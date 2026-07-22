@@ -9,7 +9,9 @@ export CARGO_HOME="${CARGO_HOME:-$ROOT/packaging/build/cargo-home}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/packaging/build/cargo-target}"
 export npm_config_cache="${npm_config_cache:-$ROOT/packaging/build/npm-cache}"
 export npm_config_prefer_offline=true
-export CARGO_TERM_COLOR=always
+# Never force color into logs/receipts when selection or capture becomes data.
+export CARGO_TERM_COLOR="${CARGO_TERM_COLOR:-never}"
+export NO_COLOR="${NO_COLOR:-1}"
 
 # Matching provenance for host + council. Prefer an already-committed clean SHA.
 if [[ -z "${IRIN_TAURI_BUILD_GIT_SHA:-}" ]]; then
