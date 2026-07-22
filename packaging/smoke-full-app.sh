@@ -437,28 +437,35 @@ avail=any(r.get('env_hint')=='$FAKE_MARKER_NAME' and r.get('available') is True 
 print('discover_marker_available=', avail)
 " | tee -a "$REPORT"
 
-# Webview evidence: bring window forward and screenshot.
+# Webview evidence: capture ONLY the packaged host's window (by PID + identity),
+# then OCR-verify War Room markers. No full-desktop fallback; fail closed.
 log "=== webview evidence ==="
+WEBVIEW_HELPER="$ROOT/packaging/webview-evidence.swift"
+[[ -f "$WEBVIEW_HELPER" ]] || die "missing webview evidence helper: $WEBVIEW_HELPER"
+command -v swift >/dev/null 2>&1 || die "swift required for webview evidence"
+# Ensure the host we started is still the GUI process.
+kill -0 "$HOST_PID" 2>/dev/null || die "packaged host pid $HOST_PID not running for webview capture"
+# Best-effort activate so the window is on-screen (capture still keys off PID).
 osascript >/dev/null 2>&1 <<'APPLESCRIPT' || true
 tell application "Council War Room" to activate
 delay 1
 APPLESCRIPT
-# Prefer screencapture of the app window if possible; fall back to main display crop.
-if ! screencapture -l"$(osascript -e 'tell application "System Events" to get id of first window of process "council-warroom-tauri"' 2>/dev/null || true)" "$WEBVIEW_SHOT" 2>/dev/null; then
-  screencapture -x "$WEBVIEW_SHOT" 2>/dev/null || true
-fi
-if [[ -f "$WEBVIEW_SHOT" && -s "$WEBVIEW_SHOT" ]]; then
-  log "webview_screenshot=$WEBVIEW_SHOT"
-  log "webview_screenshot_bytes=$(wc -c <"$WEBVIEW_SHOT" | tr -d ' ')"
-else
-  # Accessibility tree receipt as alternate evidence the process is a GUI app.
-  if command -v swift >/dev/null 2>&1; then
-    log "webview_screenshot missing; recording process table receipt"
+rm -f "$WEBVIEW_SHOT"
+# Capture + marker verify. stdout is machine-readable receipt lines only (no free OCR dump).
+if ! swift "$WEBVIEW_HELPER" capture --pid "$HOST_PID" --out "$WEBVIEW_SHOT" 2>"$ROOT/packaging/build/webview-evidence.err" \
+  | tee -a "$REPORT"; then
+  if [[ -s "$ROOT/packaging/build/webview-evidence.err" ]]; then
+    # Helper errors are marker/window status only — never dump foreign OCR text.
+    sed 's/^/webview_evidence_err: /' "$ROOT/packaging/build/webview-evidence.err" | tee -a "$REPORT" || true
   fi
-  pgrep -lf council-warroom-tauri | tee -a "$REPORT" || true
-  # REST already proved backend; require some GUI process evidence.
-  pgrep -f council-warroom-tauri >/dev/null || die "host GUI process not running for webview evidence"
-  log "webview_process_evidence=pgrep council-warroom-tauri"
+  die "packaged War Room window capture/verify failed (no desktop fallback)"
+fi
+[[ -f "$WEBVIEW_SHOT" && -s "$WEBVIEW_SHOT" ]] || die "webview screenshot missing after capture"
+log "webview_screenshot=$WEBVIEW_SHOT"
+log "webview_screenshot_bytes=$(wc -c <"$WEBVIEW_SHOT" | tr -d ' ')"
+# Dimension receipt (deterministic local metadata).
+if command -v sips >/dev/null 2>&1; then
+  log "webview_pixels=$(sips -g pixelWidth -g pixelHeight "$WEBVIEW_SHOT" 2>/dev/null | awk '/pixelWidth|pixelHeight/{print $2}' | paste -sd 'x' -)"
 fi
 
 # Relaunch persistence: quit, restart, private config install_id unchanged.
