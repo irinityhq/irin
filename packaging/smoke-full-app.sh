@@ -33,6 +33,13 @@ FAKE_MARKER_NAME="XAI_API_KEY"
 FAKE_MARKER_VALUE="irin-dmg-fake-marker-not-a-real-key"
 DENIED_FAKE_NAME="GW_API_KEY"
 DENIED_FAKE_VALUE="should-never-import-gateway-key"
+# Prefer explicit env, then the built DMG HASHES receipt, then HEAD.
+if [[ -z "${IRIN_TAURI_BUILD_GIT_SHA:-}" && -f "$ROOT/packaging/artifacts/HASHES.txt" ]]; then
+  IRIN_TAURI_BUILD_GIT_SHA="$(
+    awk -F= '/^source_sha=/{print $2; exit}' "$ROOT/packaging/artifacts/HASHES.txt" | tr -d '[:space:]'
+  )"
+  export IRIN_TAURI_BUILD_GIT_SHA
+fi
 EXPECTED_SHA="${IRIN_TAURI_BUILD_GIT_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)}"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
