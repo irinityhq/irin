@@ -282,14 +282,22 @@ APPLESCRIPT
 }
 
 # Click an enabled button and require busy transition (disabled) proving the command started.
+# Retries the find+click atomically: WebKit AX can drop buttons during pack-status re-renders.
 ax_click_button_busy() {
   local label="$1"
-  local before after click_rc busy_seen=0 i
-  before="$(ax_button_enabled "$label" || true)"
-  log "ax_before_${label// /_}=$before"
-  [[ "$before" == "enabled" ]] || die "button not enabled before click: $label ($before)"
-  click_rc="$(ax_click_button "$label" || true)"
-  log "ax_click_${label// /_}=$click_rc"
+  local after click_rc busy_seen=0 i attempt
+  click_rc="not_found"
+  for attempt in $(seq 1 40); do
+    click_rc="$(ax_click_button "$label" || true)"
+    if [[ "$click_rc" == clicked_button* ]]; then
+      log "ax_click_${label// /_}=$click_rc attempt=$attempt"
+      break
+    fi
+    if [[ "$click_rc" == "disabled" ]]; then
+      log "ax_click_${label// /_}=disabled attempt=$attempt (waiting)"
+    fi
+    sleep 0.5
+  done
   [[ "$click_rc" == clicked_button* ]] || die "could not click enabled AXButton: $label ($click_rc)"
   for i in $(seq 1 40); do
     after="$(ax_button_enabled "$label" || true)"
@@ -304,7 +312,7 @@ ax_click_button_busy() {
     fi
     sleep 0.15
   done
-  log "ax_busy_${label// /_}=$busy_seen after=$after"
+  log "ax_busy_${label// /_}=$busy_seen after=${after:-unknown}"
   [[ "$busy_seen" == 1 ]] || die "no busy/state transition after click: $label (command may not have run)"
 }
 
