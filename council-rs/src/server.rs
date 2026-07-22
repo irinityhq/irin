@@ -475,12 +475,12 @@ fn ws_smoke_only_enabled() -> bool {
 
 /// GET /api/health
 async fn health(State(state): State<AppState>) -> impl IntoResponse {
-    // The governed runtime starts Council before the Gateway containers, but
-    // GW_API_KEY already establishes the configured route. Use the existing
-    // gateway-mode provider semantics so liveness never shells out to every
-    // optional CLI. Exact model readiness is enforced by Gateway /v1/models
+    // Liveness must stay cheap and deterministic: no provider CLI discovery,
+    // no gcloud, no version probes. GW_API_KEY alone establishes the configured
+    // Gateway route for the env-only summary. Full CLI discovery is
+    // `GET /api/discover`. Exact model readiness remains Gateway /v1/models
     // immediately before each governed dispatch.
-    let providers = provider::check_providers_with_gateway(provider::env_nonempty("GW_API_KEY"));
+    let providers = provider::check_providers_liveness(provider::env_nonempty("GW_API_KEY"));
     let available: Vec<&str> = providers
         .iter()
         .filter(|(_, ok)| *ok)
@@ -3512,6 +3512,62 @@ mod ws_upgrade_auth_tests {
             payload.get("base_dir").is_none(),
             "remote health must not expose the local Council base directory: {payload}"
         );
+        // Documented client fields retained (War Room seat matrix, smoke probes).
+        assert!(
+            payload["providers_available"].is_array(),
+            "health must retain providers_available: {payload}"
+        );
+        assert!(
+            payload["providers_missing"].is_array(),
+            "health must retain providers_missing: {payload}"
+        );
+        assert!(
+            payload["council_version"].is_string(),
+            "health must retain council_version: {payload}"
+        );
+        assert!(
+            payload["deliberate_permits_available"].is_number(),
+            "health must retain deliberate_permits_available: {payload}"
+        );
+    }
+
+    #[tokio::test]
+    async fn health_uses_liveness_provider_summary_not_cli_discovery() {
+        use axum::body::{Body, to_bytes};
+        use axum::http::Request;
+        use tower::ServiceExt;
+
+        // Prove /api/health does not claim host-only CLI seats without env:
+        // liveness never shells out, so grok_build/claude_code stay unavailable
+        // even if those CLIs exist on the build host.
+        install_auth("ws-test-secret");
+        let response = router(empty_config())
+            .oneshot(
+                Request::builder()
+                    .uri("/api/health")
+                    .header("authorization", "Bearer ws-test-secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let available = payload["providers_available"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        let available_s: Vec<String> = available
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_string))
+            .collect();
+        for host_only in ["grok_build", "claude_code", "gemini_agy"] {
+            assert!(
+                !available_s.iter().any(|p| p == host_only),
+                "liveness must not report host-only CLI {host_only} as available: {available_s:?}"
+            );
+        }
     }
 
     #[test]
