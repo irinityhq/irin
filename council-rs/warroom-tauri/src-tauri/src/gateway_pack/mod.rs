@@ -381,11 +381,11 @@ fn build_compose_secret_env(
     bootstrap: Option<&str>,
 ) -> Result<ComposeEnv, String> {
     let mut env = ComposeEnv::new();
-    let pepper = match load_auth_pepper(store)? {
+    let pepper = match load_auth_pepper(store).map_err(|e| format!("keychain load pepper: {e}"))? {
         Some(p) => p,
         None => {
             let p = random_hex(32)?;
-            store_auth_pepper(store, &p)?;
+            store_auth_pepper(store, &p).map_err(|e| format!("keychain store pepper: {e}"))?;
             p
         }
     };
@@ -400,7 +400,12 @@ fn build_compose_secret_env(
     }
 
     // Provider keys from login/process only — never persisted to app env file.
-    let login = gui_login_environment();
+    // Skip gui_login_environment when IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV=1 (tests).
+    let login = if std::env::var_os("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV").is_some() {
+        Vec::new()
+    } else {
+        gui_login_environment()
+    };
     for key in ["XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "NVIDIA_API_KEY"] {
         let val = std::env::var(key)
             .ok()
@@ -413,10 +418,17 @@ fn build_compose_secret_env(
                     .filter(|v| !v.trim().is_empty())
             })
             .unwrap_or_default();
-        if !val.is_empty() {
-            validate_env_value(key, &val)?;
-        }
-        env.insert(key.to_string(), val);
+        // Provider keys are optional for pack start. Skip any value that fails
+        // injection validation (CR/LF/NUL) rather than aborting Enable — pack
+        // auth still works; only that provider route is empty.
+        let safe = if val.is_empty() {
+            String::new()
+        } else if validate_env_value(key, &val).is_ok() {
+            val
+        } else {
+            String::new()
+        };
+        env.insert(key.to_string(), safe);
     }
     Ok(env)
 }
@@ -1071,7 +1083,16 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         // Generate bootstrap only for provisioning.
         let bootstrap = random_hex(32)?;
         let secret_env = build_compose_secret_env(store, Some(&bootstrap)).map_err(|e| {
-            lifecycle_stage("secret_env_bootstrap", "error");
+            // Fixed non-secret categories only — never log the error body if it
+            // could include env material. Classify known prefixes.
+            let cat = if e.contains("keychain") {
+                "keychain_error"
+            } else if e.contains("env value") || e.contains("forbidden") {
+                "env_validate_error"
+            } else {
+                "secret_env_error"
+            };
+            lifecycle_stage("secret_env_bootstrap", cat);
             e
         })?;
         lifecycle_stage("secret_env_bootstrap", "ok");
