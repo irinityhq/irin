@@ -64,3 +64,50 @@ export function canEnableGovernedProceeding(
   }
   return gatewayPackAllowsGoverned(status);
 }
+
+/**
+ * Header/status strip label: distinguish URL configured, pack authenticated,
+ * and Council actually governed. Never call a bare URL "ready".
+ */
+export type GatewayHeaderTruth =
+  | { label: string; tone: "ok" | "warn" | "down" | "neutral"; detail: string };
+
+export function gatewayHeaderTruth(
+  pack: GatewayPackStatus | null | undefined,
+  healthGatewayConfigured: boolean,
+): GatewayHeaderTruth {
+  if (pack?.state === "authenticated_ready" && pack.authenticated && pack.council_governed) {
+    return {
+      label: "governed",
+      tone: "ok",
+      detail: "Gateway Pack authenticated and Council is governed.",
+    };
+  }
+  if (pack?.authenticated && pack.enabled) {
+    return {
+      label: "pack auth",
+      tone: "warn",
+      detail: "Gateway client authenticates; Council governed route not confirmed.",
+    };
+  }
+  if (pack?.state === "docker_missing" || pack?.state === "docker_daemon_down") {
+    return {
+      label: "direct",
+      tone: "neutral",
+      detail: pack.message || "Docker optional; core War Room is Direct.",
+    };
+  }
+  if (healthGatewayConfigured) {
+    return {
+      label: "url set",
+      tone: "warn",
+      detail:
+        "Gateway credentials present on Council health (not the same as Pack authenticated-ready).",
+    };
+  }
+  return {
+    label: "not set",
+    tone: "down",
+    detail: "No Gateway client key; Direct mode.",
+  };
+}

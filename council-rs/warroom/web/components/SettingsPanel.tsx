@@ -468,10 +468,11 @@ export default function SettingsPanel() {
                 try {
                   const st = await enableGatewayPack();
                   setPackStatus(st);
-                  toast(
-                    st.state === "authenticated_ready" ? "success" : "error",
-                    st.message,
-                  );
+                  const ok =
+                    st.state === "authenticated_ready" &&
+                    st.authenticated &&
+                    st.council_governed;
+                  toast(ok ? "success" : "error", st.message);
                 } catch (e) {
                   toast("error", e instanceof Error ? e.message : String(e));
                   void refreshPackStatus();
@@ -493,9 +494,13 @@ export default function SettingsPanel() {
                 try {
                   const st = await disableGatewayPack();
                   setPackStatus(st);
-                  toast("success", "Gateway disabled — Direct mode restored");
+                  toast(
+                    st.council_governed ? "error" : "success",
+                    st.message || "Gateway disabled — Direct mode restored",
+                  );
                 } catch (e) {
                   toast("error", e instanceof Error ? e.message : String(e));
+                  void refreshPackStatus();
                 } finally {
                   setPackBusy(false);
                 }
@@ -513,9 +518,13 @@ export default function SettingsPanel() {
                 try {
                   const st = await stopGatewayPack();
                   setPackStatus(st);
-                  toast("success", "Gateway pack stopped");
+                  toast(
+                    st.council_governed ? "error" : "success",
+                    st.message || "Gateway pack stopped",
+                  );
                 } catch (e) {
                   toast("error", e instanceof Error ? e.message : String(e));
+                  void refreshPackStatus();
                 } finally {
                   setPackBusy(false);
                 }
@@ -541,9 +550,15 @@ export default function SettingsPanel() {
                 try {
                   const st = await uninstallGatewayPack();
                   setPackStatus(st);
-                  toast("success", "Gateway pack uninstalled");
+                  toast(
+                    st.state === "not_installed" || !st.enabled
+                      ? "success"
+                      : "error",
+                    st.message || "Gateway pack uninstalled",
+                  );
                 } catch (e) {
                   toast("error", e instanceof Error ? e.message : String(e));
+                  void refreshPackStatus();
                 } finally {
                   setPackBusy(false);
                 }

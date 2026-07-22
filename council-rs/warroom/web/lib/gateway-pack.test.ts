@@ -21,6 +21,8 @@ function status(
     watch_producer_enabled: false,
     watch_dispatcher_enabled: false,
     authenticated: false,
+    council_governed: false,
+    gateway_url_configured: true,
     support_matrix_summary: "",
     ...partial,
   };
@@ -56,6 +58,7 @@ describe("governed proceeding gate", () => {
       state: "authenticated_ready",
       authenticated: true,
       enabled: true,
+      council_governed: true,
     });
     expect(
       canEnableGovernedProceeding(ready, {
@@ -77,5 +80,39 @@ describe("governed proceeding gate", () => {
     expect(
       canEnableGovernedProceeding(null, { desktopMode: "development" }),
     ).toBe(true);
+  });
+});
+
+import { gatewayHeaderTruth } from "./gateway-pack";
+
+describe("gateway header truth", () => {
+  it("distinguishes url-set from pack-authenticated and governed", () => {
+    expect(gatewayHeaderTruth(null, true).label).toBe("url set");
+    expect(gatewayHeaderTruth(null, false).label).toBe("not set");
+    expect(
+      gatewayHeaderTruth(
+        status({
+          state: "authenticated_ready",
+          authenticated: true,
+          enabled: true,
+          council_governed: true,
+        }),
+        true,
+      ).label,
+    ).toBe("governed");
+    expect(
+      gatewayHeaderTruth(
+        status({
+          state: "authenticated_ready",
+          authenticated: true,
+          enabled: true,
+          council_governed: false,
+        }),
+        true,
+      ).label,
+    ).toBe("pack auth");
+    expect(
+      gatewayHeaderTruth(status({ state: "docker_missing" }), false).tone,
+    ).toBe("neutral");
   });
 });

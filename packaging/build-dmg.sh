@@ -16,6 +16,17 @@ STAGE_SCRIPT="$TAURI_DIR/scripts/stage-bundle-inputs.sh"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Packaging mode: local-dev (default, non-releasable) or production (strict).
+# A release build must set IRIN_DMG_PACK_MODE=production and supply a real
+# production Gateway Pack manifest. local-dev cannot be notarized by the
+# release target and is visibly labeled in HASHES.txt.
+PACK_MODE="${IRIN_DMG_PACK_MODE:-local-dev}"
+case "$PACK_MODE" in
+  local-dev|production) ;;
+  *) die "IRIN_DMG_PACK_MODE must be local-dev or production (got $PACK_MODE)" ;;
+esac
+export IRIN_GATEWAY_PACK_MODE="$PACK_MODE"
+
 REQUIRE_CLEAN="${IRIN_DMG_REQUIRE_CLEAN:-1}"
 if [[ "$REQUIRE_CLEAN" == "1" ]]; then
   if [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null || true)" ]]; then
@@ -29,8 +40,27 @@ if [[ "$REQUIRE_CLEAN" == "1" ]]; then
   export COUNCIL_BUILD_GIT_SHA="$IRIN_TAURI_BUILD_GIT_SHA"
 fi
 
+if [[ "$PACK_MODE" == "production" ]]; then
+  [[ -n "${IRIN_GATEWAY_PACK_PROD_MANIFEST:-}" ]] || die \
+    "production DMG requires IRIN_GATEWAY_PACK_PROD_MANIFEST (explicit production image manifest)"
+  [[ -f "$IRIN_GATEWAY_PACK_PROD_MANIFEST" ]] || die \
+    "production manifest missing: $IRIN_GATEWAY_PACK_PROD_MANIFEST"
+  if grep -q '"mode"[[:space:]]*:[[:space:]]*"local-dev"' "$IRIN_GATEWAY_PACK_PROD_MANIFEST"; then
+    die "production DMG refuses a local-dev Gateway Pack manifest"
+  fi
+  # Refuse leftover local-dev build output as production input.
+  LOCAL_LEFTOVER="$ROOT/packaging/build/gateway-pack/image-manifest.local.json"
+  if [[ -f "$LOCAL_LEFTOVER" ]] && [[ "$(cd "$(dirname "$IRIN_GATEWAY_PACK_PROD_MANIFEST")" && pwd)/$(basename "$IRIN_GATEWAY_PACK_PROD_MANIFEST")" == "$(cd "$(dirname "$LOCAL_LEFTOVER")" && pwd)/$(basename "$LOCAL_LEFTOVER")" ]]; then
+    die "production DMG refuses packaging/build/gateway-pack/image-manifest.local.json"
+  fi
+  if [[ "$REQUIRE_CLEAN" != "1" ]]; then
+    die "production DMG requires a clean tree (IRIN_DMG_REQUIRE_CLEAN=1)"
+  fi
+fi
+
 echo "=== IRIN DMG build ==="
 echo "ROOT=$ROOT"
+echo "PACK_MODE=$PACK_MODE"
 echo "BUILD_SHA=${IRIN_TAURI_BUILD_GIT_SHA:-unknown}"
 echo "BUILD_DIRTY=${IRIN_TAURI_BUILD_DIRTY:-unknown}"
 echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
@@ -44,7 +74,7 @@ echo "=== cargo build council (release, aarch64) ==="
 echo "=== stage bundled council + base-dir resources ==="
 bash "$STAGE_SCRIPT"
 
-echo "=== stage Gateway Pack runtime assets ==="
+echo "=== stage Gateway Pack runtime assets (mode=$PACK_MODE) ==="
 bash "$ROOT/scripts/stage-gateway-pack.sh"
 
 echo "=== npm ci warroom web + tauri ==="
@@ -116,6 +146,8 @@ hdiutil create -volname "Council War Room" -srcfolder "$STAGE" -ov -format UDZO 
 
 {
   echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "pack_mode=$PACK_MODE"
+  echo "releasable=$([[ "$PACK_MODE" == "production" ]] && echo true || echo false)"
   echo "source_sha=${IRIN_TAURI_BUILD_GIT_SHA:-unknown}"
   echo "build_dirty=${IRIN_TAURI_BUILD_DIRTY:-unknown}"
   echo "arch=aarch64-apple-darwin"
@@ -124,6 +156,9 @@ hdiutil create -volname "Council War Room" -srcfolder "$STAGE" -ov -format UDZO 
   echo "app_sha256=$(shasum -a 256 "$DEST_APP/Contents/MacOS/council-warroom-tauri" | awk '{print $1}')"
   echo "council_sha256=$(shasum -a 256 "$DEST_APP/Contents/MacOS/council" | awk '{print $1}')"
   echo "dmg_sha256=$(shasum -a 256 "$DEST_DMG" | awk '{print $1}')"
+  if [[ "$PACK_MODE" != "production" ]]; then
+    echo "note=local-dev candidate; not for notarization or production promotion"
+  fi
 } | tee "$ROOT/packaging/artifacts/HASHES.txt"
 
 echo "=== build complete ==="

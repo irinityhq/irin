@@ -9,7 +9,13 @@ import {
   initRuntimeConfig,
   loadRuntimeConfig,
 } from "@/lib/runtime-config";
-import { isTauri, startCouncilServer } from "@/lib/tauri";
+import {
+  getGatewayPackStatus,
+  isTauri,
+  startCouncilServer,
+  type GatewayPackStatus,
+} from "@/lib/tauri";
+import { gatewayHeaderTruth } from "@/lib/gateway-pack";
 import { cn } from "@/lib/cn";
 import type { Cabinet, HealthResponse } from "@/lib/types";
 import type { StartPayload } from "@/lib/ws";
@@ -34,6 +40,7 @@ export default function WarRoom() {
   const { state, start: rawStart, intervene, reset, abort } = useDeliberation();
   const [view, setView] = useState<View>("deliberate");
   const [health, setHealth] = useState<HealthResponse | null>(null);
+  const [gatewayPack, setGatewayPack] = useState<GatewayPackStatus | null>(null);
   const [cabinets, setCabinets] = useState<Cabinet[]>([]);
   const [apiStatus, setApiStatus] = useState<ApiStatus>("loading");
   const [apiError, setApiError] = useState<string | null>(null);
@@ -89,9 +96,10 @@ export default function WarRoom() {
     setApiStatus("loading");
     setApiError(null);
 
-    const [healthResult, cabinetsResult] = await Promise.allSettled([
+    const [healthResult, cabinetsResult, packResult] = await Promise.allSettled([
       api.health(),
       api.cabinets(),
+      isTauri() ? getGatewayPackStatus() : Promise.resolve(null),
     ]);
 
     if (healthResult.status === "fulfilled") {
@@ -104,6 +112,10 @@ export default function WarRoom() {
       setCabinets(cabinetsResult.value.cabinets);
     } else {
       setCabinets([]);
+    }
+
+    if (packResult.status === "fulfilled") {
+      setGatewayPack(packResult.value);
     }
 
     const failures = [
@@ -178,6 +190,7 @@ export default function WarRoom() {
         view={view}
         onView={setView}
         health={health}
+        gatewayPack={gatewayPack}
         apiStatus={apiStatus}
         active={isActive}
         sessionDone={isDone}
@@ -287,6 +300,7 @@ function Header({
   view,
   onView,
   health,
+  gatewayPack,
   apiStatus,
   active,
   sessionDone,
@@ -296,6 +310,7 @@ function Header({
   view: View;
   onView: (v: View) => void;
   health: HealthResponse | null;
+  gatewayPack: GatewayPackStatus | null;
   apiStatus: ApiStatus;
   active: boolean;
   sessionDone?: boolean;
@@ -364,7 +379,7 @@ function Header({
 
         <div className="flex items-center self-stretch gap-3 md:gap-4 shrink-0">
           <div className="hidden md:flex self-stretch">
-            <StatusStrip health={health} />
+            <StatusStrip health={health} pack={gatewayPack} />
           </div>
           {sessionDone ? (
             <button
@@ -417,19 +432,28 @@ function NavBtn({
   );
 }
 
-/** Council health reports Gateway configuration, not live reachability. */
-function StatusStrip({ health }: { health: HealthResponse | null }) {
+/** Gateway strip: pack-ready/governed truth preferred over bare health "gateway" flag. */
+function StatusStrip({
+  health,
+  pack,
+}: {
+  health: HealthResponse | null;
+  pack?: GatewayPackStatus | null;
+}) {
   if (!health) return null;
   const seats = ["grok", "claude", "gpt", "gemini"];
   const up = seats.filter((p) => health.providers_available.includes(p));
-  const gatewayConfigured = health.providers_available.includes("gateway");
+  const healthGw = health.providers_available.includes("gateway");
+  const gw = gatewayHeaderTruth(pack ?? null, healthGw);
+  // Docker-optional is not a product failure: map neutral → warn (not red "down").
+  const tone = gw.tone === "neutral" ? "warn" : gw.tone;
   return (
     <div className="flex items-stretch font-mono border-l border-border">
       <StripCell
         label="Gateway"
-        value={gatewayConfigured ? "configured" : "not set"}
-        tone={gatewayConfigured ? "ok" : "down"}
-        title="Gateway credentials are configured. Settings > Test Connection checks live reachability."
+        value={gw.label}
+        tone={tone}
+        title={gw.detail}
       />
       <StripCell
         label="Providers"

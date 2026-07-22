@@ -3,6 +3,11 @@
 //! Production and local-dev modes both require `name@sha256:<64-hex>` for
 //! gateway and sidecar. Tag-only refs are refused. Local-dev is explicitly
 //! labeled so it cannot be mistaken for releasable GHCR refs.
+//!
+//! **Digest semantics:**
+//! - `local-dev`: manifest digest may match Docker image **config Id** (`{{.Id}}`).
+//! - `production`: manifest digest is the **registry manifest digest**; verify via
+//!   `RepoDigests` (or equivalent), never by comparing to config Id alone.
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
@@ -14,6 +19,10 @@ pub struct ImageRef(String);
 impl ImageRef {
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    pub fn name(&self) -> &str {
+        self.0.split_once('@').map(|(n, _)| n).unwrap_or(&self.0)
     }
 
     pub fn parse(raw: &str) -> Result<Self, String> {
@@ -47,6 +56,11 @@ impl ImageRef {
     pub fn digest_hex(&self) -> &str {
         self.0.split_once("@sha256:").map(|(_, h)| h).unwrap_or("")
     }
+
+    /// `name@sha256:digest` form for docker pull/inspect.
+    pub fn digest_ref(&self) -> &str {
+        &self.0
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -64,6 +78,14 @@ impl ManifestMode {
             ManifestMode::Production => "production",
             ManifestMode::LocalDev => "local-dev",
         }
+    }
+
+    pub fn is_production(&self) -> bool {
+        matches!(self, ManifestMode::Production)
+    }
+
+    pub fn is_local_dev(&self) -> bool {
+        matches!(self, ManifestMode::LocalDev)
     }
 }
 
@@ -98,6 +120,8 @@ pub struct ImageManifest {
     pub notes: Option<String>,
     #[serde(default)]
     pub source_sha: Option<String>,
+    #[serde(default)]
+    pub source_dirty: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -108,8 +132,10 @@ pub struct ValidatedManifest {
     pub sidecar: ImageRef,
     #[allow(dead_code)]
     pub third_party: Vec<(String, ImageRef)>,
-    #[allow(dead_code)]
     pub source_sha: Option<String>,
+    pub source_dirty: Option<bool>,
+    /// Local-dev only: optional config Ids for dual-check.
+    pub local_image_ids: std::collections::BTreeMap<String, String>,
 }
 
 pub fn load_manifest(path: &Path) -> Result<ImageManifest, String> {
@@ -152,6 +178,28 @@ pub fn validate_manifest(m: &ImageManifest) -> Result<ValidatedManifest, String>
         );
     }
 
+    // Production must not use local-dev naming and must declare a clean source SHA.
+    if mode.is_production() {
+        if gateway.as_str().starts_with("irin-desktop/")
+            || sidecar.as_str().starts_with("irin-desktop/")
+        {
+            return Err(
+                "production manifest must not use irin-desktop/* local image names".to_string(),
+            );
+        }
+        if m.source_dirty == Some(true) {
+            return Err("production manifest must have source_dirty=false".to_string());
+        }
+        let sha = m
+            .source_sha
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty() && *s != "unknown");
+        if sha.is_none() {
+            return Err("production manifest requires source_sha".to_string());
+        }
+    }
+
     let mut third_party = Vec::new();
     for (k, v) in &m.third_party_pins {
         third_party.push((k.clone(), ImageRef::parse(v)?));
@@ -164,17 +212,64 @@ pub fn validate_manifest(m: &ImageManifest) -> Result<ValidatedManifest, String>
         sidecar,
         third_party,
         source_sha: m.source_sha.clone(),
+        source_dirty: m.source_dirty,
+        local_image_ids: m.image_ids.clone(),
     })
 }
 
-/// Verify a local docker image id matches the digest portion of an ImageRef.
-/// `image_id` is `sha256:hex` from `docker image inspect`.
-pub fn image_id_matches_ref(image_id: &str, image_ref: &ImageRef) -> bool {
+/// Verify a local docker image **config Id** matches the digest portion of an ImageRef.
+/// Valid **only** for `local-dev` mode. Production must use [`repo_digests_match_ref`].
+pub fn image_config_id_matches_ref(image_id: &str, image_ref: &ImageRef) -> bool {
     let id_hex = image_id
         .strip_prefix("sha256:")
         .unwrap_or(image_id)
         .to_ascii_lowercase();
     id_hex == image_ref.digest_hex()
+}
+
+/// Back-compat alias used by local-dev path.
+pub fn image_id_matches_ref(image_id: &str, image_ref: &ImageRef) -> bool {
+    image_config_id_matches_ref(image_id, image_ref)
+}
+
+/// True when any entry in `RepoDigests` (newline or comma separated
+/// `name@sha256:hex` lines) matches the expected registry digest reference.
+///
+/// Production verification must use this (or equivalent manifest digest),
+/// **not** config Id equality. A config Id equal to the hex is neither
+/// necessary nor sufficient for production.
+pub fn repo_digests_match_ref(repo_digests: &str, image_ref: &ImageRef) -> bool {
+    let want_hex = image_ref.digest_hex();
+    let want_name = image_ref.name();
+    for line in repo_digests
+        .split(|c| c == '\n' || c == '\r' || c == ',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        if let Ok(parsed) = ImageRef::parse(line) {
+            if parsed.digest_hex() == want_hex {
+                // Name may be a registry path variant; digest match is authoritative.
+                // Prefer exact name match when present.
+                if parsed.name() == want_name || line.contains(want_hex) {
+                    return true;
+                }
+            }
+        } else if let Some((_, dig)) = line.split_once("@sha256:") {
+            if dig.to_ascii_lowercase() == want_hex {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Production must refuse comparing a registry digest to a config Id.
+/// Returns true only when the probe is valid for the given mode.
+pub fn digest_probe_allowed_for_mode(mode: &ManifestMode, used_config_id: bool) -> bool {
+    match mode {
+        ManifestMode::LocalDev => true,
+        ManifestMode::Production => !used_config_id,
+    }
 }
 
 #[cfg(test)]
@@ -201,31 +296,130 @@ mod tests {
 
     #[test]
     fn validate_watch_off() {
-        let mut m = sample_manifest();
+        let mut m = sample_manifest("local-dev");
         m.watch_invariants.watch_producer_enabled = true;
         assert!(validate_manifest(&m).is_err());
     }
 
     #[test]
     fn validate_placeholder_zero_digest() {
-        let mut m = sample_manifest();
+        let mut m = sample_manifest("local-dev");
         m.images.gateway = format!("ghcr.io/x@sha256:{}", "0".repeat(64));
         assert!(validate_manifest(&m).is_err());
     }
 
     #[test]
-    fn id_match() {
-        let hex = "a".repeat(64);
-        let r = ImageRef::parse(&format!("n@sha256:{hex}")).unwrap();
-        assert!(image_id_matches_ref(&format!("sha256:{hex}"), &r));
-        assert!(!image_id_matches_ref(&format!("sha256:{}", "b".repeat(64)), &r));
+    fn production_rejects_local_dev_image_names() {
+        let m = sample_manifest("production");
+        // sample uses irin-desktop — production must refuse
+        assert!(validate_manifest(&m).is_err());
     }
 
-    fn sample_manifest() -> ImageManifest {
+    #[test]
+    fn production_requires_source_sha_and_clean() {
+        let hex = "c".repeat(64);
+        let mut m = ImageManifest {
+            schema_version: 1,
+            mode: "production".into(),
+            pack_version: "0.1.0".into(),
+            images: PackImages {
+                gateway: format!("ghcr.io/example/gw@sha256:{hex}"),
+                sidecar: format!("ghcr.io/example/sc@sha256:{hex}"),
+            },
+            third_party_pins: Default::default(),
+            watch_invariants: WatchInvariants {
+                watch_producer_enabled: false,
+                watch_dispatcher_enabled: false,
+            },
+            image_ids: Default::default(),
+            local_tags: Default::default(),
+            notes: None,
+            source_sha: None,
+            source_dirty: Some(false),
+        };
+        assert!(validate_manifest(&m).is_err());
+        m.source_sha = Some("abc".into());
+        assert!(validate_manifest(&m).is_ok());
+        m.source_dirty = Some(true);
+        assert!(validate_manifest(&m).is_err());
+    }
+
+    #[test]
+    fn config_id_match_local_dev_only_helper() {
+        let hex = "a".repeat(64);
+        let r = ImageRef::parse(&format!("n@sha256:{hex}")).unwrap();
+        assert!(image_config_id_matches_ref(&format!("sha256:{hex}"), &r));
+        assert!(!image_config_id_matches_ref(
+            &format!("sha256:{}", "b".repeat(64)),
+            &r
+        ));
+        assert!(digest_probe_allowed_for_mode(
+            &ManifestMode::LocalDev,
+            true
+        ));
+        assert!(!digest_probe_allowed_for_mode(
+            &ManifestMode::Production,
+            true
+        ));
+        assert!(digest_probe_allowed_for_mode(
+            &ManifestMode::Production,
+            false
+        ));
+    }
+
+    #[test]
+    fn production_digest_not_satisfied_by_config_id_alone() {
+        // Fixture: registry digest D, config Id C (different). Production must
+        // use RepoDigests, not C == D.
+        let registry_hex = "d".repeat(64);
+        let config_hex = "e".repeat(64);
+        let image_ref =
+            ImageRef::parse(&format!("ghcr.io/org/gw@sha256:{registry_hex}")).unwrap();
+        // Config Id matching registry digest is a false signal for production.
+        assert!(image_config_id_matches_ref(
+            &format!("sha256:{registry_hex}"),
+            &image_ref
+        ));
+        // Even if config Id matches by coincidence, production probe must not use it.
+        assert!(!digest_probe_allowed_for_mode(
+            &ManifestMode::Production,
+            true
+        ));
+        // Different config Id is the normal case — config match would fail.
+        assert!(!image_config_id_matches_ref(
+            &format!("sha256:{config_hex}"),
+            &image_ref
+        ));
+        // RepoDigests containing the registry digest is the correct production check.
+        let repos = format!("ghcr.io/org/gw@sha256:{registry_hex}\n");
+        assert!(repo_digests_match_ref(&repos, &image_ref));
+        // Stale / tag-only style empty RepoDigests fail.
+        assert!(!repo_digests_match_ref("", &image_ref));
+        assert!(!repo_digests_match_ref(
+            &format!("ghcr.io/org/gw@sha256:{config_hex}"),
+            &image_ref
+        ));
+    }
+
+    #[test]
+    fn repo_digests_accept_digest_only_match() {
+        let hex = "f".repeat(64);
+        let r = ImageRef::parse(&format!("ghcr.io/org/gw@sha256:{hex}")).unwrap();
+        assert!(repo_digests_match_ref(
+            &format!("ghcr.io/org/gw@sha256:{hex}"),
+            &r
+        ));
+        assert!(repo_digests_match_ref(
+            &format!("ghcr.io/org/gw:latest@sha256:{hex}"),
+            &r
+        ));
+    }
+
+    fn sample_manifest(mode: &str) -> ImageManifest {
         let hex = "c".repeat(64);
         ImageManifest {
             schema_version: 1,
-            mode: "local-dev".into(),
+            mode: mode.into(),
             pack_version: "0.1.0-test".into(),
             images: PackImages {
                 gateway: format!("irin-desktop/gateway@sha256:{hex}"),
@@ -239,7 +433,8 @@ mod tests {
             image_ids: Default::default(),
             local_tags: Default::default(),
             notes: None,
-            source_sha: None,
+            source_sha: Some("deadbeef".into()),
+            source_dirty: Some(false),
         }
     }
 }

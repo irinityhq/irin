@@ -1,11 +1,13 @@
-//! Device-local generic-password storage for the Council→Gateway client key.
+//! Device-local generic-password storage for Gateway Pack secrets.
 //!
-//! Raw `GW_API_KEY` lives only here (or in-memory during a single provision call).
-//! Never write it to private.json, localStorage, Compose yaml, env files that the
-//! renderer can read, command arguments, receipts, or logs.
+//! - Raw `GW_API_KEY` (Council→Gateway client key)
+//! - Long-lived `AUTH_PEPPER` (separate account)
 //!
-//! Production uses macOS Security.framework via the `security-framework` crate
-//! (not the `security` CLI). Unit tests use an in-memory store.
+//! Never write these to private.json, localStorage, Compose yaml, durable app
+//! env files that the renderer can read, command arguments, receipts, or logs.
+//!
+//! Production uses macOS Security.framework with atomic add/update and
+//! `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. Unit tests use in-memory.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -14,6 +16,8 @@ use std::sync::Mutex;
 pub const KEYCHAIN_SERVICE: &str = "com.sovereign.council.warroom";
 /// Account label for the Council service-role client key.
 pub const GW_API_KEY_ACCOUNT: &str = "gateway-client-gw-api-key";
+/// Account label for the long-lived auth pepper (never co-mingled with client key).
+pub const AUTH_PEPPER_ACCOUNT: &str = "gateway-pack-auth-pepper";
 
 /// Abstraction so tests never touch the real Keychain.
 pub trait SecretStore: Send + Sync {
@@ -61,12 +65,137 @@ impl SecretStore for MemorySecretStore {
 pub struct KeychainSecretStore;
 
 #[cfg(target_os = "macos")]
+mod macos_keychain {
+    use core_foundation::base::{CFType, TCFType};
+    use core_foundation::data::CFData;
+    use core_foundation::dictionary::CFDictionary;
+    use core_foundation::string::CFString;
+    use security_framework::access_control::{ProtectionMode, SecAccessControl};
+    use security_framework::base::Result as SfResult;
+    use security_framework::passwords::delete_generic_password;
+    // TCFType brings as_CFType/into_CFType for SecAccessControl.
+    use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound, errSecSuccess};
+    use security_framework_sys::item::{
+        kSecAttrAccessControl, kSecAttrAccount, kSecAttrService, kSecClass,
+        kSecClassGenericPassword, kSecValueData,
+    };
+    use security_framework_sys::keychain_item::{SecItemAdd, SecItemUpdate};
+
+    fn is_not_found(err: &security_framework::base::Error) -> bool {
+        err.code() == errSecItemNotFound
+            || err.to_string().contains("could not be found")
+            || err.to_string().contains("not found")
+            || err.to_string().contains("-25300")
+    }
+
+    /// Atomic add-or-update with WhenUnlockedThisDeviceOnly accessibility.
+    /// Never delete-then-add (that creates a loss window under concurrent readers).
+    pub fn set_password_device_local(
+        service: &str,
+        account: &str,
+        password: &[u8],
+    ) -> Result<(), String> {
+        // 1) Prefer update of existing item (password only — preserves identity).
+        match update_password(service, account, password) {
+            Ok(()) => return Ok(()),
+            Err(e) if is_not_found(&e) => {}
+            Err(e) => {
+                // Fall through to add; some items may reject update if ACL differs.
+                let _ = e;
+            }
+        }
+        // 2) Add with explicit device-local accessibility.
+        match add_password_device_local(service, account, password) {
+            Ok(()) => Ok(()),
+            Err(e) if e.code() == errSecDuplicateItem => {
+                // Race: another writer added between update-miss and add.
+                update_password(service, account, password)
+                    .map_err(|e| format!("keychain update after race failed: {e}"))
+            }
+            Err(e) => Err(format!("keychain add failed: {e}")),
+        }
+    }
+
+    fn update_password(service: &str, account: &str, password: &[u8]) -> SfResult<()> {
+        let query = CFDictionary::from_CFType_pairs(&[
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecClass) },
+                unsafe { CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType() },
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecAttrService) },
+                CFString::from(service).into_CFType(),
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) },
+                CFString::from(account).into_CFType(),
+            ),
+        ]);
+        let update = CFDictionary::from_CFType_pairs(&[(
+            unsafe { CFString::wrap_under_get_rule(kSecValueData) },
+            CFData::from_buffer(password).into_CFType(),
+        )]);
+        let status = unsafe {
+            SecItemUpdate(query.as_concrete_TypeRef(), update.as_concrete_TypeRef())
+        };
+        if status == errSecSuccess {
+            Ok(())
+        } else {
+            Err(security_framework::base::Error::from_code(status))
+        }
+    }
+
+    fn add_password_device_local(service: &str, account: &str, password: &[u8]) -> SfResult<()> {
+        // Explicit WhenUnlockedThisDeviceOnly via SecAccessControl protection.
+        let access = SecAccessControl::create_with_protection(
+            Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
+            0,
+        )?;
+        let pairs: Vec<(CFString, CFType)> = vec![
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecClass) },
+                unsafe { CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType() },
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecAttrService) },
+                CFString::from(service).into_CFType(),
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) },
+                CFString::from(account).into_CFType(),
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecAttrAccessControl) },
+                access.as_CFType(),
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecValueData) },
+                CFData::from_buffer(password).into_CFType(),
+            ),
+        ];
+        let params = CFDictionary::from_CFType_pairs(&pairs);
+        let mut ret = std::ptr::null();
+        let status = unsafe { SecItemAdd(params.as_concrete_TypeRef(), &mut ret) };
+        if status == errSecSuccess {
+            Ok(())
+        } else {
+            Err(security_framework::base::Error::from_code(status))
+        }
+    }
+
+    pub fn delete_password_raw(service: &str, account: &str) -> Result<(), String> {
+        match delete_generic_password(service, account) {
+            Ok(()) => Ok(()),
+            Err(e) if is_not_found(&e) => Ok(()),
+            Err(e) => Err(format!("keychain delete failed: {e}")),
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
 impl SecretStore for KeychainSecretStore {
     fn set_password(&self, service: &str, account: &str, password: &str) -> Result<(), String> {
-        // Delete existing item first so updates replace rather than fail.
-        let _ = self.delete_password(service, account);
-        security_framework::passwords::set_generic_password(service, account, password.as_bytes())
-            .map_err(|e| format!("keychain set failed: {e}"))
+        macos_keychain::set_password_device_local(service, account, password.as_bytes())
     }
 
     fn get_password(&self, service: &str, account: &str) -> Result<Option<String>, String> {
@@ -77,11 +206,11 @@ impl SecretStore for KeychainSecretStore {
                 Ok(Some(s))
             }
             Err(e) => {
-                // Item-not-found is a normal miss, not an error.
                 let msg = e.to_string();
                 if msg.contains("could not be found")
                     || msg.contains("not found")
                     || msg.contains("-25300")
+                    || e.code() == security_framework_sys::base::errSecItemNotFound
                 {
                     Ok(None)
                 } else {
@@ -92,20 +221,7 @@ impl SecretStore for KeychainSecretStore {
     }
 
     fn delete_password(&self, service: &str, account: &str) -> Result<(), String> {
-        match security_framework::passwords::delete_generic_password(service, account) {
-            Ok(()) => Ok(()),
-            Err(e) => {
-                let msg = e.to_string();
-                if msg.contains("could not be found")
-                    || msg.contains("not found")
-                    || msg.contains("-25300")
-                {
-                    Ok(())
-                } else {
-                    Err(format!("keychain delete failed: {e}"))
-                }
-            }
-        }
+        macos_keychain::delete_password_raw(service, account)
     }
 }
 
@@ -139,6 +255,29 @@ pub fn delete_gw_api_key(store: &dyn SecretStore) -> Result<(), String> {
     store.delete_password(KEYCHAIN_SERVICE, GW_API_KEY_ACCOUNT)
 }
 
+/// Store / load the long-lived AUTH_PEPPER (hex, >= 32 chars). Separate Keychain account.
+pub fn store_auth_pepper(store: &dyn SecretStore, pepper: &str) -> Result<(), String> {
+    let trimmed = pepper.trim();
+    if !is_valid_auth_pepper(trimmed) {
+        return Err("refusing to store invalid AUTH_PEPPER shape".to_string());
+    }
+    store.set_password(KEYCHAIN_SERVICE, AUTH_PEPPER_ACCOUNT, trimmed)
+}
+
+pub fn load_auth_pepper(store: &dyn SecretStore) -> Result<Option<String>, String> {
+    store.get_password(KEYCHAIN_SERVICE, AUTH_PEPPER_ACCOUNT)
+}
+
+pub fn delete_auth_pepper(store: &dyn SecretStore) -> Result<(), String> {
+    store.delete_password(KEYCHAIN_SERVICE, AUTH_PEPPER_ACCOUNT)
+}
+
+pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), String> {
+    delete_gw_api_key(store)?;
+    delete_auth_pepper(store)?;
+    Ok(())
+}
+
 /// Gateway client keys are `gw_` + 32 hex chars (see sidecar auth.rs).
 pub fn is_valid_gw_raw_key(key: &str) -> bool {
     let b = key.as_bytes();
@@ -151,6 +290,18 @@ pub fn is_valid_gw_raw_key(key: &str) -> bool {
     b[3..].iter().all(|c| c.is_ascii_hexdigit())
 }
 
+/// AUTH_PEPPER: 32+ hex chars (we generate 64 hex = 32 bytes).
+pub fn is_valid_auth_pepper(pepper: &str) -> bool {
+    let b = pepper.as_bytes();
+    b.len() >= 32 && b.len() <= 128 && b.iter().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Presence-only probe: returns whether the Keychain item exists without
+/// returning the secret value (for receipts).
+pub fn gw_api_key_present(store: &dyn SecretStore) -> Result<bool, String> {
+    Ok(load_gw_api_key(store)?.is_some())
+}
+
 /// Redact a secret for logs: never include the raw value.
 pub fn redact_secret(value: &str) -> String {
     if value.is_empty() {
@@ -158,6 +309,9 @@ pub fn redact_secret(value: &str) -> String {
     }
     if is_valid_gw_raw_key(value) {
         return "gw_***".to_string();
+    }
+    if is_valid_auth_pepper(value) {
+        return "<pepper:***>".to_string();
     }
     if value.len() <= 4 {
         return "***".to_string();
@@ -169,11 +323,15 @@ pub fn redact_secret(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn fake_gateway_key(nibble: char) -> String {
+        format!("gw_{}", nibble.to_string().repeat(32))
+    }
+
     #[test]
     fn memory_store_round_trip_and_delete() {
         let store = MemorySecretStore::default();
-        let key = "gw_0123456789abcdef0123456789abcdef";
-        store_gw_api_key(&store, key).unwrap();
+        let key = fake_gateway_key('a');
+        store_gw_api_key(&store, &key).unwrap();
         let got = load_gw_api_key(&store).unwrap().unwrap();
         assert_eq!(got, key);
         delete_gw_api_key(&store).unwrap();
@@ -181,24 +339,50 @@ mod tests {
     }
 
     #[test]
+    fn memory_store_update_is_atomic_no_delete_gap() {
+        let store = MemorySecretStore::default();
+        let k1 = fake_gateway_key('1');
+        let k2 = fake_gateway_key('2');
+        store_gw_api_key(&store, &k1).unwrap();
+        // Concurrent-style update: set without delete.
+        store_gw_api_key(&store, &k2).unwrap();
+        assert_eq!(load_gw_api_key(&store).unwrap().unwrap(), k2);
+        assert!(gw_api_key_present(&store).unwrap());
+    }
+
+    #[test]
+    fn pepper_separate_account() {
+        let store = MemorySecretStore::default();
+        let pepper = "ab".repeat(32);
+        store_auth_pepper(&store, &pepper).unwrap();
+        assert_eq!(load_auth_pepper(&store).unwrap().unwrap(), pepper);
+        // Client key account remains empty.
+        assert!(load_gw_api_key(&store).unwrap().is_none());
+        delete_all_gateway_pack_secrets(&store).unwrap();
+        assert!(load_auth_pepper(&store).unwrap().is_none());
+    }
+
+    #[test]
     fn rejects_invalid_key_shape() {
         let store = MemorySecretStore::default();
         assert!(store_gw_api_key(&store, "not-a-key").is_err());
         assert!(store_gw_api_key(&store, "gw_short").is_err());
+        assert!(store_auth_pepper(&store, "short").is_err());
+        assert!(store_auth_pepper(&store, "not-hex!!").is_err());
     }
 
     #[test]
     fn redaction_never_echoes_raw() {
-        let key = "gw_0123456789abcdef0123456789abcdef";
-        let r = redact_secret(key);
-        assert!(!r.contains("0123456789"));
+        let key = fake_gateway_key('b');
+        let r = redact_secret(&key);
+        assert!(!r.contains(&"b".repeat(8)));
         assert_eq!(r, "gw_***");
     }
 
     #[test]
     fn valid_key_predicate() {
-        assert!(is_valid_gw_raw_key("gw_0123456789abcdef0123456789abcdef"));
-        assert!(!is_valid_gw_raw_key("gw_0123456789abcdef0123456789abcde")); // 31
+        assert!(is_valid_gw_raw_key(&fake_gateway_key('c')));
+        assert!(!is_valid_gw_raw_key(&format!("gw_{}", "d".repeat(31))));
         assert!(!is_valid_gw_raw_key("sk-foo"));
     }
 }
@@ -208,9 +392,11 @@ mod tests {
 #[cfg(all(test, target_os = "macos"))]
 mod keychain_live_tests {
     use super::*;
+    use std::sync::Arc;
+    use std::thread;
 
     #[test]
-    fn live_keychain_round_trip_unique_service() {
+    fn live_keychain_create_read_update_delete_unique_service() {
         if std::env::var("IRIN_KEYCHAIN_LIVE_TEST").ok().as_deref() != Some("1") {
             eprintln!("skip live keychain test (set IRIN_KEYCHAIN_LIVE_TEST=1)");
             return;
@@ -220,14 +406,68 @@ mod keychain_live_tests {
             std::process::id()
         );
         let account = "gateway-client-gw-api-key-test";
-        let key = "gw_fedcba9876543210fedcba9876543210";
+        let key1 = format!("gw_{}", "e".repeat(32));
+        let key2 = format!("gw_{}", "f".repeat(32));
         let store = KeychainSecretStore;
-        // Use raw API with unique service so we never collide with production.
-        store.set_password(&service, account, key).unwrap();
+        // create
+        store.set_password(&service, account, &key1).unwrap();
         let got = store.get_password(&service, account).unwrap().unwrap();
-        assert_eq!(got, key);
-        // Never print got/key.
+        assert_eq!(got, key1);
+        // update without delete gap
+        store.set_password(&service, account, &key2).unwrap();
+        let got2 = store.get_password(&service, account).unwrap().unwrap();
+        assert_eq!(got2, key2);
+        // delete
         store.delete_password(&service, account).unwrap();
         assert!(store.get_password(&service, account).unwrap().is_none());
+        // Never print key1/key2/got.
+    }
+
+    #[test]
+    fn live_keychain_concurrent_updates_last_writer_wins() {
+        if std::env::var("IRIN_KEYCHAIN_LIVE_TEST").ok().as_deref() != Some("1") {
+            eprintln!("skip live keychain concurrency test");
+            return;
+        }
+        let service = format!(
+            "com.sovereign.council.warroom.test.conc.{}",
+            std::process::id()
+        );
+        let account = "gateway-client-gw-api-key-test";
+        let store = Arc::new(KeychainSecretStore);
+        store
+            .set_password(&service, account, &format!("gw_{}", "0".repeat(32)))
+            .unwrap();
+        let mut handles = Vec::new();
+        for n in 0..4u8 {
+            let store = Arc::clone(&store);
+            let service = service.clone();
+            handles.push(thread::spawn(move || {
+                let key = format!("gw_{}", format!("{n:x}").repeat(32));
+                store.set_password(&service, account, &key)
+            }));
+        }
+        for h in handles {
+            h.join().unwrap().unwrap();
+        }
+        let final_val = store.get_password(&service, account).unwrap().unwrap();
+        assert!(is_valid_gw_raw_key(&final_val));
+        store.delete_password(&service, account).unwrap();
+    }
+
+    #[test]
+    fn live_keychain_get_missing_is_none_not_error() {
+        if std::env::var("IRIN_KEYCHAIN_LIVE_TEST").ok().as_deref() != Some("1") {
+            return;
+        }
+        let service = format!(
+            "com.sovereign.council.warroom.test.missing.{}",
+            std::process::id()
+        );
+        let store = KeychainSecretStore;
+        assert!(store
+            .get_password(&service, "no-such-account")
+            .unwrap()
+            .is_none());
     }
 }

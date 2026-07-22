@@ -548,7 +548,9 @@ dependencies = [
 name = "council-warroom-tauri"
 version = "0.1.0"
 dependencies = [
+ "core-foundation 0.9.4",
  "security-framework",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "tauri",

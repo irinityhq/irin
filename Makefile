@@ -88,6 +88,9 @@ gateway-pack-test: ## Static + isolation tests for the optional Gateway Pack
 	bash scripts/test-gateway-pack-assets.sh
 	bash scripts/test-gateway-pack-isolation.sh
 
+gateway-pack-integration-smoke: ## Isolated compose smoke (local-dev images; preserves foreign fixtures)
+	bash scripts/test-gateway-pack-integration-smoke.sh
+
 build: ## Build the full Rust workspace in release mode
 	cargo build --workspace --release
 

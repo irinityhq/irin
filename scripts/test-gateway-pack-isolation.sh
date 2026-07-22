@@ -55,18 +55,50 @@ if rg -n 'compose -p gateway\b|compose -p "gateway"' \
   die "pack tooling must not target project 'gateway'"
 fi
 
-if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
-  # Ensure we never `down -v` a non-desktop project from pack scripts.
-  if docker compose ls --format json 2>/dev/null | grep -q 'irin-desktop-gateway'; then
-    pass "desktop project currently present (will not auto-destroy here)"
+# Bounded docker info (must not hang forever).
+if command -v docker >/dev/null 2>&1; then
+  if python3 - <<'PY'
+import subprocess, sys
+try:
+    r = subprocess.run(
+        ["docker", "info", "--format", "{{.ServerVersion}}"],
+        capture_output=True, timeout=12, check=False,
+    )
+    sys.exit(0 if r.returncode == 0 else 1)
+except subprocess.TimeoutExpired:
+    sys.exit(2)
+PY
+  then
+    if docker compose ls --format json 2>/dev/null | grep -q 'irin-desktop-gateway'; then
+      pass "desktop project currently present (will not auto-destroy here)"
+    else
+      pass "docker ready; desktop project not running (clean)"
+    fi
+    [[ "gateway" != "irin-desktop-gateway" ]] || die "names"
+    pass "docker isolation predicates"
   else
-    pass "docker ready; desktop project not running (clean)"
+    pass "docker absent or down — core-neutral path (no red)"
   fi
-  # Prove foreign project name is distinct.
-  [[ "gateway" != "irin-desktop-gateway" ]] || die "names"
-  pass "docker isolation predicates"
 else
-  pass "docker absent or down — core-neutral path (no red)"
+  pass "docker CLI missing — core-neutral path (no red)"
 fi
+
+# Source-level: stage script must not silently prefer local-dev in production.
+rg -q 'IRIN_GATEWAY_PACK_MODE' "$ROOT/scripts/stage-gateway-pack.sh" || die "stage mode gate"
+rg -q 'production packaging refuses a local-dev' "$ROOT/scripts/stage-gateway-pack.sh" \
+  || die "stage refuse local-dev"
+rg -q 'pack_mode' "$ROOT/packaging/build-dmg.sh" || die "dmg pack_mode"
+rg -q 'run_command_timeout\|DOCKER_CMD_TIMEOUT' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "docker timeout"
+rg -q 'WhenUnlockedThisDeviceOnly\|kSecAttrAccessibleWhenUnlockedThisDeviceOnly' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/keychain.rs" || die "keychain accessibility"
+rg -q 'redact_process_text' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "redactor"
+rg -q 'is_pack_installed' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/gateway_pack/mod.rs" || die "install marker"
+rg -q 'repo_digests_match_ref' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/gateway_pack/manifest.rs" || die "prod digests"
+rg -q 'GATEWAY_SCRUB_ENV_KEYS' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/sidecar.rs" || die "council env scrub"
 
 pass "gateway pack isolation invariants"

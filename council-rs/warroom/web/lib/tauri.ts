@@ -126,13 +126,21 @@ export interface GatewayPackStatus {
   watch_producer_enabled: boolean;
   watch_dispatcher_enabled: boolean;
   authenticated: boolean;
+  /** True when Gateway auth + Council governed route are both proven. */
+  council_governed: boolean;
+  /** Fixed pack URL is configured (distinct from authenticated-ready). */
+  gateway_url_configured: boolean;
   support_matrix_summary: string;
 }
 
 export function gatewayPackAllowsGoverned(
   status: GatewayPackStatus | null | undefined,
 ): boolean {
-  return status?.state === "authenticated_ready" && status.authenticated === true;
+  return (
+    status?.state === "authenticated_ready" &&
+    status.authenticated === true &&
+    status.council_governed === true
+  );
 }
 
 export async function getGatewayPackStatus(): Promise<GatewayPackStatus> {

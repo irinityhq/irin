@@ -15,6 +15,19 @@ pub struct GatewayChildCredentials {
     pub gateway_url: String,
 }
 
+/// Gateway-related env keys that must never be inherited from the parent/login shell.
+/// Empty-string overwrite is used because tauri-plugin-shell has no env_remove.
+pub const GATEWAY_SCRUB_ENV_KEYS: &[&str] = &[
+    "GW_API_KEY",
+    "GATEWAY_URL",
+    "COUNCIL_VIA_GATEWAY",
+    "COUNCIL_GATEWAY_TOKEN",
+    "COUNCIL_GATEWAY_KEY_ID",
+    "WATCH_ADMIN_TOKEN",
+    "BOOTSTRAP_TOKEN",
+    "AUTH_PEPPER",
+];
+
 /// Compose the env pairs for a `council --serve` sidecar spawn.
 ///
 /// - `COUNCIL_CORS_ORIGINS` is always set.
@@ -27,9 +40,8 @@ pub struct GatewayChildCredentials {
 /// - When `via_gateway` is `Some(true)`, `gateway_creds` must supply Keychain-sourced
 ///   `GW_API_KEY` + fixed loopback `GATEWAY_URL`. Packaged installs never import
 ///   `GW_API_KEY` from the login shell.
-/// - When `via_gateway` is `Some(false)`, any inherited `GW_API_KEY` is cleared
-///   by setting an empty value is not enough for all children — we set
-///   `COUNCIL_VIA_GATEWAY=0` and omit `GW_API_KEY` (Direct mode).
+/// - **Always** scrub inherited Gateway vars first; `COUNCIL_VIA_GATEWAY=0` alone is
+///   not credential removal. Selective re-injection happens only for governed mode.
 pub fn compose_sidecar_env(
     cors_origins: &str,
     debug_build: bool,
@@ -44,24 +56,32 @@ pub fn compose_sidecar_env(
     } else if let Some(token) = auth_token.map(str::trim).filter(|t| !t.is_empty()) {
         env.push(("COUNCIL_AUTH_TOKEN".to_string(), token.to_string()));
     }
+
+    // Scrub inherited Gateway credential/route vars for every explicit route decision.
+    if via_gateway.is_some() {
+        for key in GATEWAY_SCRUB_ENV_KEYS {
+            env.push(((*key).to_string(), String::new()));
+        }
+    }
+
     match via_gateway {
         Some(true) => {
-            env.push(("COUNCIL_VIA_GATEWAY".to_string(), "1".to_string()));
+            upsert_env(&mut env, "COUNCIL_VIA_GATEWAY", "1");
             if let Some(creds) = gateway_creds {
                 let key = creds.api_key.trim();
                 if !key.is_empty() {
-                    env.push(("GW_API_KEY".to_string(), key.to_string()));
+                    // Replace scrubbed empty value with Keychain-sourced key.
+                    upsert_env(&mut env, "GW_API_KEY", key);
                 }
                 let url = creds.gateway_url.trim();
                 if !url.is_empty() {
-                    env.push(("GATEWAY_URL".to_string(), url.to_string()));
+                    upsert_env(&mut env, "GATEWAY_URL", url);
                 }
             }
         }
         Some(false) => {
-            env.push(("COUNCIL_VIA_GATEWAY".to_string(), "0".to_string()));
-            // Explicitly unset gateway routing credentials in the child by omitting them.
-            // Do not import GW_API_KEY from the parent/login shell.
+            upsert_env(&mut env, "COUNCIL_VIA_GATEWAY", "0");
+            // Scrub already cleared GW_API_KEY / GATEWAY_URL / related.
         }
         None => {}
     }
@@ -71,6 +91,14 @@ pub fn compose_sidecar_env(
         }
     }
     env
+}
+
+fn upsert_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
+    if let Some((_, v)) = env.iter_mut().find(|(k, _)| k == key) {
+        *v = value.to_string();
+    } else {
+        env.push((key.to_string(), value.to_string()));
+    }
 }
 
 /// Compose the CLI args for a `council --serve` sidecar spawn.
@@ -286,9 +314,12 @@ mod tests {
     fn compose_via_gateway_false_sets_explicit_0() {
         // "0" (not removal) — council only treats "1"/"true" as on, and the
         // child inherits the parent env so an unset var could leak gateway mode.
+        // Scrub sets empty strings for credential keys (not omit) so login/parent
+        // values cannot win when Command.env is applied.
         let env = compose_sidecar_env("o", false, None, Some(false), None, None);
         assert_eq!(env_value(&env, "COUNCIL_VIA_GATEWAY"), Some("0"));
-        assert_eq!(env_value(&env, "GW_API_KEY"), None);
+        assert_eq!(env_value(&env, "GW_API_KEY"), Some(""));
+        assert_eq!(env_value(&env, "GATEWAY_URL"), Some(""));
     }
 
     #[test]
@@ -306,15 +337,16 @@ mod tests {
 
     #[test]
     fn compose_via_gateway_injects_keychain_creds_only_when_on() {
+        let fake_key = format!("gw_{}", "a".repeat(32));
         let creds = GatewayChildCredentials {
-            api_key: "gw_0123456789abcdef0123456789abcdef".into(),
+            api_key: fake_key.clone(),
             gateway_url: "http://127.0.0.1:18080".into(),
         };
         let on = compose_sidecar_env("o", false, None, Some(true), None, Some(&creds));
         assert_eq!(env_value(&on, "COUNCIL_VIA_GATEWAY"), Some("1"));
         assert_eq!(
             env_value(&on, "GW_API_KEY"),
-            Some("gw_0123456789abcdef0123456789abcdef")
+            Some(fake_key.as_str())
         );
         assert_eq!(
             env_value(&on, "GATEWAY_URL"),
@@ -322,8 +354,24 @@ mod tests {
         );
         let off = compose_sidecar_env("o", false, None, Some(false), None, Some(&creds));
         assert_eq!(env_value(&off, "COUNCIL_VIA_GATEWAY"), Some("0"));
-        assert_eq!(env_value(&off, "GW_API_KEY"), None);
-        assert_eq!(env_value(&off, "GATEWAY_URL"), None);
+        // Scrub sets empty string (not omit) so inherited parent values cannot win.
+        assert_eq!(env_value(&off, "GW_API_KEY"), Some(""));
+        assert_eq!(env_value(&off, "GATEWAY_URL"), Some(""));
+        assert_eq!(env_value(&off, "COUNCIL_GATEWAY_TOKEN"), Some(""));
+    }
+
+    #[test]
+    fn compose_scrubs_gateway_vars_before_selective_inject() {
+        let off = compose_sidecar_env("o", false, None, Some(false), None, None);
+        // Credential/token keys stay scrubbed empty; route flag is explicit "0".
+        for key in GATEWAY_SCRUB_ENV_KEYS {
+            if *key == "COUNCIL_VIA_GATEWAY" {
+                assert_eq!(env_value(&off, key), Some("0"), "route flag {key}");
+            } else {
+                assert_eq!(env_value(&off, key), Some(""), "missing scrub for {key}");
+            }
+        }
+        assert_ne!(env_value(&off, "COUNCIL_VIA_GATEWAY"), Some("1"));
     }
 
     #[test]

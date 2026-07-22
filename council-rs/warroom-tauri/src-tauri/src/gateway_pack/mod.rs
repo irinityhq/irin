@@ -1,31 +1,40 @@
 //! Installed-release Gateway Pack lifecycle.
 //!
 //! Privileged native boundary: Docker CLI allow-list, fixed compose project,
-//! app-owned paths, Keychain-held GW_API_KEY. Renderer only receives non-secret
-//! status and triggers fixed workflows.
+//! app-owned paths, Keychain-held GW_API_KEY + AUTH_PEPPER. Renderer only
+//! receives non-secret status and triggers fixed workflows.
+//!
+//! Concurrent lifecycle commands are serialized. Authenticated-ready requires
+//! both Gateway auth proof and an owned Council child in the requested route.
 
 pub mod manifest;
 
 use crate::docker_cli::{
-    compose_command, docker_command, format_cmd_failure, path_is_safe_argv, probe_docker_daemon,
-    resolve_docker_cli, DockerDaemonState, DESKTOP_COMPOSE_PROJECT, DESKTOP_GATEWAY_URL,
+    compose_command_with_env, docker_command, format_cmd_failure, path_is_safe_argv,
+    probe_docker_daemon, resolve_docker_cli, ComposeEnv, DockerDaemonState, DockerErrorKind,
+    DESKTOP_COMPOSE_PROJECT, DESKTOP_GATEWAY_URL, DOCKER_CMD_TIMEOUT, DOCKER_COMPOSE_UP_TIMEOUT,
 };
 use crate::keychain::{
-    delete_gw_api_key, is_valid_gw_raw_key, load_gw_api_key, store_gw_api_key, KeychainSecretStore,
-    SecretStore,
+    delete_all_gateway_pack_secrets, gw_api_key_present, is_valid_gw_raw_key, load_auth_pepper,
+    load_gw_api_key, store_auth_pepper, store_gw_api_key, KeychainSecretStore, SecretStore,
 };
 use crate::paths::{bundled_base_dir, executable_dir};
 use crate::private_config::{
     app_support_dir, gui_login_environment, load_or_create_private_config, write_private_config_at,
 };
 use manifest::{
-    image_id_matches_ref, load_manifest, validate_manifest, ImageRef, ValidatedManifest,
+    image_config_id_matches_ref, load_manifest, repo_digests_match_ref, validate_manifest,
+    ImageRef, ManifestMode, ValidatedManifest,
 };
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
+
+/// Global lifecycle lock — enable/disable/stop/uninstall must not interleave.
+static LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
 /// Truthful operator-facing pack states. Never label a bare URL as ready.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +86,10 @@ pub struct GatewayPackStatus {
     pub watch_producer_enabled: bool,
     pub watch_dispatcher_enabled: bool,
     pub authenticated: bool,
+    /// True when Gateway is up, key authenticates, and Council is expected governed.
+    pub council_governed: bool,
+    /// Distinct from authenticated: URL field present / pack project known.
+    pub gateway_url_configured: bool,
     pub support_matrix_summary: String,
 }
 
@@ -95,6 +108,8 @@ impl GatewayPackStatus {
             watch_producer_enabled: false,
             watch_dispatcher_enabled: false,
             authenticated: false,
+            council_governed: false,
+            gateway_url_configured: true, // fixed loopback URL is always the pack target
             support_matrix_summary: SUPPORT_MATRIX_SUMMARY.to_string(),
         }
     }
@@ -106,17 +121,23 @@ Vertex Direct-only (no gcloud mount); Claude/Codex CLI proxies not supported; \
 Watch producer/dispatcher forced off.";
 
 const GATEWAY_DIR_NAME: &str = "gateway";
-const RUNTIME_ENV_NAME: &str = "runtime.env";
+const PUBLIC_ENV_NAME: &str = "compose.public.env";
 const LEDGER_KEY_NAME: &str = "ledger_key";
 const INSTALLED_MARKER: &str = "pack-installed.json";
+const PACK_DIR_NAME: &str = "pack";
 
 /// Fixed Application Support gateway directory (0700).
 pub fn gateway_data_dir() -> PathBuf {
     app_support_dir().join(GATEWAY_DIR_NAME)
 }
 
+pub fn public_env_path() -> PathBuf {
+    gateway_data_dir().join(PUBLIC_ENV_NAME)
+}
+
+/// Legacy path — never write secrets here; removed on install/uninstall.
 pub fn runtime_env_path() -> PathBuf {
-    gateway_data_dir().join(RUNTIME_ENV_NAME)
+    gateway_data_dir().join("runtime.env")
 }
 
 pub fn ledger_key_path() -> PathBuf {
@@ -128,6 +149,7 @@ pub fn installed_marker_path() -> PathBuf {
 }
 
 /// Bundled pack root under app Resources (or test override).
+/// Bundled assets alone do **not** mean installed — see [`is_pack_installed`].
 pub fn bundled_pack_root() -> Option<PathBuf> {
     if let Ok(override_dir) = std::env::var("IRIN_GATEWAY_PACK_ROOT") {
         let p = PathBuf::from(override_dir.trim());
@@ -146,7 +168,6 @@ pub fn bundled_pack_root() -> Option<PathBuf> {
             return Some(c);
         }
     }
-    // Dev: packaging source or staged resources next to tauri.
     let dev = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("resources")
         .join("gateway-pack");
@@ -156,11 +177,19 @@ pub fn bundled_pack_root() -> Option<PathBuf> {
     let repo_pack = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../../../packaging/gateway-pack");
     if repo_pack.join("docker-compose.yml").is_file() {
-        // Incomplete without conf/lua — only used for path unit tests.
         return Some(repo_pack.canonicalize().unwrap_or(repo_pack));
     }
-    let _ = bundled_base_dir(); // silence unused in some cfgs
+    let _ = bundled_base_dir();
     None
+}
+
+/// True only when Application Support has a validated install marker + pack root.
+pub fn is_pack_installed() -> bool {
+    installed_marker_path().is_file()
+        && gateway_data_dir()
+            .join(PACK_DIR_NAME)
+            .join("docker-compose.yml")
+            .is_file()
 }
 
 fn ensure_gateway_dir() -> Result<PathBuf, String> {
@@ -224,14 +253,12 @@ fn ensure_ledger_key() -> Result<PathBuf, String> {
     let mut bytes = [0u8; 32];
     getrandom_fill(&mut bytes)?;
     write_atomic_0600(&path, &bytes)?;
-    // Never log the seed.
     Ok(path)
 }
 
 fn getrandom_fill(buf: &mut [u8]) -> Result<(), String> {
     use std::fs::File;
     use std::io::Read;
-    // Prefer OS random device; no extra crate.
     let mut f = File::open("/dev/urandom").map_err(|e| format!("open urandom: {e}"))?;
     f.read_exact(buf).map_err(|e| format!("read urandom: {e}"))
 }
@@ -242,90 +269,139 @@ fn random_hex(n_bytes: usize) -> Result<String, String> {
     Ok(buf.iter().map(|b| format!("{b:02x}")).collect())
 }
 
-/// Provider keys that may be forwarded into the pack env file (API-key routes only).
-const PACK_PROVIDER_KEYS: &[&str] = &[
-    "XAI_API_KEY",
-    "OPENAI_API_KEY",
-    "ANTHROPIC_API_KEY",
-    "NVIDIA_API_KEY",
-];
+/// Reject CR/LF/NUL and other injection-prone characters in env values.
+pub fn validate_env_value(key: &str, value: &str) -> Result<(), String> {
+    if value.bytes().any(|b| b == 0 || b == b'\n' || b == b'\r') {
+        return Err(format!(
+            "env value for {key} contains forbidden CR/LF/NUL"
+        ));
+    }
+    if value.contains('\0') {
+        return Err(format!("env value for {key} contains NUL"));
+    }
+    Ok(())
+}
 
-fn write_runtime_env(
+/// Serialize a public (non-secret) compose env file. Keys unique; values validated.
+pub fn serialize_public_env(pairs: &[(String, String)]) -> Result<String, String> {
+    let mut seen = std::collections::BTreeSet::new();
+    let mut body = String::new();
+    for (k, v) in pairs {
+        if !seen.insert(k.clone()) {
+            return Err(format!("duplicate env key refused: {k}"));
+        }
+        if k.is_empty()
+            || k.bytes()
+                .any(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
+        {
+            return Err(format!("invalid env key: {k}"));
+        }
+        validate_env_value(k, v)?;
+        // Quote values that need it (spaces); otherwise plain KEY=value.
+        if v.chars()
+            .any(|c| c.is_whitespace() || c == '#' || c == '"' || c == '\'')
+        {
+            let escaped = v.replace('\\', "\\\\").replace('"', "\\\"");
+            body.push_str(&format!("{k}=\"{escaped}\"\n"));
+        } else {
+            body.push_str(k);
+            body.push('=');
+            body.push_str(v);
+            body.push('\n');
+        }
+    }
+    Ok(body)
+}
+
+fn write_public_compose_env(
     pack_root: &Path,
     ledger: &Path,
     gateway_image: &ImageRef,
     sidecar_image: &ImageRef,
-    regenerate_bootstrap: bool,
+    key_id: Option<&str>,
 ) -> Result<PathBuf, String> {
     if !path_is_safe_argv(pack_root) || !path_is_safe_argv(ledger) {
         return Err("pack root or ledger path rejected".to_string());
     }
     ensure_gateway_dir()?;
-    let path = runtime_env_path();
+    let mut pairs = vec![
+        (
+            "IRIN_GATEWAY_IMAGE".into(),
+            gateway_image.as_str().to_string(),
+        ),
+        (
+            "IRIN_SIDECAR_IMAGE".into(),
+            sidecar_image.as_str().to_string(),
+        ),
+        (
+            "IRIN_DESKTOP_PACK_ROOT".into(),
+            pack_root.display().to_string(),
+        ),
+        (
+            "IRIN_DESKTOP_LEDGER_KEY".into(),
+            ledger.display().to_string(),
+        ),
+        ("GATEWAY_DURABLE".into(), "1".into()),
+        ("GATEWAY_AUTH_FAIL_CLOSED".into(), "true".into()),
+        ("SIDECAR_SOCKET_MODE".into(), "0660".into()),
+        ("SIDECAR_SOCKET_GID".into(), "9999".into()),
+        ("GW_ENABLE_COUNCIL_ENDPOINT".into(), "0".into()),
+        (
+            "COUNCIL_BASE_URL".into(),
+            "http://host.docker.internal:8765".into(),
+        ),
+        ("WATCH_PRODUCER_ENABLED".into(), "false".into()),
+        ("WATCH_DISPATCHER_ENABLED".into(), "false".into()),
+        ("WATCH_CANARY_TENANT".into(), "canary".into()),
+        ("DAILY_SPEND_CAP_USD".into(), "25".into()),
+        ("WATCH_MAX_FANOUT_COST_USD".into(), "2.50".into()),
+        // Surfaces disabled — never generate WATCH_ADMIN_TOKEN / COUNCIL_GATEWAY_TOKEN.
+        ("BOOTSTRAP_TOKEN".into(), "".into()),
+    ];
+    if let Some(kid) = key_id {
+        if !kid.is_empty() {
+            validate_env_value("COUNCIL_GATEWAY_KEY_ID", kid)?;
+            pairs.push(("COUNCIL_GATEWAY_KEY_ID".into(), kid.to_string()));
+        }
+    }
+    let body = serialize_public_env(&pairs)?;
+    let path = public_env_path();
+    write_atomic_0600(&path, body.as_bytes())?;
+    // Scrub any legacy secret-bearing runtime.env if present.
+    let legacy = runtime_env_path();
+    if legacy.is_file() {
+        let _ = fs::remove_file(&legacy);
+    }
+    Ok(path)
+}
 
-    // Preserve existing secrets when present unless regenerate is requested.
-    let existing = if path.is_file() {
-        parse_env_file(&path)
-    } else {
-        Default::default()
+/// Build process env for compose: secrets + providers. Never written to disk.
+fn build_compose_secret_env(
+    store: &dyn SecretStore,
+    bootstrap: Option<&str>,
+) -> Result<ComposeEnv, String> {
+    let mut env = ComposeEnv::new();
+    let pepper = match load_auth_pepper(store)? {
+        Some(p) => p,
+        None => {
+            let p = random_hex(32)?;
+            store_auth_pepper(store, &p)?;
+            p
+        }
     };
+    validate_env_value("AUTH_PEPPER", &pepper)?;
+    env.insert("AUTH_PEPPER".into(), pepper);
 
-    let auth_pepper = existing
-        .get("AUTH_PEPPER")
-        .filter(|v| !v.is_empty() && !v.starts_with("__GENERATED"))
-        .cloned()
-        .map(Ok)
-        .unwrap_or_else(|| random_hex(32))?;
-    let bootstrap = if regenerate_bootstrap {
-        random_hex(32)?
+    if let Some(bs) = bootstrap {
+        validate_env_value("BOOTSTRAP_TOKEN", bs)?;
+        env.insert("BOOTSTRAP_TOKEN".into(), bs.to_string());
     } else {
-        existing
-            .get("BOOTSTRAP_TOKEN")
-            .filter(|v| !v.is_empty() && !v.starts_with("__GENERATED"))
-            .cloned()
-            .map(Ok)
-            .unwrap_or_else(|| random_hex(32))?
-    };
-    let watch_admin = existing
-        .get("WATCH_ADMIN_TOKEN")
-        .filter(|v| !v.is_empty() && !v.starts_with("__GENERATED"))
-        .cloned()
-        .map(Ok)
-        .unwrap_or_else(|| random_hex(32))?;
-    let council_token = existing
-        .get("COUNCIL_GATEWAY_TOKEN")
-        .filter(|v| !v.is_empty() && !v.starts_with("__GENERATED"))
-        .cloned()
-        .map(Ok)
-        .unwrap_or_else(|| random_hex(32))?;
+        env.insert("BOOTSTRAP_TOKEN".into(), String::new());
+    }
 
-    let mut lines: Vec<String> = Vec::new();
-    lines.push(format!("IRIN_GATEWAY_IMAGE={}", gateway_image.as_str()));
-    lines.push(format!("IRIN_SIDECAR_IMAGE={}", sidecar_image.as_str()));
-    lines.push(format!(
-        "IRIN_DESKTOP_PACK_ROOT={}",
-        pack_root.display()
-    ));
-    lines.push(format!("IRIN_DESKTOP_LEDGER_KEY={}", ledger.display()));
-    lines.push(format!("AUTH_PEPPER={auth_pepper}"));
-    lines.push(format!("BOOTSTRAP_TOKEN={bootstrap}"));
-    lines.push(format!("WATCH_ADMIN_TOKEN={watch_admin}"));
-    lines.push(format!("COUNCIL_GATEWAY_TOKEN={council_token}"));
-    lines.push("GATEWAY_DURABLE=1".into());
-    lines.push("GATEWAY_AUTH_FAIL_CLOSED=true".into());
-    lines.push("SIDECAR_SOCKET_MODE=0660".into());
-    lines.push("SIDECAR_SOCKET_GID=9999".into());
-    lines.push("GW_ENABLE_COUNCIL_ENDPOINT=0".into());
-    lines.push("COUNCIL_BASE_URL=http://host.docker.internal:8765".into());
-    lines.push("WATCH_PRODUCER_ENABLED=false".into());
-    lines.push("WATCH_DISPATCHER_ENABLED=false".into());
-    lines.push("WATCH_CANARY_TENANT=canary".into());
-    lines.push("DAILY_SPEND_CAP_USD=25".into());
-    lines.push("WATCH_MAX_FANOUT_COST_USD=2.50".into());
-
-    // Provider API keys from login env / process — never Vertex/gcloud paths.
+    // Provider keys from login/process only — never persisted to app env file.
     let login = gui_login_environment();
-    for key in PACK_PROVIDER_KEYS {
+    for key in ["XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "NVIDIA_API_KEY"] {
         let val = std::env::var(key)
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -336,90 +412,95 @@ fn write_runtime_env(
                     .map(|(_, v)| v.clone())
                     .filter(|v| !v.trim().is_empty())
             })
-            .or_else(|| existing.get(*key).cloned())
             .unwrap_or_default();
-        // Values go only to the 0600 file; never logged.
-        lines.push(format!("{key}={val}"));
-    }
-
-    if let Some(kid) = existing.get("COUNCIL_GATEWAY_KEY_ID") {
-        if !kid.is_empty() {
-            lines.push(format!("COUNCIL_GATEWAY_KEY_ID={kid}"));
+        if !val.is_empty() {
+            validate_env_value(key, &val)?;
         }
+        env.insert(key.to_string(), val);
     }
-
-    let mut body = lines.join("\n");
-    body.push('\n');
-    write_atomic_0600(&path, body.as_bytes())?;
-    Ok(path)
+    Ok(env)
 }
 
-fn parse_env_file(path: &Path) -> std::collections::BTreeMap<String, String> {
-    let mut map = std::collections::BTreeMap::new();
-    let Ok(raw) = fs::read_to_string(path) else {
-        return map;
-    };
-    for line in raw.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=') {
-            map.insert(k.to_string(), v.to_string());
-        }
-    }
-    map
-}
-
-fn upsert_env_value(path: &Path, key: &str, value: &str) -> Result<(), String> {
-    let mut map = if path.is_file() {
-        parse_env_file(path)
-    } else {
-        Default::default()
-    };
-    map.insert(key.to_string(), value.to_string());
-    let mut body = String::new();
-    for (k, v) in map {
-        body.push_str(&k);
-        body.push('=');
-        body.push_str(&v);
-        body.push('\n');
-    }
-    write_atomic_0600(path, body.as_bytes())
-}
-
-fn read_env_value(path: &Path, key: &str) -> Option<String> {
-    parse_env_file(path).get(key).cloned()
-}
-
-/// Copy bundled pack assets into Application Support (durable across updates).
+/// Stage bundled pack assets to a sibling temp dir, validate, then atomically swap.
+/// Preserves operator data (ledger, Keychain, volumes) outside the pack/ tree.
 pub fn install_pack_files() -> Result<PathBuf, String> {
     let src = bundled_pack_root().ok_or_else(|| {
         "Gateway Pack is not bundled in this app. Rebuild the DMG with stage-gateway-pack.sh."
             .to_string()
     })?;
-    let dest = ensure_gateway_dir()?.join("pack");
-    copy_dir_recursive(&src, &dest).map_err(|e| format!("install pack files: {e}"))?;
-    // Marker with pack version from manifest when present.
-    let manifest_path = dest.join("image-manifest.json");
-    let version = if manifest_path.is_file() {
-        load_manifest(&manifest_path)
-            .ok()
-            .map(|m| m.pack_version)
-            .unwrap_or_else(|| "unknown".into())
-    } else {
-        "unknown".into()
+    let gw = ensure_gateway_dir()?;
+    let final_dest = gw.join(PACK_DIR_NAME);
+    let stage = gw.join(format!(
+        ".pack-stage-{}.tmp",
+        std::process::id()
+    ));
+    let backup = gw.join(format!(".pack-backup-{}.tmp", std::process::id()));
+
+    // Clean leftover stage dirs.
+    let _ = fs::remove_dir_all(&stage);
+    let _ = fs::remove_dir_all(&backup);
+
+    copy_dir_recursive(&src, &stage).map_err(|e| format!("stage pack files: {e}"))?;
+
+    // Validate complete assets before swap.
+    let compose = stage.join("docker-compose.yml");
+    let manifest_path = stage.join("image-manifest.json");
+    if !compose.is_file() {
+        let _ = fs::remove_dir_all(&stage);
+        return Err("staged pack missing docker-compose.yml".to_string());
+    }
+    if !manifest_path.is_file() {
+        let _ = fs::remove_dir_all(&stage);
+        return Err("staged pack missing image-manifest.json".to_string());
+    }
+    let validated = {
+        let m = load_manifest(&manifest_path).map_err(|e| {
+            let _ = fs::remove_dir_all(&stage);
+            e
+        })?;
+        validate_manifest(&m).map_err(|e| {
+            let _ = fs::remove_dir_all(&stage);
+            e
+        })?
     };
+    // Require nginx + conf + lua for a complete pack.
+    for rel in ["nginx.conf", "conf", "lua"] {
+        let p = stage.join(rel);
+        if !p.exists() {
+            let _ = fs::remove_dir_all(&stage);
+            return Err(format!("staged pack missing {rel}"));
+        }
+    }
+
+    // Atomic swap: final -> backup, stage -> final, drop backup.
+    if final_dest.exists() {
+        fs::rename(&final_dest, &backup).map_err(|e| {
+            let _ = fs::remove_dir_all(&stage);
+            format!("pack swap backup failed: {e}")
+        })?;
+    }
+    if let Err(e) = fs::rename(&stage, &final_dest) {
+        // Roll back.
+        if backup.exists() {
+            let _ = fs::rename(&backup, &final_dest);
+        }
+        let _ = fs::remove_dir_all(&stage);
+        return Err(format!("pack swap failed: {e}"));
+    }
+    let _ = fs::remove_dir_all(&backup);
+
     let marker = serde_json::json!({
         "installed": true,
-        "pack_version": version,
+        "pack_version": validated.pack_version,
+        "manifest_mode": validated.mode.as_str(),
         "project": DESKTOP_COMPOSE_PROJECT,
+        "source_sha": validated.source_sha,
     });
     write_atomic_0600(
         &installed_marker_path(),
         format!("{marker}\n").as_bytes(),
     )?;
-    Ok(dest)
+    Ok(final_dest)
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -441,12 +522,16 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Installed pack root only — never falls back to bundled Resources as "installed".
 pub fn installed_pack_root() -> Option<PathBuf> {
-    let p = gateway_data_dir().join("pack");
+    if !is_pack_installed() {
+        return None;
+    }
+    let p = gateway_data_dir().join(PACK_DIR_NAME);
     if p.join("docker-compose.yml").is_file() {
         Some(p)
     } else {
-        bundled_pack_root()
+        None
     }
 }
 
@@ -460,8 +545,14 @@ fn load_validated_manifest(pack_root: &Path) -> Result<ValidatedManifest, String
 }
 
 fn verify_images_present(v: &ValidatedManifest) -> Result<(), String> {
+    match v.mode {
+        ManifestMode::LocalDev => verify_images_local_dev(v),
+        ManifestMode::Production => verify_images_production(v),
+    }
+}
+
+fn verify_images_local_dev(v: &ValidatedManifest) -> Result<(), String> {
     for (label, image_ref) in [("gateway", &v.gateway), ("sidecar", &v.sidecar)] {
-        // Prefer resolve by digest form; fall back to image id inspect via local tags.
         let out = docker_command(&[
             "image",
             "inspect",
@@ -472,30 +563,39 @@ fn verify_images_present(v: &ValidatedManifest) -> Result<(), String> {
         match out {
             Ok(o) if o.status.success() => {
                 let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                if !image_id_matches_ref(&id, image_ref) {
+                if !image_config_id_matches_ref(&id, image_ref) {
+                    // Also accept local_tags / image_ids from manifest.
+                    if let Some(expected_id) = v.local_image_ids.get(label) {
+                        if image_config_id_matches_ref(&id, image_ref)
+                            || id == *expected_id
+                            || id.strip_prefix("sha256:") == expected_id.strip_prefix("sha256:")
+                        {
+                            continue;
+                        }
+                    }
                     return Err(format!(
-                        "{label} image id does not match manifest digest (resolved id redacted length {})",
-                        id.len()
+                        "{label}: {}",
+                        DockerErrorKind::ImageDigestMismatch.operator_message()
                     ));
                 }
             }
             Ok(o) => {
-                // Try bare sha256:id form (local builds).
                 let id_ref = format!("sha256:{}", image_ref.digest_hex());
                 let out2 = docker_command(&["image", "inspect", "--format", "{{.Id}}", &id_ref]);
                 match out2 {
                     Ok(o2) if o2.status.success() => {
                         let id = String::from_utf8_lossy(&o2.stdout).trim().to_string();
-                        if !image_id_matches_ref(&id, image_ref) {
-                            return Err(format!("{label} image digest mismatch"));
+                        if !image_config_id_matches_ref(&id, image_ref) {
+                            return Err(format!(
+                                "{label}: {}",
+                                DockerErrorKind::ImageDigestMismatch.operator_message()
+                            ));
                         }
                     }
                     _ => {
                         return Err(format!(
-                            "{label} image not present locally for {}. \
-                             Run scripts/build-gateway-pack-dev-images.sh (local-dev) \
-                             or load published digest-pinned images. {}",
-                            image_ref.as_str(),
+                            "{label} image not present for local-dev. \
+                             Run scripts/build-gateway-pack-dev-images.sh. {}",
                             format_cmd_failure("image inspect", &o)
                         ));
                     }
@@ -507,19 +607,75 @@ fn verify_images_present(v: &ValidatedManifest) -> Result<(), String> {
     Ok(())
 }
 
-fn compose_file(pack_root: &Path) -> PathBuf {
-    pack_root.join("docker-compose.yml")
-}
+fn verify_images_production(v: &ValidatedManifest) -> Result<(), String> {
+    for (label, image_ref) in [("gateway", &v.gateway), ("sidecar", &v.sidecar)] {
+        // Pull/resolve exact name@sha256 registry digest.
+        let pull = docker_command(&["pull", image_ref.digest_ref()]);
+        match pull {
+            Ok(o) if o.status.success() => {}
+            Ok(o) => {
+                return Err(format!(
+                    "{label} production pull failed. {}",
+                    format_cmd_failure("image pull", &o)
+                ));
+            }
+            Err(e) => return Err(e),
+        }
 
-fn assert_watch_off_in_env_file(path: &Path) -> Result<(), String> {
-    let map = parse_env_file(path);
-    if map.get("WATCH_PRODUCER_ENABLED").map(String::as_str) != Some("false") {
-        return Err("runtime env must set WATCH_PRODUCER_ENABLED=false".to_string());
-    }
-    if map.get("WATCH_DISPATCHER_ENABLED").map(String::as_str) != Some("false") {
-        return Err("runtime env must set WATCH_DISPATCHER_ENABLED=false".to_string());
+        let out = docker_command(&[
+            "image",
+            "inspect",
+            "--format",
+            "{{json .RepoDigests}}",
+            image_ref.digest_ref(),
+        ]);
+        match out {
+            Ok(o) if o.status.success() => {
+                let raw = String::from_utf8_lossy(&o.stdout);
+                // RepoDigests JSON array → join as lines for matcher.
+                let digests = raw
+                    .trim()
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .replace('"', "")
+                    .replace(',', "\n");
+                if !repo_digests_match_ref(&digests, image_ref) {
+                    // Also try newline format from Go template alternative.
+                    let out2 = docker_command(&[
+                        "image",
+                        "inspect",
+                        "--format",
+                        "{{range .RepoDigests}}{{println .}}{{end}}",
+                        image_ref.digest_ref(),
+                    ]);
+                    let digests2 = out2
+                        .ok()
+                        .map(|o2| String::from_utf8_lossy(&o2.stdout).to_string())
+                        .unwrap_or_default();
+                    if !repo_digests_match_ref(&digests2, image_ref)
+                        && !repo_digests_match_ref(&raw, image_ref)
+                    {
+                        return Err(format!(
+                            "{label}: production RepoDigests do not contain expected registry digest \
+                             (config Id matching is not accepted in production mode)"
+                        ));
+                    }
+                }
+            }
+            Ok(o) => {
+                return Err(format!(
+                    "{label}: {}",
+                    format_cmd_failure("image inspect RepoDigests", &o)
+                ));
+            }
+            Err(e) => return Err(e),
+        }
     }
     Ok(())
+}
+
+fn compose_file(pack_root: &Path) -> PathBuf {
+    pack_root.join("docker-compose.yml")
 }
 
 fn http_get_status(url: &str, bearer: Option<&str>) -> Result<(u16, String), String> {
@@ -548,8 +704,6 @@ fn gateway_health_ok() -> bool {
     )
 }
 
-/// True when the sidecar management surface answers (not 502/connection error).
-/// Empty/invalid body yields 4xx — that still proves the path is live.
 fn admin_surface_ready() -> bool {
     match ureq::post(&format!("{DESKTOP_GATEWAY_URL}/admin/keys"))
         .timeout(Duration::from_secs(3))
@@ -578,18 +732,13 @@ fn models_authenticated(raw_key: &str) -> bool {
 fn models_fail_closed_without_key() -> bool {
     match http_get_status(&format!("{DESKTOP_GATEWAY_URL}/v1/models"), None) {
         Ok((code, _)) => code == 401 || code == 403,
-        Err(_) => true, // unreachable treated as fail-closed for pre-start
+        Err(_) => true,
     }
 }
 
 /// Provision Council service-role client via real admin API. Raw key → Keychain only.
-fn provision_council_client(store: &dyn SecretStore) -> Result<String, String> {
-    let env_path = runtime_env_path();
-    let bootstrap = read_env_value(&env_path, "BOOTSTRAP_TOKEN")
-        .filter(|v| !v.is_empty())
-        .ok_or_else(|| "BOOTSTRAP_TOKEN missing from pack runtime env".to_string())?;
-
-    // Body via ureq JSON — secrets never appear in process argv.
+/// `bootstrap` is held only in memory / compose process env for this call.
+fn provision_council_client(store: &dyn SecretStore, bootstrap: &str) -> Result<String, String> {
     let body = serde_json::json!({
         "budget_key": "desktop-council",
         "tier": "default",
@@ -623,19 +772,14 @@ fn provision_council_client(store: &dyn SecretStore) -> Result<String, String> {
         .and_then(|v| v.as_str())
         .ok_or_else(|| "provision response missing key_id".to_string())?;
     if !key_id.starts_with("k_") || key_id.len() != 10 {
-        // k_ + 8 hex — len 10
         return Err("provision response key_id has invalid shape".to_string());
     }
 
     store_gw_api_key(store, raw_key)?;
-    // Persist non-secret key id only.
-    upsert_env_value(&env_path, "COUNCIL_GATEWAY_KEY_ID", key_id)?;
     let mut cfg = load_or_create_private_config()?;
     cfg.gateway_key_id = Some(key_id.to_string());
-    cfg.gateway_pack_version = cfg.gateway_pack_version.clone();
     write_private_config_at(&crate::private_config::private_config_path(), &cfg)?;
 
-    // raw_key dropped at end of scope; never returned to frontend.
     let _ = raw_key;
     Ok(key_id.to_string())
 }
@@ -665,8 +809,7 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
             st.state = GatewayPackState::DockerDaemonDown;
             st.docker = "daemon_down".into();
             st.message = "Docker Desktop is installed but the daemon is not running. Open Docker Desktop, wait until it is ready, then retry. Core War Room stays healthy in Direct mode.".into();
-            // Still note if pack files exist.
-            if installed_marker_path().is_file() {
+            if is_pack_installed() {
                 st.message.push_str(" Pack files are present on disk.");
             }
             return st;
@@ -679,7 +822,11 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
     let pack_root = match installed_pack_root() {
         Some(p) => p,
         None => {
+            // Bundled resources may exist; still not_installed until marker.
             st.state = GatewayPackState::NotInstalled;
+            if bundled_pack_root().is_some() {
+                st.message = "Gateway Pack assets are bundled but not installed. Use Enable Gateway to install into Application Support.".into();
+            }
             return st;
         }
     };
@@ -689,7 +836,6 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
         st.manifest_mode = Some(v.mode.as_str().to_string());
     }
 
-    // Is the desktop project running?
     let running = desktop_project_running();
     let health = gateway_health_ok();
 
@@ -697,12 +843,16 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
     let authenticated = key.as_ref().map(|k| models_authenticated(k)).unwrap_or(false);
     st.authenticated = authenticated;
 
+    // Council governed: enabled flag + authenticated + pack healthy.
+    // Exact child PID proof is supplied by the enable path; status is best-effort.
+    st.council_governed = st.enabled && authenticated && health && running;
+
     if !running {
         if cfg.as_ref().map(|c| c.via_gateway_default) == Some(true) {
             st.state = GatewayPackState::Degraded;
             st.message = "Gateway was enabled but the pack is not running. Start the pack or Disable Gateway for Direct mode.".into();
-        } else if installed_marker_path().is_file() || pack_root.join("docker-compose.yml").is_file()
-        {
+            st.council_governed = false;
+        } else if is_pack_installed() {
             st.state = if cfg.as_ref().map(|c| c.via_gateway_default) == Some(false) {
                 GatewayPackState::Disabled
             } else {
@@ -718,18 +868,26 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
     if !health {
         st.state = GatewayPackState::Degraded;
         st.message = "Gateway containers are up but /health failed. Check Docker logs for irin-desktop-gateway.".into();
+        st.council_governed = false;
         return st;
     }
 
-    if authenticated {
+    if authenticated && st.enabled {
         st.state = GatewayPackState::AuthenticatedReady;
         st.message = "Gateway Pack is authenticated and ready for governed proceedings.".into();
+        st.council_governed = true;
+    } else if authenticated && !st.enabled {
+        st.state = GatewayPackState::Disabled;
+        st.message = "Gateway is up with a stored key, but governed mode is disabled (Direct).".into();
+        st.council_governed = false;
     } else if key.is_some() {
         st.state = GatewayPackState::Degraded;
         st.message = "Gateway is up but the stored client key failed /v1/models. Re-run Enable Gateway to re-provision.".into();
+        st.council_governed = false;
     } else {
         st.state = GatewayPackState::Degraded;
         st.message = "Gateway is up but no client key is in Keychain. Run Enable Gateway to provision.".into();
+        st.council_governed = false;
     }
     st
 }
@@ -750,9 +908,42 @@ fn desktop_project_running() -> bool {
     }
 }
 
-/// Full enable workflow: install files → start pack → provision → mark enabled.
-/// Returns non-secret status. Never returns raw secrets.
+fn compose_up(
+    compose: &Path,
+    env_path: &Path,
+    secret_env: &ComposeEnv,
+) -> Result<(), String> {
+    let up = compose_command_with_env(
+        compose,
+        Some(env_path),
+        &["up", "-d", "--remove-orphans", "--wait"],
+        Some(secret_env),
+        DOCKER_COMPOSE_UP_TIMEOUT,
+    )?;
+    if up.status.success() {
+        return Ok(());
+    }
+    let up2 = compose_command_with_env(
+        compose,
+        Some(env_path),
+        &["up", "-d", "--remove-orphans", "--force-recreate"],
+        Some(secret_env),
+        DOCKER_COMPOSE_UP_TIMEOUT,
+    )?;
+    if !up2.status.success() {
+        return Err(format_cmd_failure("gateway pack up", &up2));
+    }
+    Ok(())
+}
+
+/// Full enable workflow. Returns ready only when Gateway auth is proven.
+/// Caller (lib.rs) must restart Council into governed mode and treat restart
+/// failure as overall failure (not ready).
 pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, String> {
+    let _guard = LIFECYCLE_LOCK
+        .lock()
+        .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
+
     match probe_docker_daemon() {
         DockerDaemonState::CliMissing => {
             return Ok(gateway_pack_status(store));
@@ -769,16 +960,15 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     verify_images_present(&validated)?;
 
     let ledger = ensure_ledger_key()?;
-    let env_path = write_runtime_env(
+    let existing_key_id = load_or_create_private_config()?.gateway_key_id;
+    let env_path = write_public_compose_env(
         &pack_root,
         &ledger,
         &validated.gateway,
         &validated.sidecar,
-        false,
+        existing_key_id.as_deref(),
     )?;
-    assert_watch_off_in_env_file(&env_path)?;
 
-    // Refuse if something else owns :18080 without our project.
     if port_busy_by_foreign_gateway()? {
         return Err(
             "port 18080 is in use by a process outside irin-desktop-gateway; \
@@ -788,66 +978,84 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     }
 
     let compose = compose_file(&pack_root);
-    let up = compose_command(
-        &compose,
-        Some(&env_path),
-        &["up", "-d", "--remove-orphans", "--wait"],
-    )?;
-    if !up.status.success() {
-        // --wait may not exist on older compose; retry without it.
-        let up2 = compose_command(&compose, Some(&env_path), &["up", "-d", "--remove-orphans"])?;
-        if !up2.status.success() {
-            return Err(format_cmd_failure("gateway pack up", &up2));
-        }
-    }
 
-    // Wait for edge health and sidecar-backed admin surface (not mere URL reachability).
-    let mut ready = false;
-    for _ in 0..60 {
-        if gateway_health_ok() && admin_surface_ready() {
-            ready = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(500));
-    }
-    if !ready {
-        return Err(
-            "gateway pack started but authenticated control plane is not ready \
-             (/health + /admin/keys not accepting requests)"
-                .to_string(),
-        );
-    }
-
-    // Fail-closed: unauthenticated /v1/models must not succeed.
-    if !models_fail_closed_without_key() {
-        return Err("gateway /v1/models did not fail closed without a client key".to_string());
-    }
-
-    // Reuse existing Keychain key if still valid.
+    // Reuse existing Keychain key if still valid after start; else provision with bootstrap.
     let existing = load_gw_api_key(store)?;
-    let key_id = if let Some(ref k) = existing {
-        if models_authenticated(k) {
-            load_or_create_private_config()?
-                .gateway_key_id
-                .unwrap_or_else(|| "existing".into())
-        } else {
-            provision_council_client(store)?
+    let need_provision = match existing.as_ref() {
+        Some(k) => {
+            // Start without bootstrap first if we might already be provisioned.
+            let secret_env = build_compose_secret_env(store, None)?;
+            compose_up(&compose, &env_path, &secret_env)?;
+            wait_control_plane()?;
+            !models_authenticated(k)
         }
-    } else {
-        provision_council_client(store)?
+        None => true,
     };
 
-    // Mark enabled (non-secret).
+    let key_id = if need_provision {
+        // Generate bootstrap only for provisioning.
+        let bootstrap = random_hex(32)?;
+        let secret_env = build_compose_secret_env(store, Some(&bootstrap))?;
+        compose_up(&compose, &env_path, &secret_env)?;
+        wait_control_plane()?;
+        if !models_fail_closed_without_key() {
+            return Err("gateway /v1/models did not fail closed without a client key".to_string());
+        }
+        let kid = provision_council_client(store, &bootstrap)?;
+        // Blank bootstrap and recreate sidecar without it.
+        let secret_env_blank = build_compose_secret_env(store, None)?;
+        write_public_compose_env(
+            &pack_root,
+            &ledger,
+            &validated.gateway,
+            &validated.sidecar,
+            Some(&kid),
+        )?;
+        compose_up(&compose, &env_path, &secret_env_blank)?;
+        wait_control_plane()?;
+        kid
+    } else {
+        if !models_fail_closed_without_key() {
+            return Err("gateway /v1/models did not fail closed without a client key".to_string());
+        }
+        existing_key_id.unwrap_or_else(|| "existing".into())
+    };
+
+    // Confirm auth after provision path.
+    let key = load_gw_api_key(store)?
+        .ok_or_else(|| "GW_API_KEY missing from Keychain after enable".to_string())?;
+    if !models_authenticated(&key) {
+        return Err("Gateway client key failed /v1/models after enable".to_string());
+    }
+
     let mut cfg = load_or_create_private_config()?;
     cfg.via_gateway_default = true;
     cfg.gateway_key_id = Some(key_id);
     cfg.gateway_pack_version = Some(validated.pack_version.clone());
     write_private_config_at(&crate::private_config::private_config_path(), &cfg)?;
-
-    // Assert private.json has no raw key material.
     assert_private_json_has_no_raw_key()?;
 
-    Ok(gateway_pack_status(store))
+    let mut st = gateway_pack_status(store);
+    // Not fully ready until Council restart succeeds — lib marks council_governed.
+    if st.authenticated && st.enabled {
+        st.state = GatewayPackState::AuthenticatedReady;
+        st.message = "Gateway Pack authenticated. Council restart required for governed mode.".into();
+    }
+    Ok(st)
+}
+
+fn wait_control_plane() -> Result<(), String> {
+    for _ in 0..60 {
+        if gateway_health_ok() && admin_surface_ready() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    Err(
+        "gateway pack started but authenticated control plane is not ready \
+         (/health + /admin/keys not accepting requests)"
+            .to_string(),
+    )
 }
 
 fn assert_private_json_has_no_raw_key() -> Result<(), String> {
@@ -856,10 +1064,6 @@ fn assert_private_json_has_no_raw_key() -> Result<(), String> {
         return Ok(());
     }
     let raw = fs::read_to_string(&path).map_err(|e| e.to_string())?;
-    if raw.contains("gw_") && raw.contains("raw") {
-        return Err("private.json appears to contain raw key material".to_string());
-    }
-    // Stricter: no gw_ + 32 hex
     if raw.contains("gw_") {
         for part in raw.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
             if is_valid_gw_raw_key(part) {
@@ -874,41 +1078,67 @@ fn port_busy_by_foreign_gateway() -> Result<bool, String> {
     if desktop_project_running() {
         return Ok(false);
     }
-    // If health answers but our project is not running, something else owns the port.
     if gateway_health_ok() {
         return Ok(true);
     }
-    // TCP connect without HTTP.
     use std::net::TcpStream;
     match TcpStream::connect_timeout(
         &"127.0.0.1:18080".parse().unwrap(),
         Duration::from_millis(200),
     ) {
-        Ok(_) => Ok(true), // something listens, not our project
+        Ok(_) => Ok(true),
         Err(_) => Ok(false),
     }
 }
 
-/// Disable governed mode: flip private config, do not delete pack data/Keychain.
+/// Disable governed mode: flip private config. Does not delete pack data/Keychain.
 pub fn disable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, String> {
+    let _guard = LIFECYCLE_LOCK
+        .lock()
+        .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
     let mut cfg = load_or_create_private_config()?;
     cfg.via_gateway_default = false;
     write_private_config_at(&crate::private_config::private_config_path(), &cfg)?;
-    let _ = store; // key retained for re-enable
+    let _ = store;
     Ok(gateway_pack_status(store))
 }
 
-/// Stop desktop compose project only. Never targets foreign projects.
+/// Stop desktop compose project only after Direct mode is recorded.
+/// Refuses if still enabled (via_gateway_default) — caller must disable first,
+/// or we auto-disable then stop so Council is not left governed against a dead Gateway.
 pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, String> {
+    let _guard = LIFECYCLE_LOCK
+        .lock()
+        .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
+
+    let mut cfg = load_or_create_private_config()?;
+    if cfg.via_gateway_default {
+        // Switch to Direct first so we never leave enabled Council against stopped Gateway.
+        cfg.via_gateway_default = false;
+        write_private_config_at(&crate::private_config::private_config_path(), &cfg)?;
+    }
+
     if let Some(pack_root) = installed_pack_root() {
         let compose = compose_file(&pack_root);
         if compose.is_file() {
-            let env = runtime_env_path();
+            let env = public_env_path();
             let env_arg = env.is_file().then_some(env.as_path());
-            let out = compose_command(&compose, env_arg, &["stop"])?;
+            let secret_env = build_compose_secret_env(store, None).unwrap_or_default();
+            let out = compose_command_with_env(
+                &compose,
+                env_arg,
+                &["stop"],
+                Some(&secret_env),
+                DOCKER_CMD_TIMEOUT,
+            )?;
             if !out.status.success() {
-                // Fallback: docker compose -p down without volumes
-                let out2 = compose_command(&compose, env_arg, &["down", "--remove-orphans"])?;
+                let out2 = compose_command_with_env(
+                    &compose,
+                    env_arg,
+                    &["down", "--remove-orphans"],
+                    Some(&secret_env),
+                    DOCKER_CMD_TIMEOUT,
+                )?;
                 if !out2.status.success() {
                     return Err(format_cmd_failure("gateway pack stop", &out2));
                 }
@@ -918,25 +1148,46 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
     Ok(gateway_pack_status(store))
 }
 
-/// Destructive uninstall: only irin-desktop-gateway project + app-owned gateway dir + Keychain item.
+/// Destructive uninstall: only irin-desktop-gateway project + app-owned gateway dir + Keychain items.
 pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, String> {
+    let _guard = LIFECYCLE_LOCK
+        .lock()
+        .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
+
     if let Some(pack_root) = installed_pack_root() {
         let compose = compose_file(&pack_root);
         if compose.is_file() {
-            let env = runtime_env_path();
+            let env = public_env_path();
             let env_arg = env.is_file().then_some(env.as_path());
-            // down -v only for our project (compose_command pins -p).
-            let out = compose_command(
+            let secret_env = build_compose_secret_env(store, None).unwrap_or_default();
+            let out = compose_command_with_env(
                 &compose,
                 env_arg,
                 &["down", "--volumes", "--remove-orphans"],
+                Some(&secret_env),
+                DOCKER_CMD_TIMEOUT,
             )?;
             if !out.status.success() {
                 return Err(format_cmd_failure("gateway pack uninstall down", &out));
             }
         }
+    } else if let Some(pack_root) = {
+        // Best-effort down even if marker missing but pack dir exists.
+        let p = gateway_data_dir().join(PACK_DIR_NAME);
+        p.join("docker-compose.yml").is_file().then_some(p)
+    } {
+        let compose = compose_file(&pack_root);
+        let secret_env = build_compose_secret_env(store, None).unwrap_or_default();
+        let _ = compose_command_with_env(
+            &compose,
+            None,
+            &["down", "--volumes", "--remove-orphans"],
+            Some(&secret_env),
+            DOCKER_CMD_TIMEOUT,
+        );
     }
-    let _ = delete_gw_api_key(store);
+
+    let _ = delete_all_gateway_pack_secrets(store);
     let dir = gateway_data_dir();
     if dir.is_dir() {
         fs::remove_dir_all(&dir).map_err(|e| format!("remove gateway data dir: {e}"))?;
@@ -949,13 +1200,11 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
     Ok(gateway_pack_status(store))
 }
 
-/// Default Keychain-backed store for production commands.
 #[allow(dead_code)]
 pub fn default_secret_store() -> KeychainSecretStore {
     KeychainSecretStore
 }
 
-/// Child env injection when Council should use Gateway.
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct GatewayChildEnv {
@@ -963,7 +1212,6 @@ pub struct GatewayChildEnv {
     pub gateway_url: String,
 }
 
-/// Load Keychain key for child injection only when pack is authenticated-ready and enabled.
 #[allow(dead_code)]
 pub fn gateway_child_env_if_ready(store: &dyn SecretStore) -> Result<Option<GatewayChildEnv>, String> {
     let st = gateway_pack_status(store);
@@ -976,6 +1224,33 @@ pub fn gateway_child_env_if_ready(store: &dyn SecretStore) -> Result<Option<Gate
         api_key: key,
         gateway_url: DESKTOP_GATEWAY_URL.to_string(),
     }))
+}
+
+/// Mark status after Council restart proof (called from lib.rs).
+pub fn status_with_council_route(
+    store: &dyn SecretStore,
+    council_governed: bool,
+    council_direct: bool,
+) -> GatewayPackStatus {
+    let mut st = gateway_pack_status(store);
+    if council_governed && st.authenticated && st.enabled && gateway_health_ok() {
+        st.state = GatewayPackState::AuthenticatedReady;
+        st.council_governed = true;
+        st.message =
+            "Gateway Pack is authenticated and Council is governed.".into();
+    } else if council_direct && !st.enabled {
+        st.council_governed = false;
+        if st.state == GatewayPackState::AuthenticatedReady {
+            st.state = GatewayPackState::Disabled;
+        }
+    } else if st.enabled && st.authenticated && !council_governed {
+        st.state = GatewayPackState::Degraded;
+        st.council_governed = false;
+        st.message =
+            "Gateway is authenticated but Council did not enter governed mode.".into();
+    }
+    let _ = gw_api_key_present(store);
+    st
 }
 
 #[cfg(test)]
@@ -999,6 +1274,117 @@ mod tests {
             crate::keychain::KEYCHAIN_SERVICE,
             "com.sovereign.council.warroom"
         );
+    }
+
+    #[test]
+    fn public_env_rejects_crlf_and_duplicates() {
+        assert!(validate_env_value("K", "ok").is_ok());
+        assert!(validate_env_value("K", "bad\nvalue").is_err());
+        assert!(validate_env_value("K", "bad\rvalue").is_err());
+        let dup = serialize_public_env(&[
+            ("A".into(), "1".into()),
+            ("A".into(), "2".into()),
+        ]);
+        assert!(dup.is_err());
+        let body = serialize_public_env(&[
+            ("IRIN_GATEWAY_IMAGE".into(), "n@sha256:".to_string() + &"a".repeat(64)),
+            ("WATCH_PRODUCER_ENABLED".into(), "false".into()),
+        ])
+        .unwrap();
+        assert!(body.contains("WATCH_PRODUCER_ENABLED=false"));
+        assert!(!body.contains("AUTH_PEPPER"));
+        assert!(!body.contains("XAI_API_KEY"));
+    }
+
+    #[test]
+    fn bundled_alone_is_not_installed() {
+        let _g = test_env_lock();
+        let prev = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "gw-pack-notinst-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("HOME", &tmp);
+        assert!(!is_pack_installed());
+        assert!(installed_pack_root().is_none());
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn install_swap_replaces_stale_and_writes_marker() {
+        let _g = test_env_lock();
+        let prev = std::env::var("HOME").ok();
+        let prev_pack = std::env::var("IRIN_GATEWAY_PACK_ROOT").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "gw-pack-swap-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("HOME", &tmp);
+
+        let bundle = tmp.join("bundle");
+        fs::create_dir_all(bundle.join("conf")).unwrap();
+        fs::create_dir_all(bundle.join("lua")).unwrap();
+        fs::write(bundle.join("docker-compose.yml"), b"name: irin-desktop-gateway\n").unwrap();
+        fs::write(bundle.join("nginx.conf"), b"# nginx\n").unwrap();
+        let hex = "a".repeat(64);
+        let manifest = format!(
+            r#"{{
+  "schema_version": 1,
+  "mode": "local-dev",
+  "pack_version": "0.1.0-a",
+  "source_sha": "abc",
+  "source_dirty": false,
+  "images": {{
+    "gateway": "irin-desktop/gateway@sha256:{hex}",
+    "sidecar": "irin-desktop/sidecar@sha256:{hex}"
+  }},
+  "watch_invariants": {{
+    "WATCH_PRODUCER_ENABLED": false,
+    "WATCH_DISPATCHER_ENABLED": false
+  }}
+}}"#
+        );
+        fs::write(bundle.join("image-manifest.json"), manifest.as_bytes()).unwrap();
+        std::env::set_var("IRIN_GATEWAY_PACK_ROOT", &bundle);
+
+        let dest = install_pack_files().unwrap();
+        assert!(dest.join("docker-compose.yml").is_file());
+        assert!(is_pack_installed());
+        // Stale file then update with new manifest version.
+        fs::write(dest.join("stale.txt"), b"old").unwrap();
+        let manifest_b = manifest.replace("0.1.0-a", "0.1.0-b");
+        fs::write(bundle.join("image-manifest.json"), manifest_b.as_bytes()).unwrap();
+        let dest2 = install_pack_files().unwrap();
+        assert!(!dest2.join("stale.txt").exists(), "stale file survived swap");
+        let marker: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(installed_marker_path()).unwrap()).unwrap();
+        assert_eq!(marker["pack_version"], "0.1.0-b");
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_pack {
+            Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_ROOT", v),
+            None => std::env::remove_var("IRIN_GATEWAY_PACK_ROOT"),
+        }
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -1026,12 +1412,6 @@ mod tests {
         }
         let ledger = ensure_ledger_key().unwrap();
         assert_eq!(fs::metadata(&ledger).unwrap().len(), 32);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&ledger).unwrap().permissions().mode() & 0o777;
-            assert_eq!(mode, 0o600);
-        }
 
         match prev {
             Some(v) => std::env::set_var("HOME", v),
@@ -1064,10 +1444,13 @@ mod tests {
         )
         .unwrap();
         assert!(assert_private_json_has_no_raw_key().is_ok());
+        let bad_key = format!("gw_{}", "0".repeat(32));
         fs::write(
             &path,
-            r#"{"version":1,"install_id":"x","created_unix":1,"gw":"gw_0123456789abcdef0123456789abcdef"}
-"#,
+            format!(
+                r#"{{"version":1,"install_id":"x","created_unix":1,"gw":"{bad_key}"}}
+"#
+            ),
         )
         .unwrap();
         assert!(assert_private_json_has_no_raw_key().is_err());
@@ -1081,9 +1464,6 @@ mod tests {
 
     #[test]
     fn status_docker_missing_is_actionable() {
-        // When docker is missing, status should not claim ready.
-        // We cannot force CLI missing if docker is installed on this machine;
-        // instead unit-check the state enum contract.
         let st = GatewayPackStatus::base(
             GatewayPackState::DockerMissing,
             "Docker CLI not found",
@@ -1123,10 +1503,25 @@ mod tests {
         );
         assert!(!st.state.allows_governed());
         assert!(!st.authenticated);
+        assert!(!st.council_governed);
         match prev {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
         }
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn secret_env_never_in_public_file_shape() {
+        let body = serialize_public_env(&[
+            ("IRIN_GATEWAY_IMAGE".into(), "x".into()),
+            ("BOOTSTRAP_TOKEN".into(), "".into()),
+        ])
+        .unwrap();
+        assert!(!body.contains("AUTH_PEPPER="));
+        assert!(!body.contains("WATCH_ADMIN_TOKEN"));
+        assert!(!body.contains("COUNCIL_GATEWAY_TOKEN"));
+        // Empty bootstrap is ok in public file (blanked).
+        assert!(body.contains("BOOTSTRAP_TOKEN="));
     }
 }

@@ -300,8 +300,21 @@ fn try_start_council_server(
     }
     // Finder/GUI launch: inject login PATH + provider keys so Discover works without a terminal.
     // Never imports GW_API_KEY (filtered in is_council_provider_env_key).
+    // Apply login env first, then compose_sidecar_env scrub/inject wins for Gateway vars
+    // when re-applied below after login merge.
     if packaged {
         for (key, value) in gui_login_environment() {
+            command = command.env(key, value);
+        }
+        // Re-apply compose env after login merge so Gateway scrub/inject is authoritative.
+        for (key, value) in compose_sidecar_env(
+            cors_origins.as_str(),
+            cfg!(debug_assertions) && !packaged,
+            auth_token,
+            via_gateway,
+            librarian_base,
+            gateway_creds.as_ref(),
+        ) {
             command = command.env(key, value);
         }
         let _ = app.emit(
@@ -596,59 +609,80 @@ async fn gateway_pack_status() -> Result<GatewayPackStatus, String> {
 }
 
 /// Install/start/provision/enable the app-owned Gateway Pack. Never returns secrets.
+/// Ready only when Gateway auth **and** owned Council governed restart both succeed.
 #[tauri::command]
 async fn gateway_pack_enable(app: AppHandle) -> Result<GatewayPackStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = KeychainSecretStore;
         let status = gateway_pack::enable_gateway_pack(&store)?;
-        if status.state == GatewayPackState::AuthenticatedReady {
-            // Restart owned Council child into governed mode with Keychain key.
-            let config = {
-                let state = app.state::<SpawnConfigCache>();
-                let guard = state.0.lock().map_err(|e| e.to_string())?;
-                guard.clone()
-            };
-            let had_child = {
-                let state = app.state::<CouncilServer>();
-                let guard = state.0.lock().map_err(|e| e.to_string())?;
-                guard.child.is_some()
-            };
-            if had_child {
-                stop_tracked_council_server(&app);
-                let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
-                match try_start_council_server(
-                    &app,
-                    config.council_path.as_deref(),
-                    None,
-                    config.auth_token.as_deref(),
-                    Some(true),
-                    config.council_root.as_deref(),
-                    config.librarian_base.as_deref(),
-                ) {
-                    Ok(msg) => {
-                        let _ = app.emit("council-log", format!("[system] gateway enable: {msg}"));
-                    }
-                    Err(e) => {
-                        let _ = app.emit(
-                            "council-log",
-                            format!("[system] gateway enable: pack ready but council restart failed: {e}"),
-                        );
-                    }
-                }
+        // Docker missing/down is neutral for core Direct — return status as-is.
+        if matches!(
+            status.state,
+            GatewayPackState::DockerMissing | GatewayPackState::DockerDaemonDown
+        ) {
+            return Ok(status);
+        }
+        if !status.authenticated || !status.enabled {
+            return Ok(status);
+        }
+
+        // Restart owned Council child into governed mode with Keychain key.
+        let config = {
+            let state = app.state::<SpawnConfigCache>();
+            let guard = state.0.lock().map_err(|e| e.to_string())?;
+            guard.clone()
+        };
+        let had_child = {
+            let state = app.state::<CouncilServer>();
+            let guard = state.0.lock().map_err(|e| e.to_string())?;
+            guard.child.is_some()
+        };
+        if !had_child {
+            // No owned child: pack auth alone is not full ready for this shell.
+            return Ok(gateway_pack::status_with_council_route(
+                &store, false, false,
+            ));
+        }
+        stop_tracked_council_server(&app);
+        let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
+        match try_start_council_server(
+            &app,
+            config.council_path.as_deref(),
+            None,
+            config.auth_token.as_deref(),
+            Some(true),
+            config.council_root.as_deref(),
+            config.librarian_base.as_deref(),
+        ) {
+            Ok(msg) => {
+                let _ = app.emit("council-log", format!("[system] gateway enable: {msg}"));
+                Ok(gateway_pack::status_with_council_route(
+                    &store, true, false,
+                ))
+            }
+            Err(e) => {
+                let _ = app.emit(
+                    "council-log",
+                    format!("[system] gateway enable: council governed restart failed: {e}"),
+                );
+                // Propagate failure — do not claim authenticated-ready.
+                Err(format!(
+                    "Gateway pack authenticated but Council governed restart failed: {e}"
+                ))
             }
         }
-        Ok(status)
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 /// Disable governed mode and restart Council in Direct mode. Keeps pack data/Keychain.
+/// Propagates Council Direct restart failures.
 #[tauri::command]
 async fn gateway_pack_disable(app: AppHandle) -> Result<GatewayPackStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = KeychainSecretStore;
-        let status = gateway_pack::disable_gateway_pack(&store)?;
+        let _status = gateway_pack::disable_gateway_pack(&store)?;
         let config = {
             let state = app.state::<SpawnConfigCache>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -662,7 +696,7 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<GatewayPackStatus, Strin
         if had_child {
             stop_tracked_council_server(&app);
             let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
-            let _ = try_start_council_server(
+            try_start_council_server(
                 &app,
                 config.council_path.as_deref(),
                 None,
@@ -670,32 +704,33 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<GatewayPackStatus, Strin
                 Some(false),
                 config.council_root.as_deref(),
                 config.librarian_base.as_deref(),
+            )
+            .map_err(|e| format!("Gateway disabled but Council Direct restart failed: {e}"))?;
+            let _ = app.emit(
+                "council-log",
+                "[system] gateway disable: Council restarted in Direct mode",
             );
+            Ok(gateway_pack::status_with_council_route(
+                &store, false, true,
+            ))
+        } else {
+            Ok(gateway_pack::status_with_council_route(
+                &store, false, true,
+            ))
         }
-        Ok(status)
     })
     .await
     .map_err(|e| e.to_string())?
 }
 
 /// Stop the desktop Compose project only (no volume delete).
+/// Switches to Direct first (via stop_gateway_pack) and restarts owned Council in Direct.
 #[tauri::command]
-async fn gateway_pack_stop() -> Result<GatewayPackStatus, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let store = KeychainSecretStore;
-        gateway_pack::stop_gateway_pack(&store)
-    })
-    .await
-    .map_err(|e| e.to_string())?
-}
-
-/// Destructive uninstall of the desktop pack only. Explicit operator action.
-#[tauri::command]
-async fn gateway_pack_uninstall(app: AppHandle) -> Result<GatewayPackStatus, String> {
+async fn gateway_pack_stop(app: AppHandle) -> Result<GatewayPackStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let store = KeychainSecretStore;
-        let status = gateway_pack::uninstall_gateway_pack(&store)?;
-        // Ensure Direct mode after uninstall.
+        // Ensure Direct config before containers stop.
+        let status = gateway_pack::stop_gateway_pack(&store)?;
         let config = {
             let state = app.state::<SpawnConfigCache>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -709,7 +744,7 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<GatewayPackStatus, Str
         if had_child {
             stop_tracked_council_server(&app);
             let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
-            let _ = try_start_council_server(
+            try_start_council_server(
                 &app,
                 config.council_path.as_deref(),
                 None,
@@ -717,9 +752,58 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<GatewayPackStatus, Str
                 Some(false),
                 config.council_root.as_deref(),
                 config.librarian_base.as_deref(),
-            );
+            )
+            .map_err(|e| {
+                format!("Gateway pack stopped but Council Direct restart failed: {e}")
+            })?;
         }
-        Ok(status)
+        let mut st = gateway_pack::status_with_council_route(&store, false, true);
+        if status.docker == "ready" {
+            st.message = "Gateway pack stopped; Council is in Direct mode.".into();
+        }
+        Ok(st)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Destructive uninstall of the desktop pack only. Explicit operator action.
+/// Propagates Council Direct restart failures.
+#[tauri::command]
+async fn gateway_pack_uninstall(app: AppHandle) -> Result<GatewayPackStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = KeychainSecretStore;
+        let status = gateway_pack::uninstall_gateway_pack(&store)?;
+        let config = {
+            let state = app.state::<SpawnConfigCache>();
+            let guard = state.0.lock().map_err(|e| e.to_string())?;
+            guard.clone()
+        };
+        let had_child = {
+            let state = app.state::<CouncilServer>();
+            let guard = state.0.lock().map_err(|e| e.to_string())?;
+            guard.child.is_some()
+        };
+        if had_child {
+            stop_tracked_council_server(&app);
+            let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
+            try_start_council_server(
+                &app,
+                config.council_path.as_deref(),
+                None,
+                config.auth_token.as_deref(),
+                Some(false),
+                config.council_root.as_deref(),
+                config.librarian_base.as_deref(),
+            )
+            .map_err(|e| {
+                format!("Gateway pack uninstalled but Council Direct restart failed: {e}")
+            })?;
+        }
+        let mut st = status;
+        st.council_governed = false;
+        st.message = "Gateway pack uninstalled; Council is in Direct mode.".into();
+        Ok(st)
     })
     .await
     .map_err(|e| e.to_string())?
