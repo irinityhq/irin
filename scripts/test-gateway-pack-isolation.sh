@@ -88,9 +88,9 @@ rg -q 'IRIN_GATEWAY_PACK_MODE' "$ROOT/scripts/stage-gateway-pack.sh" || die "sta
 rg -q 'production packaging refuses a local-dev' "$ROOT/scripts/stage-gateway-pack.sh" \
   || die "stage refuse local-dev"
 rg -q 'pack_mode' "$ROOT/packaging/build-dmg.sh" || die "dmg pack_mode"
-rg -q 'run_command_timeout\|DOCKER_CMD_TIMEOUT' \
+rg -q 'run_command_timeout|DOCKER_CMD_TIMEOUT' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "docker timeout"
-rg -q 'WhenUnlockedThisDeviceOnly\|kSecAttrAccessibleWhenUnlockedThisDeviceOnly' \
+rg -q 'WhenUnlockedThisDeviceOnly|kSecAttrAccessibleWhenUnlockedThisDeviceOnly' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/keychain.rs" || die "keychain accessibility"
 rg -q 'redact_process_text' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "redactor"

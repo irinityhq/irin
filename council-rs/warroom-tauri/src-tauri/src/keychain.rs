@@ -70,16 +70,22 @@ mod macos_keychain {
     use core_foundation::data::CFData;
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::string::CFString;
-    use security_framework::access_control::{ProtectionMode, SecAccessControl};
+    use core_foundation_sys::string::CFStringRef;
     use security_framework::base::Result as SfResult;
     use security_framework::passwords::delete_generic_password;
-    // TCFType brings as_CFType/into_CFType for SecAccessControl.
+    use security_framework_sys::access_control::kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
     use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound, errSecSuccess};
     use security_framework_sys::item::{
-        kSecAttrAccessControl, kSecAttrAccount, kSecAttrService, kSecClass,
-        kSecClassGenericPassword, kSecValueData,
+        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecValueData,
     };
     use security_framework_sys::keychain_item::{SecItemAdd, SecItemUpdate};
+
+    // kSecAttrAccessible is the attribute *key*; protection class values live in
+    // access_control. Not re-exported by security-framework-sys item module.
+    #[link(name = "Security", kind = "framework")]
+    extern "C" {
+        static kSecAttrAccessible: CFStringRef;
+    }
 
     fn is_not_found(err: &security_framework::base::Error) -> bool {
         err.code() == errSecItemNotFound
@@ -90,6 +96,10 @@ mod macos_keychain {
 
     /// Atomic add-or-update with WhenUnlockedThisDeviceOnly accessibility.
     /// Never delete-then-add (that creates a loss window under concurrent readers).
+    ///
+    /// Uses `kSecAttrAccessible` (not SecAccessControl) so ad-hoc/unsigned test
+    /// binaries work without a keychain-access-groups entitlement; Developer ID
+    /// signed app continuity remains release ceremony.
     pub fn set_password_device_local(
         service: &str,
         account: &str,
@@ -104,7 +114,7 @@ mod macos_keychain {
                 let _ = e;
             }
         }
-        // 2) Add with explicit device-local accessibility.
+        // 2) Add with explicit device-local accessibility class.
         match add_password_device_local(service, account, password) {
             Ok(()) => Ok(()),
             Err(e) if e.code() == errSecDuplicateItem => {
@@ -146,11 +156,6 @@ mod macos_keychain {
     }
 
     fn add_password_device_local(service: &str, account: &str, password: &[u8]) -> SfResult<()> {
-        // Explicit WhenUnlockedThisDeviceOnly via SecAccessControl protection.
-        let access = SecAccessControl::create_with_protection(
-            Some(ProtectionMode::AccessibleWhenUnlockedThisDeviceOnly),
-            0,
-        )?;
         let pairs: Vec<(CFString, CFType)> = vec![
             (
                 unsafe { CFString::wrap_under_get_rule(kSecClass) },
@@ -165,8 +170,11 @@ mod macos_keychain {
                 CFString::from(account).into_CFType(),
             ),
             (
-                unsafe { CFString::wrap_under_get_rule(kSecAttrAccessControl) },
-                access.as_CFType(),
+                unsafe { CFString::wrap_under_get_rule(kSecAttrAccessible) },
+                unsafe {
+                    CFString::wrap_under_get_rule(kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
+                        .into_CFType()
+                },
             ),
             (
                 unsafe { CFString::wrap_under_get_rule(kSecValueData) },

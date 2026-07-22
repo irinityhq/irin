@@ -549,6 +549,7 @@ name = "council-warroom-tauri"
 version = "0.1.0"
 dependencies = [
  "core-foundation 0.9.4",
+ "core-foundation-sys",
  "security-framework",
  "security-framework-sys",
  "serde",
