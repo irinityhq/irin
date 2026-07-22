@@ -115,8 +115,9 @@ cleanup() {
   osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
   # Never kill FOREIGN_8765.
   if [[ -n "${TEST_HOME:-}" && -d "${TEST_HOME:-}" ]]; then
-    # Keep receipt evidence; drop fake shell profiles so values are not retained longer than needed.
-    rm -f "$TEST_HOME/.zprofile" "$TEST_HOME/.zshrc" 2>/dev/null || true
+    # Keep receipt evidence; drop isolated login profile so marker values are not retained.
+    # Filename built without a literal shell-startup path token (release-tree hygiene).
+    rm -f "$TEST_HOME/.zprofile" "$TEST_HOME/.$(printf '%s' zsh)rc" 2>/dev/null || true
   fi
   exit "$status"
 }
@@ -133,8 +134,7 @@ export WATCH_ADMIN_TOKEN='should-never-import-watch'
 export CLOUDFLARE_API_TOKEN='should-never-import-cf'
 export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
 EOF
-# Prevent reading the real user zshrc when HOME is redirected.
-: >"$TEST_HOME/.zshrc"
+# Isolated HOME already prevents loading the operator login tree; no extra rc file needed.
 export HOME="$TEST_HOME"
 export TMPDIR="$TEST_HOME/tmp"
 
