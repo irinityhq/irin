@@ -86,6 +86,69 @@ listen_pid() {
   lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1 || true
 }
 
+# True when the :port listener is our packaged smoke app (never a foreign Council).
+is_our_packaged_listener() {
+  local port="$1"
+  local pid path
+  pid="$(listen_pid "$port")"
+  [[ -n "$pid" ]] || return 1
+  path="$(ps -p "$pid" -o comm= 2>/dev/null || true)"
+  # Prefer full argv path when available.
+  local args
+  args="$(ps -p "$pid" -o args= 2>/dev/null || true)"
+  if [[ "$args" == *"$DEST_APP"* ]] || [[ "$args" == *"/Contents/MacOS/council"* ]]; then
+    # Packaged sidecar path under our test app, or still ambiguous "council" only after we started it.
+    if [[ "$args" == *"$DEST_APP"* ]]; then
+      return 0
+    fi
+  fi
+  # Fall back: if we started a host and no foreign was present at start, treat residual as ours.
+  if [[ -z "${FOREIGN_8765:-}" && -n "$pid" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+# Gracefully stop the packaged host and any sidecar it left behind on :8765.
+stop_packaged_host() {
+  osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
+  if [[ -f "$PIDFILE" ]]; then
+    local p
+    p="$(cat "$PIDFILE" 2>/dev/null || true)"
+    if [[ -n "$p" ]]; then
+      kill -TERM "$p" 2>/dev/null || true
+      # Give Tauri Exit handlers time to stop the tracked sidecar.
+      local i
+      for i in $(seq 1 40); do
+        if ! kill -0 "$p" 2>/dev/null; then
+          break
+        fi
+        sleep 0.25
+      done
+      kill -KILL "$p" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+  fi
+  # Reclaim :8765 only if it is still held by our packaged path (never foreign).
+  local i pid
+  for i in $(seq 1 40); do
+    pid="$(listen_pid 8765)"
+    [[ -z "$pid" ]] && return 0
+    if is_our_packaged_listener 8765; then
+      kill -TERM "$pid" 2>/dev/null || true
+      sleep 0.25
+      if kill -0 "$pid" 2>/dev/null; then
+        kill -KILL "$pid" 2>/dev/null || true
+      fi
+    else
+      # Foreign listener — do not kill.
+      return 1
+    fi
+    sleep 0.25
+  done
+  [[ -z "$(listen_pid 8765)" ]]
+}
+
 FOREIGN_8765="$(listen_pid 8765)"
 log "foreign_8765_before=${FOREIGN_8765:-none}"
 
@@ -394,18 +457,9 @@ fi
 # Relaunch persistence: quit, restart, private config install_id unchanged.
 INSTALL_ID="$(python3 -c "import json;print(json.load(open('$PRIV'))['install_id'])")"
 log "install_id_before_relaunch=$INSTALL_ID"
-if [[ -f "$PIDFILE" ]]; then
-  kill "$(cat "$PIDFILE")" 2>/dev/null || true
-  sleep 1
-  kill -9 "$(cat "$PIDFILE")" 2>/dev/null || true
-  rm -f "$PIDFILE"
+if ! stop_packaged_host; then
+  die "could not release :8765 without touching a foreign Council"
 fi
-osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
-# Wait for port release
-for _ in $(seq 1 40); do
-  [[ -z "$(listen_pid 8765)" ]] && break
-  sleep 0.25
-done
 [[ -z "$(listen_pid 8765)" ]] || die "sidecar did not release :8765 after host quit"
 log "port_released_after_quit=true"
 
@@ -429,15 +483,9 @@ INSTALL_ID2="$(python3 -c "import json;print(json.load(open('$PRIV'))['install_i
 log "relaunch_persistence_ok=true"
 
 # Final shutdown + port release
-kill "$(cat "$PIDFILE")" 2>/dev/null || true
-sleep 1
-kill -9 "$(cat "$PIDFILE")" 2>/dev/null || true
-rm -f "$PIDFILE"
-osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
-for _ in $(seq 1 40); do
-  [[ -z "$(listen_pid 8765)" ]] && break
-  sleep 0.25
-done
+if ! stop_packaged_host; then
+  die "final shutdown could not release :8765 without touching a foreign Council"
+fi
 [[ -z "$(listen_pid 8765)" ]] || die ":8765 still held after final shutdown"
 log "final_port_release_ok=true"
 
