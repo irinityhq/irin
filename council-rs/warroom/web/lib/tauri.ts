@@ -101,6 +101,60 @@ export async function restartSidecar(
   });
 }
 
+/** Truthful Gateway Pack states from the native host (never secret-bearing). */
+export type GatewayPackState =
+  | "not_installed"
+  | "docker_missing"
+  | "docker_daemon_down"
+  | "installing"
+  | "installed_stopped"
+  | "starting"
+  | "authenticated_ready"
+  | "degraded"
+  | "disabled";
+
+export interface GatewayPackStatus {
+  state: GatewayPackState;
+  message: string;
+  pack_version: string | null;
+  manifest_mode: string | null;
+  gateway_url: string;
+  project: string;
+  key_id: string | null;
+  enabled: boolean;
+  docker: string;
+  watch_producer_enabled: boolean;
+  watch_dispatcher_enabled: boolean;
+  authenticated: boolean;
+  support_matrix_summary: string;
+}
+
+export function gatewayPackAllowsGoverned(
+  status: GatewayPackStatus | null | undefined,
+): boolean {
+  return status?.state === "authenticated_ready" && status.authenticated === true;
+}
+
+export async function getGatewayPackStatus(): Promise<GatewayPackStatus> {
+  return invoke<GatewayPackStatus>("gateway_pack_status");
+}
+
+export async function enableGatewayPack(): Promise<GatewayPackStatus> {
+  return invoke<GatewayPackStatus>("gateway_pack_enable");
+}
+
+export async function disableGatewayPack(): Promise<GatewayPackStatus> {
+  return invoke<GatewayPackStatus>("gateway_pack_disable");
+}
+
+export async function stopGatewayPack(): Promise<GatewayPackStatus> {
+  return invoke<GatewayPackStatus>("gateway_pack_stop");
+}
+
+export async function uninstallGatewayPack(): Promise<GatewayPackStatus> {
+  return invoke<GatewayPackStatus>("gateway_pack_uninstall");
+}
+
 export async function getServerLogs(): Promise<string[]> {
   return invoke<string[]>("get_server_logs");
 }

@@ -6,8 +6,15 @@ import { motion } from "framer-motion";
 import { api } from "@/lib/api";
 import { cn, providerColor } from "@/lib/cn";
 import { DEFAULT_SENSITIVITY, SENSITIVITY_LEVELS, gatewayStartFields } from "@/lib/gateway-mode";
+import { canEnableGovernedProceeding } from "@/lib/gateway-pack";
 import type { Cabinet, EmbeddingStats, HealthResponse, MapmakerResult, PrecedentMatch } from "@/lib/types";
 import type { GatewaySensitivity, StartPayload } from "@/lib/ws";
+import {
+  getDesktopRuntimeMode,
+  getGatewayPackStatus,
+  isTauri,
+  type GatewayPackStatus,
+} from "@/lib/tauri";
 import {
   getProviderOption,
   providerOptionLabel,
@@ -89,8 +96,56 @@ export default function IdlePanel({
   const [rebuilding, setRebuilding] = useState(false);
   const [reindexingPrecedent, setReindexingPrecedent] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [desktopMode, setDesktopMode] = useState<string | undefined>(undefined);
+  const [packStatus, setPackStatus] = useState<GatewayPackStatus | null>(null);
   const topicRef = useRef<HTMLTextAreaElement>(null);
   const { toast } = useToast();
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    void getDesktopRuntimeMode()
+      .then((m) => {
+        if (!cancelled) setDesktopMode(m);
+      })
+      .catch(() => {
+        if (!cancelled) setDesktopMode(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri() || desktopMode !== "installed-release") return;
+    let cancelled = false;
+    const tick = () => {
+      void getGatewayPackStatus()
+        .then((s) => {
+          if (!cancelled) setPackStatus(s);
+        })
+        .catch(() => {
+          if (!cancelled) setPackStatus(null);
+        });
+    };
+    tick();
+    const id = window.setInterval(tick, 8000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [desktopMode]);
+
+  const governedAllowed = canEnableGovernedProceeding(packStatus, {
+    requireInstalledRelease: true,
+    desktopMode: desktopMode ?? "development",
+  });
+
+  useEffect(() => {
+    if (!governedAllowed && viaGateway) {
+      setViaGateway(false);
+    }
+  }, [governedAllowed, viaGateway]);
 
   // Validator choices are exact transport identities. Keep unavailable choices
   // visible for explanation, but never allow them to be selected or launched.
@@ -405,9 +460,24 @@ export default function IdlePanel({
           <div className="rounded-md border border-border bg-bg-overlay/40 p-3 space-y-3" data-testid="gateway-routing">
             <Toggle
               label="Governed via Gateway"
-              sub={viaGateway ? "All model calls fail closed through Gateway" : "Direct provider and CLI calls"}
-              value={viaGateway}
-              onChange={setViaGateway}
+              sub={
+                !governedAllowed && desktopMode === "installed-release"
+                  ? "Requires authenticated Gateway Pack (Settings → Enable Gateway)"
+                  : viaGateway
+                    ? "All model calls fail closed through Gateway"
+                    : "Direct provider and CLI calls"
+              }
+              value={viaGateway && governedAllowed}
+              onChange={(v) => {
+                if (v && !governedAllowed) {
+                  toast(
+                    "error",
+                    "Gateway Pack is not authenticated-ready. Use Settings → Enable Gateway first.",
+                  );
+                  return;
+                }
+                setViaGateway(v);
+              }}
               icon={<Network className="w-4 h-4" />}
               tone="cyan"
               testId="gateway-toggle"
