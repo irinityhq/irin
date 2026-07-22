@@ -44,6 +44,9 @@ echo "=== cargo build council (release, aarch64) ==="
 echo "=== stage bundled council + base-dir resources ==="
 bash "$STAGE_SCRIPT"
 
+echo "=== stage Gateway Pack runtime assets ==="
+bash "$ROOT/scripts/stage-gateway-pack.sh"
+
 echo "=== npm ci warroom web + tauri ==="
 (
   cd "$WEB_DIR"

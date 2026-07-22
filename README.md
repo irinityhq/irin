@@ -147,6 +147,15 @@ never silently substitutes a different provider, and a transport with no
 Gateway adapter simply stays Direct-only. Details:
 [`docs/architecture.md`](docs/architecture.md).
 
+On the **installed macOS DMG**, core War Room needs no Docker and keeps Gateway
+off by default. Optional governed routing uses Settings → **Enable Gateway**,
+which starts an app-owned Compose project (`irin-desktop-gateway`), stores the
+Council client key in the macOS Keychain, and only enables governed proceedings
+after authenticated readiness. See
+[`packaging/gateway-pack/README.md`](packaging/gateway-pack/README.md) for the
+v0.1 support matrix (Vertex and CLI proxies stay Direct-only / unsupported in
+the pack).
+
 ## Evidence and claim validation (Sheldon)
 
 Sheldon is the between-round claim validator: after a round of model responses,

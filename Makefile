@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test
+.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test
 
 setup: ## macOS: prepare config, start the managed runtime, and enable login recovery
 	bash scripts/setup-local.sh
@@ -78,6 +78,15 @@ dmg-verify: ## Verify DMG layout/codesign on an untouched copy (never re-signs)
 dmg-smoke: ## Full-app packaged smoke (PROMOTION=1 for strict promotion gate)
 	bash packaging/smoke-full-app.sh
 
+gateway-pack-stage: ## Stage runtime-only Gateway Pack into Tauri resources (gitignored)
+	bash scripts/stage-gateway-pack.sh
+
+gateway-pack-dev-images: ## Build local arm64 Gateway/sidecar images + test-only digest manifest
+	bash scripts/build-gateway-pack-dev-images.sh
+
+gateway-pack-test: ## Static + isolation tests for the optional Gateway Pack
+	bash scripts/test-gateway-pack-assets.sh
+	bash scripts/test-gateway-pack-isolation.sh
 
 build: ## Build the full Rust workspace in release mode
 	cargo build --workspace --release

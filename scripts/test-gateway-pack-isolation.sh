@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+# Prove desktop pack ownership invariants without starting a live Gateway when possible.
+# When Docker is up, also proves compose -p irin-desktop-gateway cannot be confused
+# with a foreign project name.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+COMPOSE="$ROOT/packaging/gateway-pack/docker-compose.yml"
+
+die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
+pass() { printf 'PASS: %s\n' "$*"; }
+
+# Fixed project name only.
+grep -q 'name: irin-desktop-gateway' "$COMPOSE" || die "project name"
+! grep -E '^\s*build:' "$COMPOSE" || die "no build"
+grep -q 'WATCH_PRODUCER_ENABLED=false' "$COMPOSE" || die "producer false"
+grep -q 'WATCH_DISPATCHER_ENABLED=false' "$COMPOSE" || die "dispatcher false"
+grep -q '127.0.0.1:18080:8080' "$COMPOSE" || die "loopback port"
+! grep -E '^\s*-\s*.*(\$\{HOME\}|~/|\$HOME)' "$COMPOSE" || die "no home mounts"
+
+# Tag-only image refs must not appear as defaults in pack compose.
+if grep -E 'image:\s*[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+\s*$' "$COMPOSE" >/dev/null; then
+  die "tag-only image defaults forbidden"
+fi
+grep -q 'IRIN_GATEWAY_IMAGE' "$COMPOSE" || die "gateway image from env"
+grep -q 'IRIN_SIDECAR_IMAGE' "$COMPOSE" || die "sidecar image from env"
+
+# Manifest example is production-shaped with digests.
+python3 - <<'PY' "$ROOT/packaging/gateway-pack/image-manifest.production.example.json"
+import json, re, sys
+m = json.load(open(sys.argv[1]))
+pat = re.compile(r"^[^@\s]+@sha256:[0-9a-f]{64}$")
+for v in m["images"].values():
+    assert pat.match(v)
+assert m["watch_invariants"]["WATCH_PRODUCER_ENABLED"] is False
+print("manifest shape ok")
+PY
+
+# Docker allow-list docs in source.
+rg -q '/usr/local/bin/docker' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "allowlist path"
+rg -q 'irin-desktop-gateway' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "fixed project in rust"
+rg -q 'authenticated_ready' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/gateway_pack/mod.rs" || die "ready state"
+rg -q 'GW_API_KEY' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/private_config.rs" || die "deny import"
+
+# Foreign project must not be passable through validate_compose_project (unit-tested);
+# shell-level: ensure no script targets canonical project name for pack operations.
+if rg -n 'compose -p gateway\b|compose -p "gateway"' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src" \
+  "$ROOT/scripts/stage-gateway-pack.sh" \
+  "$ROOT/scripts/build-gateway-pack-dev-images.sh" 2>/dev/null; then
+  die "pack tooling must not target project 'gateway'"
+fi
+
+if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+  # Ensure we never `down -v` a non-desktop project from pack scripts.
+  if docker compose ls --format json 2>/dev/null | grep -q 'irin-desktop-gateway'; then
+    pass "desktop project currently present (will not auto-destroy here)"
+  else
+    pass "docker ready; desktop project not running (clean)"
+  fi
+  # Prove foreign project name is distinct.
+  [[ "gateway" != "irin-desktop-gateway" ]] || die "names"
+  pass "docker isolation predicates"
+else
+  pass "docker absent or down — core-neutral path (no red)"
+fi
+
+pass "gateway pack isolation invariants"

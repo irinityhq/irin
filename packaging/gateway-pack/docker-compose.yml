@@ -1,0 +1,109 @@
+# IRIN Desktop Gateway Pack — runtime-only Compose.
+# Fixed project name is enforced by the native host: irin-desktop-gateway
+# No build: directives. No host-home mounts. No canary overlay.
+# Image refs come from IRIN_GATEWAY_IMAGE / IRIN_SIDECAR_IMAGE (digest-pinned).
+# Pack root + ledger key paths are set only by the native allow-listed host.
+
+name: irin-desktop-gateway
+
+services:
+  gateway:
+    image: ${IRIN_GATEWAY_IMAGE:?IRIN_GATEWAY_IMAGE must be a digest-pinned image ref}
+    volumes:
+      - ${IRIN_DESKTOP_PACK_ROOT}/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      - ${IRIN_DESKTOP_PACK_ROOT}/conf:/usr/local/openresty/nginx/conf/conf:ro
+      - ${IRIN_DESKTOP_PACK_ROOT}/lua:/usr/local/openresty/nginx/lua:ro
+      - irin_desktop_sidecar_sock:/run/sidecar
+    ports:
+      - "127.0.0.1:18080:8080"
+    environment:
+      - XAI_API_KEY=${XAI_API_KEY:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY:-}
+      # Vertex deliberately unsupported in pack isolation (no host ADC mount).
+      - VERTEX_PROJECT=
+      - VERTEX_LOCATION=
+      - VERTEX_GEMINI_MODEL=
+      - "SIDECAR_ADDR=unix:/run/sidecar/sidecar.sock:"
+      - SIDECAR_TIMEOUT_MS=200
+      # CLI proxies are not installed/authenticated by the DMG.
+      - CLAUDE_PROXY_URL=
+      - CODEX_PROXY_URL=
+      - GEMINI_PROXY_URL=
+      - CLAUDE_PROXY_TOKEN=
+      - CODEX_PROXY_TOKEN=
+      - GEMINI_PROXY_TOKEN=
+      - GW_ENABLE_STREAMING=${GW_ENABLE_STREAMING:-0}
+      - GW_ENABLE_BATCH=${GW_ENABLE_BATCH:-0}
+      - COUNCIL_GATEWAY_TOKEN=${COUNCIL_GATEWAY_TOKEN:-}
+      - COUNCIL_GATEWAY_KEY_ID=${COUNCIL_GATEWAY_KEY_ID:-}
+      - GW_ENABLE_COUNCIL_ENDPOINT=${GW_ENABLE_COUNCIL_ENDPOINT:-0}
+      - COUNCIL_BASE_URL=${COUNCIL_BASE_URL:-http://host.docker.internal:8765}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+  sidecar:
+    image: ${IRIN_SIDECAR_IMAGE:?IRIN_SIDECAR_IMAGE must be a digest-pinned image ref}
+    environment:
+      - MODELS_JSON_PATH=/conf/models.json
+      - SIDECAR_SOCKET_PATH=/run/sidecar/sidecar.sock
+      - SIDECAR_SOCKET_MODE=${SIDECAR_SOCKET_MODE:-0660}
+      - SIDECAR_SOCKET_GID=${SIDECAR_SOCKET_GID:-9999}
+      - WATCH_DB_PATH=/var/lib/sidecar/watch.db
+      - COUNCIL_IDEM_DB_PATH=/var/lib/sidecar/council_idem.db
+      - LEDGER_DB_PATH=/var/lib/sidecar/ledger.db
+      - LEDGER_SIGNING_KEY_PATH=/run/secrets/ledger_key
+      - GATEWAY_DURABLE=${GATEWAY_DURABLE:-1}
+      - GATEWAY_STATE_DB_PATH=/var/lib/sidecar/gateway.db
+      - DECON_CONFIG_PATH=/conf/decon_config.json
+      - AUTH_CONFIG_PATH=/var/lib/sidecar/auth_keys.json
+      - IP_POLICY_PATH=/conf/ip_policy.json
+      - GATEWAY_AUTH_FAIL_CLOSED=${GATEWAY_AUTH_FAIL_CLOSED:-true}
+      - AUTH_PEPPER=${AUTH_PEPPER}
+      - BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN:-}
+      - WATCH_ADMIN_TOKEN=${WATCH_ADMIN_TOKEN:-}
+      # Watch producer and dispatcher must remain disarmed in every pack path.
+      - WATCH_DISPATCHER_ENABLED=false
+      - WATCH_PRODUCER_ENABLED=false
+      - WATCH_DISPATCHER_STRICT_BOOT=false
+      - WATCH_CANARY_TENANT=${WATCH_CANARY_TENANT:-canary}
+      - WATCH_DISPATCHER_GATEWAY_KEY=
+      - GATEWAY_BASE_URL=${GATEWAY_BASE_URL:-http://gateway:8080}
+      - DAILY_SPEND_CAP_USD=${DAILY_SPEND_CAP_USD:-25}
+      - WATCH_MAX_FANOUT_COST_USD=${WATCH_MAX_FANOUT_COST_USD:-2.50}
+      - RECON_CADENCE_SECS=
+      - RECON_IMPORT_PATH=
+      - GW_ARM_PRINCIPALS=
+      - GW_ARM_DEVIATION_FLAG=
+      - GW_ARM_PRINCIPAL_DOMAINS=
+      - ARM_NOTIFY_URL=
+      - ARM_STAGE_TTL_MS=
+      - GW_ARM_ATTEST_KEYS_PATH=
+    volumes:
+      - ${IRIN_DESKTOP_PACK_ROOT}/conf:/conf:ro
+      - irin_desktop_sidecar_sock:/run/sidecar
+      - irin_desktop_sidecar_data:/var/lib/sidecar
+      # App-owned ledger seed only — never the canonical operator ledger key.
+      - ${IRIN_DESKTOP_LEDGER_KEY}:/run/secrets/ledger_key:ro
+    depends_on:
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /run/sidecar/sidecar.sock"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 10s
+
+volumes:
+  irin_desktop_sidecar_sock:
+  irin_desktop_sidecar_data:
