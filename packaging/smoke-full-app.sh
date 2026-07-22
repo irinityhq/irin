@@ -354,8 +354,9 @@ HOST_PID="$(cat "$PIDFILE")"
 log "host_pid=$HOST_PID"
 
 ok=0
+# Health may take >1s (provider presence probes); allow 5s per attempt.
 for _ in $(seq 1 60); do
-  if curl -fsS --max-time 1 "http://127.0.0.1:8765/api/health" \
+  if curl -fsS --max-time 5 "http://127.0.0.1:8765/api/health" \
     >"$ROOT/packaging/build/smoke-health.json" 2>/dev/null; then
     ok=1
     break
