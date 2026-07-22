@@ -103,7 +103,11 @@ services:
     image: busybox:1.36
     command: ["sleep", "3600"]
     volumes:
-      - $FOREIGN_VOLUME:/data
+      - foreign_data:/data
+volumes:
+  foreign_data:
+    name: $FOREIGN_VOLUME
+    external: true
 EOF
 docker compose -p "$FOREIGN_PROJECT" -f "$WORK/foreign-compose.yml" up -d >/dev/null
 log "foreign_project_started=$FOREIGN_PROJECT"
@@ -167,8 +171,17 @@ export BOOTSTRAP_TOKEN="$BOOTSTRAP"
 export WATCH_PRODUCER_ENABLED=false
 export WATCH_DISPATCHER_ENABLED=false
 
-# Bounded compose up.
-python3 - <<'PY' "$STAGE/docker-compose.yml" "$WORK/compose.public.env"
+# Refuse if :18080 is owned by a non-desktop listener (canonical gateway).
+if curl -fsS --max-time 2 "http://127.0.0.1:18080/health" >/dev/null 2>&1; then
+  if ! docker compose -p irin-desktop-gateway ps -q 2>/dev/null | grep -q .; then
+    die "port 18080 already answers /health outside irin-desktop-gateway (stop canonical Gateway first, then restore after smoke)"
+  fi
+fi
+
+# Bounded compose up (surface stderr on failure; never print env secrets).
+set +e
+UP_OUT="$(
+  python3 - <<'PY' "$STAGE/docker-compose.yml" "$WORK/compose.public.env" 2>&1
 import subprocess, sys
 compose, envf = sys.argv[1], sys.argv[2]
 cmd = [
@@ -176,9 +189,29 @@ cmd = [
     "-f", compose, "--env-file", envf,
     "up", "-d", "--remove-orphans",
 ]
-r = subprocess.run(cmd, capture_output=True, timeout=180)
+try:
+    r = subprocess.run(cmd, capture_output=True, timeout=180, text=True)
+except subprocess.TimeoutExpired:
+    print("compose_up_timeout", file=sys.stderr)
+    sys.exit(124)
+# Redact any accidental secret-looking tokens from docker noise before print.
+import re
+def scrub(s: str) -> str:
+    s = re.sub(r"gw_[0-9a-fA-F]{32}", "<redacted:gw_key>", s)
+    s = re.sub(r"(BOOTSTRAP_TOKEN|AUTH_PEPPER)=\\S+", r"\\1=<redacted>", s)
+    return s[:800]
+sys.stderr.write(scrub(r.stderr or ""))
+sys.stdout.write(scrub(r.stdout or ""))
 sys.exit(r.returncode)
 PY
+)"
+UP_RC=$?
+set -e
+if [[ "$UP_RC" != "0" ]]; then
+  log "compose_up_failed rc=$UP_RC"
+  log "compose_up_output_redacted=${UP_OUT//$'\n'/ | }"
+  die "compose up failed for irin-desktop-gateway (rc=$UP_RC)"
+fi
 log "compose_up=ok project=irin-desktop-gateway"
 
 # Health probe (no secrets).
