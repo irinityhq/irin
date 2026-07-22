@@ -147,7 +147,7 @@ cleanup() {
   set +e
   log "cleanup_begin=true"
   graceful_quit_app
-  # Desktop pack project only — never project "gateway".
+  # Desktop pack project only - never project "gateway".
   "$DOCKER_BIN" compose -p irin-desktop-gateway down --volumes --remove-orphans >/dev/null 2>&1 || true
   "$DOCKER_BIN" compose -p "$FOREIGN_PROJECT" down --volumes --remove-orphans >/dev/null 2>&1 || true
   "$DOCKER_BIN" volume rm "$FOREIGN_VOLUME" >/dev/null 2>&1 || true
@@ -366,7 +366,7 @@ wait_ax_button_enabled() {
   return 1
 }
 
-# --- b/c) Accessibility: Settings → Enable Gateway ---
+# --- b/c) Accessibility: Settings -> Enable Gateway ---
 "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
 sleep 1
 SETTINGS_CLICK="$(ax_click_button "Settings" || true)"
@@ -408,27 +408,6 @@ if [[ "$ready" != 1 ]]; then
   else
     log "lifecycle_log_present=false"
   fi
-  # Capture non-secret toast/static error text if present (no secret values expected).
-  TOAST_TXT="$("$OSASCRIPT_BIN" <<'APPLESCRIPT' 2>/dev/null || true
-tell application "System Events"
-  tell process "Council War Room"
-    set matches to entire contents of window 1
-    set out to {}
-    repeat with e in matches
-      try
-        set n to name of e as string
-        if n contains "Docker" or n contains "Gateway" or n contains "failed" or n contains "error" or n contains "Keychain" or n contains "compose" or n contains "image" then
-          set end of out to n
-        end if
-      end try
-    end repeat
-    set AppleScript's text item delimiters to " | "
-    return out as text
-  end tell
-end tell
-APPLESCRIPT
-)"
-  log "ui_error_text=${TOAST_TXT:0:400}"
   die "Gateway pack did not become healthy after Enable"
 fi
 [[ -f "$TEST_HOME/$PACK_MARKER_REL" ]] || die "pack-installed.json missing after Enable"
@@ -444,14 +423,14 @@ log "admin_surface_http=$ADMIN_CODE"
 [[ "$ADMIN_CODE" != "000" && "$ADMIN_CODE" != "502" && "$ADMIN_CODE" != "503" ]] \
   || die "admin surface not ready"
 
-# Watch forced off — inspect compose project env via docker inspect (names only).
+# Watch forced off - inspect compose project env via docker inspect (names only).
 WATCH_PROBE="$("$DOCKER_BIN" compose -p irin-desktop-gateway exec -T sidecar \
   sh -c 'printf "producer=%s dispatcher=%s\n" "$WATCH_PRODUCER_ENABLED" "$WATCH_DISPATCHER_ENABLED"' 2>/dev/null || true)"
 log "watch_probe=${WATCH_PROBE//$'\n'/ }"
 echo "$WATCH_PROBE" | grep -q 'producer=false' || die "WATCH_PRODUCER_ENABLED not false"
 echo "$WATCH_PROBE" | grep -q 'dispatcher=false' || die "WATCH_DISPATCHER_ENABLED not false"
 
-# Keychain presence (production account) without reading value — fail closed.
+# Keychain presence (production account) without reading value - fail closed.
 if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
   -a "gateway-client-gw-api-key" >/dev/null 2>&1; then
   log "keychain_gw_api_key=present"
@@ -459,7 +438,7 @@ else
   die "app Keychain item gateway-client-gw-api-key missing after Enable"
 fi
 
-# Council PID must change after governed restart — fail closed.
+# Council PID must change after governed restart - fail closed.
 sleep 2
 PID2="$(listen_pid 8765)"
 log "post_enable_council_pid=$PID2"
@@ -484,7 +463,7 @@ log "models_unauth_http=$CODE"
 [[ "$CODE" == "401" || "$CODE" == "403" ]] || die "models not fail-closed"
 log "step_enable=ok"
 
-# e) Disable — actual button only
+# e) Disable - actual button only
 "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
 sleep 0.5
 ax_click_button "Settings" >/dev/null 2>&1 || true
@@ -507,7 +486,7 @@ PY
 log "step_disable=ok"
 OWNED_COUNCIL_PIDS="$OWNED_COUNCIL_PIDS,$PID3"
 
-# f) Stop pack — actual button only (no compose fallback)
+# f) Stop pack - actual button only (no compose fallback)
 "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
 sleep 0.5
 ax_click_button "Settings" >/dev/null 2>&1 || true
@@ -529,7 +508,7 @@ else
 fi
 log "step_stop=ok"
 
-# g) Relaunch continuity (non-secret) — graceful quit first
+# g) Relaunch continuity (non-secret) - graceful quit first
 graceful_quit_app
 sleep 1
 : >"$ROOT/packaging/build/gw-pack-ui-relaunch.log"
@@ -563,7 +542,7 @@ fi
 log "relaunch_continuity=ok"
 
 # h) Uninstall via actual AX only (no compose fallback).
-# Note: packBusy is set only AFTER window.confirm accepts — so we click the
+# Note: packBusy is set only AFTER window.confirm accepts - so we click the
 # button, confirm the dialog, then require a busy transition / removal proof.
 "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
 sleep 0.5
@@ -578,7 +557,8 @@ log "ax_click_Uninstall_pack=$UNINSTALL_CLICK"
 [[ "$UNINSTALL_CLICK" == clicked_button* ]] || die "could not click Uninstall pack AXButton"
 sleep 0.4
 # Confirm dialog (WKWebView confirm sheet)
-CONFIRM_RC="$("$OSASCRIPT_BIN" <<'APPLESCRIPT' 2>/dev/null || true
+CONFIRM_RC="$(
+  "$OSASCRIPT_BIN" 2>/dev/null <<'APPLESCRIPT' || true
 tell application "System Events"
   tell process "Council War Room"
     -- Prefer explicit confirm buttons
@@ -629,7 +609,7 @@ log "ax_busy_Uninstall_pack=$busy_seen"
   || die "Uninstall command did not run (no confirm/busy)"
 sleep 4
 
-# Foreign survivors — fail closed
+# Foreign survivors - fail closed
 "$DOCKER_BIN" compose -p "$FOREIGN_PROJECT" -f "$ROOT/packaging/build/foreign-compose.yml" ps -q | grep -q . \
   || die "foreign project destroyed"
 "$DOCKER_BIN" volume inspect "$FOREIGN_VOLUME" >/dev/null || die "foreign volume destroyed"
