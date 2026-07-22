@@ -2,6 +2,8 @@
 
 Structured multi-model deliberation, running locally on macOS or Ubuntu.
 
+[irinity.com](https://www.irinity.com/) · [IRINITY STONES — the IRIN field guide](https://irinitystones.com/)
+
 ![A real IRIN War Room proceeding moving from two rounds of model responses to Sheldon evidence validation](assets/readme/warroom-deliberation.gif)
 
 War Room gives models assigned seats, streams their arguments across rounds,
@@ -149,10 +151,10 @@ Gateway adapter simply stays Direct-only. Details:
 
 Sheldon is the between-round claim validator: after a round of model responses,
 it checks factual claims made in that round and returns a verdict per claim —
-supported, consistent, or no-evidence — before the next round or the chair
-ruling (the screenshots in [A real proceeding](#a-real-proceeding) show this
-live). Sheldon does not gate whether a round runs; it gates what gets treated
-as an established fact inside the deliberation.
+supported, consistent, no-evidence, or contradicted — before the next round
+or the chair ruling (the screenshots in [A real proceeding](#a-real-proceeding)
+show this live). Sheldon does not gate whether a round runs; it gates what gets
+treated as an established fact inside the deliberation.
 
 Before the validator model runs, Council gathers bounded evidence for it:
 
