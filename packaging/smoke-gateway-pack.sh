@@ -197,6 +197,9 @@ rm -rf "$TEST_HOME"
 mkdir -p "$TEST_HOME/tmp" "$TEST_HOME/Library/Application Support"
 export HOME="$TEST_HOME"
 export TMPDIR="$TEST_HOME/tmp"
+# Never inherit a parent-shell DOCKER_CONFIG (debug/harness pollution).
+# The packaged host injects its own managed plugin config under app support.
+unset DOCKER_CONFIG
 
 listen_pid() { "$LSOF_BIN" -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | head -1 || true; }
 
@@ -321,8 +324,9 @@ ax_click_button_busy() {
 (
   export HOME="$TEST_HOME"
   export TMPDIR="$TEST_HOME/tmp"
+  unset DOCKER_CONFIG
   # Never pass provider secrets into the smoke host environment from the harness.
-  "$HOST" >>"$HOST_LOG" 2>&1 &
+  env -u DOCKER_CONFIG "$HOST" >>"$HOST_LOG" 2>&1 &
   echo $! >"$PIDFILE"
 )
 HOST_PID="$(cat "$PIDFILE")"
@@ -496,7 +500,8 @@ sleep 1
 (
   export HOME="$TEST_HOME"
   export TMPDIR="$TEST_HOME/tmp"
-  "$HOST" >>"$ROOT/packaging/build/gw-pack-ui-relaunch.log" 2>&1 &
+  unset DOCKER_CONFIG
+  env -u DOCKER_CONFIG "$HOST" >>"$ROOT/packaging/build/gw-pack-ui-relaunch.log" 2>&1 &
   echo $! >"$PIDFILE"
 )
 HOST_PID="$(cat "$PIDFILE")"

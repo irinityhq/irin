@@ -377,12 +377,14 @@ pub fn ensure_managed_docker_config_dir() -> Result<PathBuf, String> {
 }
 
 /// Inject env so every Docker/Compose spawn can resolve plugins under isolated HOME.
-/// Does not log values. Honors an already-set `DOCKER_CONFIG` from the operator.
+///
+/// Always prefer the managed pack config when the process HOME cannot discover
+/// Compose plugins (packaged UI smoke, fresh Mac). Do **not** honor a parent
+/// `DOCKER_CONFIG` that may be polluted by harness/debug shells and lack
+/// plugins — merge operator auths into the managed config instead.
 fn apply_docker_cli_env(cmd: &mut Command) {
-    if std::env::var_os("DOCKER_CONFIG").is_some() {
-        return;
-    }
     if docker_compose_plugin_discoverable() {
+        // Operator HOME already has ~/.docker/cli-plugins; leave ambient config.
         return;
     }
     if docker_cli_plugin_extra_dirs().is_empty() {
