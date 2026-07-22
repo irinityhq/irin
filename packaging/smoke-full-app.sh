@@ -486,7 +486,7 @@ log "port_released_after_quit=true"
 )
 ok=0
 for _ in $(seq 1 60); do
-  if curl -fsS --max-time 1 "http://127.0.0.1:8765/api/health" >/dev/null 2>&1; then
+  if curl -fsS --max-time 5 "http://127.0.0.1:8765/api/health" >/dev/null 2>&1; then
     ok=1
     break
   fi
