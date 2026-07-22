@@ -334,35 +334,91 @@ fn interactive_login_env_once() -> &'static [(String, String)] {
 
 /// Capture environment via interactive login shell. Public for unit tests that
 /// need a fresh capture under a redirected HOME (does not use the process cache).
+///
+/// Hard-bounded: a wedged interactive shell (slow gcloud hooks, hanging plugins)
+/// must not block Council auto-start forever.
 pub fn capture_interactive_login_env() -> Vec<(String, String)> {
     // Same shape as `scripts/irin-runtime.sh` launchd serve: /bin/zsh -lic …
     // macOS printenv has no -0; emit NUL-delimited KEY=VALUE via python3 (always
     // present on Apple silicon build hosts / operator Macs with CLT).
-    let output = std::process::Command::new("/bin/zsh")
-        .args([
-            "-lic",
-            r#"python3 -c 'import os,sys
+    let mut cmd = std::process::Command::new("/bin/zsh");
+    cmd.args([
+        "-lic",
+        r#"python3 -c 'import os,sys
 for k,v in os.environ.items():
     sys.stdout.buffer.write(k.encode()+b"="+v.encode()+b"\0")
 '"#,
-        ])
-        .output();
-    let Ok(output) = output else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        // Fallback: line-oriented env (API keys never contain newlines).
-        let fallback = std::process::Command::new("/bin/zsh")
-            .args(["-lic", "/usr/bin/env"])
-            .output();
-        if let Ok(fb) = fallback {
-            if fb.status.success() {
-                return parse_env_lines(&fb.stdout);
-            }
-        }
-        return Vec::new();
+    ]);
+    match run_login_capture_timeout(cmd, std::time::Duration::from_secs(8)) {
+        Ok(output) if output.status.success() => return parse_printenv_null(&output.stdout),
+        _ => {}
     }
-    parse_printenv_null(&output.stdout)
+    // Fallback: line-oriented env (API keys never contain newlines).
+    let mut fallback = std::process::Command::new("/bin/zsh");
+    fallback.args(["-lic", "/usr/bin/env"]);
+    match run_login_capture_timeout(fallback, std::time::Duration::from_secs(5)) {
+        Ok(fb) if fb.status.success() => parse_env_lines(&fb.stdout),
+        _ => Vec::new(),
+    }
+}
+
+fn run_login_capture_timeout(
+    mut cmd: std::process::Command,
+    timeout: std::time::Duration,
+) -> Result<std::process::Output, ()> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    cmd.stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|_| ())?;
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let out_h = thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(mut r) = stdout {
+            let _ = r.read_to_end(&mut b);
+        }
+        b
+    });
+    let err_h = thread::spawn(move || {
+        let mut b = Vec::new();
+        if let Some(mut r) = stderr {
+            let _ = r.read_to_end(&mut b);
+        }
+        b
+    });
+    let pid = child.id();
+    let timed = Arc::new(Mutex::new(false));
+    let timed2 = Arc::clone(&timed);
+    let killer = thread::spawn(move || {
+        thread::sleep(timeout);
+        *timed2.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        #[cfg(unix)]
+        {
+            extern "C" {
+                fn kill(pid: i32, sig: i32) -> i32;
+            }
+            let _ = unsafe { kill(pid as i32, 15) };
+            thread::sleep(std::time::Duration::from_millis(150));
+            let _ = unsafe { kill(pid as i32, 9) };
+        }
+    });
+    let status = child.wait().map_err(|_| ())?;
+    let stdout = out_h.join().unwrap_or_default();
+    let stderr = err_h.join().unwrap_or_default();
+    let _ = killer.join();
+    if *timed.lock().unwrap_or_else(|e| e.into_inner()) && !status.success() {
+        return Err(());
+    }
+    Ok(std::process::Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 fn parse_env_lines(raw: &[u8]) -> Vec<(String, String)> {
