@@ -461,6 +461,8 @@ export default function SettingsPanel() {
             <button
               type="button"
               data-testid="settings-gateway-pack-enable"
+              aria-label="Enable Gateway"
+              aria-busy={packBusy}
               className="btn btn-cyan text-xs"
               disabled={packBusy}
               onClick={async () => {
@@ -487,6 +489,8 @@ export default function SettingsPanel() {
             <button
               type="button"
               data-testid="settings-gateway-pack-disable"
+              aria-label="Disable"
+              aria-busy={packBusy}
               className="btn btn-primary text-xs"
               disabled={packBusy}
               onClick={async () => {
@@ -511,6 +515,8 @@ export default function SettingsPanel() {
             <button
               type="button"
               data-testid="settings-gateway-pack-stop"
+              aria-label="Stop pack"
+              aria-busy={packBusy}
               className="btn text-xs"
               disabled={packBusy}
               onClick={async () => {
@@ -535,6 +541,8 @@ export default function SettingsPanel() {
             <button
               type="button"
               data-testid="settings-gateway-pack-uninstall"
+              aria-label="Uninstall pack"
+              aria-busy={packBusy}
               className="btn text-xs text-red-400"
               disabled={packBusy}
               title="Destructive: removes irin-desktop-gateway volumes, app-owned gateway data, and Keychain client key"

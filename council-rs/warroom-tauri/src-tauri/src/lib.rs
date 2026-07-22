@@ -114,14 +114,65 @@ fn show_main_window(app: &AppHandle) {
 }
 
 /// Best-effort kill of the tracked council sidecar (shared by stop command, tray, and app exit).
+///
+/// Prefer an orderly kill of the owned child, then re-check the PID so a stuck
+/// listener is not left reparented under launchd/PID 1 when the host exits.
+/// Never kills a process that is not the tracked child PID.
 fn stop_tracked_council_server(app: &AppHandle) {
     let state = app.state::<CouncilServer>();
+    let mut tracked_pid: Option<u32> = None;
     if let Ok(mut guard) = state.0.lock() {
         if let Some(child) = guard.child.take() {
+            tracked_pid = Some(child.pid());
             let _ = child.kill();
         }
     };
+    if let Some(pid) = tracked_pid {
+        // Give the child a moment to exit after kill(); then SIGTERM/SIGKILL
+        // only if that exact PID is still alive (fail-closed owned reclaim).
+        std::thread::sleep(Duration::from_millis(150));
+        if unix_pid_alive(pid) {
+            unix_kill_pid(pid, 15);
+            std::thread::sleep(Duration::from_millis(200));
+            if unix_pid_alive(pid) {
+                unix_kill_pid(pid, 9);
+            }
+        }
+        // Best-effort listener release after owned child death.
+        let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(3));
+    }
 }
+
+#[cfg(unix)]
+fn unix_pid_alive(pid: u32) -> bool {
+    if pid == 0 {
+        return false;
+    }
+    // kill(pid, 0) probes existence without signaling.
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    unsafe { kill(pid as i32, 0) == 0 }
+}
+
+#[cfg(not(unix))]
+fn unix_pid_alive(_pid: u32) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn unix_kill_pid(pid: u32, sig: i32) {
+    if pid == 0 {
+        return;
+    }
+    extern "C" {
+        fn kill(pid: i32, sig: i32) -> i32;
+    }
+    let _ = unsafe { kill(pid as i32, sig) };
+}
+
+#[cfg(not(unix))]
+fn unix_kill_pid(_pid: u32, _sig: i32) {}
 
 /// Adopt a matching external Council when available; otherwise spawn a managed
 /// `council --serve` when this is a packaged install (bundled binary + base-dir)
