@@ -23,11 +23,13 @@ fi
 
 SHA="$(git -C "$ROOT" rev-parse HEAD)"
 SHORT="$(git -C "$ROOT" rev-parse --short=12 HEAD)"
-DIRTY="$(git -C "$ROOT" status --porcelain 2>/dev/null | head -1 | wc -l | tr -d ' ')"
-if [[ "$DIRTY" != "0" ]]; then
+DIRTY_COUNT="$(git -C "$ROOT" status --porcelain 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "$DIRTY_COUNT" != "0" ]]; then
   TAG_SUFFIX="dirty-${SHORT}"
+  SOURCE_DIRTY=true
 else
   TAG_SUFFIX="clean-${SHORT}"
+  SOURCE_DIRTY=false
 fi
 
 GW_TAG="irin-desktop/gateway:local-${TAG_SUFFIX}"
@@ -42,13 +44,64 @@ docker build \
   -t "$GW_TAG" \
   "$ROOT/gateway"
 
+echo "=== prepare sidecar docker context ==="
+# Sidecar Dockerfile needs monorepo root + a real .git (not a worktree gitfile).
+CTX=""
+cleanup_ctx() {
+  if [[ -n "${CTX:-}" && -d "${CTX:-}" ]]; then
+    rm -rf "$CTX"
+  fi
+}
+trap cleanup_ctx EXIT
+
+if [[ -f "$ROOT/.git" ]]; then
+  CTX="$(mktemp -d "${TMPDIR:-/tmp}/irin-gw-pack-ctx.XXXXXX")"
+  echo "worktree detected; materializing self-contained context at $CTX"
+  COMMON="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)"
+  git -C "$ROOT" archive HEAD | tar -x -C "$CTX"
+  mkdir -p "$CTX/.git/objects" "$CTX/.git/refs/heads" "$CTX/.git/info"
+  rsync -a "$COMMON/objects/" "$CTX/.git/objects/"
+  if [[ -f "$COMMON/packed-refs" ]]; then
+    cp -f "$COMMON/packed-refs" "$CTX/.git/packed-refs"
+  fi
+  if [[ -d "$COMMON/refs" ]]; then
+    rsync -a "$COMMON/refs/" "$CTX/.git/refs/"
+  fi
+  printf 'ref: refs/heads/pack-build\n' >"$CTX/.git/HEAD"
+  echo "$SHA" >"$CTX/.git/refs/heads/pack-build"
+  cat >"$CTX/.git/config" <<'EOF'
+[core]
+	repositoryformatversion = 0
+	filemode = true
+	bare = false
+	logallrefupdates = true
+EOF
+  # Seed the index so status is clean against the archived tree.
+  git -C "$CTX" read-tree HEAD
+  # Drop index entries for paths missing from this archive (e.g. export-ignore).
+  while IFS= read -r rel; do
+    [[ -n "$rel" ]] || continue
+    if [[ ! -e "$CTX/$rel" ]]; then
+      git -C "$CTX" update-index --force-remove -- "$rel" 2>/dev/null || true
+    fi
+  done < <(git -C "$CTX" ls-files)
+  git -C "$CTX" rev-parse HEAD >/dev/null \
+    || die "materialized context is not a git repository"
+  SIDECAR_CONTEXT="$CTX"
+else
+  SIDECAR_CONTEXT="$ROOT"
+fi
+
 echo "=== build sidecar image (arm64) $SC_TAG ==="
-# Sidecar Dockerfile expects monorepo root context (for .git provenance + path deps).
 docker build \
   --platform linux/arm64 \
   -f "$ROOT/gateway/sidecar-rs/Dockerfile" \
   -t "$SC_TAG" \
-  "$ROOT"
+  "$SIDECAR_CONTEXT"
+
+cleanup_ctx
+trap - EXIT
+CTX=""
 
 gw_id="$(docker image inspect --format '{{.Id}}' "$GW_TAG")"
 sc_id="$(docker image inspect --format '{{.Id}}' "$SC_TAG")"
@@ -60,11 +113,9 @@ sc_digest="${sc_id#sha256:}"
 [[ "${#gw_digest}" -eq 64 ]] || die "gateway digest length"
 [[ "${#sc_digest}" -eq 64 ]] || die "sidecar digest length"
 
-# Record as name@sha256:content-id (local proof). Production uses published repo digests.
 GW_REF="irin-desktop/gateway@sha256:${gw_digest}"
 SC_REF="irin-desktop/sidecar@sha256:${sc_digest}"
 
-# Ensure Docker can resolve the digest form against the local image id.
 docker tag "$gw_id" "irin-desktop/gateway:sha-${gw_digest:0:12}" || true
 docker tag "$sc_id" "irin-desktop/sidecar:sha-${sc_digest:0:12}" || true
 
@@ -75,7 +126,7 @@ cat >"$MANIFEST" <<EOF
   "mode": "local-dev",
   "pack_version": "0.1.0-local-${TAG_SUFFIX}",
   "source_sha": "$SHA",
-  "source_dirty": $([ "$DIRTY" = "0" ] && echo false || echo true),
+  "source_dirty": $SOURCE_DIRTY,
   "built_at_unix": $(date +%s),
   "platform": "linux/arm64",
   "notes": "Test-only local manifest. Not a releasable GHCR ref. Production requires published name@sha256 digests.",
@@ -103,7 +154,6 @@ cat >"$MANIFEST" <<EOF
 EOF
 chmod 644 "$MANIFEST"
 
-# Also write a resolved env snippet for manual compose smoke (not used by the app).
 cat >"$OUT_DIR/compose.images.env" <<EOF
 IRIN_GATEWAY_IMAGE=$GW_REF
 IRIN_SIDECAR_IMAGE=$SC_REF
