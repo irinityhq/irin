@@ -548,13 +548,21 @@ fn gateway_health_ok() -> bool {
     )
 }
 
-fn sidecar_health_ok() -> bool {
-    // Sidecar is not directly HTTP-exposed; gateway /health is enough for edge.
-    // Optional: /health/sidecar if edge exposes it.
-    matches!(
-        http_get_status(&format!("{DESKTOP_GATEWAY_URL}/health/sidecar"), None),
-        Ok((200, _))
-    ) || gateway_health_ok()
+/// True when the sidecar management surface answers (not 502/connection error).
+/// Empty/invalid body yields 4xx — that still proves the path is live.
+fn admin_surface_ready() -> bool {
+    match ureq::post(&format!("{DESKTOP_GATEWAY_URL}/admin/keys"))
+        .timeout(Duration::from_secs(3))
+        .set("Content-Type", "application/json")
+        .send_string("{}")
+    {
+        Ok(resp) => {
+            let s = resp.status();
+            s != 502 && s != 503 && s != 504
+        }
+        Err(ureq::Error::Status(code, _)) => code != 502 && code != 503 && code != 504,
+        Err(_) => false,
+    }
 }
 
 fn models_authenticated(raw_key: &str) -> bool {
@@ -791,22 +799,23 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         if !up2.status.success() {
             return Err(format_cmd_failure("gateway pack up", &up2));
         }
-        // Poll health.
-        let mut ok = false;
-        for _ in 0..30 {
-            if gateway_health_ok() {
-                ok = true;
-                break;
-            }
-            std::thread::sleep(Duration::from_millis(500));
-        }
-        if !ok {
-            return Err("gateway pack started but /health did not become ready".to_string());
-        }
     }
 
-    if !sidecar_health_ok() {
-        // Soft: edge health is enough; log via message later.
+    // Wait for edge health and sidecar-backed admin surface (not mere URL reachability).
+    let mut ready = false;
+    for _ in 0..60 {
+        if gateway_health_ok() && admin_surface_ready() {
+            ready = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(500));
+    }
+    if !ready {
+        return Err(
+            "gateway pack started but authenticated control plane is not ready \
+             (/health + /admin/keys not accepting requests)"
+                .to_string(),
+        );
     }
 
     // Fail-closed: unauthenticated /v1/models must not succeed.
