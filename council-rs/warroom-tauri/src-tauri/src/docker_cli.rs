@@ -5,6 +5,7 @@
 //! Every native Docker/Compose call is hard wall-clock bounded and killable.
 
 use std::collections::HashMap;
+use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -33,6 +34,14 @@ pub const DOCKER_CLI_ALLOWLIST: &[&str] = &[
     "/usr/local/bin/docker",
     "/Applications/Docker.app/Contents/Resources/bin/docker",
 ];
+
+/// Docker Desktop ships Compose as a CLI plugin under this directory.
+/// `$HOME/.docker/cli-plugins` normally contains symlinks; when HOME is
+/// isolated (packaged UI smoke) or the operator has no plugin links, the CLI
+/// reports `unknown command: docker compose` unless we inject
+/// `cliPluginsExtraDirs` via a managed `DOCKER_CONFIG`.
+pub const DOCKER_DESKTOP_CLI_PLUGINS: &str =
+    "/Applications/Docker.app/Contents/Resources/cli-plugins";
 
 /// Bounded, non-secret failure categories returned to the UI/logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -258,6 +267,7 @@ pub fn probe_docker_daemon() -> DockerDaemonState {
     };
     let mut cmd = Command::new(&docker);
     cmd.args(["info", "--format", "{{.ServerVersion}}"]);
+    apply_docker_cli_env(&mut cmd);
     match run_command_timeout(cmd, Duration::from_secs(12)) {
         Ok(o) if o.status.success() => DockerDaemonState::Ready,
         Ok(_) => DockerDaemonState::DaemonDown,
@@ -270,6 +280,119 @@ pub fn probe_docker_daemon() -> DockerDaemonState {
 /// appear in argv and are not returned in error messages.
 pub type ComposeEnv = HashMap<String, String>;
 
+/// True when the Docker CLI can already discover the Compose plugin without a
+/// managed `DOCKER_CONFIG` (operator `~/.docker/cli-plugins` or system dirs).
+pub fn docker_compose_plugin_discoverable() -> bool {
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(home) = std::env::var("HOME") {
+        let home = home.trim();
+        if !home.is_empty() {
+            candidates.push(
+                PathBuf::from(home)
+                    .join(".docker")
+                    .join("cli-plugins")
+                    .join("docker-compose"),
+            );
+        }
+    }
+    for dir in [
+        "/usr/local/lib/docker/cli-plugins",
+        "/usr/lib/docker/cli-plugins",
+    ] {
+        candidates.push(PathBuf::from(dir).join("docker-compose"));
+    }
+    candidates.iter().any(|p| p.is_file())
+}
+
+/// Known Compose plugin directories to inject via `cliPluginsExtraDirs`.
+pub fn docker_cli_plugin_extra_dirs() -> Vec<&'static str> {
+    let mut out = Vec::new();
+    for dir in [
+        DOCKER_DESKTOP_CLI_PLUGINS,
+        "/usr/local/lib/docker/cli-plugins",
+        "/usr/lib/docker/cli-plugins",
+    ] {
+        if Path::new(dir).is_dir() {
+            out.push(dir);
+        }
+    }
+    out
+}
+
+/// Managed Docker CLI config directory (non-secret). Contains only plugin path
+/// hints and, when available, a merge of the operator's existing config.json so
+/// production `docker pull` auth still works. Never logs config contents.
+pub fn ensure_managed_docker_config_dir() -> Result<PathBuf, String> {
+    let dir = if let Ok(home) = std::env::var("HOME") {
+        let home = home.trim();
+        if !home.is_empty() {
+            PathBuf::from(home)
+                .join("Library")
+                .join("Application Support")
+                .join("com.sovereign.council.warroom")
+                .join("gateway")
+                .join(".docker-cli")
+        } else {
+            std::env::temp_dir().join("irin-docker-cli-config")
+        }
+    } else {
+        std::env::temp_dir().join("irin-docker-cli-config")
+    };
+    fs::create_dir_all(&dir).map_err(|e| format!("create managed docker config dir: {e}"))?;
+
+    let extra = docker_cli_plugin_extra_dirs();
+    let mut base = serde_json::Map::new();
+    // Merge operator config when present so GHCR credentials survive.
+    if let Ok(home) = std::env::var("HOME") {
+        let user_cfg = PathBuf::from(home.trim())
+            .join(".docker")
+            .join("config.json");
+        if let Ok(raw) = fs::read_to_string(&user_cfg) {
+            if let Ok(serde_json::Value::Object(map)) = serde_json::from_str(&raw) {
+                base = map;
+            }
+        }
+    }
+    if !extra.is_empty() {
+        base.insert(
+            "cliPluginsExtraDirs".into(),
+            serde_json::Value::Array(
+                extra
+                    .iter()
+                    .map(|d| serde_json::Value::String((*d).to_string()))
+                    .collect(),
+            ),
+        );
+    }
+    let body = serde_json::Value::Object(base).to_string();
+    let path = dir.join("config.json");
+    // Atomic-ish write without logging contents.
+    let tmp = dir.join(format!(".config.{}.tmp", std::process::id()));
+    fs::write(&tmp, body.as_bytes()).map_err(|e| format!("write managed docker config: {e}"))?;
+    fs::rename(&tmp, &path).map_err(|e| {
+        let _ = fs::remove_file(&tmp);
+        format!("rename managed docker config: {e}")
+    })?;
+    Ok(dir)
+}
+
+/// Inject env so every Docker/Compose spawn can resolve plugins under isolated HOME.
+/// Does not log values. Honors an already-set `DOCKER_CONFIG` from the operator.
+fn apply_docker_cli_env(cmd: &mut Command) {
+    if std::env::var_os("DOCKER_CONFIG").is_some() {
+        return;
+    }
+    if docker_compose_plugin_discoverable() {
+        return;
+    }
+    if docker_cli_plugin_extra_dirs().is_empty() {
+        return;
+    }
+    if let Ok(dir) = ensure_managed_docker_config_dir() {
+        cmd.env("DOCKER_CONFIG", dir);
+    }
+}
+
 /// Run `docker <args…>` with the allow-listed binary. Never routes through a shell.
 pub fn docker_command(args: &[&str]) -> Result<Output, String> {
     docker_command_timeout(args, DOCKER_CMD_TIMEOUT)
@@ -280,6 +403,7 @@ pub fn docker_command_timeout(args: &[&str], timeout: Duration) -> Result<Output
     validate_docker_cli_path(&docker)?;
     let mut cmd = Command::new(&docker);
     cmd.args(args);
+    apply_docker_cli_env(&mut cmd);
     run_command_timeout(cmd, timeout)
 }
 
@@ -376,6 +500,7 @@ pub fn compose_command_with_env(
     validate_docker_cli_path(&docker)?;
 
     let mut cmd = Command::new(&docker);
+    apply_docker_cli_env(&mut cmd);
     cmd.arg("compose")
         .arg("-p")
         .arg(DESKTOP_COMPOSE_PROJECT)
@@ -691,5 +816,31 @@ mod tests {
         .unwrap_err();
         assert!(err.contains("not allow-listed"), "{err}");
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn managed_docker_config_declares_desktop_plugin_dirs() {
+        // Only meaningful on Docker Desktop hosts; still validates writer shape.
+        if !Path::new(DOCKER_DESKTOP_CLI_PLUGINS).is_dir() {
+            return;
+        }
+        let extras = docker_cli_plugin_extra_dirs();
+        assert!(
+            extras.contains(&DOCKER_DESKTOP_CLI_PLUGINS),
+            "expected Desktop plugin dir in extras: {extras:?}"
+        );
+        let dir = ensure_managed_docker_config_dir().expect("managed config dir");
+        let raw = fs::read_to_string(dir.join("config.json")).expect("config.json");
+        assert!(
+            raw.contains("cliPluginsExtraDirs"),
+            "managed config must declare plugin dirs"
+        );
+        assert!(
+            raw.contains("cli-plugins"),
+            "managed config must point at plugin path"
+        );
+        // Never embed obvious secret key material in the managed config writer path.
+        assert!(!raw.contains("gw_"));
+        assert!(!raw.contains("AUTH_PEPPER"));
     }
 }
