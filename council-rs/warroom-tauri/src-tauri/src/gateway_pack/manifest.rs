@@ -106,7 +106,9 @@ pub struct ValidatedManifest {
     pub pack_version: String,
     pub gateway: ImageRef,
     pub sidecar: ImageRef,
+    #[allow(dead_code)]
     pub third_party: Vec<(String, ImageRef)>,
+    #[allow(dead_code)]
     pub source_sha: Option<String>,
 }
 

@@ -111,6 +111,7 @@ for path in "${files[@]}"; do
         council-rs/warroom-tauri/README.md|council-rs/warroom/docs/TAURI-AUTH.md|\
         docs/architecture.md|docs/cabinets.md|docs/ci-operating-model.md|docs/development-workflow.md|docs/security-claims-vs-reality.md|\
         docs/surface-map.md|docs/troubleshooting.md|\
+        packaging/gateway-pack/README.md|\
         gateway/COUNCIL_GATEWAY_CONTRACT.md|gateway/README.md|gateway/SECURITY.md|\
         gateway/docs/gateway-core-surfaces.md|gateway/docs/operator-quickstart.md|gateway/docs/runbook.md|\
         gateway/docs/runbooks/arming-authorization.md|gateway/docs/verify.md|\

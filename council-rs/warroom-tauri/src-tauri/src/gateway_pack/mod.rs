@@ -12,7 +12,7 @@ use crate::docker_cli::{
 };
 use crate::keychain::{
     delete_gw_api_key, is_valid_gw_raw_key, load_gw_api_key, store_gw_api_key, KeychainSecretStore,
-    SecretStore, KEYCHAIN_SERVICE,
+    SecretStore,
 };
 use crate::paths::{bundled_base_dir, executable_dir};
 use crate::private_config::{
@@ -986,7 +986,10 @@ mod tests {
     #[test]
     fn project_constant() {
         assert_eq!(DESKTOP_COMPOSE_PROJECT, "irin-desktop-gateway");
-        assert_eq!(KEYCHAIN_SERVICE, "com.sovereign.council.warroom");
+        assert_eq!(
+            crate::keychain::KEYCHAIN_SERVICE,
+            "com.sovereign.council.warroom"
+        );
     }
 
     #[test]
