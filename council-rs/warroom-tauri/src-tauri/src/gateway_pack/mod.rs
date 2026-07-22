@@ -27,7 +27,7 @@ use manifest::{
     ImageRef, ManifestMode, ValidatedManifest,
 };
 use serde::{Deserialize, Serialize};
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -936,6 +936,28 @@ fn compose_up(
     Ok(())
 }
 
+/// Append a single non-secret lifecycle stage line for operator/smoke diagnosis.
+/// Never logs values, keys, paths that may contain credentials, or command output.
+fn lifecycle_stage(stage: &str, detail: &str) {
+    let dir = gateway_data_dir();
+    let _ = fs::create_dir_all(&dir);
+    let path = dir.join("lifecycle.log");
+    let line = format!(
+        "{} stage={} detail={}\n",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        stage,
+        detail
+    );
+    let _ = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .and_then(|mut f| f.write_all(line.as_bytes()));
+}
+
 /// Full enable workflow. Returns ready only when Gateway auth is proven.
 /// Caller (lib.rs) must restart Council into governed mode and treat restart
 /// failure as overall failure (not ready).
@@ -943,23 +965,42 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     let _guard = LIFECYCLE_LOCK
         .lock()
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
+    lifecycle_stage("enable_begin", "ok");
 
     match probe_docker_daemon() {
         DockerDaemonState::CliMissing => {
+            lifecycle_stage("enable_abort", "docker_cli_missing");
             return Ok(gateway_pack_status(store));
         }
         DockerDaemonState::DaemonDown => {
+            lifecycle_stage("enable_abort", "docker_daemon_down");
             return Ok(gateway_pack_status(store));
         }
         DockerDaemonState::Ready => {}
     }
     let _ = resolve_docker_cli()?;
+    lifecycle_stage("docker_ready", "ok");
 
-    let pack_root = install_pack_files()?;
-    let validated = load_validated_manifest(&pack_root)?;
-    verify_images_present(&validated)?;
+    let pack_root = install_pack_files().map_err(|e| {
+        lifecycle_stage("install_pack", "error");
+        e
+    })?;
+    lifecycle_stage("install_pack", "ok");
+    let validated = load_validated_manifest(&pack_root).map_err(|e| {
+        lifecycle_stage("manifest", "error");
+        e
+    })?;
+    verify_images_present(&validated).map_err(|e| {
+        lifecycle_stage("verify_images", "error");
+        e
+    })?;
+    lifecycle_stage("verify_images", "ok");
 
-    let ledger = ensure_ledger_key()?;
+    let ledger = ensure_ledger_key().map_err(|e| {
+        lifecycle_stage("ledger", "error");
+        e
+    })?;
+    lifecycle_stage("ledger", "ok");
     let existing_key_id = load_or_create_private_config()?.gateway_key_id;
     let env_path = write_public_compose_env(
         &pack_root,
@@ -967,43 +1008,98 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         &validated.gateway,
         &validated.sidecar,
         existing_key_id.as_deref(),
-    )?;
+    )
+    .map_err(|e| {
+        lifecycle_stage("public_env", "error");
+        e
+    })?;
+    lifecycle_stage("public_env", "ok");
 
     if port_busy_by_foreign_gateway()? {
+        lifecycle_stage("port_check", "foreign_busy");
         return Err(
             "port 18080 is in use by a process outside irin-desktop-gateway; \
              stop the foreign Gateway or free the port. The desktop pack will not replace it."
                 .to_string(),
         );
     }
+    lifecycle_stage("port_check", "ok");
 
     let compose = compose_file(&pack_root);
 
     // Reuse existing Keychain key if still valid after start; else provision with bootstrap.
-    let existing = load_gw_api_key(store)?;
+    let existing = load_gw_api_key(store).map_err(|e| {
+        lifecycle_stage("keychain_load", "error");
+        e
+    })?;
+    lifecycle_stage(
+        "keychain_load",
+        if existing.is_some() {
+            "present"
+        } else {
+            "absent"
+        },
+    );
     let need_provision = match existing.as_ref() {
         Some(k) => {
             // Start without bootstrap first if we might already be provisioned.
-            let secret_env = build_compose_secret_env(store, None)?;
-            compose_up(&compose, &env_path, &secret_env)?;
-            wait_control_plane()?;
+            let secret_env = build_compose_secret_env(store, None).map_err(|e| {
+                lifecycle_stage("secret_env", "error");
+                e
+            })?;
+            lifecycle_stage("secret_env", "ok");
+            compose_up(&compose, &env_path, &secret_env).map_err(|e| {
+                lifecycle_stage("compose_up_existing", "error");
+                e
+            })?;
+            lifecycle_stage("compose_up_existing", "ok");
+            wait_control_plane().map_err(|e| {
+                lifecycle_stage("wait_control_plane", "error");
+                e
+            })?;
+            lifecycle_stage("wait_control_plane", "ok");
             !models_authenticated(k)
         }
         None => true,
     };
+    lifecycle_stage(
+        "need_provision",
+        if need_provision { "true" } else { "false" },
+    );
 
     let key_id = if need_provision {
         // Generate bootstrap only for provisioning.
         let bootstrap = random_hex(32)?;
-        let secret_env = build_compose_secret_env(store, Some(&bootstrap))?;
-        compose_up(&compose, &env_path, &secret_env)?;
-        wait_control_plane()?;
+        let secret_env = build_compose_secret_env(store, Some(&bootstrap)).map_err(|e| {
+            lifecycle_stage("secret_env_bootstrap", "error");
+            e
+        })?;
+        lifecycle_stage("secret_env_bootstrap", "ok");
+        compose_up(&compose, &env_path, &secret_env).map_err(|e| {
+            lifecycle_stage("compose_up_bootstrap", "error");
+            e
+        })?;
+        lifecycle_stage("compose_up_bootstrap", "ok");
+        wait_control_plane().map_err(|e| {
+            lifecycle_stage("wait_control_plane_bootstrap", "error");
+            e
+        })?;
+        lifecycle_stage("wait_control_plane_bootstrap", "ok");
         if !models_fail_closed_without_key() {
+            lifecycle_stage("models_fail_closed", "error");
             return Err("gateway /v1/models did not fail closed without a client key".to_string());
         }
-        let kid = provision_council_client(store, &bootstrap)?;
+        lifecycle_stage("models_fail_closed", "ok");
+        let kid = provision_council_client(store, &bootstrap).map_err(|e| {
+            lifecycle_stage("provision", "error");
+            e
+        })?;
+        lifecycle_stage("provision", "ok");
         // Blank bootstrap and recreate sidecar without it.
-        let secret_env_blank = build_compose_secret_env(store, None)?;
+        let secret_env_blank = build_compose_secret_env(store, None).map_err(|e| {
+            lifecycle_stage("secret_env_blank", "error");
+            e
+        })?;
         write_public_compose_env(
             &pack_root,
             &ledger,
@@ -1011,11 +1107,18 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
             &validated.sidecar,
             Some(&kid),
         )?;
-        compose_up(&compose, &env_path, &secret_env_blank)?;
-        wait_control_plane()?;
+        compose_up(&compose, &env_path, &secret_env_blank).map_err(|e| {
+            lifecycle_stage("compose_up_blank", "error");
+            e
+        })?;
+        wait_control_plane().map_err(|e| {
+            lifecycle_stage("wait_control_plane_blank", "error");
+            e
+        })?;
         kid
     } else {
         if !models_fail_closed_without_key() {
+            lifecycle_stage("models_fail_closed", "error");
             return Err("gateway /v1/models did not fail closed without a client key".to_string());
         }
         existing_key_id.unwrap_or_else(|| "existing".into())
@@ -1025,8 +1128,10 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     let key = load_gw_api_key(store)?
         .ok_or_else(|| "GW_API_KEY missing from Keychain after enable".to_string())?;
     if !models_authenticated(&key) {
+        lifecycle_stage("models_auth", "error");
         return Err("Gateway client key failed /v1/models after enable".to_string());
     }
+    lifecycle_stage("models_auth", "ok");
 
     let mut cfg = load_or_create_private_config()?;
     cfg.via_gateway_default = true;
@@ -1034,6 +1139,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     cfg.gateway_pack_version = Some(validated.pack_version.clone());
     write_private_config_at(&crate::private_config::private_config_path(), &cfg)?;
     assert_private_json_has_no_raw_key()?;
+    lifecycle_stage("enable_complete", "authenticated");
 
     let mut st = gateway_pack_status(store);
     // Not fully ready until Council restart succeeds — lib marks council_governed.

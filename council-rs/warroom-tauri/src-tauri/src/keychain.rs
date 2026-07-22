@@ -77,14 +77,17 @@ mod macos_keychain {
     use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound, errSecSuccess};
     use security_framework_sys::item::{
         kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecValueData,
+        kSecUseAuthenticationUI, kSecUseAuthenticationUISkip,
     };
     use security_framework_sys::keychain_item::{SecItemAdd, SecItemUpdate};
 
     // kSecAttrAccessible is the attribute *key*; protection class values live in
     // access_control. Not re-exported by security-framework-sys item module.
+    // kSecUseAuthenticationUIFail fails closed without presenting UI.
     #[link(name = "Security", kind = "framework")]
     extern "C" {
         static kSecAttrAccessible: CFStringRef;
+        static kSecUseAuthenticationUIFail: CFStringRef;
     }
 
     fn is_not_found(err: &security_framework::base::Error) -> bool {
@@ -100,6 +103,9 @@ mod macos_keychain {
     /// Uses `kSecAttrAccessible` (not SecAccessControl) so ad-hoc/unsigned test
     /// binaries work without a keychain-access-groups entitlement; Developer ID
     /// signed app continuity remains release ceremony.
+    ///
+    /// Non-interactive: never present Keychain UI (packaged smoke / headless
+    /// automation must fail closed rather than hang on a modal).
     pub fn set_password_device_local(
         service: &str,
         account: &str,
@@ -140,6 +146,12 @@ mod macos_keychain {
                 unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) },
                 CFString::from(account).into_CFType(),
             ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
+                unsafe {
+                    CFString::wrap_under_get_rule(kSecUseAuthenticationUIFail).into_CFType()
+                },
+            ),
         ]);
         let update = CFDictionary::from_CFType_pairs(&[(
             unsafe { CFString::wrap_under_get_rule(kSecValueData) },
@@ -174,6 +186,13 @@ mod macos_keychain {
                 unsafe {
                     CFString::wrap_under_get_rule(kSecAttrAccessibleWhenUnlockedThisDeviceOnly)
                         .into_CFType()
+                },
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
+                // Prefer Skip on add (no auth UI); Fail on query/update above.
+                unsafe {
+                    CFString::wrap_under_get_rule(kSecUseAuthenticationUISkip).into_CFType()
                 },
             ),
             (

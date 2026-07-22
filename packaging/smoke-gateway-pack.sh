@@ -394,7 +394,43 @@ for attempt in $(seq 1 240); do
   fi
   sleep 1
 done
-[[ "$ready" == 1 ]] || die "Gateway pack did not become healthy after Enable"
+if [[ "$ready" != 1 ]]; then
+  # Non-secret lifecycle stages only (product writes lifecycle.log).
+  LIFE="$TEST_HOME/$APP_SUPPORT_REL/gateway/lifecycle.log"
+  if [[ -f "$LIFE" ]]; then
+    log "lifecycle_log_present=true"
+    # Only stage= and detail= tokens; never raw dumps of unknown content beyond fixed lines.
+    while IFS= read -r line; do
+      if [[ "$line" == *" stage="* ]]; then
+        log "lifecycle=${line##* stage=}"
+      fi
+    done <"$LIFE"
+  else
+    log "lifecycle_log_present=false"
+  fi
+  # Capture non-secret toast/static error text if present (no secret values expected).
+  TOAST_TXT="$("$OSASCRIPT_BIN" <<'APPLESCRIPT' 2>/dev/null || true
+tell application "System Events"
+  tell process "Council War Room"
+    set matches to entire contents of window 1
+    set out to {}
+    repeat with e in matches
+      try
+        set n to name of e as string
+        if n contains "Docker" or n contains "Gateway" or n contains "failed" or n contains "error" or n contains "Keychain" or n contains "compose" or n contains "image" then
+          set end of out to n
+        end if
+      end try
+    end repeat
+    set AppleScript's text item delimiters to " | "
+    return out as text
+  end tell
+end tell
+APPLESCRIPT
+)"
+  log "ui_error_text=${TOAST_TXT:0:400}"
+  die "Gateway pack did not become healthy after Enable"
+fi
 [[ -f "$TEST_HOME/$PACK_MARKER_REL" ]] || die "pack-installed.json missing after Enable"
 log "gateway_health=200"
 log "project=irin-desktop-gateway"
