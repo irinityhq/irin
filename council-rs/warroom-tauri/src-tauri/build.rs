@@ -74,6 +74,35 @@ fn ensure_bundle_input_placeholders(manifest_dir: &Path) {
         let _ = std::fs::write(marker, b"staged-by-build-rs-placeholder\n");
     }
     println!("cargo:rerun-if-changed={}", cabinets.display());
+
+    // Gateway pack resources (compose + conf/lua staged by scripts/stage-gateway-pack.sh).
+    let gw_pack = manifest_dir.join("resources").join("gateway-pack");
+    let gw_compose = gw_pack.join("docker-compose.yml");
+    if !gw_compose.is_file() {
+        let _ = std::fs::create_dir_all(&gw_pack);
+        let _ = std::fs::write(
+            &gw_compose,
+            b"# placeholder - run scripts/stage-gateway-pack.sh before DMG build\nname: irin-desktop-gateway\nservices: {}\n",
+        );
+        let _ = std::fs::write(
+            gw_pack.join("image-manifest.json"),
+            br#"{
+  "schema_version": 1,
+  "mode": "local-dev",
+  "pack_version": "placeholder",
+  "images": {
+    "gateway": "irin-desktop/gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "sidecar": "irin-desktop/sidecar@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "watch_invariants": {
+    "WATCH_PRODUCER_ENABLED": false,
+    "WATCH_DISPATCHER_ENABLED": false
+  }
+}
+"#,
+        );
+    }
+    println!("cargo:rerun-if-changed={}", gw_compose.display());
 }
 
 fn read_source_sha_file() -> Option<String> {

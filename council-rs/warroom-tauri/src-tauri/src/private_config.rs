@@ -25,8 +25,15 @@ pub struct PrivateConfig {
     #[serde(default)]
     pub auth_token: String,
     /// Process-wide default; core War Room works with false (no Docker).
+    /// Raw GW_API_KEY is never stored here — only in the macOS Keychain.
     #[serde(default)]
     pub via_gateway_default: bool,
+    /// Non-secret Gateway client key id (`k_` + 8 hex), when provisioned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_key_id: Option<String>,
+    /// Non-secret pack version last enabled (for update reconciliation).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gateway_pack_version: Option<String>,
 }
 
 impl Default for PrivateConfig {
@@ -37,6 +44,8 @@ impl Default for PrivateConfig {
             created_unix: unix_now(),
             auth_token: String::new(),
             via_gateway_default: false,
+            gateway_key_id: None,
+            gateway_pack_version: None,
         }
     }
 }
@@ -97,12 +106,23 @@ pub fn load_or_create_private_config() -> Result<PrivateConfig, String> {
     }
 
     let cfg = PrivateConfig::default();
-    write_private_config(&path, &cfg)?;
+    write_private_config_at(&path, &cfg)?;
     Ok(cfg)
 }
 
-fn write_private_config(path: &Path, cfg: &PrivateConfig) -> Result<(), String> {
+/// Atomically write private config (0600). Never include raw GW_API_KEY.
+pub fn write_private_config_at(path: &Path, cfg: &PrivateConfig) -> Result<(), String> {
+    // Defense in depth: refuse to serialize if key fields look like raw keys.
+    if let Some(ref kid) = cfg.gateway_key_id {
+        if kid.starts_with("gw_") {
+            return Err("refusing to write raw-looking gateway key into private.json".to_string());
+        }
+    }
     let raw = serde_json::to_string_pretty(cfg).map_err(|e| format!("serialize private config: {e}"))?;
+    if raw.contains("gw_") {
+        // key ids are k_…; raw keys are gw_… — refuse any gw_ substring.
+        return Err("refusing to write private.json containing gw_ material".to_string());
+    }
     let tmp = path.with_extension("json.tmp");
     {
         let mut f = fs::File::create(&tmp).map_err(|e| format!("write private config tmp: {e}"))?;
@@ -122,8 +142,8 @@ fn write_private_config(path: &Path, cfg: &PrivateConfig) -> Result<(), String> 
 /// Operator-facing guidance when Gateway/Docker is unavailable.
 pub fn gateway_missing_prereq_guidance() -> &'static str {
     "Gateway is optional. Core War Room works without Docker. \
-     To enable governed routing: install and open Docker Desktop, wait until it is ready, \
-     then configure the IRIN Gateway (GW_API_KEY + reachable http://127.0.0.1:18080). \
+     To enable governed routing on an installed release: install and open Docker Desktop, \
+     wait until it is ready, then use Settings → Enable Gateway (app-owned pack). \
      Without Docker/Gateway, keep Direct routing enabled."
 }
 
@@ -384,16 +404,24 @@ fn parse_printenv_null(raw: &[u8]) -> Vec<(String, String)> {
     out
 }
 
+/// Process-wide lock for tests that mutate `HOME` (shared across modules).
+#[cfg(test)]
+pub fn test_env_lock() -> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock};
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::{Mutex, OnceLock};
-
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
     #[test]
     fn load_or_create_is_idempotent_under_redirected_home() {
-        let _g = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _g = test_env_lock();
         let prev = std::env::var("HOME").ok();
         let tmp = std::env::temp_dir().join(format!(
             "irin-private-cfg-{}-{}",
@@ -428,7 +456,7 @@ mod tests {
 
     #[test]
     fn writable_overlay_seeds_and_preserves_user_files() {
-        let _g = ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap();
+        let _g = test_env_lock();
         let prev = std::env::var("HOME").ok();
         let tmp = std::env::temp_dir().join(format!(
             "irin-overlay-{}-{}",

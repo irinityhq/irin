@@ -3,21 +3,25 @@
 #[cfg(test)]
 #[path = "../build_support.rs"]
 mod build_support;
+mod docker_cli;
+mod gateway_pack;
+mod keychain;
 mod paths;
 mod private_config;
 mod sidecar;
 
+use gateway_pack::{GatewayPackStatus, GatewayPackState};
+use keychain::{load_gw_api_key, KeychainSecretStore};
 use paths::{
     build_cors_origins, default_serve_port, is_packaged_install, resolve_council_binary,
     resolve_council_rs_dir, resolve_spawn_base_dir, validate_serve_port,
 };
 use private_config::{
-    ensure_writable_base_overlay, gateway_missing_prereq_guidance, gui_login_environment,
-    load_or_create_private_config,
+    ensure_writable_base_overlay, gui_login_environment, load_or_create_private_config,
 };
 use sidecar::{
     compose_sidecar_args, compose_sidecar_env, probe_council_server, validate_council_root,
-    wait_for_port_release, CouncilServerProbe,
+    wait_for_port_release, CouncilServerProbe, GatewayChildCredentials,
 };
 use std::sync::Mutex;
 use std::time::Duration;
@@ -237,6 +241,40 @@ fn try_start_council_server(
         via_gateway
     };
 
+    // Keychain-sourced GW_API_KEY for governed mode only. Never from login shell.
+    let gateway_creds: Option<GatewayChildCredentials> = if via_gateway == Some(true) {
+        let store = KeychainSecretStore;
+        match load_gw_api_key(&store) {
+            Ok(Some(api_key)) => {
+                // Prefer authenticated-ready gate for packaged installs.
+                if packaged {
+                    let st = gateway_pack::gateway_pack_status(&store);
+                    if st.state != GatewayPackState::AuthenticatedReady && !st.authenticated {
+                        return Err(format!(
+                            "Gateway is not authenticated-ready ({}). {}",
+                            st.state.as_str(),
+                            st.message
+                        ));
+                    }
+                }
+                Some(GatewayChildCredentials {
+                    api_key,
+                    gateway_url: docker_cli::DESKTOP_GATEWAY_URL.to_string(),
+                })
+            }
+            Ok(None) => {
+                return Err(
+                    "GW_API_KEY is not in the macOS Keychain. Use Settings → Enable Gateway \
+                     (installed release) or provision a client key before enabling governed mode."
+                        .to_string(),
+                );
+            }
+            Err(e) => return Err(format!("Keychain read failed: {e}")),
+        }
+    } else {
+        None
+    };
+
     let cors_origins = build_cors_origins(port);
     // compose_sidecar_args: first arg is default base-dir; third overrides --base-dir.
     let args = compose_sidecar_args(&spawn_base_str, port, Some(spawn_base_str.as_str()));
@@ -253,6 +291,7 @@ fn try_start_council_server(
         auth_token,
         via_gateway,
         librarian_base,
+        gateway_creds.as_ref(),
     ) {
         command = command.env(key, value);
     }
@@ -260,6 +299,7 @@ fn try_start_council_server(
         command = command.env("COUNCIL_SESSIONS_DIR", sessions_dir);
     }
     // Finder/GUI launch: inject login PATH + provider keys so Discover works without a terminal.
+    // Never imports GW_API_KEY (filtered in is_council_provider_env_key).
     if packaged {
         for (key, value) in gui_login_environment() {
             command = command.env(key, value);
@@ -269,14 +309,10 @@ fn try_start_council_server(
             "[system] packaged spawn: login PATH/provider env merged for GUI launch (values not logged)",
         );
     }
-    // When gateway is forced on in a packaged install, surface guidance if it fails later.
     if via_gateway == Some(true) {
         let _ = app.emit(
             "council-log",
-            format!(
-                "[system] Gateway mode requested. {}",
-                gateway_missing_prereq_guidance()
-            ),
+            "[system] Gateway mode: COUNCIL_VIA_GATEWAY=1 with Keychain-sourced GW_API_KEY (value not logged)",
         );
     }
 
@@ -434,6 +470,9 @@ async fn stop_council_server(
 /// explicit off, since the child inherits the parent env). Reuses the cached
 /// spawn config so the pairing token survives the restart; if no sidecar is
 /// tracked this simply starts one. Returns the same shape as start_council_server.
+///
+/// Packaged installs refuse `via_gateway=true` unless the Gateway Pack reports
+/// authenticated readiness (Keychain key + live `/v1/models`).
 /// `council_root`: optional fresh `--base-dir` override — unlike the pairing
 /// token it can change mid-session, so the restart accepts the form value
 /// instead of trusting the cache; `None` falls back to the cached spawn value.
@@ -446,6 +485,19 @@ async fn restart_sidecar(
 ) -> Result<String, String> {
     // Port-release polling blocks (up to 5s) — keep it off the async runtime.
     tauri::async_runtime::spawn_blocking(move || {
+        if via_gateway && is_packaged_install() {
+            let store = KeychainSecretStore;
+            let st = gateway_pack::gateway_pack_status(&store);
+            if !st.state.allows_governed() {
+                return Err(format!(
+                    "Cannot enable governed mode: Gateway Pack is {} — {}. \
+                     Use Settings → Enable Gateway first.",
+                    st.state.as_str(),
+                    st.message
+                ));
+            }
+        }
+
         let config = {
             let state = app.state::<SpawnConfigCache>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -532,6 +584,147 @@ async fn restart_sidecar(
     .map_err(|e| e.to_string())?
 }
 
+/// Non-secret Gateway Pack status for the installed-release UI.
+#[tauri::command]
+async fn gateway_pack_status() -> Result<GatewayPackStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let store = KeychainSecretStore;
+        Ok(gateway_pack::gateway_pack_status(&store))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Install/start/provision/enable the app-owned Gateway Pack. Never returns secrets.
+#[tauri::command]
+async fn gateway_pack_enable(app: AppHandle) -> Result<GatewayPackStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = KeychainSecretStore;
+        let status = gateway_pack::enable_gateway_pack(&store)?;
+        if status.state == GatewayPackState::AuthenticatedReady {
+            // Restart owned Council child into governed mode with Keychain key.
+            let config = {
+                let state = app.state::<SpawnConfigCache>();
+                let guard = state.0.lock().map_err(|e| e.to_string())?;
+                guard.clone()
+            };
+            let had_child = {
+                let state = app.state::<CouncilServer>();
+                let guard = state.0.lock().map_err(|e| e.to_string())?;
+                guard.child.is_some()
+            };
+            if had_child {
+                stop_tracked_council_server(&app);
+                let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
+                match try_start_council_server(
+                    &app,
+                    config.council_path.as_deref(),
+                    None,
+                    config.auth_token.as_deref(),
+                    Some(true),
+                    config.council_root.as_deref(),
+                    config.librarian_base.as_deref(),
+                ) {
+                    Ok(msg) => {
+                        let _ = app.emit("council-log", format!("[system] gateway enable: {msg}"));
+                    }
+                    Err(e) => {
+                        let _ = app.emit(
+                            "council-log",
+                            format!("[system] gateway enable: pack ready but council restart failed: {e}"),
+                        );
+                    }
+                }
+            }
+        }
+        Ok(status)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Disable governed mode and restart Council in Direct mode. Keeps pack data/Keychain.
+#[tauri::command]
+async fn gateway_pack_disable(app: AppHandle) -> Result<GatewayPackStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = KeychainSecretStore;
+        let status = gateway_pack::disable_gateway_pack(&store)?;
+        let config = {
+            let state = app.state::<SpawnConfigCache>();
+            let guard = state.0.lock().map_err(|e| e.to_string())?;
+            guard.clone()
+        };
+        let had_child = {
+            let state = app.state::<CouncilServer>();
+            let guard = state.0.lock().map_err(|e| e.to_string())?;
+            guard.child.is_some()
+        };
+        if had_child {
+            stop_tracked_council_server(&app);
+            let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
+            let _ = try_start_council_server(
+                &app,
+                config.council_path.as_deref(),
+                None,
+                config.auth_token.as_deref(),
+                Some(false),
+                config.council_root.as_deref(),
+                config.librarian_base.as_deref(),
+            );
+        }
+        Ok(status)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Stop the desktop Compose project only (no volume delete).
+#[tauri::command]
+async fn gateway_pack_stop() -> Result<GatewayPackStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let store = KeychainSecretStore;
+        gateway_pack::stop_gateway_pack(&store)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Destructive uninstall of the desktop pack only. Explicit operator action.
+#[tauri::command]
+async fn gateway_pack_uninstall(app: AppHandle) -> Result<GatewayPackStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = KeychainSecretStore;
+        let status = gateway_pack::uninstall_gateway_pack(&store)?;
+        // Ensure Direct mode after uninstall.
+        let config = {
+            let state = app.state::<SpawnConfigCache>();
+            let guard = state.0.lock().map_err(|e| e.to_string())?;
+            guard.clone()
+        };
+        let had_child = {
+            let state = app.state::<CouncilServer>();
+            let guard = state.0.lock().map_err(|e| e.to_string())?;
+            guard.child.is_some()
+        };
+        if had_child {
+            stop_tracked_council_server(&app);
+            let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
+            let _ = try_start_council_server(
+                &app,
+                config.council_path.as_deref(),
+                None,
+                config.auth_token.as_deref(),
+                Some(false),
+                config.council_root.as_deref(),
+                config.librarian_base.as_deref(),
+            );
+        }
+        Ok(status)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Native file picker (cabinet yamls, session json, map dirs, etc.).
 #[tauri::command]
 async fn pick_file(app: AppHandle) -> Result<Option<String>, String> {
@@ -608,6 +801,11 @@ pub fn run() {
             start_council_server,
             stop_council_server,
             restart_sidecar,
+            gateway_pack_status,
+            gateway_pack_enable,
+            gateway_pack_disable,
+            gateway_pack_stop,
+            gateway_pack_uninstall,
             pick_file,
             ping_council,
             get_server_logs,

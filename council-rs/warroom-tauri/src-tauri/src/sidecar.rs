@@ -8,6 +8,13 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+/// Optional Gateway child credentials (Keychain-sourced). Never log `api_key`.
+#[derive(Debug, Clone)]
+pub struct GatewayChildCredentials {
+    pub api_key: String,
+    pub gateway_url: String,
+}
+
 /// Compose the env pairs for a `council --serve` sidecar spawn.
 ///
 /// - `COUNCIL_CORS_ORIGINS` is always set.
@@ -17,12 +24,19 @@ use std::time::{Duration, Instant};
 ///   `None` → unset (child inherits the parent env). `"0"` is used instead of
 ///   removal because tauri-plugin-shell has no `env_remove` and council treats
 ///   anything other than `"1"`/`"true"` as off (src/main.rs via_gateway parse).
+/// - When `via_gateway` is `Some(true)`, `gateway_creds` must supply Keychain-sourced
+///   `GW_API_KEY` + fixed loopback `GATEWAY_URL`. Packaged installs never import
+///   `GW_API_KEY` from the login shell.
+/// - When `via_gateway` is `Some(false)`, any inherited `GW_API_KEY` is cleared
+///   by setting an empty value is not enough for all children — we set
+///   `COUNCIL_VIA_GATEWAY=0` and omit `GW_API_KEY` (Direct mode).
 pub fn compose_sidecar_env(
     cors_origins: &str,
     debug_build: bool,
     auth_token: Option<&str>,
     via_gateway: Option<bool>,
     librarian_base: Option<&str>,
+    gateway_creds: Option<&GatewayChildCredentials>,
 ) -> Vec<(String, String)> {
     let mut env = vec![("COUNCIL_CORS_ORIGINS".to_string(), cors_origins.to_string())];
     if debug_build {
@@ -31,8 +45,24 @@ pub fn compose_sidecar_env(
         env.push(("COUNCIL_AUTH_TOKEN".to_string(), token.to_string()));
     }
     match via_gateway {
-        Some(true) => env.push(("COUNCIL_VIA_GATEWAY".to_string(), "1".to_string())),
-        Some(false) => env.push(("COUNCIL_VIA_GATEWAY".to_string(), "0".to_string())),
+        Some(true) => {
+            env.push(("COUNCIL_VIA_GATEWAY".to_string(), "1".to_string()));
+            if let Some(creds) = gateway_creds {
+                let key = creds.api_key.trim();
+                if !key.is_empty() {
+                    env.push(("GW_API_KEY".to_string(), key.to_string()));
+                }
+                let url = creds.gateway_url.trim();
+                if !url.is_empty() {
+                    env.push(("GATEWAY_URL".to_string(), url.to_string()));
+                }
+            }
+        }
+        Some(false) => {
+            env.push(("COUNCIL_VIA_GATEWAY".to_string(), "0".to_string()));
+            // Explicitly unset gateway routing credentials in the child by omitting them.
+            // Do not import GW_API_KEY from the parent/login shell.
+        }
         None => {}
     }
     if let Some(lb) = librarian_base {
@@ -217,7 +247,7 @@ mod tests {
 
     #[test]
     fn compose_always_sets_cors_origins() {
-        let env = compose_sidecar_env("http://127.0.0.1:8765", false, None, None, None);
+        let env = compose_sidecar_env("http://127.0.0.1:8765", false, None, None, None, None);
         assert_eq!(
             env_value(&env, "COUNCIL_CORS_ORIGINS"),
             Some("http://127.0.0.1:8765")
@@ -226,14 +256,14 @@ mod tests {
 
     #[test]
     fn compose_debug_forces_no_auth_and_ignores_token() {
-        let env = compose_sidecar_env("o", true, Some("secret"), None, None);
+        let env = compose_sidecar_env("o", true, Some("secret"), None, None, None);
         assert_eq!(env_value(&env, "COUNCIL_DEV_NO_AUTH"), Some("1"));
         assert_eq!(env_value(&env, "COUNCIL_AUTH_TOKEN"), None);
     }
 
     #[test]
     fn compose_release_passes_trimmed_token() {
-        let env = compose_sidecar_env("o", false, Some("  tok-123  "), None, None);
+        let env = compose_sidecar_env("o", false, Some("  tok-123  "), None, None, None);
         assert_eq!(env_value(&env, "COUNCIL_AUTH_TOKEN"), Some("tok-123"));
         assert_eq!(env_value(&env, "COUNCIL_DEV_NO_AUTH"), None);
     }
@@ -241,14 +271,14 @@ mod tests {
     #[test]
     fn compose_release_skips_empty_or_whitespace_token() {
         for token in [None, Some(""), Some("   ")] {
-            let env = compose_sidecar_env("o", false, token, None, None);
+            let env = compose_sidecar_env("o", false, token, None, None, None);
             assert_eq!(env_value(&env, "COUNCIL_AUTH_TOKEN"), None, "{token:?}");
         }
     }
 
     #[test]
     fn compose_via_gateway_true_sets_1() {
-        let env = compose_sidecar_env("o", false, None, Some(true), None);
+        let env = compose_sidecar_env("o", false, None, Some(true), None, None);
         assert_eq!(env_value(&env, "COUNCIL_VIA_GATEWAY"), Some("1"));
     }
 
@@ -256,21 +286,44 @@ mod tests {
     fn compose_via_gateway_false_sets_explicit_0() {
         // "0" (not removal) — council only treats "1"/"true" as on, and the
         // child inherits the parent env so an unset var could leak gateway mode.
-        let env = compose_sidecar_env("o", false, None, Some(false), None);
+        let env = compose_sidecar_env("o", false, None, Some(false), None, None);
         assert_eq!(env_value(&env, "COUNCIL_VIA_GATEWAY"), Some("0"));
+        assert_eq!(env_value(&env, "GW_API_KEY"), None);
     }
 
     #[test]
     fn compose_via_gateway_none_leaves_env_inherited() {
-        let env = compose_sidecar_env("o", false, None, None, None);
+        let env = compose_sidecar_env("o", false, None, None, None, None);
         assert_eq!(env_value(&env, "COUNCIL_VIA_GATEWAY"), None);
     }
 
     #[test]
     fn compose_via_gateway_combines_with_release_token() {
-        let env = compose_sidecar_env("o", false, Some("tok"), Some(true), None);
+        let env = compose_sidecar_env("o", false, Some("tok"), Some(true), None, None);
         assert_eq!(env_value(&env, "COUNCIL_AUTH_TOKEN"), Some("tok"));
         assert_eq!(env_value(&env, "COUNCIL_VIA_GATEWAY"), Some("1"));
+    }
+
+    #[test]
+    fn compose_via_gateway_injects_keychain_creds_only_when_on() {
+        let creds = GatewayChildCredentials {
+            api_key: "gw_0123456789abcdef0123456789abcdef".into(),
+            gateway_url: "http://127.0.0.1:18080".into(),
+        };
+        let on = compose_sidecar_env("o", false, None, Some(true), None, Some(&creds));
+        assert_eq!(env_value(&on, "COUNCIL_VIA_GATEWAY"), Some("1"));
+        assert_eq!(
+            env_value(&on, "GW_API_KEY"),
+            Some("gw_0123456789abcdef0123456789abcdef")
+        );
+        assert_eq!(
+            env_value(&on, "GATEWAY_URL"),
+            Some("http://127.0.0.1:18080")
+        );
+        let off = compose_sidecar_env("o", false, None, Some(false), None, Some(&creds));
+        assert_eq!(env_value(&off, "COUNCIL_VIA_GATEWAY"), Some("0"));
+        assert_eq!(env_value(&off, "GW_API_KEY"), None);
+        assert_eq!(env_value(&off, "GATEWAY_URL"), None);
     }
 
     #[test]
@@ -310,7 +363,7 @@ mod tests {
         // councilRoot travels in ARGS, via_gateway/auth in ENV — both optional,
         // both set here; neither channel leaks into the other.
         let args = compose_sidecar_args("/repo", 8765, Some("/custom"));
-        let env = compose_sidecar_env("o", false, Some("tok"), Some(true), None);
+        let env = compose_sidecar_env("o", false, Some("tok"), Some(true), None, None);
         assert_eq!(args[1], "/custom");
         assert_eq!(env_value(&env, "COUNCIL_VIA_GATEWAY"), Some("1"));
         assert_eq!(env_value(&env, "COUNCIL_AUTH_TOKEN"), Some("tok"));

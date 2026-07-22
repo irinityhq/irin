@@ -37,7 +37,8 @@
       "binaries/council"
     ],
     "resources": {
-      "resources/council-base": "council-base"
+      "resources/council-base": "council-base",
+      "resources/gateway-pack": "gateway-pack"
     },
     "macOS": {
       "minimumSystemVersion": "12.0"
