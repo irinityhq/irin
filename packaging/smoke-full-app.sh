@@ -1,0 +1,446 @@
+#!/usr/bin/env bash
+# Full-app packaged smoke + promotion gate for Council War Room DMG installs.
+#
+# Modes:
+#   default / BOUNDED: may report BOUNDED_PASS when :8765 is intentionally
+#     occupied (foreign Council left alive). Never prints FULL_PASS unless
+#     the packaged host path fully passes.
+#   PROMOTION=1: exit nonzero unless the packaged host path fully passes
+#     (requires free :8765). Never prints FULL_PASS after skip/fail.
+#
+# Safety:
+#   - Never re-signs the test app.
+#   - Never kills a foreign :8765 listener that this script did not start.
+#   - Fake provider markers only under isolated HOME; values never logged.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/packaging/env.sh"
+
+PROMOTION="${PROMOTION:-0}"
+APP_NAME="Council War Room.app"
+TEST_APPS="$ROOT/packaging/test-apps"
+DEST_APP="${IRIN_SMOKE_APP:-$TEST_APPS/$APP_NAME}"
+TEST_HOME="$ROOT/packaging/test-home/smoke-$$"
+MOUNT="$ROOT/packaging/build/dmg-mount"
+DMG="${IRIN_DMG_PATH:-$ROOT/packaging/artifacts/Council War Room_0.1.0_aarch64.dmg}"
+REPORT="$ROOT/packaging/receipts/FULL_APP_SMOKE.txt"
+WEBVIEW_SHOT="$ROOT/packaging/receipts/webview-smoke.png"
+PIDFILE="$ROOT/packaging/build/smoke-host.pid"
+SIDECAR_PIDFILE="$ROOT/packaging/build/smoke-sidecar.pid"
+FAKE_MARKER_NAME="XAI_API_KEY"
+FAKE_MARKER_VALUE="irin-dmg-fake-marker-not-a-real-key"
+DENIED_FAKE_NAME="GW_API_KEY"
+DENIED_FAKE_VALUE="should-never-import-gateway-key"
+EXPECTED_SHA="${IRIN_TAURI_BUILD_GIT_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)}"
+
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+log() { printf '%s\n' "$*" | tee -a "$REPORT"; }
+
+mkdir -p "$ROOT/packaging/receipts" "$TEST_APPS" "$(dirname "$PIDFILE")"
+: >"$REPORT"
+log "=== smoke-full-app $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
+log "ROOT=$ROOT"
+log "PROMOTION=$PROMOTION"
+log "expected_sha=${EXPECTED_SHA:-unknown}"
+
+[[ "$(uname -s)" == "Darwin" ]] || die "macOS only"
+[[ "$(uname -m)" == "arm64" ]] || die "arm64 only"
+
+# --- ensure test app exists (untouched DMG copy preferred) ---
+if [[ ! -d "$DEST_APP" ]]; then
+  [[ -f "$DMG" ]] || die "missing DMG and no IRIN_SMOKE_APP: $DMG"
+  if mount | grep -q "$MOUNT"; then
+    hdiutil detach "$MOUNT" -force 2>/dev/null || true
+  fi
+  rm -rf "$MOUNT"
+  mkdir -p "$MOUNT"
+  hdiutil attach "$DMG" -mountpoint "$MOUNT" -readonly -nobrowse
+  SRC_APP="$(find "$MOUNT" -maxdepth 2 -name "$APP_NAME" -type d | head -1 || true)"
+  [[ -d "$SRC_APP" ]] || die "app not found in DMG"
+  rm -rf "$DEST_APP"
+  ditto "$SRC_APP" "$DEST_APP"
+  hdiutil detach "$MOUNT" -force 2>/dev/null || true
+fi
+[[ -d "$DEST_APP" ]] || die "missing app: $DEST_APP"
+
+if ! codesign --verify --deep --strict "$DEST_APP" >/dev/null 2>&1; then
+  die "untouched app failed codesign verify (will not re-sign)"
+fi
+log "app=$DEST_APP"
+log "codesign: ok (untouched)"
+
+HOST="$DEST_APP/Contents/MacOS/council-warroom-tauri"
+SIDECAR="$DEST_APP/Contents/MacOS/council"
+[[ -x "$HOST" && -x "$SIDECAR" ]] || die "host/sidecar missing"
+CABINETS="$(find "$DEST_APP/Contents/Resources" -type d -name cabinets | head -1 || true)"
+[[ -n "$CABINETS" ]] || die "cabinets missing"
+BASE_DIR="$(dirname "$CABINETS")"
+log "base_dir=$BASE_DIR"
+log "host_sha256=$(shasum -a 256 "$HOST" | awk '{print $1}')"
+log "council_sha256=$(shasum -a 256 "$SIDECAR" | awk '{print $1}')"
+
+listen_pid() {
+  local port="$1"
+  lsof -nP -iTCP:"$port" -sTCP:LISTEN -t 2>/dev/null | head -1 || true
+}
+
+FOREIGN_8765="$(listen_pid 8765)"
+log "foreign_8765_before=${FOREIGN_8765:-none}"
+
+cleanup() {
+  local status=$?
+  # Only kill processes we started.
+  if [[ -f "$PIDFILE" ]]; then
+    local p
+    p="$(cat "$PIDFILE" 2>/dev/null || true)"
+    if [[ -n "$p" ]]; then
+      kill "$p" 2>/dev/null || true
+      sleep 0.3
+      kill -9 "$p" 2>/dev/null || true
+    fi
+    rm -f "$PIDFILE"
+  fi
+  if [[ -f "$SIDECAR_PIDFILE" ]]; then
+    local p
+    p="$(cat "$SIDECAR_PIDFILE" 2>/dev/null || true)"
+    if [[ -n "$p" ]]; then
+      kill "$p" 2>/dev/null || true
+      sleep 0.3
+      kill -9 "$p" 2>/dev/null || true
+    fi
+    rm -f "$SIDECAR_PIDFILE"
+  fi
+  osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
+  # Never kill FOREIGN_8765.
+  if [[ -n "${TEST_HOME:-}" && -d "${TEST_HOME:-}" ]]; then
+    # Keep receipt evidence; drop fake shell profiles so values are not retained longer than needed.
+    rm -f "$TEST_HOME/.zprofile" "$TEST_HOME/.zshrc" 2>/dev/null || true
+  fi
+  exit "$status"
+}
+trap cleanup EXIT
+
+# --- isolated fake login shell for Discover proof ---
+rm -rf "$TEST_HOME"
+mkdir -p "$TEST_HOME/Library/Application Support" "$TEST_HOME/tmp" "$TEST_HOME/bin"
+# Login env markers: names only appear in Discover; values never printed by this script.
+cat >"$TEST_HOME/.zprofile" <<EOF
+export ${FAKE_MARKER_NAME}='${FAKE_MARKER_VALUE}'
+export ${DENIED_FAKE_NAME}='${DENIED_FAKE_VALUE}'
+export WATCH_ADMIN_TOKEN='should-never-import-watch'
+export CLOUDFLARE_API_TOKEN='should-never-import-cf'
+export PATH="/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin"
+EOF
+# Prevent reading the real user zshrc when HOME is redirected.
+: >"$TEST_HOME/.zshrc"
+export HOME="$TEST_HOME"
+export TMPDIR="$TEST_HOME/tmp"
+
+SUPPORT_DIR="$TEST_HOME/Library/Application Support/com.sovereign.council.warroom"
+SESSIONS="$SUPPORT_DIR/sessions"
+mkdir -p "$SESSIONS"
+
+# --- Port-conflict proof when foreign Council is present ---
+if [[ -n "$FOREIGN_8765" ]]; then
+  log "=== port-conflict: open packaged app without replacing foreign :8765 ==="
+  BEFORE="$FOREIGN_8765"
+  (
+    export HOME="$TEST_HOME"
+    export TMPDIR="$TEST_HOME/tmp"
+    open -n -a "$DEST_APP" 2>/dev/null || open -n "$DEST_APP" 2>/dev/null || true
+  )
+  sleep 4
+  AFTER="$(listen_pid 8765)"
+  log "foreign_8765_after=${AFTER:-none}"
+  if [[ -z "$AFTER" ]]; then
+    die "foreign Council on :8765 disappeared — isolation violated"
+  fi
+  if [[ "$BEFORE" != "$AFTER" ]]; then
+    die "foreign Council PID changed ($BEFORE -> $AFTER) — isolation violated"
+  fi
+  log "port_conflict_ok=true (foreign listener unchanged)"
+  osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
+  sleep 1
+
+  if [[ "$PROMOTION" == "1" ]]; then
+    log "RESULT=BOUNDED_PASS"
+    log "NOTE: PROMOTION=1 requires free :8765 for packaged host path; foreign listener blocks FULL_PASS"
+    die "promotion gate incomplete while :8765 is occupied (stop foreign Council and re-run)"
+  fi
+
+  # Bounded path: prove bundled sidecar on alternate port + fake Discover filter.
+  TEST_PORT=19876
+  if listen_pid "$TEST_PORT" >/dev/null; then
+    die "test port $TEST_PORT busy"
+  fi
+  log "=== bounded sidecar health + fake-login Discover on :$TEST_PORT ==="
+  (
+    export HOME="$TEST_HOME"
+    export TMPDIR="$TEST_HOME/tmp"
+    export COUNCIL_SESSIONS_DIR="$SESSIONS"
+    export COUNCIL_CORS_ORIGINS="tauri://localhost,https://tauri.localhost,http://127.0.0.1:$TEST_PORT"
+    # Merge login provider env the same way the host would (one interactive capture).
+    # shellcheck disable=SC1091
+    set -a
+    # Capture only filtered keys via a small python filter (no values logged).
+    eval "$(
+      HOME="$TEST_HOME" /bin/zsh -lic 'python3 -c "
+import os, shlex
+deny={\"GW_API_KEY\",\"WATCH_ADMIN_TOKEN\",\"COUNCIL_GATEWAY_TOKEN\",\"BOOTSTRAP_TOKEN\",\"AUTH_PEPPER\",\"CLAUDE_PROXY_TOKEN\",\"CODEX_PROXY_TOKEN\",\"CLOUDFLARE_API_TOKEN\",\"CLOUDFLARE_API_KEY\"}
+def ok(k):
+    if k in deny: return False
+    if k.endswith(\"_API_KEY\") or k==\"OPENAI_ADMIN_KEY\": return True
+    return k in {\"VERTEX_PROJECT\",\"VERTEX_LOCATION\",\"VERTEX_GEMINI_MODEL\",\"GOOGLE_CLOUD_PROJECT\",\"GOOGLE_CLOUD_LOCATION\",\"GOOGLE_APPLICATION_CREDENTIALS\"}
+for k,v in os.environ.items():
+    if ok(k) and v.strip():
+        print(f\"export {k}={shlex.quote(v)}\")
+"'
+    )"
+    set +a
+    # Prove denied keys were not imported into this shell for the child.
+    if [[ -n "${GW_API_KEY:-}" ]]; then
+      echo "ERROR: GW_API_KEY leaked into filtered env" >&2
+      exit 1
+    fi
+    if [[ -n "${WATCH_ADMIN_TOKEN:-}" ]]; then
+      echo "ERROR: WATCH_ADMIN_TOKEN leaked into filtered env" >&2
+      exit 1
+    fi
+    if [[ -z "${XAI_API_KEY:-}" ]]; then
+      echo "ERROR: XAI_API_KEY missing from filtered login env" >&2
+      exit 1
+    fi
+    cd "$TEST_HOME"
+    "$SIDECAR" --base-dir "$BASE_DIR" --serve --port "$TEST_PORT" \
+      >"$ROOT/packaging/build/smoke-sidecar.log" 2>&1 &
+    echo $! >"$SIDECAR_PIDFILE"
+  )
+  ok=0
+  for _ in $(seq 1 40); do
+    if curl -fsS --max-time 1 "http://127.0.0.1:${TEST_PORT}/api/health" \
+      >"$ROOT/packaging/build/smoke-health.json" 2>/dev/null; then
+      ok=1
+      break
+    fi
+    sleep 0.25
+  done
+  [[ "$ok" == 1 ]] || {
+    tail -40 "$ROOT/packaging/build/smoke-sidecar.log" | tee -a "$REPORT" || true
+    die "bounded health failed"
+  }
+  # Log health metadata only (never secret values).
+  python3 -c "
+import json
+d=json.load(open('$ROOT/packaging/build/smoke-health.json'))
+keys=sorted(d.keys())
+print('health_keys=', keys)
+print('build_sha=', d.get('build_sha') or d.get('git_sha') or d.get('source_sha'))
+print('build_dirty=', d.get('build_dirty'))
+print('providers_available_count=', len(d.get('providers_available') or []))
+" | tee -a "$REPORT"
+
+  curl -fsS --max-time 5 "http://127.0.0.1:${TEST_PORT}/api/discover" \
+    >"$ROOT/packaging/build/smoke-discover.json"
+  python3 -c "
+import json,sys
+d=json.load(open('$ROOT/packaging/build/smoke-discover.json'))
+raw=open('$ROOT/packaging/build/smoke-discover.json').read()
+marker='$FAKE_MARKER_VALUE'
+denied_val='$DENIED_FAKE_VALUE'
+assert marker not in raw, 'fake provider VALUE leaked into /api/discover'
+assert denied_val not in raw, 'denied secret VALUE leaked into /api/discover'
+rows=d.get('providers') or []
+xai=[r for r in rows if r.get('env_hint')=='$FAKE_MARKER_NAME' or r.get('name') in ('grok_api','grok')]
+assert any(r.get('env_hint')=='$FAKE_MARKER_NAME' for r in rows), 'expected env_hint $FAKE_MARKER_NAME (name only)'
+# available true for xai when key present
+assert any(r.get('env_hint')=='$FAKE_MARKER_NAME' and r.get('available') is True for r in rows), 'expected available provider for marker key'
+# operational secrets must not appear as env_hint rows for GW_API_KEY availability path
+assert not any(r.get('env_hint')=='$DENIED_FAKE_NAME' for r in rows), 'GW_API_KEY must not appear as discover env_hint'
+print('discover_ok env_hint=$FAKE_MARKER_NAME available=true value_redacted=true denied_filtered=true')
+" | tee -a "$REPORT"
+
+  log "RESULT=BOUNDED_PASS"
+  log "NOTE: packaged host path on :8765 not fully exercised (foreign listener present)"
+  exit 0
+fi
+
+# --- Full host path (requires free :8765) ---
+log "=== full packaged host path (:8765 free) ==="
+if [[ -n "$(listen_pid 8765)" ]]; then
+  die ":8765 became busy unexpectedly"
+fi
+
+# Launch host under isolated HOME so private config + overlay land in TEST_HOME.
+(
+  export HOME="$TEST_HOME"
+  export TMPDIR="$TEST_HOME/tmp"
+  # Direct exec keeps our HOME; open(1) may not always inherit for GUI.
+  "$HOST" >"$ROOT/packaging/build/smoke-host.log" 2>&1 &
+  echo $! >"$PIDFILE"
+)
+HOST_PID="$(cat "$PIDFILE")"
+log "host_pid=$HOST_PID"
+
+ok=0
+for _ in $(seq 1 60); do
+  if curl -fsS --max-time 1 "http://127.0.0.1:8765/api/health" \
+    >"$ROOT/packaging/build/smoke-health.json" 2>/dev/null; then
+    ok=1
+    break
+  fi
+  sleep 0.5
+done
+[[ "$ok" == 1 ]] || {
+  tail -80 "$ROOT/packaging/build/smoke-host.log" | tee -a "$REPORT" || true
+  die "packaged host failed to bring up Council on :8765"
+}
+
+python3 -c "
+import json,sys
+d=json.load(open('$ROOT/packaging/build/smoke-health.json'))
+sha=d.get('build_sha') or d.get('git_sha') or ''
+dirty=d.get('build_dirty')
+print('health_build_sha=', sha)
+print('health_build_dirty=', dirty)
+print('health_version=', d.get('council_version'))
+open('$ROOT/packaging/build/smoke-health.meta','w').write(f'sha={sha}\ndirty={dirty}\n')
+if '$EXPECTED_SHA' and sha and not str(sha).startswith(str('$EXPECTED_SHA')[:7]):
+    # allow full or short sha match
+    if not str('$EXPECTED_SHA').startswith(str(sha)) and not str(sha).startswith(str('$EXPECTED_SHA')[:12]):
+        sys.exit('build_sha mismatch: health=%r expected_prefix=%r' % (sha, '$EXPECTED_SHA'[:12]))
+if dirty not in (False, 'false', 0, '0', None):
+    # promotion requires clean identity
+    if '$PROMOTION' == '1':
+        sys.exit('build_dirty must be false for promotion, got %r' % (dirty,))
+" | tee -a "$REPORT"
+
+curl -fsS --max-time 5 "http://127.0.0.1:8765/api/cabinets" \
+  >"$ROOT/packaging/build/smoke-cabinets.json"
+python3 -c "
+import json
+d=json.load(open('$ROOT/packaging/build/smoke-cabinets.json'))
+c=d.get('cabinets') or d if isinstance(d,list) else d.get('cabinets')
+n=len(c) if isinstance(c,list) else 0
+print('cabinets_count=', n)
+assert n>0, 'no cabinets'
+" | tee -a "$REPORT"
+
+PRIV="$SUPPORT_DIR/private.json"
+OVERLAY="$SUPPORT_DIR/council-base"
+for _ in $(seq 1 20); do
+  [[ -f "$PRIV" ]] && break
+  sleep 0.25
+done
+[[ -f "$PRIV" ]] || die "private config missing under Application Support"
+python3 -c "
+import json
+d=json.load(open('$PRIV'))
+print('private_keys=', sorted(d.keys()))
+print('install_id_len=', len(d.get('install_id','')))
+print('via_gateway_default=', d.get('via_gateway_default'))
+assert 'auth_token' in d
+# never print token value
+" | tee -a "$REPORT"
+[[ -d "$OVERLAY/cabinets" ]] || die "writable overlay missing cabinets"
+log "overlay_seeded=true"
+
+# Discover via host-owned sidecar (login env merged by host).
+curl -fsS --max-time 5 "http://127.0.0.1:8765/api/discover" \
+  >"$ROOT/packaging/build/smoke-discover.json"
+python3 -c "
+import json
+raw=open('$ROOT/packaging/build/smoke-discover.json').read()
+assert '$FAKE_MARKER_VALUE' not in raw, 'provider VALUE leaked'
+assert '$DENIED_FAKE_VALUE' not in raw, 'denied VALUE leaked'
+d=json.loads(raw)
+rows=d.get('providers') or []
+# Host merges login env; marker may be available.
+has_hint=any(r.get('env_hint')=='$FAKE_MARKER_NAME' for r in rows)
+print('discover_has_env_hint_$FAKE_MARKER_NAME=', has_hint)
+print('discover_denied_env_hint_present=', any(r.get('env_hint')=='$DENIED_FAKE_NAME' for r in rows))
+assert has_hint, 'expected env_hint name for fake provider key'
+assert not any(r.get('env_hint')=='$DENIED_FAKE_NAME' for r in rows)
+# Prefer available true when host injected the marker
+avail=any(r.get('env_hint')=='$FAKE_MARKER_NAME' and r.get('available') is True for r in rows)
+print('discover_marker_available=', avail)
+" | tee -a "$REPORT"
+
+# Webview evidence: bring window forward and screenshot.
+log "=== webview evidence ==="
+osascript >/dev/null 2>&1 <<'APPLESCRIPT' || true
+tell application "Council War Room" to activate
+delay 1
+APPLESCRIPT
+# Prefer screencapture of the app window if possible; fall back to main display crop.
+if ! screencapture -l"$(osascript -e 'tell application "System Events" to get id of first window of process "council-warroom-tauri"' 2>/dev/null || true)" "$WEBVIEW_SHOT" 2>/dev/null; then
+  screencapture -x "$WEBVIEW_SHOT" 2>/dev/null || true
+fi
+if [[ -f "$WEBVIEW_SHOT" && -s "$WEBVIEW_SHOT" ]]; then
+  log "webview_screenshot=$WEBVIEW_SHOT"
+  log "webview_screenshot_bytes=$(wc -c <"$WEBVIEW_SHOT" | tr -d ' ')"
+else
+  # Accessibility tree receipt as alternate evidence the process is a GUI app.
+  if command -v swift >/dev/null 2>&1; then
+    log "webview_screenshot missing; recording process table receipt"
+  fi
+  pgrep -lf council-warroom-tauri | tee -a "$REPORT" || true
+  # REST already proved backend; require some GUI process evidence.
+  pgrep -f council-warroom-tauri >/dev/null || die "host GUI process not running for webview evidence"
+  log "webview_process_evidence=pgrep council-warroom-tauri"
+fi
+
+# Relaunch persistence: quit, restart, private config install_id unchanged.
+INSTALL_ID="$(python3 -c "import json;print(json.load(open('$PRIV'))['install_id'])")"
+log "install_id_before_relaunch=$INSTALL_ID"
+if [[ -f "$PIDFILE" ]]; then
+  kill "$(cat "$PIDFILE")" 2>/dev/null || true
+  sleep 1
+  kill -9 "$(cat "$PIDFILE")" 2>/dev/null || true
+  rm -f "$PIDFILE"
+fi
+osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
+# Wait for port release
+for _ in $(seq 1 40); do
+  [[ -z "$(listen_pid 8765)" ]] && break
+  sleep 0.25
+done
+[[ -z "$(listen_pid 8765)" ]] || die "sidecar did not release :8765 after host quit"
+log "port_released_after_quit=true"
+
+(
+  export HOME="$TEST_HOME"
+  export TMPDIR="$TEST_HOME/tmp"
+  "$HOST" >"$ROOT/packaging/build/smoke-host-relaunch.log" 2>&1 &
+  echo $! >"$PIDFILE"
+)
+ok=0
+for _ in $(seq 1 60); do
+  if curl -fsS --max-time 1 "http://127.0.0.1:8765/api/health" >/dev/null 2>&1; then
+    ok=1
+    break
+  fi
+  sleep 0.5
+done
+[[ "$ok" == 1 ]] || die "relaunch failed to restore health"
+INSTALL_ID2="$(python3 -c "import json;print(json.load(open('$PRIV'))['install_id'])")"
+[[ "$INSTALL_ID" == "$INSTALL_ID2" ]] || die "install_id changed across relaunch"
+log "relaunch_persistence_ok=true"
+
+# Final shutdown + port release
+kill "$(cat "$PIDFILE")" 2>/dev/null || true
+sleep 1
+kill -9 "$(cat "$PIDFILE")" 2>/dev/null || true
+rm -f "$PIDFILE"
+osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
+for _ in $(seq 1 40); do
+  [[ -z "$(listen_pid 8765)" ]] && break
+  sleep 0.25
+done
+[[ -z "$(listen_pid 8765)" ]] || die ":8765 still held after final shutdown"
+log "final_port_release_ok=true"
+
+log "RESULT=FULL_PASS"
+log "PROMOTION_ELIGIBLE=true"
+exit 0

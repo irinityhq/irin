@@ -16,3 +16,10 @@ runs/
 .irin-worktree-base
 .irin-receipts/
 .irin-tools/
+
+# DMG packaging artifacts and isolated test state (generated)
+/packaging/artifacts/
+/packaging/build/
+/packaging/test-home/
+/packaging/test-apps/
+/packaging/receipts/

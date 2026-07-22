@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build build test
+.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test
 
 setup: ## macOS: prepare config, start the managed runtime, and enable login recovery
 	bash scripts/setup-local.sh
@@ -68,6 +68,16 @@ warroom-tauri: ## Open the War Room native desktop shell (Tauri)
 
 warroom-tauri-build: ## Package the War Room native desktop shell (Tauri)
 	$(MAKE) -C council-rs warroom-build
+
+dmg-build: ## Build ad-hoc signed Council War Room .app + .dmg (Apple silicon)
+	bash packaging/build-dmg.sh
+
+dmg-verify: ## Verify DMG layout/codesign on an untouched copy (never re-signs)
+	bash packaging/verify-dmg.sh
+
+dmg-smoke: ## Full-app packaged smoke (PROMOTION=1 for strict promotion gate)
+	bash packaging/smoke-full-app.sh
+
 
 build: ## Build the full Rust workspace in release mode
 	cargo build --workspace --release
