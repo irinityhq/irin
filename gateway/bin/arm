@@ -1,0 +1,157 @@
+#!/bin/sh
+# Dual-custody local-attest arm ceremony, single entry point (spec §4, B7).
+# Resume-first (spec §4.3): an open unexpired stage is RESUMED — same
+# stage_id, same challenge bytes — never re-staged. Touch ID is the second
+# custody domain; nothing is ever typed or pasted.
+#
+# Usage:
+#   bin/arm                  real ceremony (SE-p256 Touch ID)
+#   bin/arm --rehearse       rehearsal (SE-p256)
+#   bin/arm --fido2          real with FIDO2 backup credential (YubiKey)
+#   bin/arm --fido2-rehearse rehearsal with FIDO2 (native or FIDO2_ASSERT_JSON from fido2-assert.html for macOS)
+#
+# The signing helper enforces its own token-bucket rate limit (3 attempts /
+# 300s) independent of the sidecar — an unexpected Touch ID prompt or a
+# surprise rate-limit hit is an ALARM (phish-a-touch), not an inconvenience.
+set -eu
+cd "$(dirname "$0")/.."
+
+# Shared FIDO2 python resolution (validates the interpreter on every branch).
+. bin/lib/fido2.sh
+. bin/lib/runtime-env.sh
+
+REHEARSE=0
+[ "${1:-}" = "--rehearse" ] && REHEARSE=1
+
+# fido2-es256 leg (spec §3 backup credential): uses libfido2 via the Python
+# helper to get a FIDO2 assertion from a USB security key (YubiKey).
+FIDO2=0
+if [ "${1:-}" = "--fido2" ]; then
+  FIDO2=1
+  REHEARSE=0
+  FIDO2_PYTHON="$(resolve_fido2_python)" || exit 1
+fi
+if [ "${1:-}" = "--fido2-rehearse" ]; then
+  FIDO2=1
+  REHEARSE=1
+  FIDO2_PYTHON="$(resolve_fido2_python)" || exit 1
+fi
+
+# macOS HID workaround for get_assertion (parallel to fido2-enroll.html):
+#   1. bin/arm --fido2-rehearse   (will print stage + challenge)
+#   2. open bin/fido2-assert.html in browser, paste challenge + cred_id from registry
+#   3. touch in browser, copy the JSON
+#   4. FIDO2_ASSERT_JSON='{"credential_id":.., "signature":.., "authenticator_data":.., "client_data_json":..}' bin/arm --fido2-rehearse
+# The server will hash client_data_json bytes for the FIDO2 composition (see verify path).
+if [ -n "${FIDO2_ASSERT_JSON:-}" ] && [ "$FIDO2" != "1" ]; then
+  echo "FIDO2_ASSERT_JSON supplied but FIDO2 mode not active — refusing" >&2
+  exit 1
+fi
+
+# Token A is read from the canonical private environment, never an argument.
+TOK=$(irin_arm_principal_token) || exit 1
+SIDECAR_SOCKET_VOLUME=$(irin_sidecar_socket_volume)
+
+# Build the signing helper if missing or older than its source.
+# Only the SE-p256 (Touch ID) path uses arm-attest; the FIDO2 path signs via
+# the Python helper, so skip the swiftc build entirely in FIDO2 mode (swiftc
+# is absent on the Linux canary host).
+HELPER=bin/arm-attest
+if [ "$FIDO2" != "1" ]; then
+  if [ ! -x "$HELPER" ] || [ -n "$(find bin/arm-attest.swift -newer "$HELPER" 2>/dev/null)" ]; then
+    echo "building $HELPER from source..." >&2
+    swiftc -O -o "$HELPER" bin/arm-attest.swift
+  fi
+fi
+
+curl_uds() {
+  docker run --rm -i --user 0 -v "$SIDECAR_SOCKET_VOLUME":/run/sidecar \
+    curlimages/curl:8.12.1 -s --unix-socket /run/sidecar/sidecar.sock "$@"
+}
+
+# --- Resume-first: is there an open stage? -------------------------------
+PENDING=$(curl_uds -w '\n%{http_code}' http://localhost/watch/admin/producer/arm/pending \
+  -H "Authorization: Bearer sovereign-op:$TOK")
+CODE=$(printf '%s' "$PENDING" | tail -1)
+BODY=$(printf '%s' "$PENDING" | sed '$d')
+
+if [ "$CODE" = "200" ]; then
+  STAGE_REH=$(printf '%s' "$BODY" | jq -r '.rehearsal')
+  if [ "$STAGE_REH" = "true" ] && [ "$REHEARSE" = "0" ]; then
+    echo "open stage is a REHEARSAL but you asked for a real arm — finish or expire it first" >&2
+    exit 1
+  fi
+  if [ "$STAGE_REH" = "false" ] && [ "$REHEARSE" = "1" ]; then
+    echo "open stage is a REAL arm but you asked for --rehearse — finish or expire it first" >&2
+    exit 1
+  fi
+  SID=$(printf '%s' "$BODY" | jq -r '.stage_id')
+  CHALLENGE=$(printf '%s' "$BODY" | jq -r '.challenge')
+  LEFT=$(printf '%s' "$BODY" | jq -r '.expires_in_ms')
+  echo "resuming open stage $SID (${LEFT}ms left in window)"
+elif [ "$CODE" = "404" ]; then
+  if [ "$REHEARSE" = "1" ]; then
+    STAGE=$(curl_uds -X POST http://localhost/watch/admin/producer/arm/stage \
+      -H "Authorization: Bearer sovereign-op:$TOK" \
+      -H "Content-Type: application/json" -d '{"rehearse": true}')
+  else
+    STAGE=$(curl_uds -X POST http://localhost/watch/admin/producer/arm/stage \
+      -H "Authorization: Bearer sovereign-op:$TOK")
+  fi
+  SID=$(printf '%s' "$STAGE" | jq -r '.stage_id // empty')
+  CHALLENGE=$(printf '%s' "$STAGE" | jq -r '.challenge // empty')
+  if [ -z "$SID" ] || [ -z "$CHALLENGE" ]; then
+    echo "stage failed: $STAGE" >&2
+    exit 1
+  fi
+  if [ "$REHEARSE" = "1" ]; then
+    echo "REHEARSAL stage $SID open (producer will NOT start)"
+  else
+    echo "staged $SID — phone should ding; window open"
+  fi
+
+  if [ "$FIDO2" = "1" ] && [ -z "${FIDO2_ASSERT_JSON:-}" ]; then
+    CH_HEX=$(printf '%s' "$CHALLENGE" | base64 -D 2>/dev/null | xxd -p -c 256 || printf '%s' "$CHALLENGE" | base64 -d | xxd -p -c 256)
+    echo ""
+    echo "FIDO2 browser path: open bin/fido2-assert.html"
+    echo "  challenge: $CH_HEX"
+    echo "  credential_id: (the fido2-es256 one from arm_attest_keys.json)"
+    echo "After capturing assertion in browser:"
+    echo "  FIDO2_ASSERT_JSON='paste-the-json' bin/arm --fido2-rehearse"
+    echo "(stage remains open and will be resumed on re-run)"
+    exit 0
+  fi
+else
+  echo "pending check failed (HTTP $CODE): $BODY" >&2
+  exit 1
+fi
+
+# --- Sign (custody domain 2) ----------------------------------------------
+SHORT=$(printf '%s' "$SID" | cut -c1-8)
+if [ "$FIDO2" = "1" ]; then
+  if [ -n "${FIDO2_ASSERT_JSON:-}" ]; then
+    echo "using external FIDO2 assertion JSON (browser path)"
+    ATTEST="$FIDO2_ASSERT_JSON"
+  else
+    CHALLENGE_HEX=$(printf '%s' "$CHALLENGE" | base64 -D 2>/dev/null | xxd -p -c 256 || printf '%s' "$CHALLENGE" | base64 -d | xxd -p -c 256)
+    echo "touch the FIDO2 key when it blinks (stage $SHORT)..."
+    ATTEST=$("$FIDO2_PYTHON" bin/fido2-helper.py assert --challenge "$CHALLENGE_HEX")
+  fi
+else
+  echo "touch the sensor when prompted (stage $SHORT)..."
+  ATTEST=$("$HELPER" sign --challenge "$CHALLENGE" --stage-id "$SID")
+fi
+
+# --- Confirm --------------------------------------------------------------
+CONFIRM_BODY=$(printf '%s' "$ATTEST" | jq --arg sid "$SID" '. + {stage_id: $sid}')
+RESP=$(curl_uds -X POST http://localhost/watch/admin/producer/arm/confirm \
+  -H "Authorization: Bearer sovereign-op:$TOK" \
+  -H "Content-Type: application/json" \
+  -d "$CONFIRM_BODY")
+echo "$RESP"
+STATUS=$(printf '%s' "$RESP" | jq -r '.status // empty')
+case "$STATUS" in
+  armed)        echo "--> ARMED. Kill switch: POST /watch/admin/producer/disarm";;
+  rehearsal-ok) echo "--> rehearsal complete; producer NOT started (confirm_rehearsal row in chain)";;
+  *)            echo "--> confirm did not arm; see response above and the arm_audit chain" >&2; exit 1;;
+esac

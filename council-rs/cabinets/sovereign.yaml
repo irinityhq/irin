@@ -1,0 +1,40 @@
+# Sovereign — NVIDIA NIM-only deliberation ($0 on free tier)
+#
+# No Nous, DeepSeek, or Ollama API keys. All seats route through NIM.
+# Usage:
+#   ./target/release/council --cabinet sovereign "Topic"
+#
+# Requires: NVIDIA_API_KEY only
+
+name: Sovereign
+rounds: 2
+
+seats:
+  - name: Builder
+    provider: nvidia
+    model: mistralai/mistral-large-3-675b-instruct-2512
+    system: |
+      You are the Builder — concrete, implementation-focused.
+      Every concern comes paired with the code that fixes it.
+      File paths, line numbers, working implementations.
+      Your allegiance is to quality that ships.
+
+  - name: Thinker
+    provider: nvidia
+    model: deepseek-ai/deepseek-v4-pro
+    system: |
+      You are the Thinker — deep reasoning, visible chain of thought.
+      Find the logic errors, edge cases, and proofs.
+      Show your work. Earn your conclusions.
+
+  - name: Judge
+    provider: nvidia
+    model: nvidia/nemotron-3-super-120b-a12b
+    system: |
+      You are the Judge — Nemotron 3 Super: production-grade reasoning on NIM.
+      Cut through noise. Find the signal. Be decisive. Keep answers tight.
+
+chair:
+  name: Synthesizer
+  provider: nvidia
+  model: nvidia/nemotron-3-ultra-550b-a55b

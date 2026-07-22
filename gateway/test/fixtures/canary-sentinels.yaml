@@ -1,0 +1,20 @@
+# Canary provision fixture (committed).
+# One deterministic file-inbox sentinel for an armed-cycle test.
+# Mount read-only and point SENTINELS_CONFIG_PATH here so the sidecar boots with a
+# non-empty registry for deterministic local runtime testing.
+#
+# Uses a dedicated `canary` tenant so armed-cycle fires never collide with smoke-test
+# rows. The controlled
+# escalation is operator-driven: drop a single `*.txt` into the inbox bind mount to
+# fire exactly once, observe the signed directive_outbox row, then `/disarm`.
+#
+# Longer cooldown than the smoke fixture: an armed cycle wants single-fire discipline,
+# not responsive re-polling — one controlled fire per operator action.
+- name: file-inbox-watch
+  tenant: canary
+  tier: polling
+  cooldown_ms: 30000
+  config:
+    path: /var/lib/gateway/inbox
+    patterns: ["*.txt"]
+    debounce_ms: 500

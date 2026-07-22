@@ -1,0 +1,29 @@
+{
+  "text": "Council Weekly Drift",
+  "blocks": [
+    {
+      "type": "header",
+      "text": {"type": "plain_text", "text": "🎯 Council Weekly Drift"}
+    },
+    {
+      "type": "section",
+      "fields": [
+        {"type": "mrkdwn", "text": "*Window*\n{{ window_days }}d"},
+        {"type": "mrkdwn", "text": "*Sessions*\n{{ sessions_analyzed }}"},
+        {"type": "mrkdwn", "text": "*{{ drift_emoji }} Avg drift*\n{{ avg_drift }}"},
+        {"type": "mrkdwn", "text": "*Confidence flips*\n{{ confidence_flips }}"}
+      ]
+    }{% if top_anchoring is defined and top_anchoring | length > 0 %},
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Top anchoring patterns*\n{% for p in top_anchoring %}• `{{ p.keyword }}` — drift {{ p.avg_drift }} ({{ p.session_count }} session{% if p.session_count != 1 %}s{% endif %})\n{% endfor %}"
+      }
+    }{% endif %},
+    {
+      "type": "context",
+      "elements": [{"type": "mrkdwn", "text": "Report: `{{ report_filename }}`"}]
+    }
+  ]
+}

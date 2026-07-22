@@ -1,0 +1,75 @@
+#!/bin/sh
+# Tier-0 enrollment ceremony (spec §7.1, enrollment invariant).
+# Generates the SE keypair via the arm-attest helper (Touch ID prompt proves
+# the biometric gate), then appends the credential record to the registry
+# ATOMICALLY: merged registry -> temp file -> fail-closed validation -> rename
+# into place inside the sidecar_data volume. No human ever pastes credential
+# JSON — transcription is the failure mode this project exists to kill.
+#
+# After this script: restart the sidecar and VERIFY the boot audit row +
+# ntfy alert carry the new keyset hash printed below. A keyset change with
+# no matching ceremony in your memory is an ALARM.
+set -eu
+cd "$(dirname "$0")/.."
+
+. bin/lib/runtime-env.sh
+REGISTRY_PATH_IN_VOLUME=/var/lib/sidecar/arm_attest_keys.json
+LABEL=${1:-sovereign-mac-touchid}
+SIDECAR_DATA_VOLUME=$(irin_sidecar_data_volume)
+
+HELPER=bin/arm-attest
+if [ ! -x "$HELPER" ] || [ -n "$(find bin/arm-attest.swift -newer "$HELPER" 2>/dev/null)" ]; then
+  echo "building $HELPER from source..." >&2
+  swiftc -O -o "$HELPER" bin/arm-attest.swift
+fi
+
+vol_sh() {
+  docker run --rm -i --user 0 -v "$SIDECAR_DATA_VOLUME":/var/lib/sidecar \
+    alpine:3.21 sh -c "$1"
+}
+
+echo "enrolling SE credential (Touch ID prompt incoming)..."
+RECORD=$("$HELPER" enroll --label "$LABEL")
+echo "new credential record:"
+printf '%s\n' "$RECORD" | jq .
+
+# Current registry (empty array when absent).
+EXISTING=$(vol_sh "cat $REGISTRY_PATH_IN_VOLUME 2>/dev/null || echo '[]'")
+
+# Merge + the same fail-closed structural rules the sidecar loader applies:
+# array shape, required fields, known types, 33/65-byte base64 SEC1 point,
+# no duplicate credential_id, >= 1 hardware credential.
+# --argjson parses RECORD as a single JSON value — a malformed or multi-doc
+# record (compromised helper) makes jq fail and set -e aborts fail-closed,
+# rather than string-concatenating attacker bytes into the slurp (hardening).
+MERGED=$(printf '%s' "$EXISTING" | jq --argjson rec "$RECORD" '. + [$rec]')
+printf '%s' "$MERGED" | python3 -c '
+import base64, json, sys
+creds = json.load(sys.stdin)
+assert isinstance(creds, list) and creds, "registry must be a non-empty array"
+ids = set()
+for c in creds:
+    for k in ("credential_id", "credential_type", "public_key", "label", "enrolled_at"):
+        assert isinstance(c.get(k), str) and c[k], f"missing field {k}"
+    assert c["credential_type"] in ("se-p256", "fido2-es256"), "unknown credential_type"
+    pk = base64.b64decode(c["public_key"], validate=True)
+    assert len(pk) in (33, 65), f"public_key is {len(pk)} bytes, not a SEC1 point"
+    assert c["credential_id"] not in ids, "duplicate credential_id"
+    ids.add(c["credential_id"])
+print("validation: PASS ({} credentials)".format(len(creds)))
+'
+
+# Atomic install: temp file in the SAME directory -> rename (root 0600).
+printf '%s' "$MERGED" | jq -S . | vol_sh "cat > $REGISTRY_PATH_IN_VOLUME.tmp \
+  && chmod 600 $REGISTRY_PATH_IN_VOLUME.tmp \
+  && mv $REGISTRY_PATH_IN_VOLUME.tmp $REGISTRY_PATH_IN_VOLUME \
+  && echo 'installed: '$REGISTRY_PATH_IN_VOLUME"
+
+# Operator cross-check (spec §7.2 pinned recipe): expected boot keyset hash.
+HASH=$(printf '%s' "$MERGED" | jq -cS 'sort_by(.credential_id)' | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)
+echo
+echo "expected boot keyset_hash: $HASH"
+echo "next steps:"
+echo "  1. ensure the Gateway environment has GW_ARM_ATTEST_KEYS_PATH=$REGISTRY_PATH_IN_VOLUME"
+echo "  2. docker compose up -d sidecar   (restart loads the registry)"
+echo "  3. VERIFY the boot audit row + ntfy alert show the hash above"

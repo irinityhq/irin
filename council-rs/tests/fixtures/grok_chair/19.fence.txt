@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Dismiss","in_response_to":"esc-boot-0019","rationale":"Checker (nvidia) restated the problem and assessed insufficient evidence for Worker dispatch due to lack of failure symptoms or actionable scope; Analyst (grok) confirmed the minimal signal does not cross the recommend-only threshold with 100% convergence."}
+```

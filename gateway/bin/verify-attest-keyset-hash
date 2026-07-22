@@ -1,0 +1,71 @@
+#!/bin/sh
+# Public integrity check for the enrolled attest keyset (spec §7.2).
+# Reads credential_id + public_key material only — private keys never leave SE.
+#
+# Usage:
+#   bin/verify-attest-keyset-hash
+#   bin/verify-attest-keyset-hash /path/to/arm_attest_keys.json
+#   EXPECTED_KEYSET_HASH=<64-hex> bin/verify-attest-keyset-hash
+#
+# Default read path: docker volume gateway_sidecar_data → arm_attest_keys.json
+# (the path arm-enroll writes; NOT attest_keys.json — see smoke_phase3 CI drift).
+set -eu
+cd "$(dirname "$0")/.."
+
+. bin/lib/runtime-env.sh
+REGISTRY_IN_VOLUME=/var/lib/sidecar/arm_attest_keys.json
+REGISTRY_PATH=${1:-$REGISTRY_IN_VOLUME}
+SIDECAR_DATA_VOLUME=$(irin_sidecar_data_volume)
+
+read_registry() {
+  if [ -f "$REGISTRY_PATH" ]; then
+    cat "$REGISTRY_PATH"
+    return 0
+  fi
+  docker run --rm -v "$SIDECAR_DATA_VOLUME":/var/lib/sidecar:ro alpine:3.21 \
+    cat "$REGISTRY_PATH" 2>/dev/null
+}
+
+RAW=$(read_registry) || {
+  echo "FAIL: cannot read registry at $REGISTRY_PATH" >&2
+  echo "  (host file missing and $SIDECAR_DATA_VOLUME volume unreadable)" >&2
+  exit 1
+}
+
+if [ -z "$(printf '%s' "$RAW" | tr -d '[:space:]')" ]; then
+  echo "FAIL: registry file is empty (0 bytes) — sidecar will fail-closed (cannot arm)" >&2
+  echo "  if arm_attest_keys.json has credentials, GW_ARM_ATTEST_KEYS_PATH may point at the wrong file" >&2
+  exit 1
+fi
+
+printf '%s' "$RAW" | jq -e 'type == "array" and length > 0' >/dev/null || {
+  echo "FAIL: registry is not a non-empty JSON array" >&2
+  exit 1
+}
+
+CREDS=$(printf '%s' "$RAW" | jq 'length')
+IDS=$(printf '%s' "$RAW" | jq -r '[.[].credential_id] | join(", ")')
+TYPES=$(printf '%s' "$RAW" | jq -r '[.[].credential_type] | join(", ")')
+HASH=$(printf '%s' "$RAW" | jq -cS 'sort_by(.credential_id)' | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)
+
+echo "registry:     $REGISTRY_PATH"
+echo "credentials:  $CREDS"
+echo "types:        $TYPES"
+echo "credential_ids: $IDS"
+echo "keyset_hash:  $HASH"
+echo
+
+if [ -n "${EXPECTED_KEYSET_HASH:-}" ]; then
+  if [ "$HASH" = "$EXPECTED_KEYSET_HASH" ]; then
+    echo "PASS: matches EXPECTED_KEYSET_HASH"
+    exit 0
+  fi
+  echo "FAIL: hash mismatch" >&2
+  echo "  expected: $EXPECTED_KEYSET_HASH" >&2
+  echo "  got:      $HASH" >&2
+  exit 1
+fi
+
+echo "INFO: compare this value with the sidecar boot log keyset_hash."
+
+exit 0

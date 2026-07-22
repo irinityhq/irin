@@ -1,0 +1,225 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile.gateway
+    volumes:
+      - ./nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
+      - ./conf:/usr/local/openresty/nginx/conf/conf:ro
+      - ./lua:/usr/local/openresty/nginx/lua:ro
+      # Shared UDS socket dir — sidecar binds the socket here, gateway
+      # connects to it. Named volume so both containers see the same inode.
+      - sidecar_sock:/run/sidecar
+    ports:
+      # Authenticated via virtual API keys — bind localhost only
+      - "127.0.0.1:${IRIN_GATEWAY_PORT:-18080}:8080"
+      # (Sovereign / Phase 3: never expose 0.0.0.0 in compose; use reverse proxy + mTLS for remote)
+    environment:
+      - XAI_API_KEY=${XAI_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - NVIDIA_API_KEY=${NVIDIA_API_KEY}
+      - VERTEX_PROJECT=${VERTEX_PROJECT:-your-gcp-project}
+      - VERTEX_LOCATION=${VERTEX_LOCATION:-global}
+      - VERTEX_GEMINI_MODEL=${VERTEX_GEMINI_MODEL:-}
+      # Sidecar over Unix Domain Socket — see COUNCIL_GATEWAY_CONTRACT.md.
+      # The trailing colon is the lua-resty-http convention for "no port".
+      # Quoted because YAML would otherwise parse the colons as a mapping.
+      - "SIDECAR_ADDR=unix:/run/sidecar/sidecar.sock:"
+      - SIDECAR_TIMEOUT_MS=200
+      - CLAUDE_PROXY_URL=http://192.168.65.254:9090
+      - CODEX_PROXY_URL=${CODEX_PROXY_URL:-http://192.168.65.254:9091}
+      - GEMINI_PROXY_URL=${GEMINI_PROXY_URL:-http://192.168.65.254:9092}
+      - GW_ENABLE_STREAMING=${GW_ENABLE_STREAMING:-0}
+      - GW_ENABLE_BATCH=${GW_ENABLE_BATCH:-0}
+      # Council endpoint (Phase 0.5, spec §5.9). Default off.
+      - COUNCIL_GATEWAY_TOKEN=${COUNCIL_GATEWAY_TOKEN:-}
+      - COUNCIL_GATEWAY_KEY_ID=${COUNCIL_GATEWAY_KEY_ID:-}
+      - GW_ENABLE_COUNCIL_ENDPOINT=${GW_ENABLE_COUNCIL_ENDPOINT:-0}
+      - COUNCIL_BASE_URL=${COUNCIL_BASE_URL:-}
+      # P0-1: shared-secret bearer tokens for the host-side CLI proxies.
+      # Empty when the proxy runs with default loopback bind; otherwise
+      # must match the token set in the proxy process env.
+      - CLAUDE_PROXY_TOKEN=${CLAUDE_PROXY_TOKEN:-}
+      - CODEX_PROXY_TOKEN=${CODEX_PROXY_TOKEN:-}
+      - GEMINI_PROXY_TOKEN=${GEMINI_PROXY_TOKEN:-}
+      - _CHAOS_DUMMY=test
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    restart: unless-stopped
+    healthcheck:
+      # busybox wget, IPv4-explicit: curl is absent from the openresty image and
+      # in-container localhost resolves IPv6 while nginx listens IPv4-only.
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 15s
+
+
+  sidecar:
+    build:
+      # Context is the IRIN monorepo root so `.git`, Gateway, and the shared
+      # sovereign-protocol path dependency have the same layout in-container
+      # as they do in the checkout. build.rs uses that Git state to bake the
+      # fail-closed provenance identity.
+      context: ..
+      dockerfile: gateway/sidecar-rs/Dockerfile
+    environment:
+      - MODELS_JSON_PATH=/conf/models.json
+      - SIDECAR_SOCKET_PATH=/run/sidecar/sidecar.sock
+      # Management UDS lockdown. The socket carries the full management
+      # surface (arm/admin), so its mode is the FIRST isolation boundary. The
+      # tightened default is 0o660 (was 0o777 = world-rwx, NO isolation).
+      #
+      # Compose topology: the sidecar container runs as root (uid 0); the
+      # gateway container's nginx worker runs as `user nobody triad_mgmt;`
+      # (nginx.conf). H4: dedicated `triad_mgmt` group (gid 9999) replaces
+      # the former `nobody` (65534) catch-all — only nginx gets IPC access.
+      # Both Dockerfiles create the group at the same gid. nginx's setgid
+      # DROPS supplementary groups, so the PRIMARY gid path is what works.
+      # The sidecar chowns the socket to root:triad_mgmt 0o660.
+      # FAIL CLOSED: an invalid value refuses sidecar startup (see socket.rs).
+      - SIDECAR_SOCKET_MODE=${SIDECAR_SOCKET_MODE:-0660}
+      - SIDECAR_SOCKET_GID=${SIDECAR_SOCKET_GID:-9999}
+      # Pin the watch plane DB onto the persistent sidecar_data volume. Without
+      # this the sidecar defaults to cwd-relative "watch.db" (main.rs), which on
+      # the WORKDIR-less runtime image lands at /watch.db on the ephemeral
+      # container root fs — the hash-chained watch_fires ledger + pending_escalations
+      # would be lost on every container recreate (and the Phase 3 smoke probes
+      # /var/lib/sidecar/watch.db, so it could never find the table after RESTART).
+      - WATCH_DB_PATH=/var/lib/sidecar/watch.db
+      # D5 (council_idem read-through-on-miss durability P0-2): pin the write-ahead
+      # mirror for council idempotency exactly like WATCH_DB_PATH. Without this the
+      # sidecar defaults to cwd-relative "council_idem.db" (main.rs:1683), which on
+      # the alpine runtime (no WORKDIR) lands at /council_idem.db on ephemeral rootfs.
+      # Post-restart cold-tail get_stored_row + LRU warm (the exact gap closed by D5)
+      # would be lost on any recreate. Smoke (which does --force-recreate + local-overlay)
+      # and plan D9 gate both require the mirror to survive restarts. Reuses sidecar_data
+      # volume (already mounted at 103).
+      - COUNCIL_IDEM_DB_PATH=/var/lib/sidecar/council_idem.db
+      - LEDGER_DB_PATH=/var/lib/sidecar/ledger.db
+      - LEDGER_SIGNING_KEY_PATH=/run/secrets/ledger_key
+      # Air-gapped root verifying key (Ed25519 public key, 64 hex chars / 32
+      # bytes). When set, `gateway-ledger verify` and `fsck` cross-check that
+      # every key_introduce / key_revoke ceremony was signed by this root.
+      # The matching private key MUST stay air-gapped — only sign envelopes
+      # with `gateway-ceremony introduce|revoke` on an offline workstation.
+      # Leave commented out to keep the implicit-root model (back-compat).
+      # - ROOT_PUBKEY_HEX=${ROOT_PUBKEY_HEX:-}
+      - GATEWAY_DURABLE=${GATEWAY_DURABLE:-0}
+      - GATEWAY_STATE_DB_PATH=/var/lib/sidecar/gateway.db
+      - DECON_CONFIG_PATH=/conf/decon_config.json
+      - AUTH_CONFIG_PATH=${AUTH_CONFIG_PATH:-/var/lib/sidecar/auth_keys.json}
+      - IP_POLICY_PATH=/conf/ip_policy.json
+      # Phase 3 multi-tenant: deny by default when no keys are configured.
+      # Set to "false" only for legacy/dev passthrough mode.
+      - GATEWAY_AUTH_FAIL_CLOSED=${GATEWAY_AUTH_FAIL_CLOSED:-true}
+      - AUTH_PEPPER=${AUTH_PEPPER}
+      # One-time admin bootstrap token. When set, this string can be passed
+      # as `admin_key` to POST /admin/keys to provision the very first admin
+      # key. Leave empty in steady-state operation.
+      - BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN:-}
+      # Separate credential for the admin-only Watch/Outbox read surface. The
+      # canonical setup generates this so BOOTSTRAP_TOKEN can be retired.
+      - WATCH_ADMIN_TOKEN=${WATCH_ADMIN_TOKEN:-}
+      # Phase 3b live dispatcher (default disabled). These are passed through
+      # so `make up` + .env can control the live path without code changes.
+      - WATCH_DISPATCHER_ENABLED=${WATCH_DISPATCHER_ENABLED:-false}
+      - WATCH_DISPATCHER_STRICT_BOOT=${WATCH_DISPATCHER_STRICT_BOOT:-false}
+      - WATCH_DISPATCHER_TICK_INTERVAL_MS=${WATCH_DISPATCHER_TICK_INTERVAL_MS:-500}
+      - WATCH_DISPATCHER_MAX_CLAIMS_PER_TICK=${WATCH_DISPATCHER_MAX_CLAIMS_PER_TICK:-2}
+      - WATCH_DISPATCHER_PROBE_MAX_ATTEMPTS=${WATCH_DISPATCHER_PROBE_MAX_ATTEMPTS:-30}
+      - WATCH_DISPATCHER_PROBE_RETRY_MS=${WATCH_DISPATCHER_PROBE_RETRY_MS:-1000}
+      - WATCH_DISPATCHER_COUNCIL_TIMEOUT_SECS=${WATCH_DISPATCHER_COUNCIL_TIMEOUT_SECS:-120}
+      # Phase 1 CDC producer seam (default disabled). D9 smoke arms this with
+      # the dispatcher key so committed watch_fires rows become pending_escalations.
+      - WATCH_PRODUCER_ENABLED=${WATCH_PRODUCER_ENABLED:-false}
+      # Wave-1 single-tenant tripwire: the ONE tenant the watch outbox surface
+      # accepts (api.rs assert_canary_tenant). Default "sovereign" PRESERVES the
+      # historical hard-coded guard for local canary / `make up` — the base
+      # compose default must stay sovereign. CI/phase-3-smoke overrides this to
+      # "phase3-smoke" via the workflow step env + .env so the smoke job's HTTP
+      # outbox read (checklist 6b) clears the guard; the guard stays fail-closed
+      # for every other tenant. Removed in Wave 2 when capability tokens land.
+      - WATCH_CANARY_TENANT=${WATCH_CANARY_TENANT:-sovereign}
+      # Sidecar → gateway caller auth for council-triage (probe + live dispatcher).
+      # Separate from COUNCIL_GATEWAY_TOKEN (gateway → council-rs). Provision via
+      # `make provision-key` + BOOTSTRAP_TOKEN and export the raw key here.
+      - WATCH_DISPATCHER_GATEWAY_KEY=${WATCH_DISPATCHER_GATEWAY_KEY:-}
+      # Inside compose the sidecar should talk to the gateway service by name
+      - GATEWAY_BASE_URL=${GATEWAY_BASE_URL:-http://gateway:8080}
+      # P0-1 canary cap (the invariant / cap (b)). The sidecar's
+      # fail-closed env reader caps at the $50 ceiling const; compose default
+      # pins the ratified canary value so the deployed container can never
+      # silently fall back to the ceiling during the canary window.
+      - DAILY_SPEND_CAP_USD=${DAILY_SPEND_CAP_USD:-25}
+      - WATCH_MAX_FANOUT_COST_USD=${WATCH_MAX_FANOUT_COST_USD:-2.50}
+      # p0d/H2 — out-of-band file-import recon (default OFF unless cadence set).
+      # RECON_IMPORT_PATH points inside the sidecar_data volume; drop the
+      # provider billing export there (docker cp or via the volume).
+      - RECON_CADENCE_SECS=${RECON_CADENCE_SECS:-}
+      - RECON_DIVERGENCE_THRESHOLD_USD=${RECON_DIVERGENCE_THRESHOLD_USD:-}
+      - RECON_IMPORT_PATH=${RECON_IMPORT_PATH:-}
+      # Dual-custody single-operator arming (the invariant, runbook §10).
+      # Principals + deviation tags come from .env; OTC hash file lives on the
+      # sidecar_data volume (hashes only — codes never touch this host).
+      - GW_ARM_PRINCIPALS=${GW_ARM_PRINCIPALS:-}
+      - GW_ARM_DEVIATION_FLAG=${GW_ARM_DEVIATION_FLAG:-}
+      - GW_ARM_PRINCIPAL_DOMAINS=${GW_ARM_PRINCIPAL_DOMAINS:-}
+      - ARM_NOTIFY_URL=${ARM_NOTIFY_URL:-}
+      # dual-custody-local-attest (spec §4.3 + §7.2): stage TTL pass-through
+      # (previously defaulted in-binary only) + boot-only enrolled-credential
+      # registry path (root-owned 0600 file on the sidecar_data volume;
+      # fail-closed when unset — confirm rejects registry_unloaded).
+      - ARM_STAGE_TTL_MS=${ARM_STAGE_TTL_MS:-}
+      - GW_ARM_ATTEST_KEYS_PATH=${GW_ARM_ATTEST_KEYS_PATH:-}
+    volumes:
+      - ./conf:/conf:ro
+      - sidecar_sock:/run/sidecar
+      - sidecar_data:/var/lib/sidecar
+      # Phase 2 P0-4 / D9 harness demo bind mount — file-inbox-watch sentinel
+      # reads from this host directory (ro). Real drops (e.g. by
+      # smoke_phase3.sh TRIGGER_MODE=file-inbox using the phase3-sentinels.yaml
+      # fixture) exercise the unseeded fire path. `./demo/inbox/.gitkeep` keeps
+      # the path present in clones. The D9 activation fix starts the watcher.
+      - ./demo/inbox:/var/lib/gateway/inbox:ro
+      # Trust root: the host file at ~/.irin/ledger_key.pem is 32 raw bytes
+      # (despite the misleading extension — see COUNCIL_GATEWAY_CONTRACT.md).
+      # Mount read-only at a stable in-container path.
+      - ${HOME}/.irin/ledger_key.pem:/run/secrets/ledger_key:ro
+      # Allow sidecar to access the host's gcloud Application Default Credentials.
+      # If this is missing on the host, Docker will create an empty directory,
+      # which is harmless (gcp_auth will gracefully fall back to env var).
+      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+    depends_on:
+      # The Phase 3 startup probe calls the gateway router after the sidecar
+      # binds its UDS server. The gateway must therefore be started before the
+      # sidecar can become healthy; making gateway wait on sidecar health creates
+      # a reboot-time deadlock.
+      gateway:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      # Socket must exist before gateway starts. We don't probe HTTP here —
+      # the gateway will surface a real failure on the first request if the
+      # sidecar is unhealthy beyond the socket existing.
+      test: ["CMD-SHELL", "test -S /run/sidecar/sidecar.sock"]
+      interval: 5s
+      timeout: 2s
+      retries: 5
+      start_period: 10s
+
+  # Redis for L2 cache + budget persistence (optional)
+  # Uncomment when ready for distributed/persistent mode
+  # redis:
+  #   image: redis:7.4-alpine
+  #   command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+  #   volumes:
+  #     - redis_data:/data
+  #   restart: unless-stopped
+
+volumes:
+  sidecar_sock:
+  sidecar_data:
+  # redis_data:

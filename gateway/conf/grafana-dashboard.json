@@ -1,0 +1,1028 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_PROMETHEUS",
+      "label": "Prometheus",
+      "description": "Prometheus datasource scraping the AI gateway",
+      "type": "datasource",
+      "pluginId": "prometheus",
+      "pluginName": "Prometheus"
+    }
+  ],
+  "__requires": [
+    {
+      "type": "grafana",
+      "id": "grafana",
+      "name": "Grafana",
+      "version": "10.0.0"
+    },
+    {
+      "type": "datasource",
+      "id": "prometheus",
+      "name": "Prometheus",
+      "version": "1.0.0"
+    },
+    {
+      "type": "panel",
+      "id": "timeseries",
+      "name": "Time series",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "stat",
+      "name": "Stat",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "heatmap",
+      "name": "Heatmap",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "piechart",
+      "name": "Pie chart",
+      "version": ""
+    },
+    {
+      "type": "panel",
+      "id": "bargauge",
+      "name": "Bar gauge",
+      "version": ""
+    }
+  ],
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": {
+          "type": "grafana",
+          "uid": "-- Grafana --"
+        },
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "AI Gateway — request, latency, cache, security, error, and budget telemetry",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "iteration": 1,
+  "links": [],
+  "liveNow": false,
+  "panels": [
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "id": 100,
+      "panels": [],
+      "title": "Traffic",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Requests per second per model",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "req/s",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "opacity",
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 4,
+            "scaleDistribution": {"type": "linear"},
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"},
+            "thresholdsStyle": {"mode": "off"}
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]},
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 1},
+      "id": 101,
+      "options": {
+        "legend": {"calcs": ["sum", "mean"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (model) (rate(gw_requests_total[5m]))",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Request Rate by Model",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Prompt + completion tokens per second",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisLabel": "tokens/s",
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "opacity",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"}
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]},
+          "unit": "short"
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/^in:.*/"},
+            "properties": [{"id": "custom.fillOpacity", "value": 10}]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 1},
+      "id": 102,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (model) (rate(gw_tokens_in_total[5m]))",
+          "legendFormat": "in:{{model}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (model) (rate(gw_tokens_out_total[5m]))",
+          "legendFormat": "out:{{model}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Token Throughput (in/out) by Model",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "USD spent per hour, derived from gw_cost_microdollars_total (1 USD = 1e6 micro-USD)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisLabel": "USD/hr",
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "opacity",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"}
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]},
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 16, "x": 0, "y": 9},
+      "id": 103,
+      "options": {
+        "legend": {"calcs": ["sum", "mean", "lastNotNull"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (model) (rate(gw_cost_microdollars_total[5m])) * 3600 / 1e6",
+          "legendFormat": "{{model}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Cost / Hour by Model (USD)",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Total request rate (all models)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green"},
+              {"color": "yellow", "value": 50},
+              {"color": "red", "value": 200}
+            ]
+          },
+          "unit": "reqps"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 9},
+      "id": 104,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum(rate(gw_requests_total[5m]))",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Request Rate",
+      "type": "stat"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Total cost rate across all models",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green"},
+              {"color": "yellow", "value": 1},
+              {"color": "red", "value": 10}
+            ]
+          },
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 8, "x": 16, "y": 13},
+      "id": 105,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum(rate(gw_cost_microdollars_total[5m])) * 3600 / 1e6",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Cost / Hour",
+      "type": "stat"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 17},
+      "id": 200,
+      "panels": [],
+      "title": "Latency",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "P50 / P95 / P99 latency by provider (from histogram_quantile over gw_request_duration_ms_bucket)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisLabel": "ms",
+            "drawStyle": "line",
+            "fillOpacity": 5,
+            "gradientMode": "none",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": false
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green"},
+              {"color": "yellow", "value": 1000},
+              {"color": "red", "value": 5000}
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byRegexp", "options": "/p99/.*/"},
+            "properties": [{"id": "custom.lineWidth", "value": 3}]
+          }
+        ]
+      },
+      "gridPos": {"h": 9, "w": 16, "x": 0, "y": 18},
+      "id": 201,
+      "options": {
+        "legend": {"calcs": ["mean", "max"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "histogram_quantile(0.50, sum by (provider, le) (rate(gw_request_duration_ms_bucket[5m])))",
+          "legendFormat": "p50/{{provider}}",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "histogram_quantile(0.95, sum by (provider, le) (rate(gw_request_duration_ms_bucket[5m])))",
+          "legendFormat": "p95/{{provider}}",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "histogram_quantile(0.99, sum by (provider, le) (rate(gw_request_duration_ms_bucket[5m])))",
+          "legendFormat": "p99/{{provider}}",
+          "refId": "C"
+        }
+      ],
+      "title": "Latency Quantiles by Provider",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Aggregate p50/p95/p99 across all providers",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green"},
+              {"color": "yellow", "value": 1000},
+              {"color": "red", "value": 5000}
+            ]
+          },
+          "unit": "ms"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 18},
+      "id": 202,
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(gw_request_duration_ms_bucket[5m])))",
+          "legendFormat": "p50",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(gw_request_duration_ms_bucket[5m])))",
+          "legendFormat": "p95",
+          "refId": "B"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(gw_request_duration_ms_bucket[5m])))",
+          "legendFormat": "p99",
+          "refId": "C"
+        }
+      ],
+      "title": "Aggregate Latency",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Latency distribution heatmap (all providers/models)",
+      "fieldConfig": {
+        "defaults": {
+          "custom": {
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false},
+            "scaleDistribution": {"type": "linear"}
+          }
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 24, "x": 0, "y": 27},
+      "id": 203,
+      "options": {
+        "calculate": false,
+        "cellGap": 1,
+        "cellValues": {"unit": "short"},
+        "color": {
+          "exponent": 0.5,
+          "fill": "dark-orange",
+          "mode": "scheme",
+          "reverse": false,
+          "scale": "exponential",
+          "scheme": "Spectral",
+          "steps": 64
+        },
+        "exemplars": {"color": "rgba(255,0,255,0.7)"},
+        "filterValues": {"le": 1e-9},
+        "legend": {"show": true},
+        "rowsFrame": {"layout": "auto"},
+        "showValue": "never",
+        "tooltip": {"show": true, "yHistogram": true},
+        "yAxis": {"axisPlacement": "left", "reverse": false, "unit": "ms"}
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (le) (rate(gw_request_duration_ms_bucket[1m]))",
+          "format": "heatmap",
+          "legendFormat": "{{le}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Latency Heatmap",
+      "type": "heatmap"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 36},
+      "id": 300,
+      "panels": [],
+      "title": "Cache",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Cache hit rate (hit / (hit + miss))",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "max": 1,
+          "min": 0,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red"},
+              {"color": "yellow", "value": 0.2},
+              {"color": "green", "value": 0.5}
+            ]
+          },
+          "unit": "percentunit"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 0, "y": 37},
+      "id": 301,
+      "options": {
+        "minVizHeight": 75,
+        "minVizWidth": 75,
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showThresholdLabels": false,
+        "showThresholdMarkers": true
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum(rate(gw_cache_outcomes_total{outcome=\"hit\"}[5m])) / clamp_min(sum(rate(gw_cache_outcomes_total[5m])), 1e-9)",
+          "refId": "A"
+        }
+      ],
+      "title": "Cache Hit Rate",
+      "type": "gauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Cache hit vs miss counts over time",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisLabel": "events/s",
+            "drawStyle": "line",
+            "fillOpacity": 25,
+            "gradientMode": "opacity",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {"group": "A", "mode": "normal"}
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]},
+          "unit": "ops"
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "hit"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "green"}}]
+          },
+          {
+            "matcher": {"id": "byName", "options": "miss"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 16, "x": 8, "y": 37},
+      "id": 302,
+      "options": {
+        "legend": {"calcs": ["sum", "mean"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (outcome) (rate(gw_cache_outcomes_total[5m]))",
+          "legendFormat": "{{outcome}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Cache Hits vs Misses",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 45},
+      "id": 400,
+      "panels": [],
+      "title": "Security",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Auth rejections per second by reason",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisLabel": "rej/s",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "gradientMode": "none",
+            "lineWidth": 1,
+            "showPoints": "never",
+            "stacking": {"group": "A", "mode": "normal"}
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]},
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 46},
+      "id": 401,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (reason) (rate(gw_auth_rejections_total[5m]))",
+          "legendFormat": "{{reason}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Auth Rejections by Reason",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Decontaminator blocks per second by threat type",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisLabel": "blocks/s",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "stacking": {"group": "A", "mode": "normal"}
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]},
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 46},
+      "id": 402,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (threat) (rate(gw_decon_blocks_total[5m]))",
+          "legendFormat": "{{threat}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Decon Blocks by Threat",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Credential redactions per second by pattern",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisLabel": "redactions/s",
+            "drawStyle": "line",
+            "fillOpacity": 15,
+            "gradientMode": "opacity",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "stacking": {"group": "A", "mode": "normal"}
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]},
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 54},
+      "id": 403,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (pattern) (rate(gw_credentials_redacted_total[5m]))",
+          "legendFormat": "{{pattern}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Credentials Redacted by Pattern",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "IP gate blocks and shape gate violations per second",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisLabel": "events/s",
+            "drawStyle": "bars",
+            "fillOpacity": 80,
+            "lineWidth": 1,
+            "showPoints": "never",
+            "stacking": {"group": "A", "mode": "none"}
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]},
+          "unit": "ops"
+        },
+        "overrides": [
+          {
+            "matcher": {"id": "byName", "options": "ip_gate_blocks"},
+            "properties": [{"id": "color", "value": {"mode": "fixed", "fixedColor": "red"}}]
+          }
+        ]
+      },
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 54},
+      "id": 404,
+      "options": {
+        "legend": {"calcs": ["sum"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum(rate(gw_ip_gate_blocks_total[5m]))",
+          "legendFormat": "ip_gate_blocks",
+          "refId": "A"
+        },
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (field) (rate(gw_shape_gate_violations_total[5m]))",
+          "legendFormat": "shape:{{field}}",
+          "refId": "B"
+        }
+      ],
+      "title": "IP Gate + Shape Gate Violations",
+      "type": "timeseries"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 62},
+      "id": 500,
+      "panels": [],
+      "title": "Errors",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Error rate per second by stable code",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisLabel": "errors/s",
+            "drawStyle": "line",
+            "fillOpacity": 20,
+            "gradientMode": "opacity",
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "stacking": {"group": "A", "mode": "normal"}
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green"},
+              {"color": "yellow", "value": 0.1},
+              {"color": "red", "value": 1}
+            ]
+          },
+          "unit": "ops"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 16, "x": 0, "y": 63},
+      "id": 501,
+      "options": {
+        "legend": {"calcs": ["sum", "mean"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (code) (rate(gw_errors_total[5m]))",
+          "legendFormat": "{{code}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Error Rate by Code",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Error breakdown share over the dashboard time range",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "hideFrom": {"legend": false, "tooltip": false, "viz": false}
+          },
+          "mappings": [],
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 8, "w": 8, "x": 16, "y": 63},
+      "id": 502,
+      "options": {
+        "displayLabels": ["percent"],
+        "legend": {"displayMode": "table", "placement": "right", "showLegend": true, "values": ["value", "percent"]},
+        "pieType": "donut",
+        "reduceOptions": {"calcs": ["sum"], "fields": "", "values": false},
+        "tooltip": {"mode": "single", "sort": "none"}
+      },
+      "pluginVersion": "10.0.0",
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum by (code) (increase(gw_errors_total[$__range]))",
+          "legendFormat": "{{code}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Error Breakdown",
+      "type": "piechart"
+    },
+    {
+      "collapsed": false,
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 71},
+      "id": 600,
+      "panels": [],
+      "title": "Budget",
+      "type": "row"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Cumulative spend per budget key (USD)",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "palette-classic"},
+          "custom": {
+            "axisLabel": "USD",
+            "drawStyle": "line",
+            "fillOpacity": 10,
+            "gradientMode": "opacity",
+            "lineInterpolation": "stepAfter",
+            "lineWidth": 2,
+            "showPoints": "never",
+            "spanNulls": true
+          },
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]},
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 16, "x": 0, "y": 72},
+      "id": 601,
+      "options": {
+        "legend": {"calcs": ["lastNotNull", "max"], "displayMode": "table", "placement": "right", "showLegend": true},
+        "tooltip": {"mode": "multi", "sort": "desc"}
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "gw_budget_spent_microdollars / 1e6",
+          "legendFormat": "{{key}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Budget Spend per Key",
+      "type": "timeseries"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Top 10 budget keys by current spend",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "continuous-GrYlRd"},
+          "mappings": [],
+          "thresholds": {"mode": "absolute", "steps": [{"color": "green"}]},
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 9, "w": 8, "x": 16, "y": 72},
+      "id": 602,
+      "options": {
+        "displayMode": "gradient",
+        "minVizHeight": 10,
+        "minVizWidth": 0,
+        "orientation": "horizontal",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "showUnfilled": true,
+        "valueMode": "color"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "topk(10, gw_budget_spent_microdollars / 1e6)",
+          "legendFormat": "{{key}}",
+          "refId": "A"
+        }
+      ],
+      "title": "Top 10 Budget Keys",
+      "type": "bargauge"
+    },
+    {
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "description": "Total cumulative cost over the dashboard time range",
+      "fieldConfig": {
+        "defaults": {
+          "color": {"mode": "thresholds"},
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green"},
+              {"color": "yellow", "value": 10},
+              {"color": "red", "value": 100}
+            ]
+          },
+          "unit": "currencyUSD",
+          "decimals": 4
+        },
+        "overrides": []
+      },
+      "gridPos": {"h": 4, "w": 24, "x": 0, "y": 81},
+      "id": 603,
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "reduceOptions": {"calcs": ["lastNotNull"], "fields": "", "values": false},
+        "textMode": "auto"
+      },
+      "targets": [
+        {
+          "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+          "expr": "sum(increase(gw_cost_microdollars_total[$__range])) / 1e6",
+          "refId": "A"
+        }
+      ],
+      "title": "Total Cost (selected range)",
+      "type": "stat"
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["ai-gateway", "llm", "prometheus"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": false, "text": "Prometheus", "value": "Prometheus"},
+        "hide": 0,
+        "includeAll": false,
+        "label": "Datasource",
+        "multi": false,
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "queryValue": "",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      },
+      {
+        "current": {"selected": true, "text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+        "definition": "label_values(gw_requests_total, model)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Model",
+        "multi": true,
+        "name": "model",
+        "options": [],
+        "query": {"query": "label_values(gw_requests_total, model)", "refId": "StandardVariableQuery"},
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      },
+      {
+        "current": {"selected": true, "text": "All", "value": "$__all"},
+        "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+        "definition": "label_values(gw_request_duration_ms_bucket, provider)",
+        "hide": 0,
+        "includeAll": true,
+        "label": "Provider",
+        "multi": true,
+        "name": "provider",
+        "options": [],
+        "query": {"query": "label_values(gw_request_duration_ms_bucket, provider)", "refId": "StandardVariableQuery"},
+        "refresh": 2,
+        "regex": "",
+        "skipUrlSync": false,
+        "sort": 1,
+        "type": "query"
+      }
+    ]
+  },
+  "time": {"from": "now-1h", "to": "now"},
+  "timepicker": {
+    "refresh_intervals": ["5s", "10s", "30s", "1m", "5m", "15m", "30m", "1h"]
+  },
+  "timezone": "browser",
+  "title": "AI Gateway",
+  "uid": "ai-gateway",
+  "version": 1,
+  "weekStart": ""
+}

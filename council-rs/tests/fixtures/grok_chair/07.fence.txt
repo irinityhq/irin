@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Dismiss","in_response_to":"esc-0007","rationale":"Checker (nvidia) assessed duplicate escalation id as medium urgency with limited impact, noting it does not meet recommended-only threshold and concluded \"No dispatch is required at this stage\"."}
+```

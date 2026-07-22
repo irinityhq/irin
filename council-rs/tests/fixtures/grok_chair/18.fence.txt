@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Dismiss","in_response_to":"esc-boot-0018","rationale":"Analyst noted insufficient evidence for Worker dispatch; Checker proposed minimal Dismiss; convergence reached on Dismiss."}
+```

@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Act","in_response_to":"esc-0008","rationale":"Checker assessed the 40× rate deviation as concrete, high-magnitude evidence warranting a recommended Worker dispatch. Analyst confirmed the specific quantitative signal for tenant acme justifies job=investigate_fire_rate_anomaly with 100% convergence.","job":"investigate_fire_rate_anomaly","scope":{"tenant":"acme","subject":"frame-check","allowed_actions":["review","report"]},"stop_condition":"rate restored to <1/min or root cause identified","return_expectation":"report on findings and actions taken"}
+```

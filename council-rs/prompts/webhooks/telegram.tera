@@ -1,0 +1,12 @@
+*🎯 Council Weekly Drift*
+
+Window: `{{ window_days }}d`
+Sessions: `{{ sessions_analyzed }}`
+{{ drift_emoji }} Avg drift: `{{ avg_drift }}`
+Confidence flips: `{{ confidence_flips }}`
+High-drift: `{{ high_drift_count }}`
+{% if top_anchoring is defined and top_anchoring | length > 0 %}
+*Top anchoring:*
+{% for p in top_anchoring %}• `{{ p.keyword }}` — {{ p.avg_drift }} (×{{ p.session_count }})
+{% endfor %}{% endif %}
+Report: `{{ report_filename }}`

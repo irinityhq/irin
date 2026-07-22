@@ -1,0 +1,15 @@
+error[E0061]: this function takes 3 arguments but 1 argument was supplied
+  --> tests/compile_fail/hydration_token_required.rs:11:19
+   |
+11 |     let _future = run_boot_hydration_sweep(db);
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^---- two arguments of type `HydrationToken` and `&DirectiveSigningKey` are missing
+   |
+note: function defined here
+  --> src/watch/dispatcher.rs
+   |
+   | pub async fn run_boot_hydration_sweep(
+   |              ^^^^^^^^^^^^^^^^^^^^^^^^
+help: provide the arguments
+   |
+11 |     let _future = run_boot_hydration_sweep(db, /* HydrationToken */, /* &DirectiveSigningKey */);
+   |                                              ++++++++++++++++++++++++++++++++++++++++++++++++++

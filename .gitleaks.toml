@@ -1,0 +1,89 @@
+title = "IRIN mono-repo gitleaks"
+
+[extend]
+useDefault = true
+
+# Generated build output is not source and can contain upstream fixtures. CI
+# clean checkouts do not have these paths, but local scans should ignore them.
+[[allowlists]]
+description = "Generated build directories"
+paths = [
+  '''(^|/)target/''',
+  '''(^|/)node_modules/''',
+  '''(^|/)\.next/''',
+  '''(^|/)\.next-hosted/''',
+  '''(^|/)\.fastembed_cache/''',
+  '''(^|/)out/''',
+  '''(^|/)dist/''',
+  '''(^|/)build/''',
+  '''(^|/)coverage/''',
+  '''(^|/)\.turbo/''',
+  '''(^|/)\.vercel/''',
+  '''(^|/)warroom-web-dist/''',
+  '''(^|/)__pycache__/''',
+  '''\.tsbuildinfo$''',
+]
+
+# Gateway: synthetic policy/smoke fixtures used to assert rejection/redaction.
+[[allowlists]]
+description = "Gateway synthetic policy and smoke fixtures"
+condition = "AND"
+paths = [
+  '''gateway/sidecar-rs/src/policy\.rs''',
+  '''gateway/test/smoke\.sh''',
+]
+regexes = [
+  '''sk-abc123def456''',
+  '''smoke-test-affinity''',
+  '''gw_invalid_key_12345''',
+]
+
+# Setup regression: the fake curl shim returns a deterministic synthetic
+# Gateway key so the setup path can be tested without starting real services.
+[[allowlists]]
+description = "Setup script synthetic Gateway key fixture"
+condition = "AND"
+paths = ['''scripts/test-setup-local\.sh''']
+regexes = ['''gw_0123456789abcdef0123456789abcdef''']
+
+# Council: RFC 6455 canonical WebSocket nonce fixture.
+[[allowlists]]
+description = "Council RFC 6455 example WebSocket nonce"
+condition = "AND"
+paths = ['''council-rs/tests/ws_upgrade_protocol\.rs''']
+regexes = ['''dGhlIHNhbXBsZSBub25jZQ==''']
+
+# Council: synthetic redaction test fixtures, intentionally fake provider keys.
+[[allowlists]]
+description = "Council redaction test provider-key fixtures"
+condition = "AND"
+paths = [
+  '''council-rs/tests/test_security_gates\.rs''',
+  '''council-rs/src/librarian/redaction\.rs''',
+]
+regexes = [
+  '''sk-proj-1234567890abcdef1234567890abcdef''',
+  '''sk-ant-api03-1234567890abcdef1234567890abcdef''',
+  '''sk-ant-api03-AAAAAAAAAAAAAAAAAAAAAAAAA''',
+  '''xai-1234567890abcdef1234567890abcdef''',
+  '''AIzaSyB1234567890abcdef1234567890abcdef''',
+  '''gsk_1234567890abcdef1234567890abcdef''',
+  '''nvapi-1234567890abcdef1234567890abcdef''',
+  '''123456789:AAG_1234567890abcdef1234567890abcdef''',
+  '''https://hooks\.slack\.com/services/T12345678/B12345678/1234567890abcdef12345678''',
+  '''https://discord\.com/api/webhooks/123456789012345678/1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef''',
+  '''ghp_1234567890abcdef1234567890abcdef1234''',
+  '''ghp_ABCDEFGHIJabcdefghijABCDEFGHIJ123456''',
+  '''github_pat_1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef''',
+  '''eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\.eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiaWF0IjoxNTE2MjM5MDIyfQ\.SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c''',
+  '''-----BEGIN PRIVATE KEY-----\\nMIICXAIBAAKBgQCR\\n-----END PRIVATE KEY-----''',
+  '''A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6''',
+  '''abcdef12345678''',
+]
+
+# Council: env loader variable names only; the file reads the private provider env.
+[[allowlists]]
+description = "Council War Room env loader variable names"
+condition = "AND"
+paths = ['''council-rs/warroom/scripts/env\.sh''']
+regexes = ['''(XAI_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|NVIDIA_API_KEY|NOUS_API_KEY|DEEPSEEK_API_KEY)''']

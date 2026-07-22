@@ -1,0 +1,377 @@
+# Prometheus alerting rules for the AI Gateway.
+#
+# Scrape target: http://<gateway>:8080/metrics  (rendered by lua/cost.lua::prometheus()).
+# Thresholds derived from docs/runbook.md section 8 (Monitoring).
+#
+# Groups are organized by operator concern:
+#   - gateway.security      — credential / injection / abuse signals
+#   - gateway.availability  — error rate, circuit breakers, budget exhaustion
+#   - gateway.watch_plane   — directive_outbox TTL fence (T21c / A4a)
+#   - gateway.performance   — latency
+#
+# Notes on metric names (see lua/cost.lua::prometheus()):
+#   * Counters of interest:
+#       gw_auth_rejections_total{reason}
+#       gw_decon_blocks_total{threat}
+#       gw_credentials_redacted_total{pattern}
+#       gw_shape_gate_violations_total{field}
+#       gw_errors_total{code}
+#       gw_requests_total{model}
+#       gw_watch_directive_ttl_expired_total  (sidecar /watch/stats → cost.lua scrape)
+#   * Histogram:
+#       gw_request_duration_ms_bucket{provider,model,le}
+#       gw_request_duration_ms_sum / _count
+#
+# IMPORTANT — Two metrics requested in the alert spec do not currently exist
+# in cost.lua's exposition (no producer found in lua/ or sidecar-rs/):
+#   * gw_budget_rejections_total       → emulated via gw_errors_total{code="ERR_BUDGET_EXCEEDED"}
+#   * gw_circuit_breaker_trips_total   → emulated via gw_errors_total{code=~"ERR_CIRCUIT_.*|ERR_UPSTREAM_UNAVAILABLE"}
+# If/when those dedicated counters are added to cost.lua, update the two
+# expressions below to use them directly.
+
+groups:
+  # ---------------------------------------------------------------------------
+  - name: gateway.security
+    interval: 30s
+    rules:
+      - alert: DeconSpike
+        expr: sum(rate(gw_decon_blocks_total[5m])) * 60 > 5
+        for: 5m
+        labels:
+          severity: critical
+          surface: gateway
+          category: security
+        annotations:
+          summary: "Decontaminator blocking >5/min sustained — possible prompt injection attack"
+          description: |
+            Decontaminator stage is rejecting more than 5 requests per minute over the last 5
+            minutes (current: {{ $value | printf "%.2f" }}/min). Sustained decon blocks usually
+            indicate an active prompt-injection campaign or encoding-attack probe.
+            Investigate:
+              1. `docker compose logs gateway | jq 'select(.event=="decon_block")'`
+              2. Group by `threat` label on `gw_decon_blocks_total` to identify the dominant stage.
+              3. If a single client is the source, revoke its virtual API key via
+                 `make revoke-key KEY=<gw_live_...>` and rotate `AUTH_PEPPER` if compromise is suspected.
+              4. If false positives are dominating, tune `conf/decon_config.json`
+                 (set the noisy stage to `log_only` and reload sidecar with `kill -s HUP`).
+
+      - alert: CredentialRedactionAlert
+        expr: sum(rate(gw_credentials_redacted_total[1m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          surface: gateway
+          category: security
+          page: "true"
+        annotations:
+          summary: "Outbound responses contain secret material — upstream is leaking credentials"
+          description: |
+            The credential scrubber redacted at least one secret from a provider response in the
+            last minute (rate: {{ $value | printf "%.4f" }}/sec). Gateway redacted before the
+            client saw it, but the upstream provider returned secret material — this is a
+            confirmed leak event upstream of the gateway.
+            Immediate actions:
+              1. Identify the offending pattern: group `gw_credentials_redacted_total` by `pattern`.
+              2. `docker compose logs gateway | jq 'select(.event=="credential_redacted")'` to find
+                 the provider, model, and request_id.
+              3. Open an incident and rotate any credentials matching the redacted pattern class
+                 (AWS keys, GitHub PATs, private keys, etc.).
+              4. File an upstream report with the provider — they are echoing privileged data.
+
+      - alert: AuthRejectionSpike
+        expr: sum(rate(gw_auth_rejections_total[5m])) * 60 > 10
+        for: 5m
+        labels:
+          severity: warning
+          surface: gateway
+          category: security
+        annotations:
+          summary: "Auth rejections >10/min sustained — credential stuffing or misconfigured client"
+          description: |
+            Authentication rejections exceed 10/minute over the last 5 minutes (current:
+            {{ $value | printf "%.2f" }}/min). Possible causes:
+              - Credential stuffing / brute force against virtual API keys.
+              - A legitimate client with a stale/revoked key looping on retry.
+              - `auth_keys.json` corruption or pepper mismatch after redeploy.
+            Investigate:
+              1. Group by `reason` label: `missing_key`, `invalid_key`, `rate_limit` map to
+                 different root causes.
+              2. `docker compose logs gateway | jq 'select(.event=="auth_reject")'` to find
+                 source IPs.
+              3. If a single source IP dominates, add a deny entry to `conf/ip_policy.json`
+                 and reload (`docker compose kill -s HUP sidecar`).
+
+      - alert: ShapeGateViolations
+        expr: sum(rate(gw_shape_gate_violations_total[5m])) * 60 > 10
+        for: 5m
+        labels:
+          severity: warning
+          surface: gateway
+          category: security
+        annotations:
+          summary: "Shape gate dropping >10/min — oversized payloads or buggy client"
+          description: |
+            ASM structural shape gate is dropping more than 10 requests per minute over the last
+            5 minutes (current: {{ $value | printf "%.2f" }}/min). The gate enforces
+            `max_messages`, `max_message_bytes`, and `max_tools` from `conf/shape_limits.json`.
+            Likely causes:
+              - A client buggy enough to cram thousands of messages into one request.
+              - A DoS probe testing payload limits.
+              - Legitimate workload that has outgrown the configured limits.
+            Investigate:
+              1. Group by `field` label on `gw_shape_gate_violations_total` to identify the
+                 violated limit.
+              2. Tail the gateway logs filtered for `event=="shape_gate_block"`.
+              3. If legitimate, raise the offending limit in `conf/shape_limits.json` AND
+                 recompute the worker memory budget (see runbook section 10).
+
+  # ---------------------------------------------------------------------------
+  - name: gateway.availability
+    interval: 30s
+    rules:
+      - alert: BudgetExhaustion
+        # No dedicated gw_budget_rejections_total exists today; budget blocks surface as
+        # gw_errors_total{code="ERR_BUDGET_EXCEEDED"}. Replace this expr if a dedicated
+        # counter is added.
+        expr: sum(rate(gw_errors_total{code="ERR_BUDGET_EXCEEDED"}[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          surface: gateway
+          category: availability
+        annotations:
+          summary: "Budget rejections firing — a virtual key has run out of allowance"
+          description: |
+            One or more virtual API keys are being rejected for budget exhaustion (current rate:
+            {{ $value | printf "%.4f" }}/sec, sustained 5m). Customers/tenants on the affected key
+            are seeing `429`/`ERR_BUDGET_EXCEEDED`.
+            Triage:
+              1. Identify which key — `docker compose logs gateway | jq 'select(.error_code=="ERR_BUDGET_EXCEEDED")'`.
+              2. If the budget allotment is correct, top up via the admin API or extend the
+                 budget window.
+              3. If the key is compromised (unexpected spend pattern), revoke it.
+
+      - alert: CircuitBreakerTripped
+        # No dedicated gw_circuit_breaker_trips_total exists today; trips surface via the
+        # router's error codes. Replace this expr if a dedicated counter is added in cost.lua.
+        expr: increase(gw_errors_total{code=~"ERR_CIRCUIT_.*|ERR_UPSTREAM_UNAVAILABLE"}[5m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          surface: gateway
+          category: availability
+        annotations:
+          summary: "Provider/family circuit breaker tripped in the last 5m"
+          description: |
+            The Rust sidecar's per-(provider, family) circuit breaker has opened — a model family
+            is being isolated from routing decisions ({{ $value | printf "%.0f" }} trip events in
+            last 5m). Expected fallout: requests for that family route to the next eligible model.
+            Investigate:
+              1. `docker compose logs sidecar | grep circuit_breaker` to find which (provider, family).
+              2. Check upstream health — provider 5xx, 429, or auth failures.
+              3. Confirm the breaker is recovering (half-open → closed transitions in sidecar logs).
+                 If it stays open >15m, the family is genuinely down and you should consider a
+                 manual deny in `conf/models.json` so the auto-router stops scoring it.
+
+      - alert: HighErrorRate
+        expr: |
+          (
+            sum(rate(gw_errors_total[10m]))
+            /
+            clamp_min(sum(rate(gw_requests_total[10m])), 1)
+          ) > 0.05
+        for: 10m
+        labels:
+          severity: critical
+          surface: gateway
+          category: availability
+          page: "true"
+        annotations:
+          summary: "Gateway error rate >5% over 10m"
+          description: |
+            More than 5% of requests are returning errors over the last 10 minutes (current:
+            {{ $value | humanizePercentage }}). The gateway is failing to serve a meaningful share
+            of traffic.
+            Triage:
+              1. Group `gw_errors_total` by `code` to find the dominant error class.
+              2. Common patterns:
+                  - `ERR_UPSTREAM_*`         → provider-side outage; check provider status.
+                  - `ERR_SIDECAR_UNREACHABLE`→ sidecar down; `docker compose restart sidecar`.
+                  - `ERR_AUTH_*`             → see AuthRejectionSpike.
+                  - `ERR_GUARD_BLOCKED`      → see DeconSpike.
+              3. Cross-check with `gw_request_duration_ms` — error rate spike + latency cliff
+                 usually means upstream timeout.
+
+      - alert: ProviderParserMissing
+        expr: sum(rate(gw_provider_parser_missing_total[5m])) > 0
+        for: 1m
+        labels:
+          severity: critical
+          surface: gateway
+          category: availability
+          page: "true"
+        annotations:
+          summary: "Provider response had no usage parser — leaf accounting silently zeroed"
+          description: |
+            A provider response reached cost accounting with no parser registered in
+            `lua/lib/providers.lua` (provider={{ $labels.provider }}). Affected leaf rows
+            ship to the ledger with tokens=0/cost=0, breaking §6.4 aggregation invariants
+            for any council_wrapper that contains them. Without this alert, a missing
+            parser can remain hidden until end-to-end ledger inspection.
+            Action:
+              1. Add the parser entry in `lua/lib/providers.lua` (most CLI / OpenAI-compatible
+                 providers can reuse `parse_openai`).
+              2. `docker compose restart gateway` — `openresty -s reload` does NOT pick up
+                 lua/lib/* changes.
+              3. Re-run an affected council seat and confirm §6.4 wrapper totals reconcile.
+
+      - alert: ProviderParserError
+        expr: sum(rate(gw_provider_parser_error_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          surface: gateway
+          category: availability
+        annotations:
+          summary: "Provider parser raised on response — usage zeroed"
+          description: |
+            The parser for `{{ $labels.provider }}` threw an exception against a response
+            body. Usage was zeroed and the leaf row poisoned. Pull `docker compose logs
+            gateway | jq 'select(.code=="ERR_USAGE_PARSE_FAILED")'` to inspect the
+            offending body; usually a schema change or a partial / truncated response.
+
+      - alert: CouncilCleanupTimerRejected
+        expr: sum(rate(gw_council_cleanup_timer_rejected_total[5m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+          surface: gateway
+          category: availability
+        annotations:
+          summary: "ngx.timer.at rejected the council cleanup callback"
+          description: |
+            One or more council requests had their cleanup timer rejected by ngx — usually
+            timer-pool exhaustion or worker shutdown. The sidecar's `spawn_active_sweeper`
+            reclaims the leaked concurrency slot after ~110s, so this alert is a warning,
+            not a page. Sustained non-zero rate means timer pool is undersized for load:
+            raise `lua_max_pending_timers` in nginx.conf or look for hot-spotting on a
+            single caller_key. Cross-check with the sidecar's `council_active_swept_total`
+            log lines (`docker compose logs sidecar | grep council_active_swept`).
+
+  # ---------------------------------------------------------------------------
+  - name: gateway.watch_plane
+    interval: 30s
+    rules:
+      - alert: DirectiveOutboxTtlExpired
+        expr: increase(gw_watch_directive_ttl_expired_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: warning
+          surface: gateway
+          category: watch_plane
+        annotations:
+          summary: "Staged directives swept to expired — TTL fence fired (T21c)"
+          description: |
+            At least one `directive_outbox` row was swept from `staged` to `expired`
+            because `expires_at_ms` elapsed before the worker could dispatch it. Non-zero
+            means the stage→claim window is too tight or the worker is stalled — the
+            canary may be a no-op (directives age out pre-dispatch, fail-safe: no spend).
+            Remediation (no rebuild required):
+              1. Widen `DIRECTIVE_STAGE_TTL_MS` on the sidecar (default 90000, clamp
+                 [30000, 300000]) if real loop p99 is approaching 90s.
+              2. Check worker tick health: `docker compose logs sidecar | grep worker`.
+              3. Cross-check `/watch/stats` → `directive_ttl_expired_total`.
+            See `docs/runbooks/arming-authorization.md` §3 abort table.
+
+      - alert: DirectiveOutboxTtlExpiredSustained
+        expr: increase(gw_watch_directive_ttl_expired_total[30m]) > 0
+        for: 30m
+        labels:
+          severity: critical
+          surface: gateway
+          category: watch_plane
+          page: "true"
+        annotations:
+          summary: "Directive TTL expirations sustained 30m — page on-call"
+          description: |
+            `gw_watch_directive_ttl_expired_total` has been incrementing for 30 minutes.
+            The TTL fence is refusing dispatch on expired rows (fail-safe), but sustained
+            expirations mean the watch→council→outbox→worker path is not completing inside
+            the staged TTL. Treat as a canary abort candidate: widen
+            `DIRECTIVE_STAGE_TTL_MS`, investigate worker stall, `/disarm` if spend risk
+            is unclear.
+
+      - alert: DirectiveClockSkewRejected
+        expr: increase(gw_watch_directive_clock_skew_rejected_total[10m]) > 0
+        for: 0m
+        labels:
+          severity: critical
+          surface: gateway
+          category: watch_plane
+          page: "true"
+        annotations:
+          summary: "Directives refused at stage — clock-skew breaker fired (P2)"
+          description: |
+            At least one directive was refused at stage time because its created-time
+            normalization delta exceeded `MAX_ALLOWED_SKEW_MS` (default 5000). A host clock
+            glitched FORWARD and poisoned the per-tenant monotonic floor
+            (`prior_max = MAX(created_at_ms)`): every later directive for that tenant
+            normalizes forward past the poison row and is now fail-safe-REFUSED (blocks
+            dispatch, never spends). The refusal persists until the poison row leaves the
+            table — a silent per-tenant directive outage, which is why this pages immediately.
+
+            NO MONEY WAS SPENT. The breaker is fail-safe: it only REFUSES to stage. This is an
+            AVAILABILITY incident (directives not dispatched), NOT a spend/authorization breach.
+            Do not treat as a security page — no signed directive executed out of policy.
+
+            Cause is not only NTP: a VM suspend/resume or live-migration that pauses the host
+            longer than the cap, then resumes, can stamp a future-dated row the same way.
+
+            Remediation:
+              1. Confirm host clock is sane + NTP-synced (`timedatectl` / `chronyc tracking`);
+                 check for a recent VM suspend/resume or live-migration on the sidecar host.
+              2. Identify the poison row: the `directive_outbox` row whose `created_at_ms` is
+                 far in the future for the affected tenant (the current `MAX(created_at_ms)`).
+              3. Evict it (clears `prior_max`; held escalations self-heal on the next boot
+                 hydration sweep, re-staged from their stored council response — no re-spend):
+                   DELETE FROM directive_outbox
+                    WHERE tenant = :tenant
+                      AND created_at_ms > (:now_ms + :MAX_ALLOWED_SKEW_MS);
+              4. Cross-check `/watch/stats` → `directive_clock_skew_rejected_total`. Held
+                 escalations carry `last_error LIKE 'ClockSkewExceeded%'` in
+                 `pending_escalations` (dedup alerting on row identity off this).
+              5. Automatic eviction is not implemented. `/disarm` if spend posture is
+                 unclear.
+            See `docs/runbooks/arming-authorization.md`, "Abort and disarm."
+
+  # ---------------------------------------------------------------------------
+  - name: gateway.performance
+    interval: 30s
+    rules:
+      - alert: HighLatency
+        expr: |
+          histogram_quantile(
+            0.99,
+            sum by (le) (rate(gw_request_duration_ms_bucket[10m]))
+          ) > 30000
+        for: 10m
+        labels:
+          severity: warning
+          surface: gateway
+          category: performance
+        annotations:
+          summary: "p99 request latency >30s over 10m"
+          description: |
+            P99 request latency exceeds 30 seconds over the last 10 minutes (current:
+            {{ $value | printf "%.0f" }}ms). LLM calls can be slow, but sustained p99 above 30s
+            indicates a provider regression or a stuck model.
+            Investigate:
+              1. Break down by `provider` and `model`:
+                  histogram_quantile(0.99, sum by (provider, model, le)
+                    (rate(gw_request_duration_ms_bucket[10m])))
+                 to find the slow tail's owner.
+              2. Check sidecar circuit-breaker state — a slow provider often precedes a trip.
+              3. If a single model is the culprit, consider temporarily lowering its score in
+                 `conf/models.json` so auto-routing prefers a faster sibling.
+              4. If all models are slow, suspect the gateway host (CPU saturation, IO stall) —
+                 check `docker stats` and host load.

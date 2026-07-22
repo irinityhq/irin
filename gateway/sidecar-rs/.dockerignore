@@ -1,0 +1,6 @@
+target/
+.git/
+.gitnexus/
+*.db
+*.db-shm
+*.db-wal

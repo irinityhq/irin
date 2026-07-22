@@ -1,0 +1,17 @@
+name: IRIN CI PR dispatcher
+
+on:
+  # No workflow-level paths-ignore: the reusable graph must report its light
+  # checks and aggregate context even for documentation-only pull requests.
+  pull_request:
+    branches: ["main", "master"]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    # Pin execution policy to the reviewed graph on main. GitHub preserves the
+    # original pull_request event context for the called workflow, so scope
+    # classification and label-gated lanes retain their existing semantics.
+    uses: irinityhq/irin/.github/workflows/ci.yml@main

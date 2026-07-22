@@ -1,0 +1,99 @@
+{
+  "fixtures": [
+    {
+      "id": "local_no_map",
+      "topic": "Review src/engine/sheldon.rs validate_round scoping",
+      "context": "",
+      "seats": [
+        {
+          "seat": "Munger",
+          "text": "The validate_round fn in src/engine/sheldon.rs should skip when no --map is supplied."
+        },
+        {
+          "seat": "Socrates",
+          "text": "Agree — impl block in sheldon.rs gates local-code validation on repo context."
+        }
+      ],
+      "expect": "skip_scoped"
+    },
+    {
+      "id": "local_with_map",
+      "topic": "Does validate_round skip local code without map?",
+      "context": "src/engine/sheldon.rs\npub async fn validate_round(\n    responses: &[SeatResponse],\n    topic: &str,\n    context: &str,\n    round_num: u32,\n    config: &ValidatorConfig,\n    req_ctx: &RequestContext,\n) -> Option<(Vec<ClaimVerdictEntry>, f64)> {\n    // B (scoping): skip when local signals without repo context\n",
+      "seats": [
+        {
+          "seat": "Munger",
+          "text": "validate_round returns None when would_skip_local_without_context is true."
+        },
+        {
+          "seat": "Socrates",
+          "text": "With repo context in the prompt, Sheldon should run and extract claims about that fn."
+        }
+      ],
+      "expect": "report",
+      "min_claims": 1,
+      "max_contradicted": 2
+    },
+    {
+      "id": "public_fact",
+      "topic": "HTTP status code semantics",
+      "seats": [
+        {
+          "seat": "Analyst",
+          "text": "HTTP 404 Not Found is defined in RFC 9110 for missing resources."
+        },
+        {
+          "seat": "Checker",
+          "text": "404 is the standard client error when a resource URI does not match any handler."
+        }
+      ],
+      "expect": "report",
+      "min_claims": 1,
+      "max_contradicted": 1
+    },
+    {
+      "id": "poisoned_public",
+      "topic": "Great Wall visibility from space",
+      "seats": [
+        {
+          "seat": "Analyst",
+          "text": "The Great Wall of China is visible from the Moon with the naked eye."
+        },
+        {
+          "seat": "Checker",
+          "text": "That Moon visibility claim is a common myth — astronauts report it is not visible unaided."
+        }
+      ],
+      "expect": "report",
+      "min_claims": 1
+    },
+    {
+      "id": "opinion_only",
+      "topic": "War Room vs CLI prioritization",
+      "seats": [
+        {
+          "seat": "Analyst",
+          "text": "We should prioritize War Room UX polish over CLI feature work this sprint."
+        },
+        {
+          "seat": "Checker",
+          "text": "CLI-first keeps power users productive; UX can follow once APIs stabilize."
+        }
+      ],
+      "expect": "report",
+      "min_claims": 0,
+      "max_contradicted": 0
+    },
+    {
+      "id": "insufficient_seats",
+      "topic": "Single-seat edge case",
+      "seats": [
+        {
+          "seat": "Solo",
+          "text": "Only one seat responded with a factual claim about Rust 2024 edition."
+        }
+      ],
+      "expect": "no_report"
+    }
+  ]
+}

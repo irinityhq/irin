@@ -1,0 +1,16 @@
+{
+  "username": "Council War Room",
+  "embeds": [{
+    "title": "🎯 Council Weekly Drift",
+    "description": "**{{ sessions_analyzed }}** sessions shadow-tested over the last **{{ window_days }}** days.",
+    "color": {{ drift_color }},
+    "timestamp": "{{ ts }}",
+    "fields": [
+      {"name": "Avg drift", "value": "`{{ avg_drift }}`", "inline": true},
+      {"name": "Confidence flips", "value": "`{{ confidence_flips }}`", "inline": true},
+      {"name": "High-drift", "value": "`{{ high_drift_count }}`", "inline": true}{% if top_anchoring is defined and top_anchoring | length > 0 %},
+      {"name": "Top anchoring", "value": "{% for p in top_anchoring %}• **{{ p.keyword }}** — drift {{ p.avg_drift }} (×{{ p.session_count }})\n{% endfor %}", "inline": false}{% endif %}
+    ],
+    "footer": {"text": "Report: {{ report_filename }}"}
+  }]
+}

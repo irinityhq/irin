@@ -1,0 +1,80 @@
+name: IRIN Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    name: Build Council Release
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: startsWith(github.ref, 'refs/tags/v')
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: release
+
+      - name: Council fmt
+        run: cargo fmt -p council-rs -- --check
+
+      - name: Council clippy
+        run: cargo clippy -p council-rs --all-targets --all-features --locked -- -D warnings
+
+      - name: Council tests
+        run: cargo test -p council-rs --all-targets --all-features --locked
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build release binary
+        run: cargo build -p council-rs --release --locked
+
+      - name: Run council E2E smoke tests
+        working-directory: council-rs
+        run: |
+          python3 tests/smoke.py --quick
+          python3 tests/validate_session.py --strict
+          python3 tests/validate_index.py --strict
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: council-rs/warroom/web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: council-rs/warroom/web
+        run: npm ci
+
+      - name: Run frontend checks
+        working-directory: council-rs/warroom/web
+        run: |
+          npm run lint
+          npm run build
+          npx tsc --noEmit
+          npm run test:ci
+
+      - name: Upload release artifacts
+        uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
+        with:
+          files: |
+            target/release/council
+          generate_release_notes: true

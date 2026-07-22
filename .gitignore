@@ -1,0 +1,15 @@
+/target/
+.demo-state/
+.env.demo
+*.log
+.DS_Store
+
+# env / runtime / db / scratch — never commit live secrets or runtime state.
+# Exact `.env` (not `.env*`) so tracked .env.example / .env.canary.example stay tracked.
+.env
+sessions/
+runs/
+*.db
+*.sqlite
+.scratch/
+.irin-worktree.env

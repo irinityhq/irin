@@ -1,0 +1,51 @@
+{
+  "name": "council-warroom-web",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "dev:local": "next dev --webpack --hostname 127.0.0.1 --port 3010",
+    "build": "next build --webpack",
+    "build:hosted": "next build --webpack",
+    "build:tauri": "bash ../../../scripts/build-warroom-web-tauri.sh",
+    "dev:tauri": "NEXT_PUBLIC_API_BASE=http://127.0.0.1:8765 NEXT_PUBLIC_WS_BASE=ws://127.0.0.1:8765 NEXT_PUBLIC_GATEWAY_BASE=${GATEWAY_URL:-http://127.0.0.1:18080} npm run dev:local",
+    "start": "next start",
+    "lint": "eslint . --max-warnings 0",
+    "typecheck": "tsc --noEmit",
+    "test:unit": "vitest run",
+    "test:ci": "npm run test:unit && npm test",
+    "pretest": "npm run build && (cd ../.. && cargo build --release)",
+    "test": "playwright test",
+    "test:fast": "playwright test",
+    "test:headed": "playwright test --headed"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.3.3",
+    "@tauri-apps/api": "^2.2.0",
+    "clsx": "^2.1.1",
+    "framer-motion": "^12.40.0",
+    "lucide-react": "^1.18.0",
+    "next": "^16.2.10",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7",
+    "react-markdown": "^10.1.0",
+    "remark-gfm": "^4.0.0",
+    "tailwind-merge": "^3.6.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.61.0",
+    "@types/node": "^25.9.3",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.0.2",
+    "eslint": "^9.39.4",
+    "eslint-config-next": "^16.2.9",
+    "postcss": "8.5.15",
+    "tailwindcss": "^4.3.1",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.10"
+  },
+  "overrides": {
+    "postcss": "8.5.15",
+    "sharp": "0.35.3"
+  }
+}

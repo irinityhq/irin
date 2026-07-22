@@ -1,0 +1,7 @@
+sessions/** export-ignore
+runs/** export-ignore
+librarian_chats/** export-ignore
+.env export-ignore
+.fastembed_cache/** export-ignore
+frontend/ export-ignore
+examples/ export-ignore

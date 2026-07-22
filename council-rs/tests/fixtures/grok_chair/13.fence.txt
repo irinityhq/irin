@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Dismiss","in_response_to":"esc-0013","rationale":"Checker selected Path 1 – Dispatch none after noting the isolated self-resolved 500 with low urgency and no pattern. Analyst reached 100% convergence on dismissal because the signal is too narrow to justify Worker action."}
+```

@@ -1,0 +1,72 @@
+# Utility roles — convergence judge, frame check, etc.
+# Hot-reloaded on each council run (same as cabinets/models.yaml).
+# Emergency pin: COUNCIL_JUDGE_MODEL / COUNCIL_FRAME_CHECK_MODEL (+ _PROVIDER).
+#
+# Provider slug: use `nvidia` for all NVIDIA NIM models (`nim` is legacy alias).
+# Grok transports are explicit: `grok_build` uses the local OAuth CLI and
+# `grok_hermes` uses the Hermes OAuth adapter.
+
+roles:
+  convergence_judge:
+    description: "Scores seat agreement each round (judge.v2 JSON)"
+    cascade:
+      - provider: grok_hermes
+        model: grok-4.20-0309-reasoning
+        max_tokens: 1024
+      - provider: grok_hermes
+        model: grok-4.3
+        max_tokens: 512
+      - provider: nvidia
+        model: mistralai/mistral-large-3-675b-instruct-2512
+        max_tokens: 512
+
+  frame_check:
+    description: "R1 embedded-assumption scanner (anti-prompt-poisoning)"
+    cascade:
+      # grok-4.3 first: Hermes -z on 4.20-reasoning flakes on short utility prompts
+      # ("no final response") and blocks seat fan-out ~26s on retry.
+      - provider: grok_hermes
+        model: grok-4.3
+        max_tokens: 512
+      - provider: grok_hermes
+        model: grok-4.20-0309-reasoning
+        max_tokens: 512
+      - provider: nvidia
+        model: mistralai/mistral-large-3-675b-instruct-2512
+        max_tokens: 512
+      - provider: gemini_agy
+        model: gemini-3.5-flash
+        max_tokens: 512
+
+  claim_validator:
+    description: "Claim verification (Sheldon) between rounds for SUPPORTED/CONTRADICTED/NO_EVIDENCE"
+    cascade:
+      # Pinned evaluator. X and web evidence are gathered independently by
+      # xmcp + the native evidence pipeline before this evidence-only call.
+      - provider: grok_hermes
+        model: grok-4.20-0309-reasoning
+        max_tokens: 1024
+      # Used only when the independent evidence gather returns nothing or the
+      # primary provider fails. Grok Build retains native web/X tools.
+      - provider: grok_build
+        model: grok-cli-default
+        max_tokens: 1024
+      - provider: claude_code
+        model: claude-opus-4-6
+        max_tokens: 1024
+      - provider: codex_cli
+        model: gpt-5.6-sol
+        max_tokens: 1024
+
+  scope_auditor:
+    description: "Scoped investigator for steering detection and boundary review (anti-framing, scope discipline)"
+    cascade:
+      - provider: grok_hermes
+        model: grok-4.3
+        max_tokens: 1024
+      - provider: grok_hermes
+        model: grok-4.20-0309-reasoning
+        max_tokens: 1024
+      - provider: nvidia
+        model: mistralai/mistral-large-3-675b-instruct-2512
+        max_tokens: 1024

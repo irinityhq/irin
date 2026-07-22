@@ -1,0 +1,14 @@
+# File-inbox smoke-test fixture.
+# Single polling file-inbox sentinel for the phase3-smoke tenant.
+# Used by smoke_phase3.sh when TRIGGER_MODE=file-inbox to arm a real
+# unseeded FileInboxSentinel fire.
+# The container path matches the demo/inbox bind mount in docker-compose.yml.
+# Short cooldown/debounce for responsive harness polling (single-fire use).
+- name: file-inbox-watch
+  tenant: phase3-smoke
+  tier: polling
+  cooldown_ms: 1000
+  config:
+    path: /var/lib/gateway/inbox
+    patterns: ["*.txt"]
+    debounce_ms: 100

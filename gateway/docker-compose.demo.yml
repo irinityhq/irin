@@ -1,0 +1,50 @@
+# docker-compose.demo.yml — isolation overlay for `make demo` (test/demo.sh).
+#
+# NEVER referenced by `make up`, docker-compose.smoke.yml, or the canary
+# overlay. Used ONLY as the third `-f` under an isolated project name
+# (`-p irin-demo`) so the self-demo can run on a machine that is already
+# hosting a live `make up` / canary stack without ever touching it:
+#
+#   - Remaps the gateway host port OFF 18080 (`!override` REPLACES the base
+#     ports list — a plain overlay would APPEND and re-bind 18080, colliding
+#     with a running stack). Default 28080; set DEMO_GW_PORT to move it.
+#   - Swaps the sidecar ledger key for a demo-ephemeral 32-byte key
+#     (DEMO_LEDGER_KEY) instead of the operator's ~/.irin/ledger_key.pem,
+#     and drops the host ${HOME}/.config/gcloud mount (the demo makes no real
+#     provider calls). `!override` REPLACES the whole volumes list, so both the
+#     real-key mount and the gcloud mount are gone, not merged back in.
+#   - Adds the synthetic arm attest registry (DEMO_ATTEST_KEYS) the demo's
+#     software (non-Touch-ID) arm ceremony verifies against.
+#   - Pins image names (DEMO_*_IMAGE) so an existing local build is reused via
+#     `up --no-build` instead of triggering the ~40-min sidecar compile.
+services:
+  council-stub:
+    image: python:3.13.5-alpine3.22@sha256:37b14db89f587f9eaa890e4a442a3fe55db452b69cca1403cc730bd0fbdc8aaf
+    command: ["python3", "/app/council_stub.py", "8765"]
+    environment:
+      - COUNCIL_STUB_PROFILE=demo
+    volumes:
+      - ./test/council_stub.py:/app/council_stub.py:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8765/api/health', timeout=2)"]
+      interval: 1s
+      timeout: 3s
+      retries: 10
+    restart: "no"
+  gateway:
+    image: ${DEMO_GATEWAY_IMAGE:-gateway-gateway}
+    ports: !override
+      - "127.0.0.1:${DEMO_GW_PORT:-28080}:8080"
+    environment:
+      - COUNCIL_BASE_URL=http://council-stub:8765
+    depends_on:
+      council-stub:
+        condition: service_healthy
+  sidecar:
+    image: ${DEMO_SIDECAR_IMAGE:-gateway-sidecar}
+    volumes: !override
+      - ./conf:/conf:ro
+      - sidecar_sock:/run/sidecar
+      - sidecar_data:/var/lib/sidecar
+      - ${DEMO_LEDGER_KEY}:/run/secrets/ledger_key:ro
+      - ${DEMO_ATTEST_KEYS}:/var/lib/sidecar/attest_keys.json:ro

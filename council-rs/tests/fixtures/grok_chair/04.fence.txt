@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Act","in_response_to":"esc-0004","rationale":"Checker assessed concrete evidence of same service token SHA authenticating two distinct tenants as high severity with high blast radius warranting dispatch. Analyst confirmed 100% convergence on narrow Worker dispatch recommendation for the acme token-reuse signal.","job":"investigate token usage logs for cross-tenant reuse","scope":{"tenant":"acme","subject":"cross_tenant_token","allowed_actions":["read","report","review"]},"stop_condition":"token provenance verified or single-tenant use confirmed","return_expectation":"report on investigation findings"}
+```

@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Dismiss","in_response_to":"esc-0011","rationale":"Checker noted the escalation is nominal with unverified but stated 'all gauges within band' and low urgency, concluding insufficient evidence for dispatch; Analyst confirmed zero deviation or blast radius from the periodic liveness check and reached 100% convergence on Dismiss."}
+```

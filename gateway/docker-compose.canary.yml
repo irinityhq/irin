@@ -1,0 +1,22 @@
+# Canary provision overlay — non-secret env + mounts only.
+#
+# Used by the canonical local runtime to mount the validated Sentinel profile
+# and durable hardware-attestation registry.
+
+services:
+  sidecar:
+    environment:
+      # Hardware enrollment path. CI smoke uses
+      # attest_keys.json as a temp fixture — do not point production .env there.
+      - GW_ARM_ATTEST_KEYS_PATH=/var/lib/sidecar/arm_attest_keys.json
+      - SENTINELS_CONFIG_PATH=/var/lib/gateway/sentinels/canary-sentinels.yaml
+      - WATCH_CANARY_TENANT=canary
+      # File-import reconciliation. Set cadence and import path in .env.
+      - RECON_CADENCE_SECS=${RECON_CADENCE_SECS:-}
+      - RECON_IMPORT_PATH=${RECON_IMPORT_PATH:-/var/lib/sidecar/recon/provider-export.json}
+      - RECON_DIVERGENCE_THRESHOLD_USD=${RECON_DIVERGENCE_THRESHOLD_USD:-}
+      # Page-only until source trust proven; set on in .env when ready.
+      - RECON_AUTO_DISARM=${RECON_AUTO_DISARM:-}
+      - ROOT_PUBKEY_HEX=${ROOT_PUBKEY_HEX:-}
+    volumes:
+      - ./test/fixtures/canary-sentinels.yaml:/var/lib/gateway/sentinels/canary-sentinels.yaml:ro

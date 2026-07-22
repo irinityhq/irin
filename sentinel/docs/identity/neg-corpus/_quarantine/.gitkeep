@@ -1,0 +1,3 @@
+# Quarantine — staged NEG sessions not yet counted.
+# Sessions land here when: no consent basis yet (protocol §7), below length floor, or ambiguous authorship.
+# Archive, never delete. These do NOT count toward the 30. See ../README.md.

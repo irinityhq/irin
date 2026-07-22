@@ -1,0 +1,8 @@
+# Rename this to .gitignore after copy
+node_modules
+.next
+out
+.env.local
+.env*.local
+*.log
+.DS_Store

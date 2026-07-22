@@ -1,0 +1,34 @@
+# The Sidecar build uses the monorepo root as its context so build.rs can
+# inspect the real Git worktree. Keep .git in the context; exclude only local
+# or generated paths that are not part of the tracked product tree.
+
+target/
+**/target/
+**/node_modules/
+**/.next/
+**/out/
+**/runs/
+**/sessions/
+**/.runtime/
+**/.fastembed_cache/
+**/warroom-web-dist/
+**/gen/
+**/.DS_Store
+
+.codex/
+.claude/
+.cursor/
+.grok/
+.scratch/
+.superpowers/
+.mcp.json
+.gortex.yaml
+CLAUDE.md
+RTK.md
+state/
+
+**/.env
+**/.env.local
+
+# Local nested build output left by older Council workflows.
+council-rs/council-rs/

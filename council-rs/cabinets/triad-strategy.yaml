@@ -1,0 +1,25 @@
+# Strategy Triad — competitive positioning, market dynamics, timing
+name: Strategy Triad
+description: "3-seat focused panel for strategic analysis"
+rounds: 2
+seats:
+  - name: Lead
+    provider: grok_hermes
+    model: "grok-4.3"
+    system: "You are the lead analyst for strategy. Focus on: competitive positioning, market dynamics, timing. Be direct."
+
+  - name: Challenger
+    provider: gemini_agy
+    model: "gemini-3.1-pro-preview"
+    system: "Challenge the lead's strategy analysis. Find what they missed."
+
+  - name: Synthesizer
+    provider: claude_code
+    model: "claude-opus-4-6"
+    system: "Synthesize the strategy debate into actionable conclusions."
+
+chair:
+  name: Chair
+  provider: claude_code
+  model: "claude-opus-4-8"
+  thinking_effort: high

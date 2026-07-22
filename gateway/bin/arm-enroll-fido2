@@ -1,0 +1,75 @@
+#!/bin/sh
+# FIDO2 USB key enrollment ceremony (B0b, spec §3 backup credential).
+# Creates a resident credential on the YubiKey and appends it to the
+# attest key registry using the same atomic-install mechanism as arm-enroll.
+#
+# After this script: restart the sidecar and VERIFY the boot audit row +
+# ntfy alert carry the new keyset hash printed below.
+#
+# Usage:
+#   bin/arm-enroll-fido2 [label]
+#   FIDO2_PYTHON=/path/to/python3 bin/arm-enroll-fido2 [label]
+set -eu
+cd "$(dirname "$0")/.."
+
+. bin/lib/runtime-env.sh
+REGISTRY_PATH_IN_VOLUME=/var/lib/sidecar/arm_attest_keys.json
+LABEL=${1:-yubikey-fido2}
+SIDECAR_DATA_VOLUME=$(irin_sidecar_data_volume)
+
+# Shared FIDO2 python resolution (validates the interpreter on every branch).
+. bin/lib/fido2.sh
+FIDO2_PYTHON="$(resolve_fido2_python)" || exit 1
+
+vol_sh() {
+  docker run --rm -i --user 0 -v "$SIDECAR_DATA_VOLUME":/var/lib/sidecar \
+    alpine:3.21 sh -c "$1"
+}
+
+if [ -z "${FIDO2_PIN:-}" ]; then
+  printf 'FIDO2 PIN: ' >&2
+  read -r FIDO2_PIN
+  export FIDO2_PIN
+fi
+
+echo "enrolling FIDO2 credential (touch the key when it blinks)..."
+RECORD=$("$FIDO2_PYTHON" bin/fido2-helper.py enroll --label "$LABEL")
+echo "new credential record:"
+printf '%s\n' "$RECORD" | jq .
+
+EXISTING=$(vol_sh "cat $REGISTRY_PATH_IN_VOLUME 2>/dev/null || echo '[]'")
+
+MERGED=$(printf '%s' "$EXISTING" | jq --argjson rec "$RECORD" '. + [$rec]')
+printf '%s' "$MERGED" | python3 -c '
+import base64, json, sys
+creds = json.load(sys.stdin)
+assert isinstance(creds, list) and creds, "registry must be a non-empty array"
+ids = set()
+for c in creds:
+    for k in ("credential_id", "credential_type", "public_key", "label", "enrolled_at"):
+        assert isinstance(c.get(k), str) and c[k], f"missing field {k}"
+    assert c["credential_type"] in ("se-p256", "fido2-es256"), "unknown credential_type"
+    pk = base64.b64decode(c["public_key"], validate=True)
+    assert len(pk) in (33, 65), f"public_key is {len(pk)} bytes, not a SEC1 point"
+    assert c["credential_id"] not in ids, "duplicate credential_id"
+    ids.add(c["credential_id"])
+print("validation: PASS ({} credentials)".format(len(creds)))
+'
+
+printf '%s' "$MERGED" | jq -S . | vol_sh "cat > $REGISTRY_PATH_IN_VOLUME.tmp \
+  && chmod 600 $REGISTRY_PATH_IN_VOLUME.tmp \
+  && mv $REGISTRY_PATH_IN_VOLUME.tmp $REGISTRY_PATH_IN_VOLUME \
+  && echo 'installed: '$REGISTRY_PATH_IN_VOLUME"
+
+HASH=$(printf '%s' "$MERGED" | jq -cS 'sort_by(.credential_id)' | tr -d '\n' | shasum -a 256 | cut -d' ' -f1)
+echo
+echo "expected boot keyset_hash: $HASH"
+echo "next steps:"
+echo "  1. ensure the Gateway environment has GW_ARM_ATTEST_KEYS_PATH=$REGISTRY_PATH_IN_VOLUME"
+echo "  2. docker compose up -d --force-recreate sidecar   (restart loads registry)"
+echo "  3. VERIFY boot audit row + ntfy alert show the hash above"
+echo "  4. bin/arm --fido2-rehearse   (test the full ceremony without arming)"
+echo "     On macOS if native HID get_assertion is blocked for python:"
+echo "       - open bin/fido2-assert.html in a browser"
+echo "       - paste stage challenge + the fido2 credential_id"
+echo "       - FIDO2_ASSERT_JSON='$(cat)' bin/arm --fido2-rehearse"

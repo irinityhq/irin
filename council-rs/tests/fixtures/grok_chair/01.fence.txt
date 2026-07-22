@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Act","in_response_to":"esc-0001","rationale":"Checker assessed the deterministic hash_chain_break at ledger.db row 4412 as high-severity with clear actionability and recommended dispatch of AuditLedgerChain under recommend-only authority; Analyst restated the same concrete violation for tenant acme and reached 100% convergence on issuing a scoped Worker directive.","job":"AuditLedgerChain","scope":{"tenant":"acme","subject":"ledger.db row 4412","allowed_actions":["read","review","report"]},"stop_condition":"hash_chain_validated OR error_rate > 5%","return_expectation":"report on chain integrity status and any isolated anomalies"}
+```

@@ -1,0 +1,6 @@
+sessions/ export-ignore
+runs/ export-ignore
+librarian_chats/ export-ignore
+.env export-ignore
+frontend/ export-ignore
+examples/ export-ignore

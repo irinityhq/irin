@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Act","in_response_to":"esc-0009","rationale":"Checker noted concrete cryptographic failure on capability_token_invalid with high urgency and blast radius for tenant initech; Analyst restated the runtime-tier signature verification failure and reached 100% convergence on recommend-only Worker dispatch.","job":"review capability token verification status","scope":{"tenant":"initech","subject":"cap-token-verify","allowed_actions":["read","report","review"]},"stop_condition":"valid signature confirmed or token status reported","return_expectation":"status report on token verification"}
+```

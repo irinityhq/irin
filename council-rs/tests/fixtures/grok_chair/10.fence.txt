@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Dismiss","in_response_to":"esc-0010","rationale":"Checker (nvidia) restated the flip_flop condition of seat reversed verdict 3x across 2 rounds, noted low urgency and vague impact with no concrete service effect, and concluded Dismiss. Analyst (grok) similarly assessed the narrowly scoped reversal plus explicit ConsultCouncil proposal as non-actionable at Worker level with blast radius contained, reaching 100% convergence on Dismiss."}
+```

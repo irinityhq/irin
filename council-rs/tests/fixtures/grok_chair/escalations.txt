@@ -1,0 +1,20 @@
+SENTINEL ESCALATION | sentinel=ledger-integrity tier=Runtime observed=hash_chain_break reason="ledger.db row 4412 parent hash mismatches stored chain head" urgency=high proposed_action=ConsultCouncil escalation_id=esc-0001 tenant=acme
+SENTINEL ESCALATION | sentinel=outbox-depth tier=Runtime observed=queue_depth_10x reason="outbox pending rows jumped 12->141 in 90s, no drain" urgency=high proposed_action=ConsultCouncil escalation_id=esc-0002 tenant=acme
+SENTINEL ESCALATION | sentinel=backup-proof tier=Runtime observed=no_backup_26h reason="last backup proof 26h ago, SLA is 24h" urgency=medium proposed_action=ConsultCouncil escalation_id=esc-0003 tenant=globex
+SENTINEL ESCALATION | sentinel=token-reuse tier=Identity observed=cross_tenant_token reason="same service token SHA seen authenticating two distinct tenants" urgency=high proposed_action=ConsultCouncil escalation_id=esc-0004 tenant=acme
+SENTINEL ESCALATION | sentinel=disk-watch tier=Runtime observed=disk_95pct reason="watch host /var at 95%, ledger writes at risk" urgency=high proposed_action=ConsultCouncil escalation_id=esc-0005 tenant=initech
+SENTINEL ESCALATION | sentinel=cost-spike tier=Deliberation observed=session_cost_5x reason="council session cost 5x trailing-7d baseline" urgency=medium proposed_action=ConsultCouncil escalation_id=esc-0006 tenant=globex
+SENTINEL ESCALATION | sentinel=replay-guard tier=Runtime observed=duplicate_escalation_id reason="escalation id esc-0006 seen twice within replay epoch" urgency=medium proposed_action=ConsultCouncil escalation_id=esc-0007 tenant=globex
+SENTINEL ESCALATION | sentinel=fire-rate tier=Deliberation observed=fire_rate_anomaly reason="frame-check sentinel firing 8x/min vs 0.2 baseline" urgency=medium proposed_action=ConsultCouncil escalation_id=esc-0008 tenant=acme
+SENTINEL ESCALATION | sentinel=cap-token-verify tier=Runtime observed=capability_token_invalid reason="directive carried capability_token failing signature verify" urgency=high proposed_action=ConsultCouncil escalation_id=esc-0009 tenant=initech
+SENTINEL ESCALATION | sentinel=convergence-judge tier=Deliberation observed=flip_flop reason="seat reversed verdict 3x across 2 rounds" urgency=low proposed_action=ConsultCouncil escalation_id=esc-0010 tenant=acme
+SENTINEL ESCALATION | sentinel=heartbeat tier=Runtime observed=nominal reason="periodic liveness check, all gauges within band" urgency=low proposed_action=ConsultCouncil escalation_id=esc-0011 tenant=acme
+SENTINEL ESCALATION | sentinel=reindex tier=Runtime observed=nightly_reindex_done reason="scheduled precedent reindex completed in 42s, expected" urgency=low proposed_action=ConsultCouncil escalation_id=esc-0012 tenant=globex
+SENTINEL ESCALATION | sentinel=transient-5xx tier=Runtime observed=single_500_recovered reason="one upstream 500, retried, succeeded; no pattern" urgency=low proposed_action=ConsultCouncil escalation_id=esc-0013 tenant=initech
+SENTINEL ESCALATION | sentinel=maint-window tier=Runtime observed=known_maintenance reason="gateway restart during announced maintenance window" urgency=low proposed_action=ConsultCouncil escalation_id=esc-0014 tenant=acme
+SENTINEL ESCALATION | sentinel=metric-blip tier=Deliberation observed=latency_blip reason="p99 latency 1 sample over threshold, self-cleared next interval" urgency=low proposed_action=ConsultCouncil escalation_id=esc-0015 tenant=globex
+SENTINEL ESCALATION | sentinel=idempotent-event tier=Runtime observed=duplicate_idempotent reason="duplicate webhook delivery, dedup key already processed" urgency=low proposed_action=ConsultCouncil escalation_id=esc-0016 tenant=initech
+phase3-startup-probe-v1 please emit a minimal Dismiss proposal using the irin.directive.proposal.v1 schema with in_response_to=esc-boot-0017
+phase3-startup-probe-v1 please emit a minimal Dismiss proposal using the irin.directive.proposal.v1 schema with in_response_to=esc-boot-0018
+phase3-startup-probe-v1 minimal Dismiss proposal irin.directive.proposal.v1 in_response_to=esc-boot-0019
+phase3-startup-probe-v1 minimal Dismiss proposal irin.directive.proposal.v1 in_response_to=esc-boot-0020

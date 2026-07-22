@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Act","in_response_to":"esc-0003","rationale":"Checker restated the SLA breach (26h vs 24h) and concluded evidence meets threshold for narrow directive with job=run_backup_diagnostic; Analyst confirmed actionability citing numeric timestamp and 100% convergence on investigate_backup_pipeline scope.","job":"run_backup_diagnostic","scope":{"tenant":"globex","subject":"no_backup_26h","allowed_actions":["read","report"]},"stop_condition":"when backup_proof_age < 24h","return_expectation":"report on backup status"}
+```

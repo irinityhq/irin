@@ -1,0 +1,33 @@
+{
+  "_comment": "Example auth_keys.json. Copy to auth_keys.json and replace placeholder hashes with values produced by the /admin/keys endpoint or the AuthService::hash_key helper. Never commit real key_hash values to source control. The 'key_id' is a stable, non-secret identifier safe for logs and metrics.",
+  "_fields": {
+    "key_id": "Stable non-secret id (e.g. 'k_abc12345'). Safe for logs.",
+    "key_hash": "Hex SHA-256 of (AUTH_PEPPER || raw_key). Provision via POST /admin/keys.",
+    "budget_key": "Budget bucket this key debits against (per-tenant ledger).",
+    "tier": "admin | standard | restricted — drives policy + rate-limit defaults.",
+    "rate_limit_rpm": "Requests per minute for this key.",
+    "rate_limit_burst": "Optional burst capacity. 0 = use rpm value as burst."
+  },
+  "keys": [
+    {
+      "key_id": "k_admin001",
+      "key_hash": "REPLACE_WITH_HEX_SHA256_OF_PEPPER_PLUS_RAW_ADMIN_KEY",
+      "budget_key": "tenant:admin",
+      "tier": "admin",
+      "rate_limit_rpm": 600,
+      "rate_limit_burst": 100
+    },
+    {
+      "key_id": "k_std0001",
+      "key_hash": "REPLACE_WITH_HEX_SHA256_OF_PEPPER_PLUS_RAW_STANDARD_KEY",
+      "budget_key": "tenant:default",
+      "tier": "standard",
+      "rate_limit_rpm": 120,
+      "rate_limit_burst": 30
+    }
+  ],
+  "global_rpm": 1000,
+  "global_burst": 200,
+  "ip_rpm": 120,
+  "ip_burst": 30
+}

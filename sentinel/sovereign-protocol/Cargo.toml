@@ -1,0 +1,50 @@
+[package]
+name = "sovereign-protocol"
+version = "0.1.1"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+chrono = { version = "0.4.44", features = ["serde"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+# ryu: shortest round-trip float -> decimal digits, the same algorithm V8/ECMAScript
+# uses. We hand-port the RFC 8785 §3.2.2.3 (ECMAScript Number::toString) branch rules
+# on top of ryu's shortest digits in jcs.rs. ryu is tiny, ubiquitous, already present
+# transitively in the downstream gateway/council-rs trees, and audited. This is the
+# ONLY new runtime dep on the signing path (W5 Invariant, Q1=Option B).
+ryu = "1.0.23"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+
+# build.rs validates the cross-component directive-fence golden corpus at COMPILE time
+# (mirrors tests/fence_vectors_golden.rs), so corpus corruption fails the build —
+# including every downstream consumer build of this crate — not just `cargo test`.
+# It deserializes the corpus through the real DirectiveFenceCase (include!'d from
+# src/fence_case.rs), so serde (derive) + serde_json are needed host-side for the
+# build script. Both are already runtime deps, so no new crate enters the supply
+# chain; note build-dependencies compile for the HOST, separate from the target.
+[build-dependencies]
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.150"
+
+[dev-dependencies]
+base64 = "0.22.1"
+base64ct = "1.8.3"
+ed25519-dalek = "2.2.0"
+# json-canon: maintained RFC 8785 / ES6-number reference implementation, used ONLY
+# as the differential conformance oracle in tests/jcs_conformance.rs. It NEVER appears
+# under [dependencies] and never touches the runtime signing path — it exists solely to
+# assert our_canon(x) == reference(x) over seeded + adversarial f64 (W5 ruling Q1 P0:
+# differential oracle as dev-dependency only, zero supply-chain surface on signed bytes).
+json-canon = "=0.1.3"
+# proptest: dev-only randomized seam hardening (tests/envelope_roundtrip_prop.rs).
+# Complements the FIXED wire goldens with random valid envelope inputs — asserts
+# serde round-trip is lossless and JCS bytes are deterministic over tricky strings
+# + finite floats (the ryu path). It does NOT re-test JCS *correctness* (the
+# json-canon differential oracle owns that); it owns "random input stays stable /
+# never panics". Zero runtime surface.
+proptest = "1.5.0"
+regex = "1.12.3"
+# sha2: dev-only, used to assert the content-hash pin on the vendored cyberphone
+# vectors (tests/jcs_conformance.rs). Not on any runtime path.
+sha2 = "0.10.9"

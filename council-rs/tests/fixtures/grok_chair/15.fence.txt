@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Dismiss","in_response_to":"esc-0015","rationale":"Checker concluded single self-cleared sample, low urgency, and lack of actionability justify Dismiss with no Worker dispatch; Analyst confirmed transient blip supplies neither job nor scope and reached 100% convergence on Dismiss."}
+```

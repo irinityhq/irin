@@ -1,0 +1,97 @@
+# Council-RS - developer convenience targets
+#
+# Keep this minimal. The real authority for Council is the release binary
+# built from this tree. These targets exist to make local hygiene cheap.
+
+.DEFAULT_GOAL := help
+
+.PHONY: help
+help:
+	@echo "Council developer targets (invoke from the IRIN root with: make -C council-rs <target>)"
+	@echo "  warroom-dev              Run the Tauri development shell"
+	@echo "  warroom-browser          Run Council + browser War Room for development"
+	@echo "  warroom-build            Build and locally sign the Tauri bundle"
+	@echo "  warroom-export           Build static War Room assets"
+	@echo "  warroom-check            Run the complete War Room frontend/Tauri gate"
+	@echo "  audit-rust               Audit Council Rust dependencies"
+	@echo "  check-no-legacy-reqwest  Reject the retired reqwest/native-TLS stack"
+
+# --------------------------------------------------------------------------
+# audit-rust - Runs cargo-audit against the current lockfile.
+#
+# Installs cargo-audit if missing (idempotent for local use).
+# Fails on any new vulnerability or unmaintained crate that is not explicitly allowed.
+#
+# Run this before any dependency changes and as part of routine hygiene.
+# --------------------------------------------------------------------------
+audit-rust:
+	@cargo audit --version >/dev/null 2>&1 || cargo install cargo-audit --locked
+	@echo "Auditing council-rs..."
+	@cargo audit -D warnings --ignore RUSTSEC-2024-0436
+
+.PHONY: audit-rust
+
+# --------------------------------------------------------------------------
+# check-no-legacy-reqwest - P2 hygiene guard (post Council-RS Reqwest 0.13 wave)
+#
+# Ensures we never regress to reqwest 0.12 + native-tls + openssl-sys.
+# This was the root cause of the transitive island that had to be cleaned
+# during the 0.13 wave (via fastembed/hf-hub).
+#
+# Run this as part of local hygiene and wire it into CI.
+# Modeled after Gateway's check-no-openssl (B3).
+# --------------------------------------------------------------------------
+check-no-legacy-reqwest:
+	@echo "Checking for legacy reqwest 0.12 / native-tls / openssl-sys..."
+	@if cargo tree --target all -p council-rs --no-dedupe | grep -E '(^|[[:space:]])reqwest v0\.12|(^|[[:space:]])native-tls v|(^|[[:space:]])openssl-sys v'; then \
+		echo "FAIL: legacy reqwest/native TLS dependency present in active tree"; \
+		exit 1; \
+	fi
+	@echo "OK: No reqwest v0.12, native-tls, or openssl-sys in the active tree"
+
+.PHONY: check-no-legacy-reqwest
+
+.PHONY: warroom-dev warroom-build warroom-sign warroom-export warroom-check warroom-browser
+
+# --------------------------------------------------------------------------
+# warroom-browser — one command: council :8765 + Next.js :3010 (post-reboot)
+# --------------------------------------------------------------------------
+warroom-browser:
+	bash scripts/warroom-browser-dev.sh
+
+# --------------------------------------------------------------------------
+# warroom-dev / warroom-build — Council War Room desktop (Tauri, Phase 2 hybrid Next.js)
+# --------------------------------------------------------------------------
+warroom-dev:
+	@PIDS=$$(lsof -tiTCP:3010 -sTCP:LISTEN 2>/dev/null || true); \
+	if [ -n "$$PIDS" ]; then \
+	  echo "→ Freeing port 3010 (stale Next dev listener)..."; \
+	  kill -9 $$PIDS 2>/dev/null || true; \
+	  sleep 0.3; \
+	fi
+	cd warroom/web && [ -d node_modules ] || npm ci
+	cd warroom-tauri && [ -d node_modules ] || npm ci
+	cd warroom-tauri && npm run tauri dev
+
+warroom-build:
+	cd warroom/web && npm ci
+	cd warroom-tauri && npm ci && npm run tauri build
+	$(MAKE) warroom-sign
+
+warroom-sign:
+	@if [ "$$(uname -s)" = "Darwin" ]; then \
+	  APP="warroom-tauri/src-tauri/target/release/bundle/macos/Council War Room.app"; \
+	  test -d "$$APP" || { echo "Missing app bundle: $$APP" >&2; exit 1; }; \
+	  if ! codesign --verify --deep --strict "$$APP" >/dev/null 2>&1; then \
+	    echo "Ad-hoc signing local Council War Room bundle"; \
+	    codesign --force --deep --sign - "$$APP"; \
+	  fi; \
+	  codesign --verify --deep --strict "$$APP"; \
+	fi
+
+warroom-export:
+	bash warroom-tauri/scripts/build-warroom-assets.sh
+
+warroom-check:
+	cd warroom/web && npm ci
+	bash warroom-tauri/scripts/smoke-hybrid-build.sh

@@ -1,0 +1,15 @@
+/sessions/
+/runs/
+/librarian_chats/
+/target/
+
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.swp
+*.pyc
+__pycache__/
+.DS_Store
+gitleaks_report*.json

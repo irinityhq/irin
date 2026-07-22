@@ -1,0 +1,24 @@
+# Secret-bearing paths. Examples remain visible; live values do not.
+.env
+.env.local
+.env.*.local
+.env.demo
+.envrc
+.irin-worktree.env
+**/gateway.env
+**/auth_keys.json
+**/credentials.json
+**/*service-account*.json
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx
+**/.secrets/**
+**/secrets/**
+
+# Generated/build noise is not useful model context.
+**/node_modules/**
+**/.next/**
+**/.next-hosted/**
+**/target/**
+**/.fastembed_cache/**

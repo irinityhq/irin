@@ -1,0 +1,112 @@
+# ==========================================================================
+# gateway.yaml — Unified gateway configuration (Phase 5 item 4).
+#
+# This file consolidates the five legacy config files into one. To enable
+# it, set GATEWAY_CONFIG_PATH=/conf/gateway.yaml in docker-compose.yml.
+# When set, the Rust sidecar parses this file at boot.
+#
+# All sections are OPTIONAL. Missing sections fall back to the
+# per-component JSON file:
+#   models       → MODELS_JSON_PATH (default: /conf/models.json)
+#   auth         → AUTH_CONFIG_PATH (default: conf/auth_keys.json)
+#   ip_policy    → forward-compat stub (no current consumer)
+#   decon        → DECON_CONFIG_PATH (default: /conf/decon_config.json)
+#   shape_limits → SHAPE_LIMITS_PATH (Lua-only)
+#
+# Lua side note: OpenResty has no YAML parser. When this file is used,
+# the sidecar materializes the `models` and `shape_limits` sections as
+# derived JSON at /var/lib/sidecar/derived/{models,shape_limits}.json
+# (sections absent from the YAML are copied from the legacy on-disk JSON
+# so the derived dir always has both files). Lua's config.lua sees
+# GATEWAY_CONFIG_PATH set and auto-routes its reads to that dir — no
+# extra env vars required. Don't try to point Lua at this YAML directly;
+# it will fail to parse.
+# ==========================================================================
+
+# --- Model registry ---------------------------------------------------------
+# Same shape as conf/models.json. Pricing per 1M tokens (USD).
+models:
+  providers:
+    xai:
+      base_url: "https://api.x.ai"
+      api_key_env: "XAI_API_KEY"
+      auth_header: "Authorization"
+      auth_prefix: "Bearer "
+      format: "openai"
+    openai:
+      base_url: "https://api.openai.com"
+      api_key_env: "OPENAI_API_KEY"
+      auth_header: "Authorization"
+      auth_prefix: "Bearer "
+      format: "openai"
+  models:
+    grok-4:
+      provider: xai
+      family: grok
+      input_per_1m: 5.00
+      output_per_1m: 15.00
+  aliases:
+    grok: grok-4
+
+# --- Auth & rate limiting ---------------------------------------------------
+# Same shape as conf/auth_keys.json. `keys[].key_hash` is hex SHA-256 of
+# (AUTH_PEPPER || raw_key). Use `gw_admin_provision_key` to generate.
+auth:
+  global_rpm: 1000
+  global_burst: 0          # 0 = use rpm value as burst capacity
+  ip_rpm: 120
+  ip_burst: 0
+  keys:
+    # - key_hash: "deadbeef..."         # hex SHA256(pepper || raw_key)
+    #   budget_key: "council-default"
+    #   tier: "standard"
+    #   rate_limit_rpm: 60
+    #   rate_limit_burst: 0
+
+# --- IP allow/deny (forward-compat stub) ------------------------------------
+# WARNING: no consumer in the current sidecar — this section is parsed
+# and logged but has no effect. Reserved for the planned IP gate.
+ip_policy:
+  mode: allow_internal_deny_explicit
+  trusted_internal_cidrs:
+    - 127.0.0.1/32
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+  deny_cidrs: []
+
+# --- Decontaminator ---------------------------------------------------------
+# Same shape as conf/decon_config.json. GUARD_DRY_RUN=1 env still
+# overrides `dry_run` here.
+decon:
+  block_severity: 0.85
+  max_threats_before_block: 5
+  max_payload_len: 1000000
+  dry_run: false
+  stages:
+    oversized_payload: { enabled: true, mode: reject }
+    encoding_attack:   { enabled: true, mode: reject }
+    ghost_gate:        { enabled: true, mode: reject }
+    malformed_content: { enabled: true, mode: reject }
+    zero_width:        { enabled: true, mode: reject }
+    homoglyph:         { enabled: true, mode: reject }
+    prompt_injection:  { enabled: true, mode: reject }
+
+# --- ASM structural input gates --------------------------------------------
+# Same shape as conf/shape_limits.json. Lua-consumed only.
+shape_limits:
+  default:
+    max_messages: 256
+    max_message_bytes: 524288
+    max_tools: 64
+    max_json_depth: 32
+    max_total_body_bytes: 2097152
+  models:
+    gemini-3.1-pro-preview:
+      max_messages: 1024
+      max_message_bytes: 2097152
+      max_total_body_bytes: 4194304
+    claude-opus-4-6:
+      max_messages: 1024
+      max_message_bytes: 2097152
+      max_total_body_bytes: 4194304

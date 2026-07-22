@@ -1,0 +1,149 @@
+<!DOCTYPE html>
+<html>
+<head><title>Gateway FIDO2 Enrollment</title>
+<style>
+body { font-family: monospace; max-width: 700px; margin: 40px auto; padding: 20px; }
+button { font-size: 18px; padding: 12px 24px; margin: 10px 0; cursor: pointer; }
+pre { background: #f0f0f0; padding: 16px; overflow-x: auto; word-break: break-all; }
+.ok { color: green; font-weight: bold; }
+.fail { color: red; font-weight: bold; }
+#result { display: none; }
+</style>
+</head>
+<body>
+<h2>Gateway FIDO2 Key Enrollment (B0b)</h2>
+<p>RP: <code>gateway.local</code> &mdash; Creates a resident ES256 credential on your YubiKey.</p>
+<p>You'll be prompted for PIN + touch.</p>
+<button id="enroll" onclick="doEnroll()">Enroll YubiKey</button>
+<div id="status"></div>
+<div id="result">
+<h3>Registry Record (copy this):</h3>
+<pre id="record"></pre>
+<h3>Raw Details:</h3>
+<pre id="details"></pre>
+</div>
+<script>
+async function doEnroll() {
+  const status = document.getElementById('status');
+  status.innerHTML = '<p>Waiting for YubiKey PIN + touch...</p>';
+  try {
+    const userId = new Uint8Array(16);
+    crypto.getRandomValues(userId);
+    const challenge = new Uint8Array(32);
+    crypto.getRandomValues(challenge);
+
+    const credential = await navigator.credentials.create({
+      publicKey: {
+        rp: { id: "gateway.local", name: "Gateway Arm Ceremony" },
+        user: { id: userId, name: "sovereign", displayName: "Sovereign Operator" },
+        challenge: challenge,
+        pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+        authenticatorSelection: {
+          authenticatorAttachment: "cross-platform",
+          residentKey: "required",
+          userVerification: "required",
+        },
+        attestation: "direct",
+        timeout: 60000,
+      }
+    });
+
+    const rawId = new Uint8Array(credential.rawId);
+    const credIdHex = Array.from(rawId).map(b => b.toString(16).padStart(2, '0')).join('');
+
+    // Parse authenticator data to extract public key
+    const response = credential.response;
+    const attestObj = CBOR.decode(response.attestationObject);
+    const authData = new Uint8Array(attestObj.authData);
+    // authData: rpIdHash(32) + flags(1) + counter(4) + aaguid(16) + credIdLen(2) + credId(N) + pubkeyCBOR
+    const credIdLen = (authData[53] << 8) | authData[54];
+    const pubKeyCBOR = authData.slice(55 + credIdLen);
+    const pubKeyMap = CBOR.decode(pubKeyCBOR.buffer.slice(pubKeyCBOR.byteOffset));
+
+    // COSE key: -2 = x, -3 = y for EC2
+    const x = new Uint8Array(pubKeyMap[-2]);
+    const y = new Uint8Array(pubKeyMap[-3]);
+    // SEC1 uncompressed: 0x04 || x || y
+    const sec1 = new Uint8Array(1 + 32 + 32);
+    sec1[0] = 0x04;
+    sec1.set(x, 1);
+    sec1.set(y, 33);
+    const pubKeyB64 = btoa(String.fromCharCode(...sec1));
+
+    // Compressed SEC1: 0x02/0x03 based on y parity
+    const compressed = new Uint8Array(33);
+    compressed[0] = (y[31] & 1) ? 0x03 : 0x02;
+    compressed.set(x, 1);
+    const pubKeyCompressedB64 = btoa(String.fromCharCode(...compressed));
+
+    const record = {
+      credential_id: credIdHex,
+      credential_type: "fido2-es256",
+      public_key: pubKeyCompressedB64,
+      label: "yubikey-fido2",
+      enrolled_at: new Date().toISOString().replace(/\.\d{3}Z$/, 'Z'),
+    };
+
+    document.getElementById('record').textContent = JSON.stringify(record);
+    document.getElementById('details').textContent = JSON.stringify({
+      credential_id: credIdHex,
+      credential_id_length: rawId.length,
+      public_key_uncompressed_b64: pubKeyB64,
+      public_key_compressed_b64: pubKeyCompressedB64,
+      attestation_format: attestObj.fmt,
+    }, null, 2);
+    document.getElementById('result').style.display = 'block';
+    status.innerHTML = '<p class="ok">ENROLLED — copy the record above</p>';
+  } catch (e) {
+    status.innerHTML = '<p class="fail">Error: ' + e.message + '</p>';
+    console.error(e);
+  }
+}
+
+// Minimal CBOR decoder (handles the subset needed for attestation objects)
+const CBOR = {
+  decode(buf) {
+    const data = new DataView(buf instanceof ArrayBuffer ? buf : buf.buffer, buf.byteOffset || 0, buf.byteLength || buf.length);
+    let offset = 0;
+    function read() {
+      const first = data.getUint8(offset++);
+      const major = first >> 5;
+      let val = first & 0x1f;
+      if (val === 24) { val = data.getUint8(offset++); }
+      else if (val === 25) { val = data.getUint16(offset); offset += 2; }
+      else if (val === 26) { val = data.getUint32(offset); offset += 4; }
+      switch (major) {
+        case 0: return val; // unsigned int
+        case 1: return -1 - val; // negative int
+        case 2: { // byte string
+          const bytes = new Uint8Array(data.buffer, data.byteOffset + offset, val);
+          offset += val;
+          return bytes;
+        }
+        case 3: { // text string
+          const bytes = new Uint8Array(data.buffer, data.byteOffset + offset, val);
+          offset += val;
+          return new TextDecoder().decode(bytes);
+        }
+        case 4: { // array
+          const arr = [];
+          for (let i = 0; i < val; i++) arr.push(read());
+          return arr;
+        }
+        case 5: { // map
+          const obj = {};
+          for (let i = 0; i < val; i++) {
+            const key = read();
+            obj[key] = read();
+          }
+          return obj;
+        }
+        default: return null;
+      }
+    }
+    return read();
+  }
+};
+</script>
+</body>
+</html>

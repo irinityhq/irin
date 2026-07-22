@@ -1,0 +1,33 @@
+# ==========================================================================
+# Dockerfile.gateway — OpenResty with lua-resty-http for sidecar client.
+# ==========================================================================
+
+# Pinned digest for reproducible gateway edge builds (OpenResty 1.31.1.1).
+FROM openresty/openresty:1.31.1.1-alpine-slim@sha256:bde121249048b8c7f73500287e90d32aa65edc9672d4f5ab454c1cf7e029c6ec
+
+# lua-resty-http (3 files, no deps). opm requires perl which isn't in alpine.
+# Pin to a specific upstream commit — never fetch from a floating branch.
+# H4: dedicated IPC group for sidecar UDS access (matches sidecar Dockerfile gid)
+RUN addgroup -g 9999 triad_mgmt && addgroup nobody triad_mgmt
+
+ARG LUA_RESTY_HTTP_REV=cd41479821034959a2b9a141d03c47428b55f32e
+RUN wget -q -O /usr/local/openresty/lualib/resty/http.lua \
+    "https://raw.githubusercontent.com/ledgetech/lua-resty-http/${LUA_RESTY_HTTP_REV}/lib/resty/http.lua" && \
+    wget -q -O /usr/local/openresty/lualib/resty/http_headers.lua \
+    "https://raw.githubusercontent.com/ledgetech/lua-resty-http/${LUA_RESTY_HTTP_REV}/lib/resty/http_headers.lua" && \
+    wget -q -O /usr/local/openresty/lualib/resty/http_connect.lua \
+    "https://raw.githubusercontent.com/ledgetech/lua-resty-http/${LUA_RESTY_HTTP_REV}/lib/resty/http_connect.lua"
+
+# Patch pinned lua-resty-http: it reads ngx.var.http_traceparent inside
+# send_request, and ngx.var is API-disabled in timer phase, so the 30s stats
+# pollers (cost.lua poll_council_stats / poll_watch_stats) abort every tick.
+# Guard the read with a phase check instead of deleting it — request-phase
+# callers keep W3C traceparent propagation. The grep + luajit compile after
+# the sed are fail-closed: if upstream drifts and the pattern stops matching,
+# or the edit ever produces invalid Lua, the image build fails here instead
+# of shipping a lib that breaks every sidecar call at require time.
+RUN sed -i \
+  's/if not headers\["traceparent"\] and ngx\.var\.http_traceparent then/if not headers["traceparent"] and ngx.get_phase() ~= "timer" and ngx.var.http_traceparent then/' \
+  /usr/local/openresty/lualib/resty/http.lua && \
+  grep -q 'ngx.get_phase() ~= "timer"' /usr/local/openresty/lualib/resty/http.lua && \
+  /usr/local/openresty/luajit/bin/luajit -bl /usr/local/openresty/lualib/resty/http.lua >/dev/null

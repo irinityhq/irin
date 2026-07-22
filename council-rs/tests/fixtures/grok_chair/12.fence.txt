@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Dismiss","in_response_to":"esc-0012","rationale":"Checker assessed the nightly_reindex_done with reason \"scheduled precedent reindex completed in 42s, expected\" at low urgency as a benign health notification with no actionable anomaly or deviation, concluding evidence does not meet threshold for recommend-only dispatch. Analyst restated identical normal behavior and reached the same verdict at 100% convergence. Council therefore dismisses."}
+```

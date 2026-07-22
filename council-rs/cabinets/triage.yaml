@@ -1,0 +1,57 @@
+name: Triage
+description: |
+  Fast 2-seat, 1-round escalation triage for the council-triage endpoint (Phase 3 Sovereign Triad).
+
+  When the incoming user message contains a sentinel escalation (fields: sentinel, tier, observed state, reason, urgency, proposed_action=ConsultCouncil),
+  the Chair synthesis MUST contain EXACTLY ONE JSON code fence (```json ... ```) matching the strict CouncilDirectiveProposalV1 fence below.
+  No other JSON blocks. Parse failure on the dispatcher side → dead_lettered (no retry).
+
+  Required Directive shape (irin.directive.proposal.v1):
+  {
+    "schema": "irin.directive.proposal.v1",
+    "in_response_to": "<exact escalation envelope id from the escalation>",
+    "authority": "recommend" | "prepare" | "execute",
+    "capability_token": "<token_here_if_elevating_to_prepare_or_execute>",
+    "verdict": "Act" | "Dismiss",
+    "job": "short imperative (only if verdict=Act)",
+    "scope": {
+      "tenant": "<MUST exactly match escalation tenant>",
+      "subject": "...",
+      "allowed_actions": ["..."]
+    },
+    "stop_condition": "... (only if Act)",
+    "return_expectation": "... (only if Act)",
+    "rationale": "1-3 sentence summary of why Council reached this verdict"
+  }
+
+  POSTURE NOTE (D2b): authority is recommend-only in the current default-OFF posture.
+  "prepare" / "execute" + capability_token are the v0.2 Worker arming/elevation path
+  the gateway dispatcher already supports, but they are NOT emitted now — the Chair
+  prompt restricts output to authority=recommend until arming lands. The shape above
+  documents the full gateway wire contract; the live restriction is recommend-only.
+
+  If verdict=Dismiss, job/scope/stop_condition/return_expectation must be omitted (not null).
+
+  Note: council_session_id and council_cost_usd are **not** part of the fence.
+  They are injected by the dispatcher from the X-Council-Session-Id and
+  X-Total-Cost-Usd response headers after the cabinet returns.
+  Act proposals only: scope.tenant must match the escalation tenant. Dismiss proposals omit scope entirely (dispatcher enforces D17 for Act verdicts only).
+rounds: 1
+seats:
+  - name: Analyst
+    provider: grok_hermes
+    model: "grok-4.3"
+    system: analyst
+  - name: Checker
+    provider: codex_cli
+    model: "gpt-5.6-sol"
+    system: checker
+chair:
+  name: Chair
+  provider: gemini_agy
+  model: "gemini-3.1-pro-preview"
+
+# Phase 3 council-triage machine-output contract.
+# Tells the engine to suppress the generic 1-7 synthesis scaffold and use
+# a strict "exactly one proposal.v1 JSON fence" Chair prompt instead.
+synthesis_mode: directive_proposal_v1

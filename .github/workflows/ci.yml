@@ -1,0 +1,711 @@
+name: IRIN CI
+
+on:
+  # Phase one of the trusted-runner handoff: this lets a thin PR dispatcher
+  # invoke the reviewed CI graph from `main`, rather than scheduling a PR-ref
+  # workflow against the restricted R740 runner group. The dispatcher itself
+  # is added only after this reusable entrypoint exists on `main`.
+  workflow_call:
+  workflow_dispatch:
+    inputs:
+      run_gateway_smoke:
+        description: "Run Gateway smoke/provenance plus private-main exact-source proof"
+        required: false
+        type: boolean
+        default: false
+  schedule:
+    - cron: "23 6 * * *"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  detect-changes:
+    name: Detect CI scope
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 5
+    outputs:
+      full_matrix: ${{ steps.scope.outputs.full_matrix }}
+      gateway_rust: ${{ steps.scope.outputs.gateway_rust }}
+      council_rust: ${{ steps.scope.outputs.council_rust }}
+      sentinel_rust: ${{ steps.scope.outputs.sentinel_rust }}
+      warroom_web: ${{ steps.scope.outputs.warroom_web }}
+      warroom_tauri: ${{ steps.scope.outputs.warroom_tauri }}
+      workspace_supply_chain: ${{ steps.scope.outputs.workspace_supply_chain }}
+      tauri_supply_chain: ${{ steps.scope.outputs.tauri_supply_chain }}
+      sbom: ${{ steps.scope.outputs.sbom }}
+      changed_files: ${{ steps.scope.outputs.changed_files }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - id: scope
+        name: Classify changed paths
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          case "${{ github.event_name }}" in
+            workflow_dispatch)
+              changed=(__manual_dispatch__)
+              ;;
+            schedule)
+              changed=(__scheduled_proof__)
+              ;;
+            pull_request)
+              base="${{ github.event.pull_request.base.sha }}"
+              head="${{ github.event.pull_request.head.sha }}"
+              if git cat-file -e "${base}^{commit}" 2>/dev/null; then
+                changed=()
+                diff_output="$(git diff --name-only "$base...$head" --)"
+                while IFS= read -r path; do
+                  [[ -n "$path" ]] && changed+=("$path")
+                done <<<"$diff_output"
+              else
+                changed=(__unknown_base__)
+              fi
+              ;;
+            *)
+              changed=(__unknown_event__)
+              ;;
+          esac
+
+          scripts/test-classify-ci-paths.sh
+          classifier_output="$(scripts/classify-ci-paths.sh "${changed[@]}")"
+          expected_keys=(
+            full_matrix gateway_rust council_rust sentinel_rust warroom_web
+            warroom_tauri workspace_supply_chain tauri_supply_chain sbom
+          )
+          [[ "$(printf '%s\n' "$classifier_output" | sed '/^$/d' | wc -l | tr -d ' ')" == "${#expected_keys[@]}" ]]
+          for key in "${expected_keys[@]}"; do
+            [[ "$(printf '%s\n' "$classifier_output" | grep -Ec "^${key}=(true|false)$")" == 1 ]]
+          done
+          printf '%s\n' "$classifier_output" | tee -a "$GITHUB_OUTPUT"
+          {
+            echo "changed_files<<EOF"
+            printf '%s\n' "${changed[@]}"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          printf 'changed files:\n'
+          printf '  %s\n' "${changed[@]}"
+
+  gitleaks:
+    name: Secret Scan (gitleaks, root)
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install gitleaks
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          curl -sSfL -o "$RUNNER_TEMP/gitleaks.tgz" https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  $RUNNER_TEMP/gitleaks.tgz" | sha256sum -c -
+          tar -xz -C "$RUNNER_TEMP/tools" -f "$RUNNER_TEMP/gitleaks.tgz" gitleaks
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/tools/gitleaks" version
+
+      - name: Run root tree secret scan
+        run: gitleaks dir --config .gitleaks.toml --verbose .
+
+  release-tree:
+    name: Release tree
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install release-tree scanner on hosted runners
+        if: runner.environment != 'self-hosted'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq ripgrep
+
+      - name: Verify release-tree scanner on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        run: command -v rg
+
+      - name: Verify product completeness and tree hygiene
+        run: scripts/check-release-tree.sh
+
+  public-pr-language:
+    name: Public PR language
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 5
+    needs: detect-changes
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Self-test checker
+        run: scripts/check-public-pr-language.sh --self-test
+
+      - name: Check PR title, body, and commits
+        if: github.event_name == 'pull_request'
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          if [[ "${PR_AUTHOR}" == "dependabot[bot]" ]]; then
+            PR_BODY="${PR_BODY//\/home\/runner\/.cargo\/advisory-db/[dependabot-cargo-advisory-db]}"
+          fi
+          scripts/check-public-pr-language.sh \
+            --range "${{ github.event.pull_request.base.sha }}..${{ github.event.pull_request.head.sha }}" \
+            --title "${PR_TITLE}" \
+            --body-env PR_BODY
+
+      - name: Check contract-surface declaration (advisory)
+        if: github.event_name == 'pull_request'
+        env:
+          CHANGED_FILES: ${{ needs.detect-changes.outputs.changed_files }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "${CHANGED_FILES}" > "$RUNNER_TEMP/changed-files.txt"
+          scripts/check-contract-surface-declaration.sh \
+            --files-file "$RUNNER_TEMP/changed-files.txt" \
+            --body-env PR_BODY
+
+      - name: Check proof tip commit
+        if: github.event_name != 'pull_request'
+        run: scripts/check-public-pr-language.sh --range "0000000000000000000000000000000000000000..${{ github.sha }}"
+
+  workspace-supply-chain:
+    name: Workspace Cargo Audit and Deny
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 25
+    needs: detect-changes
+    if: needs.detect-changes.outputs.workspace_supply_chain == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: workspace-supply-chain
+
+      - name: Install supply-chain tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          curl -sSfL -o "$RUNNER_TEMP/cargo-audit.tgz" "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz"
+          echo "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428  $RUNNER_TEMP/cargo-audit.tgz" | sha256sum -c -
+          tar -xz --strip-components=1 -C "$RUNNER_TEMP/tools" --wildcards '*/cargo-audit' -f "$RUNNER_TEMP/cargo-audit.tgz"
+          curl -sSfL -o "$RUNNER_TEMP/cargo-deny.tar.gz" "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.9/cargo-deny-0.19.9-x86_64-unknown-linux-musl.tar.gz"
+          echo "f1f8eedc2a3ac297c540873f93785d4104b102c0079506b2a6b3221b7ec956af  $RUNNER_TEMP/cargo-deny.tar.gz" | sha256sum -c -
+          tar -xz --strip-components=1 -C "$RUNNER_TEMP/tools" --wildcards '*/cargo-deny' -f "$RUNNER_TEMP/cargo-deny.tar.gz"
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/tools/cargo-audit" --version
+          "$RUNNER_TEMP/tools/cargo-deny" --version
+
+      - name: Run workspace cargo audit
+        run: cargo-audit audit -D warnings --ignore RUSTSEC-2024-0436
+
+      - name: Run workspace cargo deny
+        run: cargo-deny check
+
+  tauri-supply-chain:
+    name: Tauri Cargo Audit and Deny
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 25
+    needs: detect-changes
+    if: needs.detect-changes.outputs.tauri_supply_chain == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: tauri-supply-chain
+
+      - name: Install supply-chain tools
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          curl -sSfL -o "$RUNNER_TEMP/cargo-audit.tgz" "https://github.com/rustsec/rustsec/releases/download/cargo-audit%2Fv0.22.2/cargo-audit-x86_64-unknown-linux-musl-v0.22.2.tgz"
+          echo "7fb9497f8594b389e5fce5ef9b92db08432996895b2e0c5a0167a69ed445c428  $RUNNER_TEMP/cargo-audit.tgz" | sha256sum -c -
+          tar -xz --strip-components=1 -C "$RUNNER_TEMP/tools" --wildcards '*/cargo-audit' -f "$RUNNER_TEMP/cargo-audit.tgz"
+          curl -sSfL -o "$RUNNER_TEMP/cargo-deny.tar.gz" "https://github.com/EmbarkStudios/cargo-deny/releases/download/0.19.9/cargo-deny-0.19.9-x86_64-unknown-linux-musl.tar.gz"
+          echo "f1f8eedc2a3ac297c540873f93785d4104b102c0079506b2a6b3221b7ec956af  $RUNNER_TEMP/cargo-deny.tar.gz" | sha256sum -c -
+          tar -xz --strip-components=1 -C "$RUNNER_TEMP/tools" --wildcards '*/cargo-deny' -f "$RUNNER_TEMP/cargo-deny.tar.gz"
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+
+      - name: Run Tauri cargo audit
+        run: |
+          cargo-audit audit \
+            -D unsound \
+            --file council-rs/warroom-tauri/src-tauri/Cargo.lock \
+            --ignore RUSTSEC-2026-0194 \
+            --ignore RUSTSEC-2026-0195 \
+            --ignore RUSTSEC-2024-0429
+
+      - name: Run Tauri cargo deny
+        run: cargo-deny --manifest-path council-rs/warroom-tauri/src-tauri/Cargo.toml check --config deny.toml
+
+  sbom:
+    name: Scheduled or Manual SBOM
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 25
+    needs: detect-changes
+    if: needs.detect-changes.outputs.sbom == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: sbom
+
+      - name: Install cargo-cyclonedx
+        run: |
+          mkdir -p "$RUNNER_TEMP/tools"
+          curl -sSfL -o "$RUNNER_TEMP/cyclonedx.tar.xz" "https://github.com/CycloneDX/cyclonedx-rust-cargo/releases/download/cargo-cyclonedx-0.5.9/cargo-cyclonedx-x86_64-unknown-linux-musl.tar.xz"
+          echo "9bd3e599314f50810c9d98b8b68a617ff9d3cc20873968d90b29d121f6b226ff  $RUNNER_TEMP/cyclonedx.tar.xz" | sha256sum -c -
+          tar -xJ --strip-components=1 -C "$RUNNER_TEMP/tools" --wildcards '*/cargo-cyclonedx' -f "$RUNNER_TEMP/cyclonedx.tar.xz"
+          echo "$RUNNER_TEMP/tools" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/tools/cargo-cyclonedx" cyclonedx --version
+
+      - name: Generate workspace SBOM
+        run: cargo cyclonedx --format json --all --override-filename sbom
+
+      - name: Generate Tauri SBOM
+        run: cargo cyclonedx --manifest-path council-rs/warroom-tauri/src-tauri/Cargo.toml --format json --all --target all --override-filename tauri-sbom
+
+      - name: Upload SBOMs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: sbom-irin-full-proof
+          path: |
+            **/sbom.json
+            **/tauri-sbom.json
+          if-no-files-found: error
+          retention-days: 14
+
+  gateway-rust:
+    name: Gateway Rust
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 30
+    needs: detect-changes
+    if: needs.detect-changes.outputs.gateway_rust == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: gateway-rust
+
+      - name: Verify gateway fixture verbs
+        working-directory: gateway
+        run: |
+          A5_SELFTEST=1 test/check_fixture_verbs.sh
+          test/check_fixture_verbs.sh
+
+      - name: Install Lua on hosted runners
+        if: runner.environment != 'self-hosted'
+        working-directory: gateway
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq lua5.4
+
+      - name: Verify Lua on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        run: |
+          command -v lua5.4
+          dpkg-query -W -f='${db:Status-Status}\n' lua5.4 | grep -qx installed
+
+      - name: Run gateway Lua unit tests
+        working-directory: gateway
+        run: |
+          make lua-unit
+
+      - name: Gateway fmt (known pre-existing debt)
+        continue-on-error: true
+        run: cargo fmt -p gateway-sidecar -- --check
+
+      - name: Gateway clippy
+        run: cargo clippy -p gateway-sidecar --all-targets --locked -- -D warnings
+
+      - name: Gateway tests
+        run: cargo test -p gateway-sidecar --all-targets --locked
+
+  council-rust:
+    name: Council Rust
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 30
+    needs: detect-changes
+    if: needs.detect-changes.outputs.council_rust == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: council-rust
+
+      - name: Council fmt
+        run: cargo fmt -p council-rs -- --check
+
+      - name: Council clippy
+        run: cargo clippy -p council-rs --all-targets --all-features --locked -- -D warnings
+
+      - name: Council tests
+        run: cargo test -p council-rs --all-targets --all-features --locked
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Build council release binary for smoke
+        run: cargo build -p council-rs --release --locked
+
+      - name: Run council E2E smoke tests
+        working-directory: council-rs
+        run: |
+          python3 tests/smoke.py --quick
+          python3 tests/validate_session.py --strict
+          if [ -f sessions/index.jsonl ]; then
+            python3 tests/validate_index.py --strict
+          else
+            echo "index validate: no index.jsonl found; skipping strict validator in CI"
+          fi
+
+  warroom-web:
+    name: War Room Web
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 45
+    needs: detect-changes
+    if: needs.detect-changes.outputs.warroom_web == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: warroom-web
+
+      - name: Set up Node.js on hosted runners
+        if: runner.environment != 'self-hosted'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: council-rs/warroom/web/package-lock.json
+
+      - name: Set up Node.js on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+
+      - name: Install frontend dependencies
+        working-directory: council-rs/warroom/web
+        run: npm ci
+
+      - name: Install Playwright Chromium and hosted dependencies
+        working-directory: council-rs/warroom/web
+        run: |
+          if [[ "${{ runner.environment }}" == "self-hosted" ]]; then
+            npx playwright install chromium
+          else
+            npx playwright install --with-deps chromium
+          fi
+
+      - name: Build council binary for Playwright webServer
+        run: |
+          cargo build --release -p council-rs --locked
+          mkdir -p council-rs/target/release
+          cp target/release/council council-rs/target/release/council
+
+      - name: Run web lint, typecheck, build, and browser tests
+        working-directory: council-rs/warroom/web
+        env:
+          TAURI_LANE_SELECTED: ${{ needs.detect-changes.outputs.warroom_tauri }}
+        run: |
+          npm run lint
+          npm run typecheck
+          npm run build
+          if [[ "$TAURI_LANE_SELECTED" != "true" ]]; then
+            npm run build:tauri
+          fi
+          npm run test:ci
+
+  warroom-tauri:
+    name: War Room Tauri macOS
+    runs-on: macos-15
+    timeout-minutes: 30
+    needs: detect-changes
+    if: needs.detect-changes.outputs.warroom_tauri == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: warroom-tauri
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: council-rs/warroom/web/package-lock.json
+
+      - name: Install frontend dependencies
+        working-directory: council-rs/warroom/web
+        run: npm ci
+
+      - name: Run War Room Tauri macOS smoke
+        working-directory: council-rs
+        run: WARROOM_SMOKE_SKIP_WEB_LINT=1 bash warroom-tauri/scripts/smoke-hybrid-build.sh
+
+  sentinel-rust:
+    name: Sentinel Sovereign-Protocol Rust
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 20
+    needs: detect-changes
+    if: needs.detect-changes.outputs.sentinel_rust == 'true'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Test sovereign-protocol drift guard
+        working-directory: sentinel/tools
+        run: python3 test_check_protocol_version_drift.py
+
+      - name: Drift guard default-mode smoke
+        working-directory: sentinel
+        run: python3 tools/check_protocol_version_drift.py
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: sentinel-rust
+
+      - name: Sovereign-protocol fmt
+        run: cargo fmt -p sovereign-protocol -- --check
+
+      - name: Sovereign-protocol clippy
+        run: cargo clippy -p sovereign-protocol --all-targets --all-features --locked -- -D warnings
+
+      - name: Sovereign-protocol tests
+        run: cargo test -p sovereign-protocol --all-targets --all-features --locked
+
+  gateway-smoke:
+    name: Gateway Compose Smoke (label-gated)
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 150
+    needs: [detect-changes, gitleaks]
+    if: >
+      needs.detect-changes.outputs.gateway_rust == 'true' &&
+      (
+        (github.event_name == 'workflow_dispatch' && inputs.run_gateway_smoke) ||
+        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'run-smoke')) ||
+        (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'run-provenance'))
+      )
+    env:
+      GATEWAY_DURABLE: "1"
+      COMPOSE_PROJECT_NAME: irin-ci-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Generate ledger key
+        working-directory: gateway
+        run: make ledger-key-dev
+
+      - name: Two-leg provenance gate
+        if: >
+          (github.event_name == 'workflow_dispatch' && inputs.run_gateway_smoke) ||
+          (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'run-provenance'))
+        working-directory: gateway
+        env:
+          COMPOSE_PROJECT_NAME: provtest-${{ github.run_id }}-${{ github.run_attempt }}
+          COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
+          AUTH_PEPPER: ci-test-pepper
+        run: timeout --signal=TERM --kill-after=30s 20m make prove-provenance
+
+      - name: Start gateway stack
+        working-directory: gateway
+        env:
+          BOOTSTRAP_TOKEN: ci-bootstrap-token
+          WATCH_DISPATCHER_ENABLED: "true"
+          WATCH_PRODUCER_ENABLED: "false"
+          WATCH_WORKER_ENABLED: "true"
+          WATCH_DISPATCHER_GATEWAY_KEY: placeholder-key-to-allow-boot
+          COUNCIL_GATEWAY_TOKEN: mock-council-token
+          AUTH_PEPPER: ci-test-pepper
+          WATCH_CANARY_TENANT: phase3-smoke
+          COMPOSE_FILE: docker-compose.yml:docker-compose.ci.yml
+        run: |
+          timeout --signal=TERM --kill-after=30s 10m bash <<'START_STACK'
+          set -euo pipefail
+          docker compose up -d --build
+          healthy=false
+          for i in {1..30}; do
+            if curl -fsS http://localhost:18080/health; then
+              healthy=true
+              break
+            fi
+            sleep 1
+          done
+          [[ "$healthy" == true ]]
+          START_STACK
+
+      - name: Provision internal credentials
+        working-directory: gateway
+        run: |
+          timeout --signal=TERM --kill-after=30s 10m bash <<'PROVISION'
+          set -eo pipefail
+          for i in {1..30}; do
+            if BOOTSTRAP_TOKEN=ci-bootstrap-token make provision-key BUDGET=phase3-smoke TIER=default RPM=1000 > provision_out.json 2>/dev/null; then
+              RAW_KEY=$(jq -r '.raw_key' provision_out.json)
+              if [ -n "$RAW_KEY" ] && [ "$RAW_KEY" != "null" ]; then
+                break
+              fi
+            fi
+            sleep 1
+          done
+          if [ -z "${RAW_KEY:-}" ] || [ "$RAW_KEY" = "null" ]; then
+            echo "Failed to provision gateway key"
+            cat provision_out.json || true
+            exit 1
+          fi
+          cat <<ENV_EOF > .env
+          BOOTSTRAP_TOKEN=ci-bootstrap-token
+          GATEWAY_DURABLE=1
+          WATCH_DISPATCHER_ENABLED=true
+          WATCH_PRODUCER_ENABLED=false
+          WATCH_WORKER_ENABLED=true
+          WATCH_DISPATCHER_TICK_INTERVAL_MS=500
+          WATCH_DISPATCHER_MAX_CLAIMS_PER_TICK=2
+          WATCH_DISPATCHER_GATEWAY_KEY=$RAW_KEY
+          COUNCIL_GATEWAY_TOKEN=mock-council-token
+          AUTH_PEPPER=ci-test-pepper
+          WATCH_CANARY_TENANT=phase3-smoke
+          ENV_EOF
+          docker compose down
+          docker compose up -d
+          for i in {1..30}; do
+            if curl -fsS http://localhost:18080/health; then
+              healthy=true
+              break
+            fi
+            sleep 1
+          done
+          [[ "${healthy:-false}" == true ]]
+          PROVISION
+
+      - name: Run Phase 3 smoke
+        working-directory: gateway
+        env:
+          PHASE3_SMOKE_COUNCIL_MODE: stub
+          PHASE3_SMOKE_REBUILD_MODE: none
+          PHASE3_SMOKE_FORCE_PROJECT: "1"
+        run: timeout --signal=TERM --kill-after=30s 20m make smoke-phase3
+
+      - name: Print Docker logs on failure
+        if: failure()
+        working-directory: gateway
+        run: timeout --signal=TERM --kill-after=30s 2m docker compose logs --no-color || true
+
+      - name: Tear down gateway stack
+        if: always()
+        working-directory: gateway
+        run: |
+          timeout --signal=TERM --kill-after=30s 3m docker compose down -v --remove-orphans || true
+          rm -f .env provision_out.json
+
+      - name: Run exact-source no-spend proof
+        if: >
+          !cancelled() &&
+          github.event.repository.private == true &&
+          github.ref == 'refs/heads/main' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.run_gateway_smoke
+        env:
+          COMPOSE_PROJECT_NAME: irin-verify-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEMO_SIDECAR_IMAGE_NAME: irin-verify-sidecar-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEMO_GATEWAY_IMAGE_NAME: irin-verify-gateway-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEMO_ALLOW_BUILD: "1"
+          DEMO_PULL: "0"
+        run: |
+          test "${{ runner.environment }}" = "self-hosted"
+          test "$(git rev-parse HEAD)" = "${{ github.sha }}"
+          timeout --signal=TERM --kill-after=30s 60m make verify
+
+      - name: Tear down exact-source proof
+        if: >
+          always() &&
+          github.event.repository.private == true &&
+          github.ref == 'refs/heads/main' &&
+          github.event_name == 'workflow_dispatch' &&
+          inputs.run_gateway_smoke
+        env:
+          COMPOSE_PROJECT_NAME: irin-verify-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEMO_SIDECAR_IMAGE_NAME: irin-verify-sidecar-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          DEMO_GATEWAY_IMAGE_NAME: irin-verify-gateway-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: |
+          set +e
+          timeout --signal=TERM --kill-after=30s 5m make verify-down
+          cleanup_status=$?
+          for resource in container volume network; do
+            if [ -n "$(docker "$resource" ls -q --filter "label=com.docker.compose.project=$COMPOSE_PROJECT_NAME")" ]; then
+              echo "Exact-source $resource cleanup incomplete for $COMPOSE_PROJECT_NAME" >&2
+              cleanup_status=1
+            fi
+          done
+          for image in "$DEMO_SIDECAR_IMAGE_NAME" "$DEMO_GATEWAY_IMAGE_NAME"; do
+            if docker image inspect "$image" >/dev/null 2>&1; then
+              docker image rm "$image" || cleanup_status=1
+            fi
+          done
+          exit "$cleanup_status"
+
+  ci-required:
+    name: CI required
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - detect-changes
+      - gitleaks
+      - release-tree
+      - public-pr-language
+      - workspace-supply-chain
+      - tauri-supply-chain
+      - sbom
+      - gateway-rust
+      - council-rust
+      - warroom-web
+      - warroom-tauri
+      - sentinel-rust
+      - gateway-smoke
+    steps:
+      - name: Require successful or skipped CI lanes
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<<"$NEEDS"

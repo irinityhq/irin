@@ -1,0 +1,438 @@
+{
+  "_source": "Model registry; verify identifiers and pricing against provider documentation before changing defaults.",
+
+  "providers": {
+    "xai": {
+      "base_url": "https://api.x.ai",
+      "api_key_env": "XAI_API_KEY",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "format": "openai"
+    },
+    "openai": {
+      "base_url": "https://api.openai.com",
+      "api_key_env": "OPENAI_API_KEY",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "format": "openai"
+    },
+    "gpt-cli": {
+      "base_url_env": "CODEX_PROXY_URL",
+      "base_url": "http://192.168.65.254:9091",
+      "api_key_env": "_GPT_CLI_DUMMY",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "format": "openai",
+      "_comment": "Host-side codex-proxy.py — uses Codex CLI (ChatGPT Pro/Plus OAuth, no API key). Mirrors claude-cli. Set CODEX_PROXY_URL env to override base_url."
+    },
+    "anthropic": {
+      "base_url": "https://api.anthropic.com",
+      "api_key_env": "ANTHROPIC_API_KEY",
+      "auth_header": "x-api-key",
+      "auth_prefix": "",
+      "format": "anthropic",
+      "extra_headers": {
+        "anthropic-version": "2023-06-01"
+      }
+    },
+    "claude-cli": {
+      "base_url_env": "CLAUDE_PROXY_URL",
+      "base_url": "http://192.168.65.254:9090",
+      "api_key_env": "_CLAUDE_CLI_DUMMY",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "format": "openai",
+      "_comment": "Host-side claude-proxy.py — uses Claude CLI pipe mode (Max/ProMax sub, no API key). Set CLAUDE_PROXY_URL env to override base_url."
+    },
+    "vertex": {
+      "base_url": "https://aiplatform.googleapis.com",
+      "api_key_env": "VERTEX_ADC_TOKEN",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "format": "vertex",
+      "_comment": "Vertex route using ADC/global by default; the Rust sidecar refreshes ADC tokens when VERTEX_ADC_TOKEN is not set."
+    },
+    "gemini-cli": {
+      "base_url_env": "GEMINI_PROXY_URL",
+      "base_url": "http://192.168.65.254:9092",
+      "api_key_env": "_GEMINI_CLI_DUMMY",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "format": "openai",
+      "_comment": "Legacy/scout host-side Gemini proxy. Not an active default because Gemini CLI is retiring toward Antigravity terminal (`agy`) and this path lacks provider usage parsing."
+    },
+    "nvidia": {
+      "base_url": "https://integrate.api.nvidia.com",
+      "api_key_env": "NVIDIA_API_KEY",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "format": "openai"
+    },
+    "chaos": {
+      "_comment": "Test-only provider for chaos tests. Points at mock_sse_server.py on the host.",
+      "base_url": "http://192.168.65.254:9999",
+      "api_key_env": "_CHAOS_DUMMY",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "format": "openai"
+    },
+    "local": {
+      "_comment": "Sovereign fallback for X-Sensitivity-Level: RED. Default points at Ollama on host. Override with LOCAL_LLM_URL to use a different local server (MLX, llama.cpp, vLLM, etc.). The provider is REQUIRED — sidecar-rs panics at startup if no provider=local model is declared, because RED routing has no place to send requests otherwise.",
+      "base_url_env": "LOCAL_LLM_URL",
+      "base_url": "http://192.168.65.254:11434",
+      "api_key_env": "_LOCAL_LLM_DUMMY",
+      "auth_header": "Authorization",
+      "auth_prefix": "Bearer ",
+      "format": "openai"
+    },
+    "council": {
+      "_comment": "Council deliberation exposed as an OpenAI-compatible synchronous model. Uses a custom service-identity header (X-Gateway-Auth), distinct from the per-user bearer. host.docker.internal:8765 is the Council HTTP API on the host. Gated by GW_ENABLE_COUNCIL_ENDPOINT=1.",
+      "base_url_env": "COUNCIL_BASE_URL",
+      "base_url": "http://host.docker.internal:8765",
+      "api_key_env": "COUNCIL_GATEWAY_TOKEN",
+      "auth_header": "X-Gateway-Auth",
+      "auth_prefix": "",
+      "format": "council"
+    }
+  },
+
+  "models": {
+    "grok-4.3": {
+      "provider": "xai",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 1.25, "cached_input": 0.125, "output": 2.50 },
+      "fallback": "gpt-5.5",
+      "capabilities": { "quality": 0.95, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": true },
+      "_note": "Uses the native OpenAI-compatible chat-completions response shape, including reasoning_content."
+    },
+    "grok-4.20-0309-reasoning": {
+      "provider": "xai",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 1.25, "cached_input": 0.125, "output": 2.50 },
+      "capabilities": { "quality": 0.93, "max_context": 2000000, "supports_tools": true, "supports_vision": true, "supports_streaming": true },
+      "_note": "Deep reasoning. Same price as grok-4.3 but 2M context."
+    },
+    "grok-4.20-0309-non-reasoning": {
+      "provider": "xai",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 1.25, "cached_input": 0.125, "output": 2.50 },
+      "capabilities": { "quality": 0.91, "max_context": 2000000, "supports_tools": true, "supports_vision": true, "supports_streaming": true }
+    },
+    "grok-4.20-multi-agent-0309": {
+      "provider": "xai",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 1.25, "cached_input": 0.125, "output": 2.50 },
+      "capabilities": { "quality": 0.93, "max_context": 2000000, "supports_tools": true, "supports_vision": true, "supports_streaming": true },
+      "_note": "Multi-agent swarm. Use for hard analytical/reasoning tasks."
+    },
+    "gpt-5.5": {
+      "provider": "gpt-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 5.00, "cached_input": 0.50, "output": 30.00 },
+      "fallback": "claude-opus-4-7",
+      "capabilities": { "quality": 0.97, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": true }
+    },
+    "gpt-5.6-sol": {
+      "provider": "gpt-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 5.00, "cached_input": 0.50, "output": 30.00 },
+      "fallback": "gpt-5.5",
+      "capabilities": { "quality": 0.98, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": true },
+      "_note": "Codex CLI subscription route managed by the canonical runtime; cabinet default for Quick, War Room, triage, and code verification."
+    },
+    "gpt-5.5-pro": {
+      "provider": "gpt-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 30.00, "cached_input": 0.00, "output": 180.00 },
+      "capabilities": { "quality": 0.98, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": true }
+    },
+    "gpt-5.4": {
+      "provider": "gpt-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 2.50, "cached_input": 0.25, "output": 15.00 },
+      "capabilities": { "quality": 0.91, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": true }
+    },
+    "gpt-5.4-pro": {
+      "provider": "gpt-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 30.00, "cached_input": 0.00, "output": 180.00 },
+      "capabilities": { "quality": 0.98, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": true }
+    },
+    "gpt-5.4-mini": {
+      "provider": "gpt-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.75, "cached_input": 0.075, "output": 4.50 },
+      "capabilities": { "quality": 0.84, "max_context": 400000, "supports_tools": true, "supports_vision": true, "supports_streaming": true }
+    },
+    "gpt-5.4-nano": {
+      "provider": "gpt-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.20, "cached_input": 0.02, "output": 1.25 },
+      "capabilities": { "quality": 0.72, "max_context": 400000, "supports_tools": true, "supports_vision": false, "supports_streaming": true }
+    },
+    "claude-opus-4-8": {
+      "provider": "claude-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 5.00, "cached_input": 0.50, "output": 25.00 },
+      "fallback": "claude-opus-4-7",
+      "capabilities": { "quality": 0.97, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": false },
+      "_note": "Default Council chair model in standard.yaml."
+    },
+    "claude-opus-4-7": {
+      "provider": "claude-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 5.00, "cached_input": 0.50, "output": 25.00 },
+      "fallback": "grok-4.20-0309-reasoning",
+      "capabilities": { "quality": 0.96, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": false }
+    },
+    "claude-opus-4-6": {
+      "provider": "claude-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 5.00, "cached_input": 0.50, "output": 25.00 },
+      "capabilities": { "quality": 0.94, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": false }
+    },
+    "claude-opus-4-5": {
+      "provider": "claude-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 5.00, "cached_input": 0.50, "output": 25.00 },
+      "capabilities": { "quality": 0.93, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": false }
+    },
+    "claude-sonnet-4-6": {
+      "provider": "claude-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 3.00, "cached_input": 0.30, "output": 15.00 },
+      "capabilities": { "quality": 0.90, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": false }
+    },
+    "claude-sonnet-4-5": {
+      "provider": "claude-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 3.00, "cached_input": 0.30, "output": 15.00 },
+      "capabilities": { "quality": 0.88, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": false }
+    },
+    "claude-haiku-4-5": {
+      "provider": "claude-cli",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 1.00, "cached_input": 0.10, "output": 5.00 },
+      "capabilities": { "quality": 0.78, "max_context": 200000, "supports_tools": true, "supports_vision": true, "supports_streaming": false }
+    },
+    "claude-fable-5": {
+      "provider": "anthropic",
+      "path": "/v1/messages",
+      "pricing": { "input": 10.00, "cached_input": 0.50, "output": 50.00 },
+      "capabilities": { "quality": 0.99, "max_context": 1000000, "supports_tools": true, "supports_vision": true, "supports_streaming": true },
+      "_note": "Direct Anthropic route. Requires ANTHROPIC_API_KEY."
+    },
+    "gemini-3.1-pro-preview": {
+      "provider": "vertex",
+      "path": "/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent",
+      "pricing": { "input": 1.25, "cached_input": 0.31, "output": 5.00 },
+      "capabilities": { "quality": 0.92, "max_context": 2000000, "supports_tools": false, "supports_vision": false, "supports_streaming": false },
+      "_note": "Vertex ADC/global seat and chair path. Cost accounting reads usageMetadata; tool and vision support remain disabled."
+    },
+    "gemini-3.5-flash": {
+      "provider": "vertex",
+      "path": "/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent",
+      "pricing": { "input": 1.50, "cached_input": 0.31, "output": 9.00 },
+      "capabilities": { "quality": 0.86, "max_context": 1000000, "supports_tools": false, "supports_vision": false, "supports_streaming": false },
+      "_note": "Vertex utility fallback mirrored from the Council model registry."
+    },
+    "gemini-3-flash-preview": {
+      "provider": "vertex",
+      "path": "/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent",
+      "pricing": { "input": 0.15, "cached_input": 0.0375, "output": 0.60 },
+      "capabilities": { "quality": 0.80, "max_context": 1000000, "supports_tools": false, "supports_vision": false, "supports_streaming": false },
+      "_note": "Vertex ADC/global fast path. Cost accounting reads usageMetadata; tool and vision support remain disabled."
+    },
+    "nvidia/llama-3.3-nemotron-super-49b-v1": {
+      "provider": "nvidia",
+      "family": "nemotron",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.78, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "NVIDIA NIM free-tier route; quality remains capped pending evaluation."
+    },
+    "deepseek-ai/deepseek-v4-pro": {
+      "provider": "nvidia",
+      "family": "deepseek-v4",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.90, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true, "supports_thinking": true },
+      "_note": "DeepSeek V4 Pro via NIM — flagship MoE reasoning. Quality capped at 0.90 until eval harness."
+    },
+    "deepseek-ai/deepseek-v4-flash": {
+      "provider": "nvidia",
+      "family": "deepseek-v4",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.84, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "DeepSeek V4 Flash — $0.00 convergence judge. Replaces gpt-5.4-nano in cheap-tier."
+    },
+    "mistralai/mistral-large-3-675b-instruct-2512": {
+      "provider": "nvidia",
+      "family": "mistral",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.90, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "Invokable NVIDIA NIM free-tier anchor and chair model."
+    },
+    "qwen/qwen3.5-397b-a17b": {
+      "provider": "nvidia",
+      "family": "qwen3.5",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.89, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "Invokable NVIDIA NIM free-tier reasoning seat."
+    },
+    "z-ai/glm-5.2": {
+      "provider": "nvidia",
+      "family": "glm",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.86, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "Invokable NVIDIA NIM free-tier contrarian seat."
+    },
+    "qwen/qwen3.5-122b-a10b": {
+      "provider": "nvidia",
+      "family": "qwen3.5",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.85, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "Qwen 3.5 122B MoE — sub-second latency on NIM. Free tier."
+    },
+    "qwen/qwen3-coder-480b-a35b-instruct": {
+      "provider": "nvidia",
+      "family": "qwen3-coder",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.87, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true, "is_code_specialist": true },
+      "_note": "Qwen3 Coder 480B MoE — code specialist. Free tier."
+    },
+    "mistralai/devstral-2-123b-instruct-2512": {
+      "provider": "nvidia",
+      "family": "devstral",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.86, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true, "is_code_specialist": true },
+      "_note": "Devstral 2 123B — Mistral's agentic coding model. Free tier."
+    },
+    "z-ai/glm-5.1": {
+      "provider": "nvidia",
+      "family": "glm",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.83, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "GLM 5.1 via NIM — Zhipu's latest. Free tier."
+    },
+    "google/gemma-4-31b-it": {
+      "provider": "nvidia",
+      "family": "gemma",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.80, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "Gemma 4 31B-IT via NIM — Google's latest open model. Free tier."
+    },
+    "nvidia/nemotron-3-super-120b-a12b": {
+      "provider": "nvidia",
+      "family": "nemotron",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.82, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "Nemotron 3 Super 120B MoE — NVIDIA's best open model. Free tier."
+    },
+    "nvidia/nemotron-3-ultra-550b-a55b": {
+      "provider": "nvidia",
+      "family": "nemotron",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.93, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "Invokable NVIDIA NIM free-tier Sovereign chair model."
+    },
+    "openai/gpt-oss-120b": {
+      "provider": "nvidia",
+      "family": "gpt-oss",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.83, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "OpenAI GPT-OSS 120B via NIM — open-sourced GPT weights. Free tier."
+    },
+    "chaos-normal":        { "provider": "chaos", "path": "/v1/chat/completions/normal",        "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": false, "supports_vision": false, "supports_streaming": true }, "_test_only": true },
+    "chaos-no-usage":      { "provider": "chaos", "path": "/v1/chat/completions/no-usage",      "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": false, "supports_vision": false, "supports_streaming": true }, "_test_only": true },
+    "chaos-fragmented":    { "provider": "chaos", "path": "/v1/chat/completions/fragmented",    "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": false, "supports_vision": false, "supports_streaming": true }, "_test_only": true },
+    "chaos-forged-usage":  { "provider": "chaos", "path": "/v1/chat/completions/forged-usage",  "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": false, "supports_vision": false, "supports_streaming": true }, "_test_only": true },
+    "chaos-crlf":          { "provider": "chaos", "path": "/v1/chat/completions/crlf",          "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": false, "supports_vision": false, "supports_streaming": true }, "_test_only": true },
+    "chaos-responses-api": { "provider": "chaos", "path": "/v1/chat/completions/responses-api", "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": false, "supports_vision": false, "supports_streaming": true }, "_test_only": true },
+    "chaos-mid-5xx":       { "provider": "chaos", "path": "/v1/chat/completions/mid-5xx",       "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": false, "supports_vision": false, "supports_streaming": true }, "_test_only": true },
+    "chaos-slow":          { "provider": "chaos", "path": "/v1/chat/completions/slow",          "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": false, "supports_vision": false, "supports_streaming": true }, "_test_only": true },
+    "chaos-anthropic-stream": { "provider": "chaos", "path": "/v1/chat/completions/anthropic-stream", "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": false, "supports_vision": false, "supports_streaming": true }, "_test_only": true, "_stream_translate": "anthropic" },
+    "chaos-anthropic-tool":   { "provider": "chaos", "path": "/v1/chat/completions/anthropic-tool",   "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": true,  "supports_vision": false, "supports_streaming": true }, "_test_only": true, "_stream_translate": "anthropic" },
+    "chaos-vertex-stream":    { "provider": "chaos", "path": "/v1/chat/completions/vertex-stream",    "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": false, "supports_vision": false, "supports_streaming": true }, "_test_only": true, "_stream_translate": "vertex" },
+    "chaos-responses-stream-wrap": { "provider": "chaos", "path": "/v1/chat/completions/responses-stream-wrap", "pricing": { "input": 0, "cached_input": 0, "output": 0 }, "capabilities": { "quality": 0.5, "max_context": 4096, "supports_tools": false, "supports_vision": false, "supports_streaming": true }, "_test_only": true },
+    "sovereign-node": {
+      "_comment": "Sovereign fallback model for X-Sensitivity-Level: RED. Required by sidecar-rs startup assertion (panics if no provider=local model exists). Default ID matches an Ollama tag (llama3.1:8b); change to whatever your local server serves. Pricing is zero — local hardware time, not API spend.",
+      "provider": "local",
+      "path": "/v1/chat/completions",
+      "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
+      "capabilities": { "quality": 0.70, "max_context": 128000, "supports_tools": false, "supports_vision": false, "supports_streaming": true }
+    },
+
+    "council-audit": {
+      "_comment": "Retrieves a Council session trace by ID.",
+      "provider": "council",
+      "path": "/api/deliberate",
+      "family": "council",
+      "internal": false,
+      "kind": "synthetic_rollup",
+      "pricing": { "input": 0, "cached_input": 0, "output": 0 },
+      "capabilities": { "quality": 1.0, "max_context": 200000, "supports_tools": false, "supports_vision": false, "supports_streaming": false }
+    },
+    "council-triage": {
+      "_comment": "Council triage endpoint using a 2-seat, 1-round cabinet. The wrapper itself does not bill; chair and seat costs are surfaced on response headers and rolled up through parent_request_id.",
+      "provider": "council",
+      "path": "/api/deliberate",
+      "family": "council",
+      "internal": false,
+      "kind": "synthetic_rollup",
+      "pricing": { "input": 0, "cached_input": 0, "output": 0 },
+      "capabilities": { "quality": 0.95, "max_context": 200000, "supports_tools": false, "supports_vision": false, "supports_streaming": false }
+    },
+    "council-warroom": {
+      "_comment": "Council War Room endpoint using a 5-seat, 3-round cabinet. This route is marked internal and must be explicitly enabled.",
+      "provider": "council",
+      "path": "/api/deliberate",
+      "family": "council",
+      "internal": true,
+      "kind": "synthetic_rollup",
+      "pricing": { "input": 0, "cached_input": 0, "output": 0 },
+      "capabilities": { "quality": 0.99, "max_context": 200000, "supports_tools": false, "supports_vision": false, "supports_streaming": false }
+    }
+  },
+
+  "aliases": {
+    "grok": "grok-4.3",
+    "grok-hard": "grok-4.20-multi-agent-0309",
+    "grok-reasoning": "grok-4.20-0309-reasoning",
+    "gpt": "gpt-5.5",
+    "claude": "claude-opus-4-7",
+    "opus": "claude-opus-4-7",
+    "sonnet": "claude-sonnet-4-6",
+    "fable": "claude-fable-5",
+    "claude-fable": "claude-fable-5",
+    "mythos": "claude-fable-5",
+    "gemini": "gemini-3.1-pro-preview",
+    "nvidia": "nvidia/llama-3.3-nemotron-super-49b-v1",
+    "deepseek": "deepseek-ai/deepseek-v4-pro",
+    "deepseek-flash": "deepseek-ai/deepseek-v4-flash",
+    "qwen": "qwen/qwen3.5-122b-a10b",
+    "qwen-coder": "qwen/qwen3-coder-480b-a35b-instruct",
+    "devstral": "mistralai/devstral-2-123b-instruct-2512",
+    "glm": "z-ai/glm-5.1",
+    "nemotron": "nvidia/nemotron-3-super-120b-a12b",
+    "gemma": "google/gemma-4-31b-it",
+    "gpt-oss": "openai/gpt-oss-120b",
+    "cheap": "deepseek-ai/deepseek-v4-flash",
+    "free": "deepseek-ai/deepseek-v4-flash",
+    "fast": "grok-4.3",
+    "sovereign": "sovereign-node",
+    "local": "sovereign-node"
+  }
+}

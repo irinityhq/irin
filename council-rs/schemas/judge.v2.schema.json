@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://council.irinity.ai/schemas/judge.v2.schema.json",
+  "title": "Council Structured Judge Output v2",
+  "description": "The structured assessment produced by the convergence judge after each round. Replaces the naked 0.0-1.0 float. This schema is also the prompt contract — the judge prompt asks for JSON matching this shape.",
+  "type": "object",
+  "required": ["convergence", "intent_aligned", "recommendation"],
+  "properties": {
+    "convergence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Agreement score across all seat responses. 0.0 = complete disagreement, 1.0 = perfect consensus."
+    },
+    "intent_aligned": {
+      "type": "boolean",
+      "description": "Did the seat responses substantively address the ORIGINAL question/topic? False = potential prompt poisoning or intent drift."
+    },
+    "drift": {
+      "type": ["string", "null"],
+      "default": null,
+      "maxLength": 500,
+      "description": "Short description of what drifted from the original intent, if anything. Null = no drift detected."
+    },
+    "quality_flag": {
+      "type": ["string", "null"],
+      "enum": ["thin", "circular", "off_topic", null],
+      "default": null,
+      "description": "Quality concern. 'thin' = responses lack depth, 'circular' = seats restating each other without new insight, 'off_topic' = responses don't address the question."
+    },
+    "homogeneity_score": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "maximum": 1,
+      "default": null,
+      "description": "Diversity/homogeneity metric (0.0=high diversity across seats, 1.0=high homogenization/quick agreement on near-identical outputs). Computed from seat response texts (lexical Jaccard). High values + high convergence raise effective threshold and force 'continue'."
+    },
+    "quick_agreement": {
+      "type": ["boolean", "null"],
+      "default": null,
+      "description": "Flag set when seats reach high agreement unusually quickly or with low variance (homogeneity >= ~0.75). Triggers continued deliberation even on high raw convergence to counter model slop/homogenization attractors."
+    },
+    "recommendation": {
+      "type": "string",
+      "enum": ["continue", "converged", "escalate", "reframe"],
+      "description": "Judge's recommended action. 'continue' = more rounds needed, 'converged' = agreement reached, 'escalate' = trigger SpecOps, 'reframe' = rephrase the question (requires code path)."
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "default": 1.0,
+      "description": "Judge's self-reported confidence in this assessment. Values <0.5 should trigger auto-escalation to a higher-tier judge model."
+    }
+  },
+  "additionalProperties": false,
+  "examples": [
+    {
+      "convergence": 0.85,
+      "intent_aligned": true,
+      "drift": null,
+      "quality_flag": null,
+      "recommendation": "converged",
+      "confidence": 0.92
+    },
+    {
+      "convergence": 0.35,
+      "intent_aligned": true,
+      "drift": "Seat 2 pivoted to implementation details when the topic asked for strategic direction",
+      "quality_flag": null,
+      "recommendation": "continue",
+      "confidence": 0.78
+    },
+    {
+      "convergence": 0.60,
+      "intent_aligned": false,
+      "drift": "All seats addressed a different framing than the original question",
+      "quality_flag": "off_topic",
+      "recommendation": "reframe",
+      "confidence": 0.45
+    }
+  ]
+}

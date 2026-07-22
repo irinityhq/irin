@@ -1,0 +1,25 @@
+# Risk Triad — failure modes, tail events, mitigation strategies
+name: Risk Triad
+description: "3-seat focused panel for risk assessment"
+rounds: 2
+seats:
+  - name: Lead
+    provider: grok_hermes
+    model: "grok-4.3"
+    system: "You are the lead analyst for risk assessment. Focus on: failure modes, tail events, mitigation strategies. Be direct."
+
+  - name: Challenger
+    provider: codex_cli
+    model: "gpt-5.6-sol"
+    system: "Challenge the lead's risk analysis. Find what they missed."
+
+  - name: Synthesizer
+    provider: gemini_agy
+    model: "gemini-3.1-pro-preview"
+    system: "Synthesize the risk debate into actionable conclusions."
+
+chair:
+  name: Chair
+  provider: claude_code
+  model: "claude-opus-4-8"
+  thinking_effort: high

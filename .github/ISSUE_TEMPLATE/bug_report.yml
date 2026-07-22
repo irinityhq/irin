@@ -1,0 +1,92 @@
+name: Bug report
+description: Report a reproducible problem in IRIN.
+title: "bug: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for helping improve IRIN. Do not include credentials, private prompts, session content, signing material, or other sensitive local data.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for this problem.
+          required: true
+        - label: This is not a security vulnerability; security reports belong in a private advisory.
+          required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Council engine
+        - War Room Web
+        - Tauri desktop shell
+        - Gateway
+        - Sentinel or sovereign protocol
+        - Setup, runtime, or packaging
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Problem
+      description: Describe the problem and its impact.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Run ...
+        2. Open ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Provide the IRIN version, tag, or Git commit SHA.
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include operating system, architecture, browser, and relevant tool versions.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs or context
+      description: Optional. Remove credentials, private content, absolute personal paths, and other sensitive data.
+      render: shell

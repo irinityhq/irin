@@ -1,0 +1,60 @@
+# Grok transport routing — edit when xAI ships new CLI or API model IDs.
+# Council loads this at startup (no recompile). See src/provider/grok_route.rs.
+#
+# Local `grok` CLI (`grok models` as of 2026-07): grok-4.5 (default),
+# grok-composer-2.5-fast, grok-multi-agent. OAuth/subscription agentic seats.
+# Normal deliberation seats still pin grok-4.3 in cabinets (Hermes/xAI path) until
+# scripts/seat-model-shootout.py + human review pick a winner — do NOT mass-flip.
+
+# Passed to `grok -m` when the cabinet/role model id matches (value = CLI flag).
+# Lookup is exact match BEFORE api_only_prefixes (so grok-4.5 can be local CLI).
+cli_models:
+  grok-4.5: grok-4.5
+  grok-build: grok-build
+  grok-build-0.1: grok-build
+  grok-composer-2.5: grok-composer-2.5-fast
+  grok-composer-2.5-fast: grok-composer-2.5-fast
+  grok-multi-agent: grok-multi-agent
+
+# Cabinet/role ids that mean "xAI API / Hermes wire" — never pass to local `grok -m`
+# as if they were Build models. Hermes adapter owns these when use_hermes_for_api_only.
+api_only_ids:
+  - grok-4.3
+  - grok-4.20-0309-reasoning
+  - grok-4.20-0309-non-reasoning
+  - grok-4.20-multi-agent-0309
+  - grok-4-1-fast-non-reasoning
+
+# Prefixes treated as API-only when not listed in cli_models.
+# Keep specific; do not swallow cli_models keys (matched first).
+api_only_prefixes:
+  - grok-4.20-
+  - grok-4-1-
+
+# Response label when CLI runs (pricing / session JSON). Omit -m → grok-cli-default.
+cli_default_label: grok-cli-default
+
+# Label suffix when a known CLI model is pinned via -m.
+cli_pinned_label_prefix: grok-cli-
+
+# Hermes `-z` seat adapter (scripts/hermes-seat-adapter.sh — fork outside council-rs).
+# When true, api_only_ids route to Hermes if the adapter/hermes binary is available.
+use_hermes_for_api_only: true
+hermes_label_prefix: hermes-cli-
+
+# Hermes transport contract — council reads this; operator owns adapter flags.
+hermes:
+  # script: spawn default_adapter with --model/--provider + stdin (recommended).
+  # direct: council invokes `hermes -z` inline (legacy; prefer script).
+  adapter_protocol: script
+  default_adapter: scripts/hermes-seat-adapter.sh
+
+hermes_seats:
+  grok-4.3:
+    provider: xai
+  grok-4.20-0309-reasoning:
+    provider: xai
+  grok-4.20-0309-non-reasoning:
+    provider: xai
+  grok-4.20-multi-agent-0309:
+    provider: xai

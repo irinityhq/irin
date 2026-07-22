@@ -1,0 +1,50 @@
+name: CodeQL Advanced
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "41 7 * * 1"
+
+permissions:
+  actions: read
+  contents: read
+  packages: read
+  security-events: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ${{ fromJSON(github.event.repository.private == true && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        language:
+          - actions
+          - javascript-typescript
+          - python
+          - rust
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Set up Node.js for TypeScript CodeQL
+        if: matrix.language == 'javascript-typescript'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@eec0bff2f6c15bf3f1e8a0152f94d17664a06a06 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@eec0bff2f6c15bf3f1e8a0152f94d17664a06a06 # v4
+        with:
+          category: "/language:${{ matrix.language }}"

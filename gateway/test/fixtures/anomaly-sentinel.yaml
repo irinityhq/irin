@@ -1,0 +1,16 @@
+# Experimental escalation failure-rate spike detector.
+# Fires when pending_escalations failure rate in window_ms exceeds EWMA baseline.
+# experimental: true — unregister if false-positive; ships disabled by default.
+- name: anomaly-watch
+  tenant: sovereign
+  tier: fast
+  cooldown_ms: 60000
+  config:
+    watch_db_path: /var/lib/gateway/watch.db
+    window_ms: 900000
+    threshold_pct: 50.0
+    min_samples: 5
+    min_failures: 2
+    min_error_rate: 0.25
+    ewma_alpha: 0.3
+    consecutive_windows: 2

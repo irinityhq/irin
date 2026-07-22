@@ -1,0 +1,54 @@
+# NVIDIA NIM models that returned successful chat/completions on the operator
+# key (2026-07-11 probe). Catalog /v1/models listed 121; only these 45 answered.
+#
+# Re-probe:
+#   NVIDIA_API_KEY=… python3 scripts/probe-nim-catalog.py
+# Do NOT put freeride/starter seats on models outside this list without a re-probe.
+#
+# Source receipt: maxaccel/reviews/receipts/IRIN-NVIDIA-CATALOG-PROBE-2026-07-11.md
+
+abacusai/dracarys-llama-3.1-70b-instruct
+bytedance/seed-oss-36b-instruct
+deepseek-ai/deepseek-v4-pro
+google/diffusiongemma-26b-a4b-it
+google/gemma-4-31b-it
+meta/llama-3.1-70b-instruct
+meta/llama-3.1-8b-instruct
+meta/llama-3.2-11b-vision-instruct
+meta/llama-3.2-90b-vision-instruct
+meta/llama-guard-4-12b
+microsoft/phi-4-mini-instruct
+microsoft/phi-4-multimodal-instruct
+minimaxai/minimax-m2.7
+minimaxai/minimax-m3
+mistralai/ministral-14b-instruct-2512
+mistralai/mistral-large-3-675b-instruct-2512
+mistralai/mistral-nemotron
+mistralai/mistral-small-4-119b-2603
+nvidia/gliner-pii
+nvidia/ising-calibration-1-35b-a3b
+nvidia/llama-3.1-nemoguard-8b-content-safety
+nvidia/llama-3.1-nemotron-nano-vl-8b-v1
+nvidia/llama-3.1-nemotron-safety-guard-8b-v3
+nvidia/llama-3.3-nemotron-super-49b-v1
+nvidia/llama-3.3-nemotron-super-49b-v1.5
+nvidia/nemotron-3-content-safety
+nvidia/nemotron-3-nano-30b-a3b
+nvidia/nemotron-3-nano-omni-30b-a3b-reasoning
+nvidia/nemotron-3-super-120b-a12b
+nvidia/nemotron-3-ultra-550b-a55b
+nvidia/nemotron-3.5-content-safety
+nvidia/nemotron-content-safety-reasoning-4b
+nvidia/nemotron-mini-4b-instruct
+nvidia/nemotron-nano-12b-v2-vl
+nvidia/nvidia-nemotron-nano-9b-v2
+nvidia/riva-translate-4b-instruct-v1.1
+openai/gpt-oss-120b
+openai/gpt-oss-20b
+qwen/qwen3.5-397b-a17b
+sarvamai/sarvam-m
+stepfun-ai/step-3.5-flash
+stepfun-ai/step-3.7-flash
+stockmark/stockmark-2-100b-instruct
+upstage/solar-10.7b-instruct
+z-ai/glm-5.2

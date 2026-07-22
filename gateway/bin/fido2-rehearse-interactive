@@ -1,0 +1,91 @@
+#!/bin/sh
+# Interactive FIDO2 rehearsal: stage → show challenge → read assertion → confirm
+# Run: ! bin/fido2-rehearse-interactive
+set -eu
+cd "$(dirname "$0")/.."
+
+. bin/lib/runtime-env.sh
+TOK=$(irin_arm_principal_token) || exit 1
+SIDECAR_SOCKET_VOLUME=$(irin_sidecar_socket_volume)
+SIDECAR_DATA_VOLUME=$(irin_sidecar_data_volume)
+
+curl_uds() {
+  docker run --rm -i --user 0 -v "$SIDECAR_SOCKET_VOLUME":/run/sidecar \
+    curlimages/curl:8.12.1 -s --unix-socket /run/sidecar/sidecar.sock "$@"
+}
+
+# Check for existing stage
+PENDING=$(curl_uds -w '\n%{http_code}' http://localhost/watch/admin/producer/arm/pending \
+  -H "Authorization: Bearer sovereign-op:$TOK")
+CODE=$(printf '%s' "$PENDING" | tail -1)
+BODY=$(printf '%s' "$PENDING" | sed '$d')
+
+if [ "$CODE" = "200" ]; then
+  STAGE_REH=$(printf '%s' "$BODY" | jq -r '.rehearsal')
+  if [ "$STAGE_REH" = "false" ]; then
+    echo "open stage is REAL, not rehearsal — aborting" >&2
+    exit 1
+  fi
+  SID=$(printf '%s' "$BODY" | jq -r '.stage_id')
+  CHALLENGE_B64=$(printf '%s' "$BODY" | jq -r '.challenge')
+  LEFT=$(printf '%s' "$BODY" | jq -r '.expires_in_ms')
+  echo "resuming open stage $SID (${LEFT}ms left)"
+else
+  STAGE=$(curl_uds -X POST http://localhost/watch/admin/producer/arm/stage \
+    -H "Authorization: Bearer sovereign-op:$TOK" \
+    -H "Content-Type: application/json" -d '{"rehearse": true}')
+  SID=$(printf '%s' "$STAGE" | jq -r '.stage_id // empty')
+  CHALLENGE_B64=$(printf '%s' "$STAGE" | jq -r '.challenge // empty')
+  if [ -z "$SID" ] || [ -z "$CHALLENGE_B64" ]; then
+    echo "stage failed: $STAGE" >&2
+    exit 1
+  fi
+  echo "REHEARSAL stage $SID open (120s window)"
+fi
+
+CH_HEX=$(printf '%s' "$CHALLENGE_B64" | base64 -D 2>/dev/null | xxd -p -c 256 || printf '%s' "$CHALLENGE_B64" | base64 -d | xxd -p -c 256)
+
+echo ""
+echo "=== Paste into https://gateway.local:8443/fido2-assert.html ==="
+CRED_ID=$(docker run --rm -i --user 0 -v "$SIDECAR_DATA_VOLUME":/var/lib/sidecar \
+  alpine:3.21 sh -c 'cat /var/lib/sidecar/arm_attest_keys.json 2>/dev/null' \
+  | jq -r '.[] | select(.credential_type=="fido2-es256") | .credential_id' | head -1)
+if [ -z "$CRED_ID" ]; then
+  echo "no fido2-es256 credential in registry" >&2
+  exit 1
+fi
+echo "Challenge: $CH_HEX"
+echo "Credential ID: $CRED_ID"
+echo "================================================================"
+echo ""
+echo "After browser assertion, paste the FULL JSON (one line) and press Enter:"
+read -r ASSERTION_JSON
+
+if [ -z "$ASSERTION_JSON" ]; then
+  echo "empty input" >&2
+  exit 1
+fi
+
+# Validate it's JSON with required fields
+printf '%s' "$ASSERTION_JSON" | jq -e '.credential_id and .signature and .authenticator_data and .client_data_json' >/dev/null 2>&1 || {
+  echo "invalid JSON or missing fields" >&2
+  exit 1
+}
+
+CONFIRM_BODY=$(printf '%s' "$ASSERTION_JSON" | jq --arg sid "$SID" '. + {stage_id: $sid}')
+
+echo ""
+echo "submitting confirm for stage $SID..."
+RESP=$(printf '%s' "$CONFIRM_BODY" | docker run --rm -i --user 0 -v "$SIDECAR_SOCKET_VOLUME":/run/sidecar \
+  curlimages/curl:8.12.1 -s --unix-socket /run/sidecar/sidecar.sock \
+  -X POST http://localhost/watch/admin/producer/arm/confirm \
+  -H "Authorization: Bearer sovereign-op:$TOK" \
+  -H "Content-Type: application/json" -d @-)
+
+echo "$RESP"
+STATUS=$(printf '%s' "$RESP" | jq -r '.status // empty')
+case "$STATUS" in
+  rehearsal-ok) echo "--> REHEARSAL COMPLETE. Producer NOT started.";;
+  armed)        echo "--> ARMED.";;
+  *)            echo "--> FAILED; see response above" >&2; exit 1;;
+esac

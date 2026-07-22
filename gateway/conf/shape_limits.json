@@ -1,0 +1,21 @@
+{
+  "default": {
+    "max_messages": 256,
+    "max_message_bytes": 524288,
+    "max_tools": 64,
+    "max_json_depth": 32,
+    "max_total_body_bytes": 2097152
+  },
+  "models": {
+    "gemini-3.1-pro-preview": {
+      "max_messages": 1024,
+      "max_message_bytes": 2097152,
+      "max_total_body_bytes": 4194304
+    },
+    "claude-opus-4-6": {
+      "max_messages": 1024,
+      "max_message_bytes": 2097152,
+      "max_total_body_bytes": 4194304
+    }
+  }
+}

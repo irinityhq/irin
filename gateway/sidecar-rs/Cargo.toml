@@ -1,0 +1,129 @@
+[package]
+name = "gateway-sidecar"
+version = "0.1.0"
+edition = "2021"
+description = "AI Gateway policy engine — guardrails, smart routing, enforcement"
+license = "Apache-2.0"
+
+[[bin]]
+name = "gateway-sidecar"
+path = "src/main.rs"
+
+[[bin]]
+name = "gateway-ledger"
+path = "src/bin/gateway_ledger.rs"
+
+[[bin]]
+name = "gateway-ceremony"
+path = "src/bin/gateway_ceremony.rs"
+
+[dependencies]
+# CLI argument parsing (used by gateway-ceremony)
+clap = { version = "4", features = ["derive"] }
+
+# HTTP server
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower = "0.5"
+tower-http = { version = "0.7", features = ["trace", "timeout"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Pattern matching & Unicode
+regex = "1"
+unicode-normalization = "0.1"
+
+# Observability
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+# OTLP trace exporter, opt-in and HTTP-only; tonic/gRPC is disabled.
+tracing-opentelemetry = "0.33"
+opentelemetry = { version = "0.32", features = ["trace"] }
+opentelemetry-otlp = { version = "0.32", default-features = false, features = ["trace", "http-json", "reqwest-client", "reqwest-rustls"] }
+opentelemetry_sdk = { version = "0.32", features = ["trace"] }
+
+# Crypto (content hashing)
+sha2 = "0.10"
+hex = "0.4"
+
+# O_NONBLOCK open for the precedent-integrity sentinel (fifo/device guard)
+libc = "0.2"
+
+# Redis supports distributed caching and budget counters. Local moka/SQLite
+# fallbacks keep Redis optional for the single-operator deployment.
+moka = { version = "0.12", features = ["future"] }
+redis = { version = "1", features = ["tokio-comp", "json"] }
+async-trait = "0.1"
+ed25519-dalek = { version = "2.2.0", features = ["rand_core"] }
+tokio-rusqlite = "0.7.0"
+rusqlite = { version = "0.37.0", features = ["bundled"] }
+rand_core = { version = "0.6.4", features = ["getrandom"] }
+rand = "0.10.1"
+base64 = "0.22.1"
+
+# GCP Application Default Credentials (Vertex AI token refresh)
+gcp_auth = "0.12"
+
+# IP CIDR matching (auth IP gate)
+ipnet = "2"
+
+# Council endpoint state uses a non-poisoning mutex and bounded LRU.
+parking_lot = "0.12"
+lru = "0.18"
+
+# Watch-plane file watcher. FileInboxSentinel intentionally uses PollWatcher.
+notify = "8.2"
+# HTTP poller JSONPath extractor for queue-depth Sentinel.
+jsonpath-rust = "1.0"
+# Watch-plane error enums.
+thiserror = "2"
+# Panic isolation in the fire pipeline.
+futures = "0.3"
+anyhow = "1"
+# Outbound HTTP for Sentinel polling, dispatch, and startup probes. Native TLS
+# remains disabled.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+# Constant-time admin-token comparison.
+subtle = "2"
+rustls = "0.23.40"
+# Pure-Rust ES256 verification for hardware-backed arm confirmation. The
+# sidecar never holds the private signing key.
+p256 = { version = "=0.13.2", default-features = false, features = ["ecdsa", "std"] }
+sovereign-protocol = { version = "0.1.1", path = "../../sentinel/sovereign-protocol" }
+
+[features]
+# Gates test-only constructors (for example,
+# `WatchDb::upsert_active_arm_for_test`) out of the production binary. Enabled
+# for the integration-test crate via the self dev-dependency below; never set on
+# a release build, so the helper cannot be a production code path.
+test-helpers = []
+
+[dev-dependencies]
+# Enable `test-helpers` for the integration-test crate (the standard
+# self-dependency pattern — integration tests link the crate as a normal dep, so
+# #[cfg(test)] items are invisible to them; a feature is the supported seam).
+gateway-sidecar = { path = ".", features = ["test-helpers"] }
+# Property test on the length-prefixed preimage builder.
+proptest = "1"
+# Temporary directories for falsification tests.
+tempfile = "3"
+# HTTP client for tests that hit the sidecar over UDS/loopback.
+# 0.13 upgrade keeps default-features=false + rustls; see main dependency comment for rationale.
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
+# Enables `start_paused` + `tokio::time::advance` for the
+# deterministic TimedOut-path test in tests/watch_pending_retry.rs. Additive
+# to the main `features = ["full"]` for dev/test builds only; release builds
+# stay free of test-util shims.
+tokio = { version = "1", features = ["test-util"] }
+# Compile-fail tests for HydrationToken typestate.
+trybuild = "1"
+
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true

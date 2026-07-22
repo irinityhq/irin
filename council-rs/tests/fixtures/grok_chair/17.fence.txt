@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Dismiss","in_response_to":"esc-boot-0017","rationale":"Checker output states escalation reports only generic probe failure without concrete details, making dispatch unwarranted; Analyst concludes no actionable condition with 100% convergence on Dismiss."}
+```

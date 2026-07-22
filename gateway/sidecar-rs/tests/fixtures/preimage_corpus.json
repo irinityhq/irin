@@ -1,0 +1,342 @@
+[
+  {
+    "event_type": "escalation_received",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166531000,
+    "state_json": "{\"event_type\":\"escalation_received\",\"escalation_id\":\"deadbeefcafebabedeadbeefcafebabe\"}",
+    "reason": "escalation_received: deadbeefcafebabedeadbeefcafebabe",
+    "prev_hash": "0ffed28740318eb8e9fa37cc3d034394c1eea87a273ecdbfcdcb937af502acba",
+    "hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09"
+  },
+  {
+    "event_type": "escalation_replay_detected",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166532000,
+    "state_json": "{\"event_type\":\"escalation_replay_detected\",\"escalation_id\":\"esc-fixture-01\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_replay_detected: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "0eeca439cdc6722d904504a506f963ad9375e36c97046b75bb7ad195cdfe6b91"
+  },
+  {
+    "event_type": "escalation_replay_terminal",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166533000,
+    "state_json": "{\"event_type\":\"escalation_replay_terminal\",\"escalation_id\":\"esc-fixture-02\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_replay_terminal: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "534320ed694f9ec4397d3159822aebeacca2edb174b67f01006a7efcda9ac24b"
+  },
+  {
+    "event_type": "escalation_origin_invalid",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166534000,
+    "state_json": "{\"event_type\":\"escalation_origin_invalid\",\"escalation_id\":\"esc-fixture-03\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_origin_invalid: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "5b04efd089d70c303b7fac8345e30c3359cbb4e2a5084e0e42386355182925be"
+  },
+  {
+    "event_type": "escalation_schema_rejected",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166535000,
+    "state_json": "{\"event_type\":\"escalation_schema_rejected\",\"escalation_id\":\"esc-fixture-04\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_schema_rejected: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "160627e88e95c321f3b32a8130cd8796a95e0bb48638f4dff27ad8ec272d2584"
+  },
+  {
+    "event_type": "escalation_expired",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166536000,
+    "state_json": "{\"event_type\":\"escalation_expired\",\"escalation_id\":\"esc-fixture-05\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_expired: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "0b18f923f457f4f5c9bf52c1fcc780617cdde61f135c9a6a998b99c50b8fed04"
+  },
+  {
+    "event_type": "escalation_unknown_sentinel",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166537000,
+    "state_json": "{\"event_type\":\"escalation_unknown_sentinel\",\"escalation_id\":\"esc-fixture-06\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_unknown_sentinel: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "43d9b324e216b175be49e289f6b048d9627af3b575c256d949031286f6d75809"
+  },
+  {
+    "event_type": "escalation_channel_dropped",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166538000,
+    "state_json": "{\"event_type\":\"escalation_channel_dropped\",\"escalation_id\":\"esc-fixture-07\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_channel_dropped: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "8955a0da27d8992355172b9f7e812d371a4325cf7b0c2c021ec5ee9b366e6827"
+  },
+  {
+    "event_type": "escalation_rate_limited",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166539000,
+    "state_json": "{\"event_type\":\"escalation_rate_limited\",\"escalation_id\":\"esc-fixture-08\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_rate_limited: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "493a35aa84f6bfc6249682d6fec2692f7af70f0ae14a1000ecb4946757032f87"
+  },
+  {
+    "event_type": "escalation_dispatched",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166540000,
+    "state_json": "{\"event_type\":\"escalation_dispatched\",\"escalation_id\":\"esc-fixture-09\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_dispatched: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "f8edd49ff4b7f020a6a5a8c5bf00d2d87040d2f123d635291c26862bec932fb4"
+  },
+  {
+    "event_type": "escalation_recovered_pre_response",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166541000,
+    "state_json": "{\"event_type\":\"escalation_recovered_pre_response\",\"escalation_id\":\"esc-fixture-10\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_recovered_pre_response: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "315da4f06c2c383e6d6a6051b4b40dfe72d850c6a7a9dc71fcb3ad1ce7316eda"
+  },
+  {
+    "event_type": "escalation_recovered_response_intact",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166542000,
+    "state_json": "{\"event_type\":\"escalation_recovered_response_intact\",\"escalation_id\":\"esc-fixture-11\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_recovered_response_intact: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "9192316945c51285177a45bff8c3d8df197c7451b965b436f59f23d11dd3f2ce"
+  },
+  {
+    "event_type": "escalation_recovered_resume_outbox",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166543000,
+    "state_json": "{\"event_type\":\"escalation_recovered_resume_outbox\",\"escalation_id\":\"esc-fixture-12\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_recovered_resume_outbox: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "76869a5cd782bc44b1783a55a3eb3d5fab4338d9e939ec1384151e1f2586af0c"
+  },
+  {
+    "event_type": "escalation_failed",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166544000,
+    "state_json": "{\"event_type\":\"escalation_failed\",\"escalation_id\":\"esc-fixture-13\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_failed: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "30f436535b561761962de06f8ae62e2aa5dea874e3ce6f2994a025d70dc62c3a"
+  },
+  {
+    "event_type": "dispatch_dead_lettered",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166545000,
+    "state_json": "{\"event_type\":\"dispatch_dead_lettered\",\"escalation_id\":\"esc-fixture-14\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "dispatch_dead_lettered: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "e3824a5792a2df76082ecab2b4e3c90f9c61d0bfcbb9de7d8042289a54d09994"
+  },
+  {
+    "event_type": "directive_received",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166546000,
+    "state_json": "{\"event_type\":\"directive_received\",\"directive_id\":\"dir-fixture-15\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "directive_received: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "1358e7894cf3d27af2143a4868d4612c518185a1555e07529c823face6367208"
+  },
+  {
+    "event_type": "directive_parse_failed",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166547000,
+    "state_json": "{\"event_type\":\"directive_parse_failed\",\"directive_id\":\"dir-fixture-16\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "directive_parse_failed: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "78bef15b142779a96ba9e26a49341bc61ea7b87752b82fb26f1b4305e5031f0f"
+  },
+  {
+    "event_type": "directive_correlation_failed",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166548000,
+    "state_json": "{\"event_type\":\"directive_correlation_failed\",\"directive_id\":\"dir-fixture-17\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "directive_correlation_failed: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "019fb572cb7dfbc84abf711fc32b11dc65168323823b1c2353cc1da5e812099b"
+  },
+  {
+    "event_type": "directive_authority_rejected",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166549000,
+    "state_json": "{\"event_type\":\"directive_authority_rejected\",\"directive_id\":\"dir-fixture-18\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "directive_authority_rejected: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "6177eb20be80829cb6aac0d60142fc9f1227f0eb81c8d90891808e924a801e28"
+  },
+  {
+    "event_type": "directive_tenant_mismatch",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166550000,
+    "state_json": "{\"event_type\":\"directive_tenant_mismatch\",\"directive_id\":\"dir-fixture-19\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "directive_tenant_mismatch: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "707d87dfd711cdb18bc5ba4eef67102887047bff7c042d998778069a18d09b28"
+  },
+  {
+    "event_type": "directive_verdict_invalid",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166551000,
+    "state_json": "{\"event_type\":\"directive_verdict_invalid\",\"directive_id\":\"dir-fixture-20\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "directive_verdict_invalid: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "94eade3b0867265a1f7fee1f379a4e2b4acf2265406c85e44361b523251857a7"
+  },
+  {
+    "event_type": "directive_staged",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166552000,
+    "state_json": "{\"event_type\":\"directive_staged\",\"directive_id\":\"dir-fixture-21\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "directive_staged: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "53ec6dde2d59e2e324a26992de6f36c8932e06799d1bc5c0b7ad3d067b1542cf"
+  },
+  {
+    "event_type": "directive_dismissed",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166553000,
+    "state_json": "{\"event_type\":\"directive_dismissed\",\"directive_id\":\"dir-dismiss-fixture\",\"payload\":{\"schema\":\"irin.directive.payload.v1\",\"in_response_to\":\"esc-dismiss-fixture\",\"authority\":\"recommend\",\"verdict\":\"Dismiss\",\"rationale\":\"fixture dismissal\",\"tenant\":\"acme\",\"council_session_id\":\"fixture-session\",\"council_cost_usd\":0.01}}",
+    "reason": "directive_dismissed: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "3de1e9ab2fb877154c7be783e7261bda374dacd42fe9bfa4f8afe6c15656a5ee"
+  },
+  {
+    "event_type": "directive_acked",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166554000,
+    "state_json": "{\"event_type\":\"directive_acked\",\"directive_id\":\"dir-fixture-23\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "directive_acked: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "559c75ef94ad3a5fbfe0b5b9ea02a0fd6be5437e64385050d5f501b46163c8fb"
+  },
+  {
+    "event_type": "directive_expired_in_outbox",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166555000,
+    "state_json": "{\"event_type\":\"directive_expired_in_outbox\",\"directive_id\":\"dir-fixture-24\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "directive_expired_in_outbox: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "7e370006fa813c27421c168d17370142357769ba106cb5f93145d2714e06f26c"
+  },
+  {
+    "event_type": "outbox_recovered_from_restart",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166556000,
+    "state_json": "{\"event_type\":\"outbox_recovered_from_restart\",\"directive_id\":\"dir-recovered-fixture\",\"tenant\":\"acme\",\"in_response_to\":\"esc-recovered-fixture\"}",
+    "reason": "outbox_recovered_from_restart: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "0bc0e5847afa1d3b538fdfd525547409fd94af5b8cabe729f5258298fd050fc5"
+  },
+  {
+    "event_type": "escalation_recovery_max_iterations",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166557000,
+    "state_json": "{\"event_type\":\"escalation_recovery_max_iterations\",\"escalation_id\":\"esc-fixture-26\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_recovery_max_iterations: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "bb9b7351218804f6a69a6da4af680a7f8a6aedfe00e0c73e48cfb081310efa84"
+  },
+  {
+    "event_type": "escalation_watchdog_wedged",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166558000,
+    "state_json": "{\"event_type\":\"escalation_watchdog_wedged\",\"escalation_id\":\"esc-fixture-27\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_watchdog_wedged: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "c58169e58b347b3830d4e2a93f0d17ba71e28bb9f90842c0f33aea52532fdd54"
+  },
+  {
+    "event_type": "escalation_watchdog_recovered_response",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166559000,
+    "state_json": "{\"event_type\":\"escalation_watchdog_recovered_response\",\"escalation_id\":\"esc-fixture-28\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_watchdog_recovered_response: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "ae1181fca0a8e7058df0688efffce83d81879683f8d9558fc2870bbab2df43a5"
+  },
+  {
+    "event_type": "escalation_watchdog_drained_staged",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166560000,
+    "state_json": "{\"event_type\":\"escalation_watchdog_drained_staged\",\"escalation_id\":\"esc-fixture-29\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_watchdog_drained_staged: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "a0b48c5dbc7ab60c31d3078f39ceebb808b9bafb2b50ac7616cd413c72502183"
+  },
+  {
+    "event_type": "directive_cost_excessive",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166561000,
+    "state_json": "{\"event_type\":\"directive_cost_excessive\",\"directive_id\":\"dir-fixture-30\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "directive_cost_excessive: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "e2b05ef00f19f1f736d265cd05c767dcc4d792f591dffe25c0e7bb58ed4b356f"
+  },
+  {
+    "event_type": "directive_ack_tenant_mismatch",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166562000,
+    "state_json": "{\"event_type\":\"directive_ack_tenant_mismatch\",\"directive_id\":\"dir-fixture-31\",\"tenant\":\"acme\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "directive_ack_tenant_mismatch: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "585ef02071278bf8c557b64f22639ab8fe9eb8df0456d482e64649c59717a9c9"
+  },
+  {
+    "event_type": "escalation_unparseable_envelope",
+    "tenant": "_dispatch_anon",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166563000,
+    "state_json": "{\"event_type\":\"escalation_unparseable_envelope\",\"escalation_id\":\"esc-fixture-32\",\"tenant\":\"_dispatch_anon\",\"fixture\":\"phase3-ac15c\"}",
+    "reason": "escalation_unparseable_envelope: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "f6fddab570f8a686a7e8c3c35023df9cbc39c847b7a49507a08279c788ee061d"
+  },
+  {
+    "event_type": "directive_clock_skew_normalized",
+    "tenant": "acme",
+    "sentinel": "queue-depth-watch",
+    "fired_at": 1747166564000,
+    "state_json": "{\"event_type\":\"directive_clock_skew_normalized\",\"directive_id\":\"dir-skew-fixture\",\"tenant\":\"acme\",\"original_ms\":1747166531033,\"normalized_ms\":1747166531034}",
+    "reason": "directive_clock_skew_normalized: fixture",
+    "prev_hash": "37b45ae77c065d081827a1bef87fe12d6e1771f16de25d11f8254f990c9dad09",
+    "hash": "b051392566c37ff1b54a7dae266ac6ec4af477687d6a4dce3f00583c7d4004a3"
+  }
+]

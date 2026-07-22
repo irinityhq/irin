@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://council.irinity.ai/schemas/index.v2.schema.json",
+  "title": "Council Precedent Index Entry v2",
+  "description": "One line in index.jsonl — the precedent engine's search index. Schema v2 adds tier, judge_provider, failure_status, and schema_version fields.",
+  "type": "object",
+  "required": ["id", "ts", "topic", "keywords", "ruling_digest", "schema_version"],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 2,
+      "description": "Schema version for this index entry"
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{12}$",
+      "description": "Session ID (matches session file)"
+    },
+    "ts": {
+      "type": "string",
+      "description": "ISO 8601 timestamp (may be truncated to minute)"
+    },
+    "topic": {
+      "type": "string",
+      "description": "Original deliberation topic"
+    },
+    "keywords": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "Extracted keywords for precedent search"
+    },
+    "ruling_digest": {
+      "type": "string",
+      "maxLength": 2000,
+      "description": "Truncated synthesis text for precedent injection"
+    },
+    "confidence": {
+      "type": "string",
+      "enum": ["HIGH", "MEDIUM-HIGH", "MEDIUM", "LOW", "UNKNOWN"],
+      "default": "UNKNOWN",
+      "description": "Chair's stated confidence level"
+    },
+    "cabinet": {
+      "type": "string",
+      "description": "Cabinet name used"
+    },
+    "convergence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "Final-round convergence score"
+    },
+    "mode": {
+      "type": "string",
+      "default": "normal"
+    },
+    "seat_count": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "rounds": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "Actual rounds completed (may be less than configured if converged early)"
+    },
+    "synthesis_model": {
+      "type": "string",
+      "description": "Chair model used for synthesis"
+    },
+    "version": {
+      "type": "string",
+      "description": "Council engine version that produced this session"
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["best", "sovereign", "strict_sovereign"],
+      "default": "best",
+      "description": "Routing tier (v2)"
+    },
+    "judge_provider": {
+      "type": ["string", "null"],
+      "default": null,
+      "description": "Model that judged final-round convergence (v2)"
+    },
+    "failure_status": {
+      "type": "object",
+      "default": null,
+      "description": "ReasoningBank: failure tracking (v2)",
+      "properties": {
+        "failed": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this precedent has been marked as failed"
+        },
+        "failed_at": {
+          "type": ["string", "null"],
+          "format": "date-time",
+          "description": "When it was marked failed"
+        },
+        "failed_reason": {
+          "type": ["string", "null"],
+          "description": "Why it was marked failed"
+        },
+        "weight_multiplier": {
+          "type": "number",
+          "default": 1.0,
+          "minimum": 0,
+          "maximum": 1.0,
+          "description": "Precedent weight: 1.0 = normal, 0.1 = failed"
+        }
+      }
+    },
+    "cited_by": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "ReasoningBank: session IDs that cited this precedent (v2)"
+    },
+    "challenged_by": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "ReasoningBank: session IDs where this precedent was challenged (v2)"
+    }
+  }
+}

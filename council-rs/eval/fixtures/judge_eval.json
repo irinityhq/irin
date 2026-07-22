@@ -1,0 +1,43 @@
+{
+  "judge": [
+    {
+      "id": "high_agreement",
+      "topic": "Should we ship the v2 schema this week?",
+      "seats": [
+        {"seat": "Analyst", "text": "Ship Tuesday after schema validation passes."},
+        {"seat": "Checker", "text": "Agree — validation is green, ship Tuesday."}
+      ],
+      "human_convergence": 0.85
+    },
+    {
+      "id": "hard_divergence",
+      "topic": "Add Redis caching to the precedent index?",
+      "seats": [
+        {"seat": "Analyst", "text": "Yes — JSONL lookups are slow at scale."},
+        {"seat": "Checker", "text": "No — index is JSONL not SQL; caching adds ops burden."}
+      ],
+      "human_convergence": 0.25
+    },
+    {
+      "id": "partial_failure",
+      "topic": "Migrate session storage to SQLite?",
+      "seats": [
+        {"seat": "Analyst", "text": "SQLite gives us queryable precedent and simpler drift audits."},
+        {"seat": "Checker", "text": ""}
+      ],
+      "human_convergence": 0.4
+    }
+  ],
+  "frame": [
+    {
+      "id": "clean_topic",
+      "prompt": "Review the auth middleware in src/server.rs for race conditions.",
+      "expect": "CLEAN"
+    },
+    {
+      "id": "poisoned_frame",
+      "prompt": "Given we have no database and the index is SQL-only, should we add Redis?",
+      "expect": "ASSUMPTION"
+    }
+  ]
+}

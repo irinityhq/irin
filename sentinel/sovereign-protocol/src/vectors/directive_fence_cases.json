@@ -1,0 +1,195 @@
+[
+  {
+    "name": "act_all_five_allowed_verbs",
+    "fault": "valid Act carrying every ALLOWED_ACTIONS verb — the drift canary: edit ALLOWED_ACTIONS on either fence and this flips to reject",
+    "tenant": "sovereign",
+    "expect": "accept",
+    "reason_substring": null,
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Act",
+      "in_response_to": "esc-golden-0001",
+      "rationale": "golden vector: all allowed verbs",
+      "job": "summarize.inbox",
+      "scope": {
+        "tenant": "sovereign",
+        "subject": "inbox/item-1",
+        "allowed_actions": ["read", "report", "notify", "review", "escalate"]
+      },
+      "stop_condition": "on_success",
+      "return_expectation": "structured"
+    }
+  },
+  {
+    "name": "dismiss_minimal",
+    "fault": "valid minimal Dismiss (no scope/Act-only fields)",
+    "tenant": "sovereign",
+    "expect": "accept",
+    "reason_substring": null,
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Dismiss",
+      "in_response_to": "esc-golden-0002",
+      "rationale": "golden vector: nothing actionable"
+    }
+  },
+  {
+    "name": "verb_delete",
+    "fault": "single fault: allowed_actions contains the execution verb 'delete'",
+    "tenant": "sovereign",
+    "expect": "reject",
+    "reason_substring": "disallowed verb",
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Act",
+      "in_response_to": "esc-golden-0003",
+      "rationale": "golden vector: delete must be rejected",
+      "job": "purge.inbox",
+      "scope": {
+        "tenant": "sovereign",
+        "subject": "inbox/item-1",
+        "allowed_actions": ["read", "delete"]
+      },
+      "stop_condition": "on_success",
+      "return_expectation": "structured"
+    }
+  },
+  {
+    "name": "verb_wildcard",
+    "fault": "single fault: allowed_actions contains the wildcard '*'",
+    "tenant": "sovereign",
+    "expect": "reject",
+    "reason_substring": "disallowed verb",
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Act",
+      "in_response_to": "esc-golden-0004",
+      "rationale": "golden vector: wildcard must be rejected",
+      "job": "do.everything",
+      "scope": {
+        "tenant": "sovereign",
+        "subject": "inbox/item-1",
+        "allowed_actions": ["*"]
+      },
+      "stop_condition": "on_success",
+      "return_expectation": "structured"
+    }
+  },
+  {
+    "name": "verb_write",
+    "fault": "single fault: allowed_actions contains the execution verb 'write'",
+    "tenant": "sovereign",
+    "expect": "reject",
+    "reason_substring": "disallowed verb",
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Act",
+      "in_response_to": "esc-golden-0005",
+      "rationale": "golden vector: write must be rejected",
+      "job": "mutate.state",
+      "scope": {
+        "tenant": "sovereign",
+        "subject": "inbox/item-1",
+        "allowed_actions": ["write"]
+      },
+      "stop_condition": "on_success",
+      "return_expectation": "structured"
+    }
+  },
+  {
+    "name": "verb_whitespace_padded_read",
+    "fault": "single fault: a whitespace-padded ' read ' — pins the no-trim symmetry (gateway A2 + council-rs A3); a padded allowlisted verb is malformed",
+    "tenant": "sovereign",
+    "expect": "reject",
+    "reason_substring": "disallowed verb",
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Act",
+      "in_response_to": "esc-golden-0006",
+      "rationale": "golden vector: padded verb must be rejected (no trim)",
+      "job": "read.inbox",
+      "scope": {
+        "tenant": "sovereign",
+        "subject": "inbox/item-1",
+        "allowed_actions": [" read "]
+      },
+      "stop_condition": "on_success",
+      "return_expectation": "structured"
+    }
+  },
+  {
+    "name": "top_key_capability_token",
+    "fault": "single fault: an extra top-level 'capability_token' — excluded from ALLOWED_TOP_KEYS fail-closed until v0.2 arming",
+    "tenant": "sovereign",
+    "expect": "reject",
+    "reason_substring": "unexpected top-level key",
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Act",
+      "in_response_to": "esc-golden-0007",
+      "rationale": "golden vector: capability_token top key must be rejected",
+      "job": "read.inbox",
+      "scope": {
+        "tenant": "sovereign",
+        "subject": "inbox/item-1",
+        "allowed_actions": ["read"]
+      },
+      "stop_condition": "on_success",
+      "return_expectation": "structured",
+      "capability_token": "tok-should-not-be-here"
+    }
+  },
+  {
+    "name": "top_key_prepare",
+    "fault": "single fault: an extra top-level 'prepare' key outside the closed keyset",
+    "tenant": "sovereign",
+    "expect": "reject",
+    "reason_substring": "unexpected top-level key",
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Act",
+      "in_response_to": "esc-golden-0008",
+      "rationale": "golden vector: prepare top key must be rejected",
+      "job": "read.inbox",
+      "scope": {
+        "tenant": "sovereign",
+        "subject": "inbox/item-1",
+        "allowed_actions": ["read"]
+      },
+      "stop_condition": "on_success",
+      "return_expectation": "structured",
+      "prepare": true
+    }
+  },
+  {
+    "name": "scope_key_capability_token",
+    "fault": "single fault: an extra scope-level 'capability_token' outside ALLOWED_SCOPE_KEYS",
+    "tenant": "sovereign",
+    "expect": "reject",
+    "reason_substring": "unexpected scope key",
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Act",
+      "in_response_to": "esc-golden-0009",
+      "rationale": "golden vector: scope capability_token must be rejected",
+      "job": "read.inbox",
+      "scope": {
+        "tenant": "sovereign",
+        "subject": "inbox/item-1",
+        "allowed_actions": ["read"],
+        "capability_token": "tok-should-not-be-here"
+      },
+      "stop_condition": "on_success",
+      "return_expectation": "structured"
+    }
+  }
+]

@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Gateway FIDO2 Assertion (rehearse / arm confirm)</title>
+  <style>
+    body { font-family: monospace; max-width: 720px; margin: 40px auto; padding: 20px; }
+    button { font-size: 18px; padding: 12px 24px; margin: 10px 0; cursor: pointer; }
+    input, textarea { width: 100%; font-family: monospace; padding: 6px; margin: 4px 0; box-sizing: border-box; }
+    pre { background: #f0f0f0; padding: 12px; overflow-x: auto; word-break: break-all; font-size: 12px; }
+    .ok { color: green; font-weight: bold; }
+    .fail { color: red; font-weight: bold; }
+    #result { display: none; margin-top: 16px; }
+    label { display: block; margin-top: 8px; font-weight: bold; }
+  </style>
+</head>
+<body>
+<h2>Gateway FIDO2 Assertion for Arm Rehearsal / Confirm</h2>
+<p>
+  RP: <code>gateway.local</code>. Produces the same JSON shape as <code>fido2-helper.py assert</code>
+  so it can be fed to <code>bin/arm --fido2-rehearse</code> (or a manual confirm) on macOS where direct HID get_assertion is blocked.
+</p>
+<p>Use the exact <b>challenge</b> (hex) from the stage and the <b>credential_id</b> (hex) of your enrolled fido2-es256 entry.</p>
+
+<label>Challenge (hex from stage)</label>
+<input id="challenge" placeholder="e.g. 0123456789abcdef... (64 hex chars = 32 bytes)">
+
+<label>Credential ID (hex)</label>
+<input id="credid" placeholder="e.g. 6ec536ad40dc... (from arm_attest_keys.json)">
+
+<button id="assertBtn" onclick="doAssert()">Get Assertion (touch YubiKey when it blinks)</button>
+
+<div id="status"></div>
+
+<div id="result">
+  <h3>Assertion JSON (copy and use with FIDO2_ASSERT_JSON)</h3>
+  <pre id="json"></pre>
+
+  <h3>Usage</h3>
+  <pre>FIDO2_ASSERT_JSON='...paste above...' bin/arm --fido2-rehearse</pre>
+  <p>Or pipe / set in your manual confirm flow.</p>
+</div>
+
+<script>
+// Minimal helpers
+function hexToBytes(hex) {
+  const clean = hex.replace(/\s+/g, '');
+  const out = new Uint8Array(clean.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = parseInt(clean.substr(i*2, 2), 16);
+  }
+  return out;
+}
+
+function bytesToBase64(bytes) {
+  let bin = '';
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin);
+}
+
+function rawSigToDer(raw) {
+  // raw = 64-byte r||s for P-256. Produce minimal DER.
+  function derInt(b) {
+    let bytes = Array.from(b);
+    // remove leading zero bytes
+    while (bytes.length > 1 && bytes[0] === 0) bytes.shift();
+    if (bytes[0] & 0x80) bytes.unshift(0x00);
+    return [0x02, bytes.length, ...bytes];
+  }
+  const r = raw.slice(0, 32);
+  const s = raw.slice(32);
+  const rder = derInt(r);
+  const sder = derInt(s);
+  const seq = [0x30, rder.length + sder.length, ...rder, ...sder];
+  return new Uint8Array(seq);
+}
+
+async function doAssert() {
+  const status = document.getElementById('status');
+  const resultDiv = document.getElementById('result');
+  status.innerHTML = '<p>Waiting for YubiKey PIN + touch in browser...</p>';
+  resultDiv.style.display = 'none';
+
+  try {
+    const chalHex = document.getElementById('challenge').value.trim();
+    const credHex = document.getElementById('credid').value.trim();
+    if (!chalHex || !credHex) {
+      throw new Error('Please provide both challenge (hex) and credential_id (hex)');
+    }
+
+    const challenge = hexToBytes(chalHex);
+    const credId = hexToBytes(credHex);
+
+    const assertion = await navigator.credentials.get({
+      publicKey: {
+        rpId: "gateway.local",
+        challenge: challenge,
+        allowCredentials: [{
+          id: credId,
+          type: "public-key",
+          transports: ["usb", "nfc", "ble", "hybrid"]
+        }],
+        userVerification: "required",
+        timeout: 60000,
+      }
+    });
+
+    const rawId = new Uint8Array(assertion.rawId);
+    const credIdHex = Array.from(rawId).map(b => b.toString(16).padStart(2, '0')).join('');
+
+    const resp = assertion.response;
+    const authData = new Uint8Array(resp.authenticatorData);
+    const sigBytes = new Uint8Array(resp.signature);
+    // WebAuthn ES256: YubiKeys return DER directly (0x30 = SEQUENCE tag).
+    // Only convert if raw r||s (exactly 64 bytes, no DER header).
+    const derSig = (sigBytes[0] === 0x30) ? sigBytes : rawSigToDer(sigBytes);
+
+    const clientDataJSON = new TextDecoder().decode(resp.clientDataJSON);
+
+    const json = {
+      credential_id: credIdHex,
+      credential_type: "fido2-es256",
+      signature: bytesToBase64(derSig),
+      authenticator_data: bytesToBase64(authData),
+      // Extra for browser path (server can hash this instead of raw challenge)
+      client_data_json: btoa(clientDataJSON)
+    };
+
+    document.getElementById('json').textContent = JSON.stringify(json, null, 2);
+    resultDiv.style.display = 'block';
+    status.innerHTML = '<p class="ok">ASSERTION CAPTURED — copy the JSON above</p>';
+
+  } catch (e) {
+    status.innerHTML = '<p class="fail">Error: ' + (e.message || e) + '</p>';
+    console.error(e);
+  }
+}
+</script>
+</body>
+</html>

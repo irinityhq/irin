@@ -1,0 +1,422 @@
+# Model Registry — Source of truth for model IDs and pricing
+# Format: key → { id, provider, description, pricing: { input, cached_input, output } }
+# Pricing is per MTok (million tokens) in USD
+
+models:
+  # --- Grok (xAI) ---
+  grok_reasoning:
+    id: "grok-4.3"
+    provider: grok_hermes
+    description: "Flagship reasoning, 1M ctx, reasoning_effort param"
+    pricing: { input: 1.25, cached_input: 0.125, output: 2.50 }
+
+  grok_multiagent:
+    id: "grok-4.20-multi-agent-0309"
+    provider: grok_hermes
+    description: "Native swarm — 16 Groks, server-side coordination"
+    pricing: { input: 1.25, cached_input: 0.125, output: 2.50 }
+
+  # --- Gemini (Vertex AI) ---
+  gemini_flagship:
+    id: "gemini-3.1-pro-preview"
+    provider: gemini_agy
+    description: "Vertex Standard tier — deliberation seat"
+    pricing: { input: 1.25, cached_input: 0.31, output: 5.00 }
+
+  gemini_flash_35:
+    id: "gemini-3.5-flash"
+    provider: gemini_agy
+    description: "Gemini 3.5 Flash GA — fast/cheap; judge candidate pending evaluation"
+    pricing: { input: 1.50, cached_input: 0.31, output: 9.00 }
+
+  gemini_flash_lite:
+    id: "gemini-3.1-flash-lite"
+    provider: gemini_agy
+    description: "Gemini 3.1 Flash Lite GA — cheapest 3.x text; judge candidate pending eval"
+    pricing: { input: 0.15, cached_input: 0.04, output: 0.60 }
+
+  # --- Claude (Anthropic) ---
+  claude_fable_5:
+    id: "claude-fable-5"
+    provider: claude_code
+    description: "Fable 5 via Claude Code subscription/OAuth"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  claude_opus_48:
+    id: "claude-opus-4-8"
+    provider: claude_code
+    description: "Chair — best intelligence, adaptive thinking"
+    pricing: { input: 5.00, cached_input: 0.50, output: 25.00 }
+
+  claude_opus_46:
+    id: "claude-opus-4-6"
+    provider: claude_code
+    description: "Operator seat — implementation + nuance"
+    pricing: { input: 5.00, cached_input: 0.50, output: 25.00 }
+
+  # Anthropic seat routing is defined in claude_routing.yaml.
+
+  # --- GPT (OpenAI / Codex CLI) ---
+  # Interactive codex default is often gpt-5.6-sol (~/.codex/config.toml); cabinets must pin explicitly.
+  # One registry entry per runtime id — lookup is by id and must stay deterministic.
+  gpt_flagship:
+    id: "gpt-5.6-sol"
+    provider: codex_cli
+    description: "GPT-5.6 Sol via Codex CLI (default flagship / War Room Constraint; API fallback opt-in)"
+    pricing: { input: 5.00, cached_input: 0.50, output: 30.00 }
+
+  gpt_nano:
+    id: "gpt-5.4-nano"
+    provider: codex_cli
+    description: "Codex/API cheap tier — judge fallback UNVALIDATED (0 historical judge uses in corpus)"
+    pricing: { input: 0.20, cached_input: 0.02, output: 1.25 }
+
+  # --- Agent CLIs (usage not reported by runner) ---
+  agy_default:
+    id: "agy-default"
+    provider: gemini_agy
+    description: "AGY CLI default model; local read-only verifier, no token accounting"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  # agy gemini-mapped proxy labels (populated via agy_routing.yaml when gemini/agy_cli used)
+  agy_cli_gemini31pro:
+    id: "agy-cli-Gemini 3.1 Pro (High)"
+    provider: gemini_agy
+    description: "Agy CLI for Gemini 3.1 Pro (High) (mapped from gemini-3.1-pro-preview)"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  agy_cli_gemini35flash:
+    id: "agy-cli-Gemini 3.5 Flash (Medium)"
+    provider: gemini_agy
+    description: "Agy CLI for Gemini 3.5 Flash (Medium) (mapped from gemini-3.5-flash)"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  # --- CLI proxy labels (what runners return on ProviderResponse.model) ---
+  codex_cli_gpt55:
+    id: "codex-cli-gpt-5.5"
+    provider: codex_cli
+    description: "Codex CLI proxy label for gpt-5.5"
+    pricing: { input: 5.00, cached_input: 0.50, output: 30.00 }
+
+  codex_cli_gpt56_sol:
+    id: "codex-cli-gpt-5.6-sol"
+    provider: codex_cli
+    description: "Codex CLI proxy label for gpt-5.6-sol"
+    pricing: { input: 5.00, cached_input: 0.50, output: 30.00 }
+
+  claude_cli_opus:
+    id: "claude-cli-opus"
+    provider: claude_code
+    description: "Claude CLI proxy (alias opus)"
+    pricing: { input: 5.00, cached_input: 0.50, output: 25.00 }
+
+  claude_cli_fable5:
+    id: "claude-cli-claude-fable-5"
+    provider: claude_code
+    description: "Claude CLI proxy for Fable 5"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  claude_cli_opus48:
+    id: "claude-cli-claude-opus-4-8"
+    provider: claude_code
+    description: "Claude CLI proxy for claude-opus-4-8"
+    pricing: { input: 5.00, cached_input: 0.50, output: 25.00 }
+
+  claude_cli_opus46:
+    id: "claude-cli-claude-opus-4-6"
+    provider: claude_code
+    description: "Claude CLI proxy for claude-opus-4-6 (operator seats)"
+    pricing: { input: 5.00, cached_input: 0.50, output: 25.00 }
+
+  grok_cli_default:
+    id: "grok-cli-default"
+    provider: grok_build
+    description: "Local Grok Build CLI default (grok-build when -m omitted)"
+    pricing: { input: 1.00, cached_input: 0.0, output: 2.00 }
+
+  grok_cli_build:
+    id: "grok-cli-grok-build"
+    provider: grok_build
+    description: "Local Grok Build CLI pinned grok-build"
+    pricing: { input: 1.00, cached_input: 0.0, output: 2.00 }
+
+  grok_cli_composer:
+    id: "grok-cli-grok-composer-2.5-fast"
+    provider: grok_build
+    description: "Local Grok Build CLI grok-composer-2.5-fast"
+    pricing: { input: 1.00, cached_input: 0.0, output: 2.00 }
+
+  hermes_cli_grok43:
+    id: "hermes-cli-grok-4.3"
+    provider: grok_hermes
+    description: "Hermes -z seat via xAI OAuth (operator adapter)"
+    pricing: { input: 1.25, cached_input: 0.125, output: 2.50 }
+
+  hermes_cli_grok420:
+    id: "hermes-cli-grok-4.20-0309-reasoning"
+    provider: grok_hermes
+    description: "Hermes -z seat grok-4.20 reasoning via xAI OAuth"
+    pricing: { input: 1.25, cached_input: 0.125, output: 2.50 }
+
+  grok_cli_grok43:
+    id: "grok-cli-grok-4.3"
+    provider: grok_build
+    description: "Legacy label when cabinet says grok-4.3 but CLI ran default"
+    pricing: { input: 1.25, cached_input: 0.125, output: 2.50 }
+
+  gemini_cli_default:
+    id: "gemini-cli-default"
+    provider: gemini_cli
+    description: "Gemini CLI proxy label"
+    pricing: { input: 1.25, cached_input: 0.31, output: 5.00 }
+
+  gemini_cli_pro_preview:
+    id: "gemini-cli-gemini-3.1-pro-preview"
+    provider: gemini_cli
+    description: "Gemini CLI proxy for gemini-3.1-pro-preview"
+    pricing: { input: 1.25, cached_input: 0.31, output: 5.00 }
+
+  # --- API snapshot IDs (dated builds returned by providers) ---
+  grok_snapshot_420:
+    id: "grok-4.20-0309-reasoning"
+    provider: grok_hermes
+    description: "Grok 4.20 reasoning snapshot"
+    pricing: { input: 1.25, cached_input: 0.125, output: 2.50 }
+
+  grok_fast_legacy:
+    id: "grok-4-1-fast-non-reasoning"
+    provider: grok_hermes
+    description: "Legacy grok fast non-reasoning snapshot"
+    pricing: { input: 1.25, cached_input: 0.125, output: 2.50 }
+
+  gpt_snapshot_41:
+    id: "gpt-4.1-2025-04-14"
+    provider: codex_cli
+    description: "GPT-4.1 dated snapshot"
+    pricing: { input: 5.00, cached_input: 0.50, output: 30.00 }
+
+  gpt_snapshot_54:
+    id: "gpt-5.4-2026-03-05"
+    provider: codex_cli
+    description: "GPT-5.4 dated snapshot"
+    pricing: { input: 0.20, cached_input: 0.02, output: 1.25 }
+
+  gpt_snapshot_55:
+    id: "gpt-5.5-2026-04-23"
+    provider: codex_cli
+    description: "GPT-5.5 dated snapshot"
+    pricing: { input: 5.00, cached_input: 0.50, output: 30.00 }
+
+  gemini_customtools:
+    id: "gemini-3.1-pro-preview-customtools"
+    provider: gemini_agy
+    description: "Gemini 3.1 pro customtools variant"
+    pricing: { input: 1.25, cached_input: 0.31, output: 5.00 }
+
+  nim_ultra:
+    id: "nvidia/nemotron-3-ultra-550b-a55b"
+    provider: nvidia
+    description: "Nemotron 3 Ultra — frontier tier; sovereign Chair"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  # --- Nous Research / Portal (inference-api.nousresearch.com) ---
+  # Nous uses the OpenAI-compatible provider adapter.
+  # Wire ids: PascalCase aliases (Hermes-4-405B) and catalog slugs (nousresearch/hermes-4-405b).
+  # Portal subscription models use OpenRouter-style ids (z-ai/glm-5.2, deepseek/deepseek-v4-pro, …).
+  nous_hermes_405b:
+    id: "nousresearch/hermes-4-405b"
+    provider: nous
+    description: "Hermes 4 405B — hybrid reasoning; checklist-duo streaming seat"
+    pricing: { input: 0.09, cached_input: 0.0, output: 0.37 }
+
+  nous_hermes_405b_alias:
+    id: "Hermes-4-405B"
+    provider: nous
+    description: "Hermes 4 405B (PascalCase alias accepted by API)"
+    pricing: { input: 0.09, cached_input: 0.0, output: 0.37 }
+
+  nous_hermes_70b:
+    id: "nousresearch/hermes-4-70b"
+    provider: nous
+    description: "Hermes 4 70B — default smoke target"
+    pricing: { input: 0.05, cached_input: 0.0, output: 0.20 }
+
+  nous_hermes_70b_alias:
+    id: "Hermes-4-70B"
+    provider: nous
+    description: "Hermes 4 70B (PascalCase alias)"
+    pricing: { input: 0.05, cached_input: 0.0, output: 0.20 }
+
+  nous_36b:
+    id: "Hermes-4.3-36B"
+    provider: nous
+    description: "Local-only — not on hosted API (404); migrate seats to Hermes-4-70B"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  nous_glm52:
+    id: "z-ai/glm-5.2"
+    provider: nous
+    description: "GLM 5.2 via Nous Portal — 1M ctx; reasoning default on"
+    pricing: { input: 0.95, cached_input: 0.18, output: 3.00 }
+
+  nous_dsv4_flash:
+    id: "deepseek/deepseek-v4-flash"
+    provider: nous
+    description: "DeepSeek V4 Flash via Nous Portal — 1M ctx"
+    pricing: { input: 0.27, cached_input: 0.07, output: 1.10 }
+
+  nous_dsv4_pro:
+    id: "deepseek/deepseek-v4-pro"
+    provider: nous
+    description: "DeepSeek V4 Pro via Nous Portal — 1M ctx MoE"
+    pricing: { input: 1.60, cached_input: 0.14, output: 3.20 }
+
+  nous_kimi_k26:
+    id: "moonshotai/kimi-k2.6"
+    provider: nous
+    description: "Kimi K2.6 via Nous Portal"
+    pricing: { input: 0.66, cached_input: 0.14, output: 3.41 }
+
+  nous_kimi_k27_code:
+    id: "moonshotai/kimi-k2.7-code"
+    provider: nous
+    description: "Kimi K2.7 Code via Nous Portal"
+    pricing: { input: 0.74, cached_input: 0.15, output: 3.50 }
+
+  # --- DeepSeek (native API optional; compatible NIM and Nous routes supported) ---
+  # Native ids: deepseek-v4-flash / deepseek-v4-pro @ api.deepseek.com (DEEPSEEK_API_KEY)
+  # Legacy deepseek-chat / deepseek-reasoner retire 2026-07-24 UTC — migrate to v4 ids.
+  # Operator paths (no DEEPSEEK_API_KEY):
+  #   NIM:    provider nvidia + deepseek-ai/deepseek-v4-{flash,pro}
+  #   Portal: provider nous  + deepseek/deepseek-v4-{flash,pro}
+  # DeepSeek can use the native or compatible provider adapter.
+  deepseek_v4_flash:
+    id: "deepseek-v4-flash"
+    provider: deepseek
+    description: "Native API — V4 Flash (284B/13B active, 1M ctx)"
+    pricing: { input: 0.27, cached_input: 0.07, output: 1.10 }
+
+  deepseek_v4_pro:
+    id: "deepseek-v4-pro"
+    provider: deepseek
+    description: "Native API — V4 Pro (1.6T/49B active, 1M ctx)"
+    pricing: { input: 0.55, cached_input: 0.14, output: 2.19 }
+
+  deepseek_v4_legacy_chat:
+    id: "deepseek-chat"
+    provider: deepseek
+    description: "Legacy alias → v4-flash non-thinking; retires 2026-07-24"
+    pricing: { input: 0.27, cached_input: 0.07, output: 1.10 }
+
+  deepseek_v4_legacy_reasoner:
+    id: "deepseek-reasoner"
+    provider: deepseek
+    description: "Legacy alias → v4-flash thinking; retires 2026-07-24"
+    pricing: { input: 0.55, cached_input: 0.14, output: 2.19 }
+
+  # --- NVIDIA NIM free-tier (v9.11.0) ---
+  # All $0.00 on free tier — ~40 RPM prototyping
+  # Judge/frame-check cascades live in roles.yaml (empirically scored via scripts/judge_eval.py).
+  # OpenAI seats prefer the Codex CLI execution path.
+  nim_nano:
+    id: "nvidia/nemotron-3-nano-30b-a3b"
+    provider: nvidia
+    description: "Nemotron 3 Nano — smallest tier; verbose on short prompts; superseded by Super for seats"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  nim_nano_omni:
+    id: "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning"
+    provider: nvidia
+    description: "Nemotron 3 Nano Omni reasoning — multimodal; very verbose, not for utility JSON"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  nim_super:
+    id: "nvidia/nemotron-3-super-120b-a12b"
+    provider: nvidia
+    description: "Nemotron 3 Super — production reasoning (sovereign Judge, triage checker)"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  # The retired GLM 5.1 route is replaced by GLM 5.2. Utility and judge
+  # fallbacks remain on mistral_large_nim until evaluation completes.
+
+  nim_glm52:
+    id: "z-ai/glm-5.2"
+    provider: nvidia
+    description: "NIM GLM 5.2 — judge candidate pending structured-JSON evaluation"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  nim_dsv4:
+    id: "deepseek-ai/deepseek-v4-flash"
+    provider: nvidia
+    description: "DeepSeek V4 Flash via NIM — cheap seat path (sovereign/trinity)"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  nim_dsv4_pro:
+    id: "deepseek-ai/deepseek-v4-pro"
+    provider: nvidia
+    description: "DeepSeek V4 Pro via NIM — flagship MoE reasoning; judge candidate pending eval"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  # --- Local (free) ---
+  gemma_local:
+    id: "gemma3"
+    provider: ollama
+    description: "Local Ollama — free, always-on"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  # --- NIM free-tier (operator probe 2026-07-11: 45/121 invokable)
+  # Allowlist SSOT: config/nim-invokable-allowlist.txt
+  # Re-probe: NVIDIA_API_KEY=… python3 scripts/probe-nim-catalog.py
+  mistral_large_nim:
+    id: "mistralai/mistral-large-3-675b-instruct-2512"
+    provider: nvidia
+    description: "Mistral Large via NIM — invokable, but repeated Gate 4 live timeouts; not a starter/freeride default"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  gpt_oss_120b_nim:
+    id: "openai/gpt-oss-120b"
+    provider: nvidia
+    description: "GPT-OSS 120B via NIM — full-response live-proven starter/freeride anchor"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  qwen35_nim:
+    id: "qwen/qwen3.5-397b-a17b"
+    provider: nvidia
+    description: "Qwen 3.5 397B via NIM — freeride deep seat (invokable probe)"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  qwen35_122b_nim:
+    id: "qwen/qwen3.5-122b-a10b"
+    provider: nvidia
+    description: "Qwen 3.5 122B via NIM — catalog; probe timed out — do not use freeride until re-probe OK"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  qwen_next_nim:
+    id: "qwen/qwen3-next-80b-a3b-instruct"
+    provider: nvidia
+    description: "Qwen Next via NIM — catalog; probe timed out — not freeride-safe"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  kimi_nim:
+    id: "moonshotai/kimi-k2.6"
+    provider: nvidia
+    description: "Kimi K2.6 via NIM — catalog yes, chat FUNCTION_NOT_FOUND on operator NGC; do not use freeride"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  glm_nim:
+    id: "z-ai/glm-5.2"
+    provider: nvidia
+    description: "GLM 5.2 via NIM — reliable freeride/starter contrarian and chair in Gate 4 live runs"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  nemotron_super_nim:
+    id: "nvidia/nemotron-3-super-120b-a12b"
+    provider: nvidia
+    description: "Nemotron Super via NIM — invokable, but Gate 4 full-seat responses failed to parse; not a starter/freeride default"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
+
+  nemotron_ultra_nim:
+    id: "nvidia/nemotron-3-ultra-550b-a55b"
+    provider: nvidia
+    description: "Nemotron Ultra via NIM (invokable probe; sovereign chair)"
+    pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }

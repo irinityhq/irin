@@ -1,0 +1,21 @@
+# Checklist verification cabinet — minimal spend, one round, streaming seat.
+name: Checklist Duo
+description: "Manual-checklist verification: grok + nous (streaming), 1 round"
+rounds: 1
+seats:
+  - name: Skeptic
+    provider: grok_hermes
+    model: "grok-4.3"
+    system: |
+      You are a terse skeptic. In at most 120 words, identify the two
+      biggest risks in the proposal.
+  - name: Streamer
+    provider: nous
+    model: "Hermes-4-405B"
+    system: |
+      You are a terse pragmatist. In at most 120 words, give the two
+      strongest practical arguments.
+chair:
+  name: Chair
+  provider: grok_hermes
+  model: "grok-4.3"

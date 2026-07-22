@@ -1,0 +1,16 @@
+# Advisory review coverage. GitHub branch-protection enforcement is configured separately.
+* @iws17 @Raphael1717
+
+# Authority-bearing surfaces are explicit even though the same owners currently
+# cover the whole repository. This keeps the review boundary visible if general
+# ownership changes later.
+/.github/workflows/ @iws17 @Raphael1717
+/council-rs/src/engine/directive_fence.rs @iws17 @Raphael1717
+/gateway/sidecar-rs/src/comms/ @iws17 @Raphael1717
+/gateway/sidecar-rs/src/keymgmt.rs @iws17 @Raphael1717
+/gateway/sidecar-rs/src/ledger.rs @iws17 @Raphael1717
+/gateway/sidecar-rs/src/watch/dispatcher.rs @iws17 @Raphael1717
+/gateway/sidecar-rs/src/watch/outbox.rs @iws17 @Raphael1717
+/gateway/sidecar-rs/src/watch/worker.rs @iws17 @Raphael1717
+/sentinel/COMMS_CONTRACT.md @iws17 @Raphael1717
+/sentinel/sovereign-protocol/ @iws17 @Raphael1717

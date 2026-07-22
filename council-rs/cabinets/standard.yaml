@@ -1,0 +1,25 @@
+# Standard Council — 3 frontier seats, 2 rounds, Opus 4.8 Chair
+name: Standard Council
+description: "3 frontier seats (Grok + Gemini + Opus 4.6) → Opus 4.8 Chair"
+rounds: 2
+seats:
+  - name: Strategist
+    provider: grok_hermes
+    model: "grok-4.3"
+    system: strategist
+
+  - name: Mirror
+    provider: gemini_agy
+    model: "gemini-3.1-pro-preview"
+    system: mirror
+
+  - name: Operator
+    provider: claude_code
+    model: "claude-opus-4-6"
+    system: operator
+
+chair:
+  name: Chair
+  provider: claude_code
+  model: "claude-opus-4-8"
+  thinking_effort: high

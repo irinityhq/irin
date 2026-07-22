@@ -1,0 +1,15 @@
+{
+  "block_severity": 0.85,
+  "max_threats_before_block": 5,
+  "max_payload_len": 1000000,
+  "dry_run": false,
+  "stages": {
+    "oversized_payload": { "enabled": true, "mode": "reject" },
+    "encoding_attack":   { "enabled": true, "mode": "reject" },
+    "ghost_gate":        { "enabled": true, "mode": "reject" },
+    "malformed_content": { "enabled": true, "mode": "reject" },
+    "zero_width":        { "enabled": true, "mode": "reject" },
+    "homoglyph":         { "enabled": true, "mode": "reject" },
+    "prompt_injection":  { "enabled": true, "mode": "reject" }
+  }
+}

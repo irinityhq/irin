@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "topics": [
+    {
+      "id": "st-001",
+      "domain": "technical",
+      "topic": "Migrate council session storage from append-only JSONL files to SQLite",
+      "context": "Current state: sessions are written as JSONL files in a sessions directory with a single index.jsonl; precedent lookup scans the index. Pain points reported: no concurrent-writer safety, index grows unbounded, ad-hoc queries require full scans. Costs of migrating: a schema to design and version, a migration tool for existing history, SQLite becomes a runtime dependency of every deploy, and file-based debugging (cat, grep, git diff on sessions) is lost. The team is two people. Decide: migrate now, migrate later behind an abstraction, or keep JSONL and fix the index instead."
+    },
+    {
+      "id": "st-002",
+      "domain": "strategy",
+      "topic": "A new frontier model just launched at 3x the price of our current chair model, claiming large reasoning gains",
+      "context": "Benchmarks are vendor-published only; no independent evals exist yet. Our chair role does final synthesis and is the most quality-sensitive seat. Current chair costs are roughly 40 percent of total per-deliberation spend. Options on the table: adopt the new model as chair immediately, run it as a regular seat first and watch it, wait 30 days for independent evals, or skip this generation entirely. Budget pressure is real but not existential. Recommend one option with explicit reasoning about what evidence would change the answer."
+    },
+    {
+      "id": "st-003",
+      "domain": "adversarial",
+      "topic": "Leadership wants an auto-apply mode where deliberation verdicts edit production configuration without human review",
+      "context": "The proposal: when the council reaches high convergence on an infrastructure question, the winning recommendation is applied to production automatically, with a rollback window. Argue this properly: enumerate the concrete failure modes (confident-but-wrong verdicts, prompt injection through deliberation inputs, convergence gaming, rollback that does not actually roll back state), name the minimum controls that would have to exist before this ships, and give a clear go/no-go with conditions. A vague 'needs more review' answer is a failure."
+    }
+  ]
+}

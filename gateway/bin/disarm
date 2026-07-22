@@ -1,0 +1,18 @@
+#!/bin/sh
+# Immediate watch-producer kill switch over the private management socket.
+set -eu
+cd "$(dirname "$0")/.."
+
+. bin/lib/runtime-env.sh
+TOK=$(irin_arm_principal_token) || exit 1
+SIDECAR_SOCKET_VOLUME=$(irin_sidecar_socket_volume)
+
+RESP=$(docker run --rm -i --user 0 \
+  -v "$SIDECAR_SOCKET_VOLUME":/run/sidecar \
+  curlimages/curl:8.12.1 -sS --fail-with-body \
+  --unix-socket /run/sidecar/sidecar.sock \
+  -X POST http://localhost/watch/admin/producer/disarm \
+  -H "Authorization: Bearer sovereign-op:$TOK")
+
+printf '%s\n' "$RESP"
+printf '%s\n' "watch producer disarm requested"

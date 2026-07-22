@@ -1,0 +1,16 @@
+# CI-only compose overlay. Used as `-f docker-compose.yml -f docker-compose.ci.yml`
+# (or via COMPOSE_FILE). Builds the sidecar with the LIGHT (low-RAM) release profile
+# so the unified cargo-chef build fits a GitHub runner (the committed lto=true +
+# codegen-units=1 link OOMs under ~8GB). Kept OUT of the base compose so local and
+# production builds keep the heavy, smallest-binary defaults.
+#
+# Within a single run the chef Dockerfile cooks the dependency layer once and
+# reuses it for subsequent sidecar builds. Cross-run cache persistence is not
+# enabled here because it conflicts with the buildx container driver's `--load`
+# behavior.
+services:
+  sidecar:
+    build:
+      args:
+        CARGO_PROFILE_RELEASE_LTO: "false"
+        CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"

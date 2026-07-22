@@ -1,0 +1,83 @@
+name: Rust toolchain and lane cache
+description: Install Rust with isolated persistent-runner state and hosted caching.
+
+inputs:
+  lane:
+    description: Stable lane name used to isolate Rust and sccache state.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Configure persistent Rust state
+      shell: bash
+      env:
+        LANE: ${{ inputs.lane }}
+        RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        RUNNER_NAME: ${{ runner.name }}
+      run: |
+        set -euo pipefail
+        if [[ "$RUNNER_ENVIRONMENT" == "self-hosted" ]]; then
+          runner_key="${RUNNER_NAME:-runner}"
+          runner_key="${runner_key//[^A-Za-z0-9._-]/_}"
+          state_root="$HOME/.cache/irin-ci/runners/$runner_key"
+          cargo_home="$state_root/cargo"
+          rustup_home="$state_root/rustup"
+          sccache_dir="$state_root/sccache"
+          sccache_port=""
+          if [[ "$runner_key" =~ ^r740-runner-([1-6])$ ]]; then
+            sccache_port="$((42000 + BASH_REMATCH[1]))"
+          else
+            echo "::warning::sccache disabled: unsupported self-hosted runner name '$runner_key'"
+          fi
+        else
+          state_root="$RUNNER_TEMP/irin-ci/$LANE"
+          cargo_home="$state_root/cargo"
+          rustup_home="$state_root/rustup"
+          sccache_dir="$state_root/sccache"
+          sccache_port=""
+        fi
+        mkdir -p "$cargo_home" "$rustup_home" "$sccache_dir"
+        {
+          echo "CARGO_HOME=$cargo_home"
+          echo "RUSTUP_HOME=$rustup_home"
+          echo "SCCACHE_DIR=$sccache_dir"
+        } >> "$GITHUB_ENV"
+        if [[ -n "$sccache_port" ]]; then
+          echo "SCCACHE_SERVER_PORT=$sccache_port" >> "$GITHUB_ENV"
+        fi
+        if [[ -n "$sccache_port" ]] && command -v sccache >/dev/null 2>&1; then
+          echo "RUSTC_WRAPPER=$(command -v sccache)" >> "$GITHUB_ENV"
+          sccache --version
+        fi
+
+    - name: Install Rust toolchain
+      uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+      with:
+        components: rustfmt, clippy
+
+    - name: Start isolated compiler cache on self-hosted runners
+      if: runner.environment == 'self-hosted' && env.RUSTC_WRAPPER != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        # The server intentionally survives jobs on a persistent runner. A
+        # fresh start succeeds when no server exists; "address in use" is
+        # acceptable only when the existing server answers the health probe.
+        if ! sccache --start-server; then
+          echo "::notice::reusing the compiler cache server on this runner's isolated port"
+        fi
+        sccache --show-stats >/dev/null
+
+    - name: Cache Cargo state on hosted runners
+      if: runner.environment != 'self-hosted'
+      uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      with:
+        path: |
+          ${{ env.CARGO_HOME }}/registry
+          ${{ env.CARGO_HOME }}/git
+          target
+          council-rs/warroom-tauri/src-tauri/target
+        key: ${{ runner.os }}-${{ inputs.lane }}-cargo-${{ hashFiles('Cargo.lock', 'council-rs/warroom-tauri/src-tauri/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-${{ inputs.lane }}-cargo-

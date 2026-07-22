@@ -1,0 +1,19 @@
+# Quick Council — 2 seats, 1 round, fast decisions
+name: Quick Council
+description: "Fast 2-seat, 1-round deliberation — frontier models only"
+rounds: 1
+seats:
+  - name: Analyst
+    provider: grok_hermes
+    model: "grok-4.3"
+    system: analyst
+
+  - name: Checker
+    provider: codex_cli
+    model: "gpt-5.6-sol"
+    system: checker
+
+chair:
+  name: Chair
+  provider: gemini_agy
+  model: "gemini-3.1-pro-preview"

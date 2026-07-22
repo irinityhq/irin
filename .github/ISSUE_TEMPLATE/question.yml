@@ -1,0 +1,63 @@
+name: Setup or usage question
+description: Ask for help using or setting up IRIN.
+title: "question: "
+labels:
+  - question
+body:
+  - type: markdown
+    attributes:
+      value: |
+        IRIN is pre-release and community support is best effort. Do not include credentials, private prompts, session content, signing material, or other sensitive local data.
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched the documentation and existing issues.
+          required: true
+        - label: This is not a security vulnerability; security reports belong in a private advisory.
+          required: true
+
+  - type: dropdown
+    id: component
+    attributes:
+      label: Component
+      options:
+        - Council engine
+        - War Room Web
+        - Tauri desktop shell
+        - Gateway
+        - Sentinel or sovereign protocol
+        - Setup, runtime, or packaging
+        - Documentation
+        - Other
+    validations:
+      required: true
+
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+      description: Explain what you are trying to do and where you are blocked.
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Version or commit
+      description: Provide the IRIN version, tag, or Git commit SHA when applicable.
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include operating system, architecture, browser, and relevant tool versions when applicable.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Sanitized context
+      description: Optional. Include commands or logs after removing credentials, private content, absolute personal paths, and other sensitive data.
+      render: shell

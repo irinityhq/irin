@@ -1,0 +1,3 @@
+```json
+{"schema":"irin.directive.proposal.v1","authority":"recommend","verdict":"Dismiss","in_response_to":"esc-0014","rationale":"Checker (nvidia) found the gateway restart matches known_maintenance with minimal blast radius and concluded no dispatch warranted. Analyst (grok) confirmed the datum supplies no actionable scope or stop-condition, reaching 100% convergence on no Worker involvement."}
+```

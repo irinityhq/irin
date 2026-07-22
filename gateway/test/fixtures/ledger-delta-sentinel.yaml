@@ -1,0 +1,14 @@
+# Phase C1 experimental stock sentinel — spend spike detector.
+# Fires when today's spend_ledger total rises >threshold_pct above baseline.
+# Experimental: unregister if false-positive behavior is observed.
+#
+# Not enabled in canary or phase3 fixtures by default; opt-in via SENTINELS_CONFIG_PATH.
+- name: ledger-delta-watch
+  tenant: sovereign
+  tier: fast
+  cooldown_ms: 60000
+  config:
+    watch_db_path: /var/lib/gateway/watch.db
+    threshold_pct: 50.0
+    min_baseline_usd: 0.01
+    min_absolute_delta_usd: 0.25

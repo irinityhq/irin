@@ -1,0 +1,254 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://council.irinity.ai/schemas/session.v2.schema.json",
+  "title": "Council Session v2",
+  "description": "Complete transcript of a council deliberation session. Schema v2 adds tier, judge_provider, judge_assessment, and schema_version fields.",
+  "type": "object",
+  "required": [
+    "session_id",
+    "topic",
+    "cabinet_name",
+    "rounds",
+    "timestamp",
+    "schema_version"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 2,
+      "description": "Schema version. v1 = pre-April 2026 (no tier/judge fields). v2 = current."
+    },
+    "session_id": {
+      "type": "string",
+      "pattern": "^[a-f0-9-]+$",
+      "description": "Session identifier (12-char hex preferred, legacy UUID-style accepted)"
+    },
+    "topic": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The question or topic deliberated"
+    },
+    "cabinet_name": {
+      "type": "string",
+      "description": "Name of the cabinet used (e.g., 'Standard Council', 'War Room')"
+    },
+    "tier": {
+      "type": "string",
+      "enum": ["best", "sovereign", "strict_sovereign"],
+      "default": "best",
+      "description": "Routing tier. 'best' = frontier models (default), 'sovereign' = NIM/Nous/DeepSeek seats + frontier chair, 'strict_sovereign' = air-gapped NIM/local only"
+    },
+    "rounds": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/RoundResult" },
+      "description": "Ordered list of deliberation rounds"
+    },
+    "synthesis": {
+      "type": ["string", "null"],
+      "description": "Chair's final ruling (null if session was interrupted)"
+    },
+    "synthesis_model": {
+      "type": ["string", "null"],
+      "description": "Model used for final synthesis"
+    },
+    "total_tokens": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Total tokens consumed across all rounds + synthesis"
+    },
+    "total_latency_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "default": 0,
+      "description": "Wall-clock time for full deliberation in ms"
+    },
+    "total_cost_usd": {
+      "type": "number",
+      "minimum": 0,
+      "default": 0,
+      "description": "Estimated total cost in USD"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["normal", "blind", "pathfind", "teardown", "harden", "recall", "unknown"],
+      "default": "normal",
+      "description": "Deliberation mode"
+    },
+    "precedent_ids": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Session IDs of precedents injected into Round 1"
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp of session completion"
+    },
+    "context_sources": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": [],
+      "description": "Paths/URIs of context files injected via --context"
+    },
+    "budget": {
+      "type": ["object", "null"],
+      "description": "Budget tracking (v2, null if no budget was set)",
+      "properties": {
+        "max_usd": { "type": "number", "description": "Budget ceiling" },
+        "paused": { "type": "boolean", "description": "Whether a budget pause occurred" },
+        "action_taken": {
+          "type": ["string", "null"],
+          "enum": ["continue", "switch_sovereign", "end_early", "top_up", "quit", null]
+        }
+      }
+    },
+    "chair_provider_provenance": {
+      "type": ["object", "null"],
+      "default": null,
+      "properties": {
+        "runner": { "type": "string", "default": "" },
+        "access_mode": { "type": "string", "default": "" },
+        "accounting": { "type": "string", "default": "" },
+        "filesystem": { "type": "string", "default": "" }
+      }
+    }
+  },
+  "$defs": {
+    "SeatResponse": {
+      "type": "object",
+      "required": ["seat_name", "provider", "model", "text", "round_num"],
+      "properties": {
+        "seat_name": { "type": "string" },
+        "provider": { "type": "string" },
+        "model": { "type": "string" },
+        "text": { "type": "string" },
+        "round_num": { "type": "integer", "minimum": 1 },
+        "latency_ms": { "type": "integer", "minimum": 0, "default": 0 },
+        "tokens_in": { "type": "integer", "minimum": 0, "default": 0 },
+        "tokens_out": { "type": "integer", "minimum": 0, "default": 0 },
+        "cached_in": { "type": "integer", "minimum": 0, "default": 0 },
+        "cost_usd": { "type": "number", "minimum": 0, "default": 0 },
+        "error": { "type": ["string", "null"], "default": null },
+        "gateway": {
+          "type": ["object", "null"],
+          "default": null,
+          "properties": {
+            "routed_model": { "type": "string", "default": "" },
+            "routed_provider": { "type": "string", "default": "" },
+            "fallback_used": { "type": "boolean", "default": false },
+            "gateway_request_id": { "type": "string", "default": "" }
+          }
+        },
+        "provider_provenance": {
+          "type": ["object", "null"],
+          "default": null,
+          "properties": {
+            "runner": { "type": "string", "default": "" },
+            "access_mode": { "type": "string", "default": "" },
+            "accounting": { "type": "string", "default": "" },
+            "filesystem": { "type": "string", "default": "" }
+          }
+        }
+      }
+    },
+    "JudgeAssessment": {
+      "type": "object",
+      "description": "Structured judge output (v2). Replaces naked float convergence score.",
+      "required": ["convergence", "recommendation"],
+      "properties": {
+        "convergence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "description": "Agreement score 0.0-1.0"
+        },
+        "intent_aligned": {
+          "type": "boolean",
+          "default": true,
+          "description": "Did responses address the original question?"
+        },
+        "drift": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Description of intent drift, null if none"
+        },
+        "quality_flag": {
+          "type": ["string", "null"],
+          "enum": ["thin", "circular", "off_topic", null],
+          "default": null,
+          "description": "Quality concern flag"
+        },
+        "recommendation": {
+          "type": "string",
+          "enum": ["continue", "converged", "escalate", "reframe"],
+          "description": "Judge's recommended action"
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 1.0,
+          "description": "Judge's self-reported confidence. Auto-escalate if <0.5"
+        }
+      }
+    },
+    "RoundResult": {
+      "type": "object",
+      "required": ["round_num", "responses"],
+      "properties": {
+        "round_num": { "type": "integer", "minimum": 1 },
+        "responses": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/SeatResponse" }
+        },
+        "convergence_score": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1,
+          "default": 0,
+          "description": "Legacy float score (kept for backward compat)"
+        },
+        "converged": {
+          "type": "boolean",
+          "default": false
+        },
+        "judge_provider": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Which model judged this round (v2)"
+        },
+        "judge_assessment": {
+          "oneOf": [
+            { "$ref": "#/$defs/JudgeAssessment" },
+            { "type": "null" }
+          ],
+          "default": null,
+          "description": "Structured judge output (v2). Null for v1 sessions."
+        },
+        "judge_gateway_attempts": {
+          "type": "array",
+          "default": [],
+          "description": "Gateway-owned ledger correlation handles for every attempted convergence-judge cascade candidate.",
+          "items": {
+            "type": "object",
+            "required": ["gateway_request_id"],
+            "properties": {
+              "routed_model": { "type": "string", "default": "" },
+              "routed_provider": { "type": "string", "default": "" },
+              "fallback_used": { "type": "boolean", "default": false },
+              "gateway_request_id": { "type": "string", "minLength": 1 }
+            }
+          }
+        },
+        "flip_flop_hash": {
+          "type": ["string", "null"],
+          "default": null,
+          "description": "Hash of (drift, recommendation) — detect oscillation across rounds (v2)"
+        }
+      }
+    }
+  }
+}

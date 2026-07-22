@@ -1,0 +1,31 @@
+{
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax"],
+  "triggerOnUpdates": true,
+  "triggerOnDrafts": false,
+  "statusCheck": true,
+  "includeBranches": ["main"],
+  "excludeBranches": ["archive/*", "backup/*"],
+  "ignorePatterns": "target/\nnode_modules/\n.next/\nruns/\nsessions/\n*.jsonl\n_archive/",
+  "instructions": "IRIN mono-repo: Sentinel watches -> Gateway routes/guards/signs -> Council deliberates -> Worker acts. Subtrees: council-rs/ (deliberation engine + War Room UI), gateway/ (OpenResty + Rust sidecar, signing + watch plane), sentinel/ (sovereign-protocol crate + comms spine + docs). Surface candidate issues for a maintainer to judge; do not claim merge approval. If a change touches comms-spine wire shapes (envelope irin.comms.v0.1, directive outbox signing, capability tokens, escalation/directive shapes) or the arming/spend gates (attest, claim/reserve, budget), flag it as a possible breaking or security-relevant change for maintainer review.",
+  "customContext": {
+    "rules": [
+      {
+        "scope": ["sentinel/sovereign-protocol/**", "**/*envelope*", "**/*comms*", "**/*outbox*", "**/*directive*", "**/*escalation*"],
+        "rule": "Comms-spine wire shapes are contracts. Any field add/remove/rename, signing change, or capability-token change is a POSSIBLE breaking change -- require an explicit callout for human review. Do not assert adjacent components are safe."
+      },
+      {
+        "scope": ["gateway/sidecar-rs/src/watch/**", "gateway/sidecar-rs/src/keymgmt.rs", "gateway/sidecar-rs/src/budget.rs"],
+        "rule": "Signing, arming, attestation, and budget paths are fail-closed by doctrine. Flag any change that widens a gate, adds a bypass env var, removes a re-verification, or converts a hard error into a warning."
+      },
+      {
+        "scope": ["**/*.md", "docs/**"],
+        "rule": "Vocabulary guards for architecture prose only (not code): 'AI agent' should be 'Worker' (ephemeral) or 'Sentinel' (continuous); 'heartbeat'/'always-on' should be 'watch'/'sentinel-gated'. A sentinel described as firing on a clock regardless of state is a heartbeat -- flag it."
+      },
+      {
+        "scope": ["README.md", "SECURITY.md", "docs/security-claims-vs-reality.md"],
+        "rule": "Public security claims must not outrun docs/security-claims-vs-reality.md. Flag any wording that upgrades a Partially-enforced or Documented-gap claim to Enforced without code receipts in the same PR."
+      }
+    ]
+  }
+}

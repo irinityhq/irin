@@ -1,0 +1,31 @@
+# Gemini / Vertex routing — **Vertex path only** (legacy/enterprise ADC).
+# For most users (including ultra subs): provider "gemini" now dispatches to agy_cli (see mod.rs + agent_cli::ask_agy using `agy -p`).
+# This file is only consulted for the legacy Vertex `gemini::ask` fallback.
+# Edit when Google ships new model IDs for Vertex path.
+# See src/provider/gemini_route.rs. agy does not use this config (CLI handles reasoning).
+
+default_model: gemini-3.1-pro-preview
+
+# Per-model Vertex generateContent generationConfig.
+models:
+  gemini-3.1-pro-preview:
+    thinking_level: medium
+    # 16384 not 4096: on Vertex Gemini 3, thoughtsTokenCount spends from
+    # maxOutputTokens. Medium thinking burns ~3-4k before the first visible
+    # token — 4096 produced finishReason MAX_TOKENS with zero text (dead
+    # Mirror seat, session a833921a-2f3). Keep answer headroom above thinking.
+    max_output_tokens: 16384
+    temperature: 0.7
+  gemini-3.5-flash:
+    thinking_level: low
+    # 2048 not 512: same thinking-spends-output budget math as pro-preview,
+    # scaled for low thinking + short utility-role outputs.
+    max_output_tokens: 2048
+    temperature: 0.7
+  gemini-3.1-flash-lite:
+    thinking_level: low
+    max_output_tokens: 1024
+    temperature: 0.7
+
+# Default when --smoke-provider gemini_cli (not used in shipped cabinets).
+cli_default_model: gemini-3.1-pro-preview

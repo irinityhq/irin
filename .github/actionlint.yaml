@@ -1,0 +1,5 @@
+self-hosted-runner:
+  labels:
+    - irin-ci
+
+config-variables: null

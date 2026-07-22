@@ -1,0 +1,29 @@
+# Claude Code CLI routing — edit when Anthropic ships new model IDs.
+# Council loads at startup (no recompile). See src/provider/claude_route.rs.
+
+# Cabinet/role id → `claude --model` flag (alias or full wire id).
+cli_models:
+  claude-fable-5: claude-fable-5
+  claude-opus-4-8: claude-opus-4-8
+  claude-opus-4-6: claude-opus-4-6
+
+cli_default_model: claude-opus-4-8
+cli_label_prefix: claude-cli-
+
+# Minimum `claude --version` (major.minor.patch). Below this → loud error before spawn.
+min_cli_version: "2.1.0"
+
+# Headless seat constraints (`claude -p` deliberation seats).
+seat:
+  permission_mode: dontAsk
+  output_format: json
+  no_session_persistence: true
+
+# Messages API adaptive thinking (fallback when CLI unavailable).
+api_adaptive:
+  claude-opus-4-8:
+    effort: high
+    max_tokens: 16000
+  claude-opus-4-6:
+    effort: high
+    max_tokens: 16000

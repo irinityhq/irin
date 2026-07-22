@@ -1,0 +1,33 @@
+# Smoke-only compose overlay — NEVER include in a production deploy.
+#
+# Carries the test-harness relax knobs so they cannot leak into the base
+# stack via a stray environment line. smoke_phase3.sh adds this file to
+# COMPOSE_FILE_ARGS and exports the two vars; `make up` and the canary
+# overlay never reference it.
+#
+#   COUNCIL_CONCURRENCY_CAP — overrides council.rs DEFAULT_CONCURRENCY_CAP (2)
+#     so cabinet preflight + escalation + recovery can overlap. Snapshotted by
+#     the sidecar once at CouncilState construction.
+#   RATE_LIMIT_EXEMPT_CIDRS — exempts the sidecar's GLOBAL and PER-IP buckets
+#     for the docker bridge + loopback ranges the harness traffic arrives from.
+#     Per-key limits still apply everywhere — the smoke key is provisioned
+#     with its own RPM instead (make provision-key BUDGET=phase3-smoke RPM=1000).
+services:
+  council-stub:
+    image: python:3.13.5-alpine3.22@sha256:37b14db89f587f9eaa890e4a442a3fe55db452b69cca1403cc730bd0fbdc8aaf
+    command: ["python3", "/app/council_stub.py", "${PHASE3_SMOKE_COUNCIL_STUB_PORT:-8765}"]
+    environment:
+      - COUNCIL_STUB_PROFILE=phase3
+      - PHASE3_SMOKE_COUNCIL_STUB_PORT=${PHASE3_SMOKE_COUNCIL_STUB_PORT:-8765}
+    volumes:
+      - ./test/council_stub.py:/app/council_stub.py:ro
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import os, urllib.request; urllib.request.urlopen('http://127.0.0.1:' + os.environ.get('PHASE3_SMOKE_COUNCIL_STUB_PORT', '8765') + '/api/health', timeout=2)"]
+      interval: 1s
+      timeout: 3s
+      retries: 10
+    restart: "no"
+  sidecar:
+    environment:
+      - COUNCIL_CONCURRENCY_CAP=${COUNCIL_CONCURRENCY_CAP:-8}
+      - RATE_LIMIT_EXEMPT_CIDRS=${RATE_LIMIT_EXEMPT_CIDRS:-127.0.0.0/8,172.16.0.0/12}

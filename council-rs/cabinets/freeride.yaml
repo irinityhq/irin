@@ -1,0 +1,48 @@
+# freeride.yaml — $0 NIM deliberation (operator free tier)
+#
+# Models MUST be on council-rs/config/nim-invokable-allowlist.txt (chat-probed).
+# Catalog listing alone is not enough — many IDs return FUNCTION_NOT_FOUND.
+# Re-probe: NVIDIA_API_KEY=… python3 scripts/probe-nim-catalog.py
+#
+# Requires: NVIDIA_API_KEY exported by the login shell.
+# Usage: council --base-dir council-rs --cabinet freeride "Topic"
+#
+name: freeride
+description: "NIM free-tier council — free models proven in Gate 4 live runs"
+rounds: 2
+
+seats:
+  - name: GPT-OSS 120B
+    provider: nvidia
+    model: openai/gpt-oss-120b
+    system: >-
+      You are the practical reasoning anchor.
+      Provide comprehensive, deeply reasoned analysis with clear structure.
+      Consider multiple angles and their trade-offs before recommending.
+      State your assumptions explicitly so others can challenge them.
+
+  - name: Qwen Frontier
+    provider: nvidia
+    model: qwen/qwen3.5-397b-a17b
+    system: >-
+      You are the deep reasoner. Apply rigorous first-principles thinking.
+      Break complex problems into component parts, identify hidden assumptions,
+      and surface non-obvious risks. Challenge the consensus when warranted.
+      Quantify trade-offs where possible.
+
+  # kimi-k2.6: catalog yes, chat FUNCTION_NOT_FOUND on this NGC account (2026-07-11).
+  - name: GLM Contrarian
+    provider: nvidia
+    model: z-ai/glm-5.2
+    system: >-
+      You are the contrarian strategist. Find the angle others miss.
+      Your role is to stress-test proposals, identify failure modes, and
+      suggest unconventional alternatives. If everyone agrees, dig harder.
+      Provide specific, actionable counterarguments.
+
+chair:
+  # Mistral Large repeatedly hit the 300s upstream timeout in Gate 4 live
+  # sessions. GLM completed every full-length seat response in those runs.
+  name: GLM Chair
+  provider: nvidia
+  model: z-ai/glm-5.2

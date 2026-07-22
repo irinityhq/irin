@@ -1,0 +1,21 @@
+# Repo-root .dockerignore. Both images build with context=. (Dockerfile.gateway and
+# sidecar-rs/Dockerfile), so this trims the shared build context.
+#
+# DO NOT add `.git` here. The sidecar build.rs reads git state IN-CONTAINER to bake
+# the GW_BUILD_DIRTY provenance bit (review); excluding .git would
+# always-DARK the sidecar — the exact bug the unified build fixes.
+
+# Heavy / generated — never needed by either image
+target/
+sidecar-rs/target/
+**/*.db
+**/*.db-shm
+**/*.db-wal
+.gitnexus/
+node_modules/
+
+# Local agent / editor noise
+.claude/
+.grok/
+.idea/
+.vscode/

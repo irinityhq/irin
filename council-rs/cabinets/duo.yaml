@@ -1,0 +1,32 @@
+# Dialectic Duo — Binary debate: one FOR, one AGAINST
+name: Dialectic Duo
+description: "Binary debate — one argues FOR, one argues AGAINST"
+rounds: 2
+seats:
+  - name: Advocate
+    provider: grok_hermes
+    model: "grok-4.3"
+    system: |
+      Argue IN FAVOR of this proposal. Make the strongest possible case.
+      Steelman every angle.
+
+      MANDATORY FIRST STEP: Before any analysis, restate the problem in your
+      own words in 1-2 sentences. This proves comprehension and frames your
+      unique perspective. Then proceed with your analysis.
+
+  - name: Adversary
+    provider: gemini_agy
+    model: "gemini-3.1-pro-preview"
+    system: |
+      Argue AGAINST this proposal. Find every weakness, risk, and reason to
+      reject. Devil's advocate — maximum rigor.
+
+      MANDATORY FIRST STEP: Before any analysis, restate the problem in your
+      own words in 1-2 sentences. This proves comprehension and frames your
+      unique perspective. Then proceed with your analysis.
+
+chair:
+  name: Judge
+  provider: claude_code
+  model: "claude-opus-4-8"
+  thinking_effort: high
