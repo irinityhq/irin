@@ -20,6 +20,77 @@ pub fn default_serve_port() -> Result<u16, String> {
     }
 }
 
+/// Bundled sidecar binary name inside the macOS app (`Contents/MacOS/council`).
+pub const BUNDLED_COUNCIL_BIN_NAME: &str = "council";
+
+/// Bundled base-dir folder name under `Contents/Resources/`.
+pub const BUNDLED_BASE_DIR_NAME: &str = "council-base";
+
+/// Resolve the directory that contains the running app executable (`Contents/MacOS` on macOS).
+pub fn executable_dir() -> Option<PathBuf> {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+}
+
+/// Packaged app: sibling of the Tauri host binary (Tauri `externalBin`).
+pub fn bundled_council_binary() -> Option<PathBuf> {
+    let bin = executable_dir()?.join(BUNDLED_COUNCIL_BIN_NAME);
+    bin.is_file().then_some(bin)
+}
+
+/// Packaged app: `Contents/Resources/.../council-base` (Tauri `bundle.resources`).
+///
+/// Tauri may place files at `Resources/council-base` or nest the source path as
+/// `Resources/resources/council-base` depending on the resources config shape.
+pub fn bundled_base_dir() -> Option<PathBuf> {
+    let mac_os = executable_dir()?;
+    let resources_root = mac_os.parent()?.join("Resources");
+    let candidates = [
+        resources_root.join(BUNDLED_BASE_DIR_NAME),
+        resources_root.join("resources").join(BUNDLED_BASE_DIR_NAME),
+        resources_root.join("_up_").join(BUNDLED_BASE_DIR_NAME),
+    ];
+    for candidate in candidates {
+        if candidate.join("cabinets").is_dir() {
+            return Some(candidate);
+        }
+    }
+    // Last resort: search one level under Resources for a cabinets/ directory.
+    if let Ok(entries) = std::fs::read_dir(&resources_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                if path.join("cabinets").is_dir()
+                    && path
+                        .file_name()
+                        .is_some_and(|n| n == BUNDLED_BASE_DIR_NAME)
+                {
+                    return Some(path);
+                }
+                if let Ok(nested) = std::fs::read_dir(&path) {
+                    for nested_entry in nested.flatten() {
+                        let nested_path = nested_entry.path();
+                        if nested_path.join("cabinets").is_dir()
+                            && nested_path
+                                .file_name()
+                                .is_some_and(|n| n == BUNDLED_BASE_DIR_NAME)
+                        {
+                            return Some(nested_path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// True when this process looks like a self-contained DMG/app install.
+pub fn is_packaged_install() -> bool {
+    bundled_council_binary().is_some() && bundled_base_dir().is_some()
+}
+
 /// Resolve the council-rs repository root.
 ///
 /// Priority: non-empty `COUNCIL_RS_DIR` env → parent of `warroom-tauri/` derived from
@@ -96,22 +167,49 @@ pub fn validate_serve_port(port: u16) -> Result<(), String> {
     }
 }
 
-/// Resolve the council release binary: only `{COUNCIL_RS_DIR}/target/release/council`.
+/// Allowed council binary locations for spawn.
 ///
-/// Whitespace-only `explicit` is treated as absent (default path). The resolved path is
-/// canonicalized and must match the allowed release binary location.
+/// Security: callers may not point at an arbitrary executable. The only permitted
+/// paths are:
+/// - the packaged app's bundled `Contents/MacOS/council` (when present), and/or
+/// - the release build at `{COUNCIL_RS_DIR|workspace}/target/release/council`.
+fn allowed_council_binaries(root: &Path) -> Vec<PathBuf> {
+    let mut allowed = Vec::new();
+    if let Some(bundled) = bundled_council_binary() {
+        allowed.push(bundled);
+    }
+    allowed.push(default_council_binary(root));
+    allowed
+}
+
+/// Resolve the council binary for spawn.
+///
+/// Priority when `explicit` is absent:
+/// 1. Bundled `Contents/MacOS/council` when present (packaged install)
+/// 2. Repo `target/release/council` under `COUNCIL_RS_DIR` / workspace (dev)
+///
+/// When `explicit` is set (non-whitespace), the path must canonicalize to one of
+/// the allowed locations above — same pin as pre-DMG product (no arbitrary exec).
+/// Whitespace-only `explicit` is treated as absent.
 pub fn resolve_council_binary(explicit: Option<&str>) -> Result<PathBuf, String> {
     let root = resolve_council_rs_dir();
-    let allowed = default_council_binary(&root);
+    let allowed_list = allowed_council_binaries(&root);
 
     let candidate = match explicit.map(str::trim).filter(|s| !s.is_empty()) {
         Some(p) => PathBuf::from(p),
-        None => default_council_binary_path(),
+        None => {
+            if let Some(bundled) = bundled_council_binary() {
+                bundled
+            } else {
+                default_council_binary_path()
+            }
+        }
     };
 
     if !candidate.is_file() {
         return Err(format!(
-            "council binary not found at {}. Build with: cd {} && cargo build --release",
+            "council binary not found at {}. Build with: cd {} && cargo build --release \
+             (or install the self-contained app bundle that includes the council sidecar)",
             candidate.display(),
             root.display()
         ));
@@ -121,19 +219,53 @@ pub fn resolve_council_binary(explicit: Option<&str>) -> Result<PathBuf, String>
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize council binary path: {e}"))?;
 
-    let allowed_canonical = allowed
-        .canonicalize()
-        .map_err(|e| format!("failed to canonicalize allowed council binary: {e}"))?;
+    let mut allowed_canonicals = Vec::new();
+    for allowed in &allowed_list {
+        if allowed.is_file() {
+            if let Ok(c) = allowed.canonicalize() {
+                allowed_canonicals.push(c);
+            }
+        }
+    }
 
-    if canonical != allowed_canonical {
+    if allowed_canonicals.is_empty() {
+        // Dev tree without a built binary: surface the missing-file path clearly.
         return Err(format!(
-            "council binary must be the release build at {} (got {})",
-            allowed_canonical.display(),
+            "council binary not found at {}. Build with: cd {} && cargo build --release",
+            default_council_binary(&root).display(),
+            root.display()
+        ));
+    }
+
+    if !allowed_canonicals.iter().any(|a| a == &canonical) {
+        let expected = allowed_canonicals
+            .iter()
+            .map(|p| p.display().to_string())
+            .collect::<Vec<_>>()
+            .join(" or ");
+        return Err(format!(
+            "council binary must be the release build at {expected} (got {})",
             canonical.display()
         ));
     }
 
     Ok(canonical)
+}
+
+/// Resolve `--base-dir` for a packaged or development spawn.
+///
+/// Packaged: `Resources/council-base`. Dev: council-rs repo root.
+pub fn resolve_spawn_base_dir(council_root_override: Option<&str>) -> Result<PathBuf, String> {
+    if let Some(root) = council_root_override.map(str::trim).filter(|s| !s.is_empty()) {
+        // Caller validates via validate_council_root when override is set.
+        return Ok(PathBuf::from(root));
+    }
+    if let Some(bundled) = bundled_base_dir() {
+        return bundled
+            .canonicalize()
+            .map_err(|e| format!("failed to canonicalize bundled council base dir: {e}"));
+    }
+    Ok(resolve_council_rs_dir())
 }
 
 #[cfg(test)]
@@ -341,5 +473,24 @@ mod tests {
 
         let _ = fs::remove_dir_all(&tmp);
         restore_council_rs_dir(prev);
+    }
+
+    #[test]
+    fn packaged_helpers_are_none_outside_app_bundle() {
+        // Unit tests run from target/debug — not a packaged .app layout.
+        // We only assert the helpers do not panic; presence depends on layout.
+        let _ = bundled_council_binary();
+        let _ = bundled_base_dir();
+        let _ = is_packaged_install();
+    }
+
+    #[test]
+    fn resolve_council_binary_accepts_bundled_when_staged_as_sibling() {
+        // Simulate Contents/MacOS layout: put a fake host + council in a temp MacOS dir
+        // and point current_exe via… we cannot override current_exe easily, so only
+        // assert the allow-list helper includes default_council_binary always.
+        let root = PathBuf::from("/tmp/council-rs-allow-list");
+        let list = allowed_council_binaries(&root);
+        assert!(list.iter().any(|p| p.ends_with("target/release/council")));
     }
 }

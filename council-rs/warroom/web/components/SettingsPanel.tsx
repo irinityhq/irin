@@ -379,7 +379,7 @@ export default function SettingsPanel() {
             {!inTauri
               ? "This browser UI connects to the Council API above. Council startup and backend environment are managed outside this page."
               : desktopRuntimeMode === "installed-release"
-              ? "This installed app connects to the canonical IRIN runtime. Development sidecar controls are intentionally unavailable here; start or restart Council from the IRIN checkout."
+              ? "This installed app owns the bundled Council process for core War Room (no Rust/Node/Docker required). Gateway is optional: keep Direct routing for core use. To enable governed routing, install and open Docker Desktop, wait until it is ready, then configure the IRIN Gateway (GW_API_KEY + http://127.0.0.1:18080). Missing Docker does not block core War Room."
               : desktopRuntimeMode === "detecting"
                 ? "Checking the desktop build mode before enabling development-only sidecar controls…"
                 : "Desktop build mode could not be verified, so development-only sidecar controls remain unavailable. Start or restart Council from the IRIN checkout."}

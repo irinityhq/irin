@@ -11,12 +11,47 @@ fn main() {
     emit_git_rerun_paths(&manifest_dir);
     emit_tracked_file_rerun_paths(&manifest_dir);
 
-    let sha =
-        git_output(&manifest_dir, &["rev-parse", "HEAD"]).unwrap_or_else(|| "unknown".to_string());
-    let dirty = git_is_dirty(&manifest_dir).unwrap_or(true);
+    // Packaging / throwaway builds: honor explicit provenance so host + council match.
+    // Prefer COUNCIL_BUILD_GIT_SHA, then IRIN_TAURI_BUILD_GIT_SHA, then git, then SOURCE_SHA.txt.
+    println!("cargo:rerun-if-env-changed=COUNCIL_BUILD_GIT_SHA");
+    println!("cargo:rerun-if-env-changed=COUNCIL_BUILD_DIRTY");
+    println!("cargo:rerun-if-env-changed=IRIN_TAURI_BUILD_GIT_SHA");
+    println!("cargo:rerun-if-env-changed=IRIN_TAURI_BUILD_DIRTY");
+
+    let sha = env_nonempty("COUNCIL_BUILD_GIT_SHA")
+        .or_else(|| env_nonempty("IRIN_TAURI_BUILD_GIT_SHA"))
+        .or_else(|| git_output(&manifest_dir, &["rev-parse", "HEAD"]))
+        .or_else(read_source_sha_file)
+        .unwrap_or_else(|| "unknown".to_string());
+    let dirty = env_nonempty("COUNCIL_BUILD_DIRTY")
+        .or_else(|| env_nonempty("IRIN_TAURI_BUILD_DIRTY"))
+        .map(|s| s == "true" || s == "1")
+        .unwrap_or_else(|| git_is_dirty(&manifest_dir).unwrap_or(true));
 
     println!("cargo:rustc-env=COUNCIL_BUILD_GIT_SHA={sha}");
     println!("cargo:rustc-env=COUNCIL_BUILD_DIRTY={dirty}");
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn read_source_sha_file() -> Option<String> {
+    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // council-rs → src → throwaway root
+    for rel in ["../SOURCE_SHA.txt", "../../SOURCE_SHA.txt", "../../../SOURCE_SHA.txt"] {
+        let path = manifest.join(rel);
+        if let Ok(raw) = std::fs::read_to_string(&path) {
+            let v = raw.trim().to_string();
+            if !v.is_empty() {
+                return Some(v);
+            }
+        }
+    }
+    None
 }
 
 fn git_is_dirty(dir: &Path) -> Option<bool> {

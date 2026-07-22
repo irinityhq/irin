@@ -4,11 +4,16 @@
 #[path = "../build_support.rs"]
 mod build_support;
 mod paths;
+mod private_config;
 mod sidecar;
 
 use paths::{
-    build_cors_origins, default_serve_port, resolve_council_binary, resolve_council_rs_dir,
-    validate_serve_port,
+    build_cors_origins, default_serve_port, is_packaged_install, resolve_council_binary,
+    resolve_council_rs_dir, resolve_spawn_base_dir, validate_serve_port,
+};
+use private_config::{
+    ensure_writable_base_overlay, gateway_missing_prereq_guidance, gui_login_environment,
+    load_or_create_private_config,
 };
 use sidecar::{
     compose_sidecar_args, compose_sidecar_env, probe_council_server, validate_council_root,
@@ -114,13 +119,16 @@ fn stop_tracked_council_server(app: &AppHandle) {
     };
 }
 
-/// Adopt an external Council when available. Debug builds may spawn
-/// `council --serve` for development; installed release builds never create a
-/// second backend and require the canonical IRIN runtime from `make setup`.
-/// `via_gateway`: `Some(_)` sets `COUNCIL_VIA_GATEWAY` explicitly ("1"/"0"); `None` inherits.
+/// Adopt a matching external Council when available; otherwise spawn a managed
+/// `council --serve` when this is a packaged install (bundled binary + base-dir)
+/// or a debug development build. Packaged releases own the bundled Council
+/// lifecycle and do not require `make setup`, Rust, Node, or Docker for core
+/// War Room. Gateway remains optional (`via_gateway` default off).
+///
+/// `via_gateway`: `Some(_)` sets `COUNCIL_VIA_GATEWAY` explicitly ("1"/"0"); `None` inherits
+/// (packaged installs force `Some(false)` unless the caller opts in).
 /// `council_root`: Settings councilRoot — when non-blank it must pass
-/// `validate_council_root` and replaces the `--base-dir` value only (binary
-/// resolution and the spawn cwd stay pinned to the repo root).
+/// `validate_council_root` and replaces the `--base-dir` value only.
 fn try_start_council_server(
     app: &AppHandle,
     council_path: Option<&str>,
@@ -142,7 +150,7 @@ fn try_start_council_server(
     };
     validate_serve_port(port)?;
 
-    let council_rs_path = resolve_council_rs_dir();
+    let packaged = is_packaged_install();
 
     // Validate the base-dir override before spawning — a bad base dir makes
     // council exit at startup and the failure would only surface via the log
@@ -160,12 +168,13 @@ fn try_start_council_server(
     ) {
         CouncilServerProbe::MatchingBuild => {
             return Ok(format!(
-                "adopted canonical Council already running on :{port} (managed by external IRIN runtime)"
+                "adopted Council already running on :{port} (matching build identity)"
             ));
         }
         CouncilServerProbe::DifferentBuild => {
             return Err(format!(
-                "Council on :{port} has a different source identity; run `make setup` and rebuild this app from the same checkout"
+                "Council on :{port} has a different source identity; quit the other Council \
+                 process or free the port before launching this app (this app will not kill it)"
             ));
         }
         CouncilServerProbe::Unavailable => {
@@ -177,34 +186,98 @@ fn try_start_council_server(
         }
     }
 
-    if !cfg!(debug_assertions) {
+    // Packaged release owns the bundled sidecar. Debug owns a repo-built sidecar.
+    // Unpackaged release (dev shell without bundle) still requires an external runtime.
+    if !packaged && !cfg!(debug_assertions) {
         return Err(
-            "canonical IRIN Council is not running; run `make setup` from the IRIN checkout"
+            "Council is not running and this build is not a self-contained app bundle. \
+             Use the DMG-packaged app, or start Council externally."
                 .to_string(),
         );
     }
 
     let effective = resolve_council_binary(council_path)?;
     let effective = effective.to_string_lossy().into_owned();
-    let council_rs_dir = council_rs_path.to_string_lossy().into_owned();
-    let base_dir_override = base_dir_override.map(|p| p.to_string_lossy().into_owned());
+
+    // Packaged: writable Application Support overlay of bundled base-dir (cabinets save).
+    // Dev: council-rs repo root (or validated override).
+    let spawn_base = if let Some(ref override_path) = base_dir_override {
+        override_path.clone()
+    } else if packaged {
+        let bundled = paths::bundled_base_dir().ok_or_else(|| {
+            "packaged install is missing Contents/Resources/council-base".to_string()
+        })?;
+        ensure_writable_base_overlay(&bundled)?
+    } else {
+        resolve_spawn_base_dir(None)?
+    };
+    let spawn_base_str = spawn_base.to_string_lossy().into_owned();
+
+    // Packaged: writable state under Application Support (Resources is read-only).
+    // Dev: cwd = council-rs root so relative sessions/ resolve like make warroom.
+    let (child_cwd, sessions_dir_env) = if packaged {
+        let support = private_config::app_support_dir();
+        let sessions = support.join("sessions");
+        let _ = std::fs::create_dir_all(&sessions);
+        (
+            support.to_string_lossy().into_owned(),
+            Some(sessions.to_string_lossy().into_owned()),
+        )
+    } else {
+        (
+            resolve_council_rs_dir().to_string_lossy().into_owned(),
+            None,
+        )
+    };
+
+    // Packaged installs default Gateway off so missing Docker cannot break core War Room.
+    let via_gateway = if packaged {
+        Some(via_gateway.unwrap_or(false))
+    } else {
+        via_gateway
+    };
 
     let cors_origins = build_cors_origins(port);
-    let args = compose_sidecar_args(&council_rs_dir, port, base_dir_override.as_deref());
+    // compose_sidecar_args: first arg is default base-dir; third overrides --base-dir.
+    let args = compose_sidecar_args(&spawn_base_str, port, Some(spawn_base_str.as_str()));
 
     let mut command = app
         .shell()
         .command(&effective)
-        .current_dir(&council_rs_dir)
+        .current_dir(&child_cwd)
         .args(args);
     for (key, value) in compose_sidecar_env(
         cors_origins.as_str(),
-        cfg!(debug_assertions),
+        // Packaged release must not use COUNCIL_DEV_NO_AUTH; debug may.
+        cfg!(debug_assertions) && !packaged,
         auth_token,
         via_gateway,
         librarian_base,
     ) {
         command = command.env(key, value);
+    }
+    if let Some(sessions_dir) = sessions_dir_env {
+        command = command.env("COUNCIL_SESSIONS_DIR", sessions_dir);
+    }
+    // Finder/GUI launch: inject login PATH + provider keys so Discover works without a terminal.
+    if packaged {
+        for (key, value) in gui_login_environment() {
+            command = command.env(key, value);
+        }
+        let _ = app.emit(
+            "council-log",
+            "[system] packaged spawn: login PATH/provider env merged for GUI launch (values not logged)",
+        );
+    }
+    // When gateway is forced on in a packaged install, surface guidance if it fails later.
+    if via_gateway == Some(true) {
+        let _ = app.emit(
+            "council-log",
+            format!(
+                "[system] Gateway mode requested. {}",
+                gateway_missing_prereq_guidance()
+            ),
+        );
     }
 
     let (mut rx, child) = command
@@ -306,24 +379,20 @@ fn try_start_council_server(
         .show();
 
     Ok(format!(
-        "council --serve started on :{} (bin: {}{}). WS/REST should be reachable from Tauri webview",
-        port,
-        effective,
-        base_dir_override
-            .as_deref()
-            .map(|d| format!(", base-dir: {d}"))
-            .unwrap_or_default()
+        "council --serve started on :{port} (bin: {effective}, base-dir: {spawn_base_str}). \
+         WS/REST should be reachable from Tauri webview"
     ))
 }
 
-/// Adopt the canonical Council in release builds; start a managed sidecar only
-/// in a debug build used for desktop development.
+/// Start or adopt Council for the desktop shell.
+/// Packaged installs spawn the bundled sidecar; debug builds may spawn a repo
+/// binary; matching external Council is adopted when already healthy.
 /// Sets `COUNCIL_CORS_ORIGINS` for Tauri asset origins and Next dev (3010) / API port.
 /// `COUNCIL_DEV_NO_AUTH` is set only in debug builds; release requires `COUNCIL_AUTH_TOKEN`.
 /// The default port comes from `IRIN_COUNCIL_PORT` in isolated worktrees and
 /// remains 8765 for the canonical installed runtime.
 /// `council_root` (Settings councilRoot, camelCase over invoke) overrides
-/// `--base-dir` after validation; blank/absent uses the repo root.
+/// `--base-dir` after validation; blank/absent uses bundled base-dir or repo root.
 #[tauri::command]
 async fn start_council_server(
     app: AppHandle,
@@ -585,27 +654,71 @@ pub fn run() {
                 })
                 .build(app)?;
 
-            // Debug-only Rust auto-start (COUNCIL_DEV_NO_AUTH). Release builds rely on
-            // the webview calling start_council_server with Settings auth after configReady.
-            #[cfg(debug_assertions)]
+            // Packaged release: first-launch private config + auto-start bundled Council.
+            // Debug: auto-start with COUNCIL_DEV_NO_AUTH via compose_sidecar_env.
+            // Unpackaged release: webview may still call start_council_server after configReady.
             {
                 let auto_start_handle = app.handle().clone();
+                let packaged = is_packaged_install();
                 tauri::async_runtime::spawn(async move {
-                    match try_start_council_server(&auto_start_handle, None, None, None, None, None, None)
-                    {
-                        Ok(msg) => {
-                            let _ = auto_start_handle.emit(
-                                "council-log",
-                                format!("[system] auto-start: {msg}"),
-                            );
+                    let auth_token = if packaged {
+                        match load_or_create_private_config() {
+                            Ok(cfg) => {
+                                let _ = auto_start_handle.emit(
+                                    "council-log",
+                                    format!(
+                                        "[system] private config ready (install_id={}, via_gateway_default={})",
+                                        cfg.install_id, cfg.via_gateway_default
+                                    ),
+                                );
+                                let t = cfg.auth_token.trim().to_string();
+                                if t.is_empty() {
+                                    None
+                                } else {
+                                    Some(t)
+                                }
+                            }
+                            Err(e) => {
+                                let _ = auto_start_handle.emit(
+                                    "council-log",
+                                    format!("[system] private config: {e}"),
+                                );
+                                None
+                            }
                         }
-                        Err(e) => {
-                            let _ = auto_start_handle.emit(
-                                "council-log",
-                                format!(
-                                    "[system] auto-start skipped: {e} (run `cargo build --release` at council-rs root)"
-                                ),
-                            );
+                    } else {
+                        None
+                    };
+
+                    // Debug always auto-starts; packaged release auto-starts bundled Council.
+                    if packaged || cfg!(debug_assertions) {
+                        let token_ref = auth_token.as_deref();
+                        match try_start_council_server(
+                            &auto_start_handle,
+                            None,
+                            None,
+                            token_ref,
+                            Some(false), // core War Room: Gateway off by default
+                            None,
+                            None,
+                        ) {
+                            Ok(msg) => {
+                                let _ = auto_start_handle.emit(
+                                    "council-log",
+                                    format!("[system] auto-start: {msg}"),
+                                );
+                            }
+                            Err(e) => {
+                                let extra = if packaged {
+                                    String::new()
+                                } else {
+                                    " (run `cargo build --release` at council-rs root)".to_string()
+                                };
+                                let _ = auto_start_handle.emit(
+                                    "council-log",
+                                    format!("[system] auto-start skipped: {e}{extra}"),
+                                );
+                            }
                         }
                     }
                 });
