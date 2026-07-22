@@ -336,6 +336,24 @@ assert "council_version" in d
 PY
 log "step_a=direct_ok"
 
+# Wait until an enabled AXButton with the given name is present (pack status
+# refresh can leave the Settings panel without action buttons for a few seconds).
+wait_ax_button_enabled() {
+  local label="$1"
+  local timeout_s="${2:-60}"
+  local i st
+  for i in $(seq 1 "$timeout_s"); do
+    st="$(ax_button_enabled "$label" || true)"
+    if [[ "$st" == "enabled" ]]; then
+      log "ax_wait_${label// /_}=enabled_after_${i}s"
+      return 0
+    fi
+    sleep 1
+  done
+  log "ax_wait_${label// /_}=timeout last=$st"
+  return 1
+}
+
 # --- b/c) Accessibility: Settings → Enable Gateway ---
 "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
 sleep 1
@@ -344,9 +362,10 @@ log "ax_settings=$SETTINGS_CLICK"
 [[ "$SETTINGS_CLICK" == clicked_button* ]] \
   || die "could not identify/click Settings AXButton (Accessibility fail-closed)"
 
-sleep 1
 # Pre-state: pack not installed
 [[ ! -f "$TEST_HOME/$PACK_MARKER_REL" ]] || die "pack already installed before Enable"
+wait_ax_button_enabled "Enable Gateway" 45 \
+  || die "Enable Gateway AXButton never became enabled after Settings"
 ax_click_button_busy "Enable Gateway"
 
 # Wait for pack ready: project + /health + admin surface (aligned with product timeouts).
@@ -421,7 +440,8 @@ log "step_enable=ok"
 "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
 sleep 0.5
 ax_click_button "Settings" >/dev/null 2>&1 || true
-sleep 0.5
+wait_ax_button_enabled "Disable" 30 \
+  || die "Disable AXButton never became enabled"
 ax_click_button_busy "Disable"
 sleep 2
 PID3="$(listen_pid 8765)"
@@ -443,7 +463,8 @@ OWNED_COUNCIL_PIDS="$OWNED_COUNCIL_PIDS,$PID3"
 "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
 sleep 0.5
 ax_click_button "Settings" >/dev/null 2>&1 || true
-sleep 0.5
+wait_ax_button_enabled "Stop pack" 30 \
+  || die "Stop pack AXButton never became enabled"
 ax_click_button_busy "Stop pack"
 sleep 3
 wait_health || die "Direct Council unhealthy after stop"
@@ -498,7 +519,8 @@ log "relaunch_continuity=ok"
 "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
 sleep 0.5
 ax_click_button "Settings" >/dev/null 2>&1 || true
-sleep 0.5
+wait_ax_button_enabled "Uninstall pack" 30 \
+  || die "Uninstall pack AXButton never became enabled"
 UNINSTALL_BEFORE="$(ax_button_enabled "Uninstall pack" || true)"
 log "ax_before_Uninstall_pack=$UNINSTALL_BEFORE"
 [[ "$UNINSTALL_BEFORE" == "enabled" ]] || die "Uninstall pack button not enabled ($UNINSTALL_BEFORE)"
