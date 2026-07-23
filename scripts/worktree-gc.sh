@@ -36,6 +36,13 @@ while IFS= read -r line; do
   [[ -d "$dest" ]] || continue
   resolved="$(cd "$dest" && pwd -P)"
   [[ "$resolved" != "$self" ]] || continue
+  # Only managed operator worktrees (profile env or irin-wt-* path). Never
+  # treat arbitrary checkouts or unfinished product trees as garbage solely
+  # because a remote branch was deleted.
+  if [[ ! -f "$resolved/.irin-worktree.env" && "$(basename "$resolved")" != irin-wt-* ]]; then
+    printf 'KEEP unmanaged: %s\n' "$resolved"
+    continue
+  fi
 
   branch="$(git -C "$dest" symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
   [[ -n "$branch" && "$branch" != "main" && "$branch" != "master" ]] || continue
@@ -50,11 +57,14 @@ while IFS= read -r line; do
     merged=1
   fi
   # Squash merges leave local tips that are not ancestors of origin/main.
-  # A deleted origin/<branch> after merge is the usual operator signal.
+  # Require both: remote branch gone AND no unique commits vs origin/main
+  # (empty cherry list means every patch is already on main).
   remote_gone=0
   if ! git show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null \
     && ! git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-    remote_gone=1
+    if [[ -z "$(git -C "$dest" cherry origin/main HEAD 2>/dev/null)" ]]; then
+      remote_gone=1
+    fi
   fi
 
   if [[ "$merged" != 1 && "$remote_gone" != 1 ]]; then
@@ -63,7 +73,7 @@ while IFS= read -r line; do
   fi
 
   reason="merged-into-origin/main"
-  [[ "$merged" == 1 ]] || reason="origin-branch-gone"
+  [[ "$merged" == 1 ]] || reason="origin-branch-gone-and-cherry-empty"
   candidates=$((candidates + 1))
   printf 'CANDIDATE [%s]: %s (%s)\n' "$reason" "$resolved" "$branch"
   if [[ "$apply" == 1 ]]; then
