@@ -127,10 +127,26 @@ DEST_APP="$ROOT/packaging/artifacts/IRIN.app"
 DEST_DMG="$ROOT/packaging/artifacts/IRIN_0.1.0_aarch64.dmg"
 rm -rf "$DEST_APP"
 ditto "$APP" "$DEST_APP"
-codesign --force --deep --sign - "$DEST_APP"
-codesign --verify --deep --strict "$DEST_APP"
 
-echo "=== hdiutil DMG from ad-hoc signed app ==="
+if [[ "$PACK_MODE" == "production" ]]; then
+  : "${APPLE_SIGNING_IDENTITY:?production mode requires APPLE_SIGNING_IDENTITY}"
+  : "${APPLE_NOTARY_PROFILE:?production mode requires APPLE_NOTARY_PROFILE}"
+  echo "=== Developer ID signing (inside-out, hardened runtime) ==="
+  codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
+    "$DEST_APP/Contents/MacOS/council"
+  codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
+    "$DEST_APP/Contents/MacOS/council-warroom-tauri"
+  codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
+    "$DEST_APP"
+  codesign --verify --deep --strict "$DEST_APP"
+  codesign -dv "$DEST_APP" 2>&1 | grep -q 'Authority=Developer ID Application' \
+    || die "expected Developer ID Application signature"
+else
+  codesign --force --deep --sign - "$DEST_APP"
+  codesign --verify --deep --strict "$DEST_APP"
+fi
+
+echo "=== hdiutil DMG ($PACK_MODE) ==="
 STAGE="$ROOT/packaging/build/dmg-stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
@@ -138,6 +154,14 @@ ditto "$DEST_APP" "$STAGE/IRIN.app"
 ln -sf /Applications "$STAGE/Applications"
 rm -f "$DEST_DMG"
 hdiutil create -volname "IRIN" -srcfolder "$STAGE" -ov -format UDZO "$DEST_DMG"
+
+if [[ "$PACK_MODE" == "production" ]]; then
+  echo "=== sign DMG, notarize, staple ==="
+  codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DEST_DMG"
+  xcrun notarytool submit "$DEST_DMG" --keychain-profile "$APPLE_NOTARY_PROFILE" --wait
+  xcrun stapler staple "$DEST_DMG"
+  xcrun stapler validate "$DEST_DMG"
+fi
 
 {
   echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

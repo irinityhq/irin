@@ -50,6 +50,17 @@ if ! codesign --verify --deep --strict "$DEST_APP"; then
 fi
 codesign -dv "$DEST_APP" 2>&1 | tee -a "$REPORT" || true
 
+if [[ "${IRIN_DMG_PACK_MODE:-local-dev}" == "production" ]]; then
+  log "=== production assertions: identity, Gatekeeper, staple ==="
+  AUTH="$(codesign -dv "$DEST_APP" 2>&1 | grep '^Authority=' | head -1 || true)"
+  [[ "$AUTH" == *"Developer ID Application"* ]] \
+    || die "production app is not Developer ID signed (got: ${AUTH:-none})"
+  spctl --assess --type execute -vv "$DEST_APP" 2>&1 | tee -a "$REPORT" \
+    || die "Gatekeeper assessment failed on untouched copy"
+  xcrun stapler validate "$DMG" 2>&1 | tee -a "$REPORT" \
+    || die "DMG is not stapled"
+fi
+
 HOST="$DEST_APP/Contents/MacOS/council-warroom-tauri"
 SIDECAR="$DEST_APP/Contents/MacOS/council"
 [[ -x "$HOST" ]] || die "host binary missing"
