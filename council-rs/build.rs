@@ -42,7 +42,11 @@ fn env_nonempty(key: &str) -> Option<String> {
 fn read_source_sha_file() -> Option<String> {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     // council-rs → src → throwaway root
-    for rel in ["../SOURCE_SHA.txt", "../../SOURCE_SHA.txt", "../../../SOURCE_SHA.txt"] {
+    for rel in [
+        "../SOURCE_SHA.txt",
+        "../../SOURCE_SHA.txt",
+        "../../../SOURCE_SHA.txt",
+    ] {
         let path = manifest.join(rel);
         if let Ok(raw) = std::fs::read_to_string(&path) {
             let v = raw.trim().to_string();

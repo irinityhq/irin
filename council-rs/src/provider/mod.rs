@@ -605,8 +605,7 @@ pub fn check_providers_liveness(gw: bool) -> Vec<(&'static str, bool)> {
         (
             "gemini",
             gw || (std::env::var_os("COUNCIL_GEMINI_VERTEX_FALLBACK").is_some()
-                && (env_nonempty("VERTEX_PROJECT")
-                    || env_nonempty("GOOGLE_CLOUD_PROJECT"))),
+                && (env_nonempty("VERTEX_PROJECT") || env_nonempty("GOOGLE_CLOUD_PROJECT"))),
         ),
         ("gemini_agy", false),
         (
@@ -821,7 +820,10 @@ mod tests {
             "nvidia",
             "openrouter",
         ] {
-            assert!(map.contains_key(required), "missing liveness slug {required}");
+            assert!(
+                map.contains_key(required),
+                "missing liveness slug {required}"
+            );
         }
         assert_eq!(map.get("gateway"), Some(&env_nonempty("GW_API_KEY")));
         assert_eq!(map.get("grok_build"), Some(&false));
