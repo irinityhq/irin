@@ -1,30 +1,21 @@
 # IRIN
 
-Structured multi-model deliberation, running locally on macOS or Ubuntu.
+[Website](https://irinity.com) ·
+[Architecture](docs/architecture.md) ·
+[Operator guide](council-rs/docs/operator-guide.md)
+
+**Your agent said it was done. Who checked?**
+
+IRIN runs structured multi-model deliberations locally on macOS or Ubuntu.
+Each model takes a named seat, arguments stream in rounds, Sheldon checks
+factual claims between rounds when validation is enabled, and a chair files
+the ruling. Direct provider transport is the default; governed routing is
+opt-in per seat.
 
 ![A real IRIN War Room proceeding moving from two rounds of model responses to Sheldon evidence validation](assets/readme/warroom-deliberation.gif)
 
-War Room gives models assigned seats, streams their arguments across rounds,
-lets you intervene, checks factual claims, and files a chair ruling. It talks
-directly to AI providers you already use. Nothing executes without you — IRIN
-does not ship an autonomous executor.
-
-[Watch the complete 75-second War Room walkthrough (H.264 MP4)](assets/readme/warroom-walkthrough.mp4)
-
-Gateway runs alongside the local stack but stays out of a provider call unless
-you explicitly select Governed routing, which adds metering, budget limits, and
-a signed audit trail for that call.
-
-IRIN is **local-first software for one operator** — you run it on a machine you
-control. That is the product shape, not a temporary apology. Council and War
-Room Web run on macOS and Ubuntu. The streamlined full-stack installer, login
-recovery, private-phone automation, and native desktop app are macOS-only
-today; Ubuntu uses the browser War Room launcher and component-level Gateway
-paths. Services bind to loopback by default; remote access is an optional
-private Tailscale overlay, never a public one. This is not multi-tenant SaaS:
-no hosted SLA, no compliance certification, no sandbox against a compromised
-host. Precise boundary:
-[`docs/security-claims-vs-reality.md`](docs/security-claims-vs-reality.md).
+Watch fires form a verifiable hash chain; Outbox directives are signed over
+RFC 8785 canonical JSON.
 
 ## A real proceeding
 
@@ -99,10 +90,10 @@ make warroom
 This builds and starts Council plus War Room Web in the foreground on the same
 loopback addresses shown below; open `http://127.0.0.1:3010` and stop the stack
 with `Ctrl+C`. Provider discovery uses the environment and authenticated CLIs
-of the shell that launched it. This Ubuntu path does not install login recovery,
-configure Tailscale, start Gateway, or provide the macOS desktop app. Install
-Docker Engine with Compose/Buildx when using Gateway or the isolated
-`make verify` engineering lane. See
+of the shell that launched it. Ubuntu runs Council and the browser War Room;
+the native app and managed full-stack runtime are macOS paths. Install Docker
+Engine with Compose/Buildx when using Gateway or the isolated `make verify`
+engineering lane. See
 [`docs/troubleshooting.md`](docs/troubleshooting.md) for the platform boundary.
 
 ## What's running
@@ -139,20 +130,20 @@ which seats, which chair, how many rounds — are documented in
 **Direct provider transport is the default.** Council calls the provider API
 or your authenticated local CLI itself. **Gateway is an explicit, per-seat
 opt-in** — select "Governed via Gateway" for a seat, or set
-`COUNCIL_VIA_GATEWAY=1`, to add metering, a budget limit, and a signed
-audit-ledger record for that call. Gateway is not a maturity ladder: it
-never silently substitutes a different provider, and a transport with no
-Gateway adapter simply stays Direct-only. Details:
+`COUNCIL_VIA_GATEWAY=1`, to add metering and a budget limit. Gateway is not a
+maturity ladder: it never silently substitutes a different provider, and a
+transport with no Gateway adapter simply stays Direct-only. Details:
 [`docs/architecture.md`](docs/architecture.md).
 
 ## Evidence and claim validation (Sheldon)
 
-Sheldon is the between-round claim validator: after a round of model responses,
-it checks factual claims made in that round and returns a verdict per claim —
-supported, consistent, or no-evidence — before the next round or the chair
-ruling (the screenshots in [A real proceeding](#a-real-proceeding) show this
-live). Sheldon does not gate whether a round runs; it gates what gets treated
-as an established fact inside the deliberation.
+When enabled, Sheldon is the between-round claim validator: after a round of
+model responses, it checks factual claims made in that round and returns a
+verdict per claim — supported, consistent, or no-evidence — before the next
+round or the chair ruling (the screenshots in
+[A real proceeding](#a-real-proceeding) show this live). Sheldon does not gate
+whether a round runs; it gates what gets treated as an established fact inside
+the deliberation.
 
 Before the validator model runs, Council gathers bounded evidence for it:
 
@@ -239,8 +230,6 @@ from the fork. See [`docs/troubleshooting.md`](docs/troubleshooting.md).
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — setup, Docker,
   ports, login-shell discovery, Tailscale, reboot recovery, and teardown.
 - [`AGENTS.md`](AGENTS.md) — repository operating manual for coding agents.
-- [`docs/security-claims-vs-reality.md`](docs/security-claims-vs-reality.md)
-  — claim-by-claim security boundary.
 - Component docs: [`council-rs/README.md`](council-rs/README.md),
   [`gateway/README.md`](gateway/README.md),
   [`sentinel/README.md`](sentinel/README.md).
@@ -262,5 +251,10 @@ all Apache-2.0-licensed.
   what it does and does not supply.
 - **[hermes-plugin-irin](https://github.com/irinityhq/hermes-plugin-irin)** —
   the current Python Hermes-to-Council bridge.
+
+> **Current boundary.** Local-first, single-operator pre-release. No hosted
+> SLA, compliance certification, or sandbox against a compromised host. The
+> governed action lane ends at a signed Outbox directive, not autonomous
+> execution. [Exact security boundaries](docs/security-claims-vs-reality.md).
 
 Licensed under Apache-2.0.
