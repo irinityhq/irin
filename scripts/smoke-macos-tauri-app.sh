@@ -145,6 +145,10 @@ fi
 app="${IRIN_NATIVE_APP:-$ROOT/council-rs/warroom-tauri/src-tauri/target/release/bundle/macos/Council War Room.app}"
 binary="$app/Contents/MacOS/council-warroom-tauri"
 [[ -x "$binary" ]] || { printf 'ERROR: native app binary missing: %s\n' "$binary" >&2; exit 1; }
+# Resolve through worktree target symlinks so pgrep matches the LaunchServices
+# process path (realpath under the shared cargo cache).
+binary="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$binary")"
+[[ -x "$binary" ]] || { printf 'ERROR: resolved native app binary missing: %s\n' "$binary" >&2; exit 1; }
 binary_pattern="$(printf '%s\n' "$binary" | sed 's/[][\\.^$*+?{}()|]/\\&/g')"
 codesign --verify --deep --strict "$app"
 

@@ -13,9 +13,37 @@ dry_run="${IRIN_CHECK_DRY_RUN:-0}"
 if [[ "${1:-}" == "--ship" ]]; then mode=ship; shift; fi
 if [[ "${1:-}" == "--dry-run" ]]; then dry_run=1; shift; fi
 
+if [[ -f "$ROOT/.irin-worktree.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/.irin-worktree.env"
+  set +a
+fi
+
 if [[ "$mode" == "ship" || -f "$ROOT/.irin-worktree.env" ]]; then
   export IRIN_REQUIRE_GORTEX=1
 fi
+# Prefer a worktree-shared cargo target so each tree does not grow its own
+# multi-GB build. Use symlinks only — do not export CARGO_TARGET_DIR, or Tauri
+# and Playwright path discovery (./target, src-tauri/target) break.
+shared_cargo_target="${CARGO_TARGET_DIR:-}"
+if [[ -n "$shared_cargo_target" ]]; then
+  mkdir -p "$shared_cargo_target"
+  if [[ ! -e "$ROOT/target" ]]; then
+    ln -sfn "$shared_cargo_target" "$ROOT/target"
+  fi
+  tauri_target="$ROOT/council-rs/warroom-tauri/src-tauri/target"
+  if [[ ! -e "$tauri_target" ]]; then
+    mkdir -p "$(dirname "$tauri_target")"
+    ln -sfn "$shared_cargo_target" "$tauri_target"
+  fi
+  # Keep ambient cargo on the symlinked paths, not a detached target dir.
+  unset CARGO_TARGET_DIR
+fi
+# Product checks must not inherit worktree runtime ports into ambient Tauri
+# builds (build.rs requires matching TAURI_CONFIG CSP). Preflight and the native
+# smoke re-read .irin-worktree.env or pick their own ports.
+unset IRIN_COUNCIL_PORT IRIN_WEB_PORT IRIN_GATEWAY_PORT
 if [[ "$mode" == "ship" ]]; then
   if (( $# > 0 )) && [[ "$dry_run" != "1" ]]; then
     printf 'ERROR: ship scope is always the complete working-tree diff; explicit paths are not allowed\n' >&2
@@ -125,9 +153,39 @@ run() {
 }
 
 any_rust=false
-for key in gateway_rust council_rust sentinel_rust; do
-  [[ "$(lane "$key")" != true ]] || any_rust=true
-done
+rust_packages=()
+if [[ "$(lane gateway_rust)" == true ]]; then
+  any_rust=true
+  rust_packages+=("gateway-sidecar")
+fi
+if [[ "$(lane council_rust)" == true ]]; then
+  any_rust=true
+  rust_packages+=("council-rs")
+fi
+if [[ "$(lane sentinel_rust)" == true ]]; then
+  any_rust=true
+  rust_packages+=("sovereign-protocol")
+fi
+# Full matrix and multi-crate fan-out still prove the integrated workspace.
+use_workspace_rust=false
+if [[ "$(lane full_matrix)" == true ]] || (( ${#rust_packages[@]} > 1 )); then
+  use_workspace_rust=true
+fi
+
+run_rust_ship_proof() {
+  if [[ "$use_workspace_rust" == true ]]; then
+    run "Workspace formatting" cargo fmt --all -- --check
+    run "Workspace clippy" cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+    run "Workspace tests" cargo test --workspace --locked
+    return 0
+  fi
+  local pkg
+  for pkg in "${rust_packages[@]}"; do
+    run "Package formatting ($pkg)" cargo fmt -p "$pkg" -- --check
+    run "Package clippy ($pkg)" cargo clippy -p "$pkg" --all-targets --all-features --locked -- -D warnings
+    run "Package tests ($pkg)" cargo test -p "$pkg" --locked
+  done
+}
 
 if [[ "$mode" == "check" ]]; then
   run "Gortex detect_changes continuity receipt" scripts/gortex-worktree.sh detect "$ROOT"
@@ -166,9 +224,7 @@ run "Pinned actionlint" scripts/bootstrap-actionlint.sh
 run "GitHub Actions lint" .irin-tools/bin/actionlint -color
 
 if [[ "$any_rust" == true ]]; then
-  run "Workspace formatting" cargo fmt --all -- --check
-  run "Workspace clippy" cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-  run "Workspace tests" cargo test --workspace --locked
+  run_rust_ship_proof
 fi
 
 deny_bin=""

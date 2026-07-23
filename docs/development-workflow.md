@@ -34,8 +34,18 @@ Remove a finished clean worktree while retaining its branch:
 make worktree-remove DEST=/absolute/path/to/worktree
 ```
 
+List (or remove with `APPLY=1`) clean worktrees already merged into
+`origin/main`:
+
+```bash
+make worktree-gc
+make worktree-gc APPLY=1
+```
+
 The removal gate refuses main, detached, or dirty worktrees, stops the isolated
-runtime, removes the Git worktree, and unregisters it from Gortex.
+runtime, removes the Git worktree, and unregisters it from Gortex. Managed
+worktrees also set a shared `CARGO_TARGET_DIR` under `~/.cache/irin/cargo-target`
+so the next worktree reuses compiled artifacts instead of a cold multi-GB build.
 
 ## Gortex is MCP-first
 
@@ -100,15 +110,23 @@ Run immediately before claiming completion or updating the pull request. It:
 
 - refuses a receipt based on an older `origin/main`;
 - reruns the Gortex change and impact pass;
-- runs the full local equivalents for every selected CI lane;
+- runs the local equivalents for every selected CI lane only (operator
+  methodology scripts and docs stay on always-on light checks; a single Rust
+  crate uses package-scoped fmt/clippy/test; full matrix or multi-crate fan-out
+  still runs the workspace);
 - treats every War Room Web change as a Tauri product change;
 - proves hosted Next behavior, the exact embedded static export, Tauri Rust,
-  and a native macOS application launch and visible-surface smoke;
+  and a native macOS application launch and visible-surface smoke when those
+  lanes are selected;
 - rejects high or critical production npm advisories;
 - runs release-tree, public-language, secret, and whitespace checks; and
 - writes an ignored receipt under `.irin-receipts/` with the branch, commits,
   complete changed-file set, deterministic tested-tree fingerprint, lanes,
   commands, results, and completion time.
+
+Prefer one ship-check per PR. Re-run only when `origin/main` moved or the
+receipt failed. Keep open full-matrix pull requests to a minimum so branches do
+not invalidate each other in a re-proof loop.
 
 If pinned tooling is absent, the gate downloads `cargo-deny` 0.19.9 and
 actionlint 1.7.12 into the ignored `.irin-tools/` directory. It verifies the
