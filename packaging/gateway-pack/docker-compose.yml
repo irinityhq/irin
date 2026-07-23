@@ -10,9 +10,10 @@ services:
   gateway:
     image: ${IRIN_GATEWAY_IMAGE:?IRIN_GATEWAY_IMAGE must be a digest-pinned image ref}
     volumes:
-      - ${IRIN_DESKTOP_PACK_ROOT}/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro
-      - ${IRIN_DESKTOP_PACK_ROOT}/conf:/usr/local/openresty/nginx/conf/conf:ro
-      - ${IRIN_DESKTOP_PACK_ROOT}/lua:/usr/local/openresty/nginx/lua:ro
+      # Quote paths: Application Support (and IRIN_APP_SUPPORT_ROOT tests) contain spaces.
+      - "${IRIN_DESKTOP_PACK_ROOT}/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf:ro"
+      - "${IRIN_DESKTOP_PACK_ROOT}/conf:/usr/local/openresty/nginx/conf/conf:ro"
+      - "${IRIN_DESKTOP_PACK_ROOT}/lua:/usr/local/openresty/nginx/lua:ro"
       - irin_desktop_sidecar_sock:/run/sidecar
     ports:
       - "127.0.0.1:18080:8080"
@@ -88,11 +89,11 @@ services:
       - ARM_STAGE_TTL_MS=
       - GW_ARM_ATTEST_KEYS_PATH=
     volumes:
-      - ${IRIN_DESKTOP_PACK_ROOT}/conf:/conf:ro
+      - "${IRIN_DESKTOP_PACK_ROOT}/conf:/conf:ro"
       - irin_desktop_sidecar_sock:/run/sidecar
       - irin_desktop_sidecar_data:/var/lib/sidecar
       # App-owned ledger seed only — never the canonical operator ledger key.
-      - ${IRIN_DESKTOP_LEDGER_KEY}:/run/secrets/ledger_key:ro
+      - "${IRIN_DESKTOP_LEDGER_KEY}:/run/secrets/ledger_key:ro"
     depends_on:
       gateway:
         condition: service_started

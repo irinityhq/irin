@@ -9,7 +9,6 @@ use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -162,7 +161,14 @@ pub enum DockerDaemonState {
 /// Run a process with a hard wall-clock timeout. On timeout the child is killed.
 /// Never returns stdout/stderr to callers that need redaction — use
 /// [`format_cmd_failure`] which only emits fixed categories.
+///
+/// Owns the live [`std::process::Child`]: successful early exit returns
+/// immediately with **no** delayed signal and no join of a full-timeout sleeper
+/// (a prior sleeper+join pattern forced every successful `compose up --wait`
+/// to wait the full 180s before Enable could provision Keychain keys).
 pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
+    use std::time::Instant;
+
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -189,74 +195,43 @@ pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output
         buf
     });
 
-    let child_slot: Arc<Mutex<Option<u32>>> = Arc::new(Mutex::new(Some(child.id())));
-    let child_slot_watch = Arc::clone(&child_slot);
-    let timed_out = Arc::new(Mutex::new(false));
-    let timed_out_watch = Arc::clone(&timed_out);
-    let killer = thread::spawn(move || {
-        thread::sleep(timeout);
-        let mut flag = timed_out_watch.lock().unwrap_or_else(|e| e.into_inner());
-        *flag = true;
-        drop(flag);
-        if let Ok(mut slot) = child_slot_watch.lock() {
-            if let Some(pid) = slot.take() {
-                // Best-effort kill of the timed-out child.
-                #[cfg(unix)]
-                {
-                    let _ = unsafe { libc_kill(pid as i32, 15) }; // SIGTERM
-                    thread::sleep(Duration::from_millis(200));
-                    let _ = unsafe { libc_kill(pid as i32, 9) }; // SIGKILL
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let reaped = child.wait().map_err(|e| {
+                        format!("{}: wait after kill failed: {e}", DockerErrorKind::SpawnFailed.as_str())
+                    })?;
+                    let _ = out_handle.join();
+                    let _ = err_handle.join();
+                    let _ = reaped;
+                    return Err(DockerErrorKind::Timeout.as_str().to_string());
                 }
-                #[cfg(not(unix))]
-                {
-                    let _ = pid;
-                }
+                thread::sleep(Duration::from_millis(20));
             }
-        }
-    });
-
-    let status = match child.wait() {
-        Ok(s) => s,
-        Err(e) => {
-            if let Ok(mut slot) = child_slot.lock() {
-                slot.take();
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_handle.join();
+                let _ = err_handle.join();
+                return Err(format!(
+                    "{}: wait failed: {e}",
+                    DockerErrorKind::SpawnFailed.as_str()
+                ));
             }
-            let _ = killer.join();
-            return Err(format!("{}: wait failed: {e}", DockerErrorKind::SpawnFailed.as_str()));
         }
     };
 
-    // Prevent killer from SIGKILLing a recycled PID after wait returns.
-    if let Ok(mut slot) = child_slot.lock() {
-        slot.take();
-    }
-
     let stdout = out_handle.join().unwrap_or_default();
     let stderr = err_handle.join().unwrap_or_default();
-    let _ = killer.join();
-
-    let was_timeout = timed_out
-        .lock()
-        .map(|g| *g)
-        .unwrap_or(false);
-    if was_timeout && !status.success() {
-        return Err(DockerErrorKind::Timeout.as_str().to_string());
-    }
-
     Ok(Output {
         status,
         stdout,
         stderr,
     })
-}
-
-#[cfg(unix)]
-unsafe fn libc_kill(pid: i32, sig: i32) -> i32 {
-    // libc is available via std on macOS through the system; use raw syscall-ish kill.
-    extern "C" {
-        fn kill(pid: i32, sig: i32) -> i32;
-    }
-    kill(pid, sig)
 }
 
 /// Probe Docker CLI presence and daemon readiness (no secrets in output).
@@ -788,6 +763,20 @@ mod tests {
         assert!(
             err.contains(DockerErrorKind::Timeout.as_str()) || err.contains("timeout"),
             "{err}"
+        );
+    }
+
+    #[test]
+    fn run_command_timeout_fast_exit_no_full_wait() {
+        use std::time::Instant;
+        let mut cmd = Command::new("/bin/echo");
+        cmd.arg("ok");
+        let start = Instant::now();
+        let out = run_command_timeout(cmd, Duration::from_secs(60)).expect("fast exit");
+        assert!(out.status.success());
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "must not join a full-timeout sleeper after success"
         );
     }
 
