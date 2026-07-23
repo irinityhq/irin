@@ -23,9 +23,21 @@ FOREIGN_VOLUME="irin_foreign_isolation_vol"
 TEST_SERVICE="com.sovereign.council.warroom.test.pack-smoke.$$"
 TEST_ACCOUNT="gateway-client-gw-api-key-test"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/irin-gw-pack-smoke.XXXXXX")"
+DESKTOP_PREEXISTING=false
+OWNED_DESKTOP_TEARDOWN=false
 
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 log() { printf '%s\n' "$*" | tee -a "$RECEIPT"; }
+
+desktop_project_present() {
+  if docker compose -p irin-desktop-gateway ps -a -q 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  if docker compose ls -a 2>/dev/null | grep -q 'irin-desktop-gateway'; then
+    return 0
+  fi
+  return 1
+}
 
 mkdir -p "$RECEIPT_DIR"
 : >"$RECEIPT"
@@ -35,10 +47,17 @@ log "pid=$$"
 
 cleanup() {
   set +e
-  # Tear down desktop project if we started it (never foreign).
-  if [[ -f "$WORK/compose.public.env" ]]; then
-    docker compose -p irin-desktop-gateway -f "$COMPOSE" --env-file "$WORK/compose.public.env" \
-      down --volumes --remove-orphans >/dev/null 2>&1 || true
+  # Tear down desktop project only if this run created it (never foreign, never pre-existing).
+  if [[ "$OWNED_DESKTOP_TEARDOWN" == "true" ]]; then
+    if [[ -f "$WORK/compose.public.env" ]]; then
+      docker compose -p irin-desktop-gateway -f "$COMPOSE" --env-file "$WORK/compose.public.env" \
+        down --volumes --remove-orphans >/dev/null 2>&1 || true
+    else
+      docker compose -p irin-desktop-gateway down --volumes --remove-orphans >/dev/null 2>&1 || true
+    fi
+    log "owned_desktop_teardown=true"
+  else
+    log "owned_desktop_teardown=false"
   fi
   # Delete only our unique Keychain test item.
   security delete-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1 || true
@@ -66,6 +85,17 @@ then
 fi
 
 [[ -f "$COMPOSE" ]] || die "missing compose"
+
+# Refuse before any Enable/up side effects if the fixed desktop project exists.
+# (Checked before manifest so ownership survivor need not rebuild images.)
+if desktop_project_present; then
+  DESKTOP_PREEXISTING=true
+  log "desktop_preexisting=true"
+  die "refuse: irin-desktop-gateway already exists; will not down --volumes a pre-existing desktop pack"
+fi
+DESKTOP_PREEXISTING=false
+log "desktop_preexisting=false"
+
 [[ -f "$MANIFEST_LOCAL" ]] || die "missing local-dev manifest; run make gateway-pack-dev-images"
 
 # Parse local-dev image refs (no secret material).
@@ -212,6 +242,9 @@ if [[ "$UP_RC" != "0" ]]; then
   log "compose_up_output_redacted=${UP_OUT//$'\n'/ | }"
   die "compose up failed for irin-desktop-gateway (rc=$UP_RC)"
 fi
+# This run created the project — cleanup may tear it down.
+OWNED_DESKTOP_TEARDOWN=true
+log "owned_desktop_teardown_armed=true"
 log "compose_up=ok project=irin-desktop-gateway"
 
 # Health probe (no secrets).
@@ -241,10 +274,12 @@ docker compose -p irin-desktop-gateway -f "$STAGE/docker-compose.yml" --env-file
   exec -T sidecar sh -c 'echo producer=$WATCH_PRODUCER_ENABLED dispatcher=$WATCH_DISPATCHER_ENABLED' 2>/dev/null \
   | tee -a "$RECEIPT" | grep -q 'producer=false' || log "watch_env_probe=skipped_or_unavailable"
 
-# Tear down desktop only.
+# Tear down desktop only (owned by this run).
 docker compose -p irin-desktop-gateway -f "$STAGE/docker-compose.yml" --env-file "$WORK/compose.public.env" \
   down --volumes --remove-orphans >/dev/null
+OWNED_DESKTOP_TEARDOWN=false
 log "desktop_down=ok"
+log "owned_desktop_teardown=true"
 
 # Foreign still present.
 docker compose -p "$FOREIGN_PROJECT" -f "$WORK/foreign-compose.yml" ps -q | grep -q . \

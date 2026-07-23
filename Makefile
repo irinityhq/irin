@@ -87,6 +87,7 @@ gateway-pack-dev-images: ## Build local arm64 Gateway/sidecar images + test-only
 gateway-pack-test: ## Static + isolation tests for the optional Gateway Pack
 	bash scripts/test-gateway-pack-assets.sh
 	bash scripts/test-gateway-pack-isolation.sh
+	bash scripts/test-gateway-pack-desktop-ownership.sh
 
 gateway-pack-integration-smoke: ## Isolated compose smoke (local-dev images; preserves foreign fixtures)
 	bash scripts/test-gateway-pack-integration-smoke.sh
