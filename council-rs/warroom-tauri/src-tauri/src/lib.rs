@@ -14,7 +14,7 @@ use gateway_pack::{GatewayPackStatus, GatewayPackState};
 use keychain::{load_gw_api_key, KeychainSecretStore};
 use paths::{
     build_cors_origins, default_serve_port, is_packaged_install, resolve_council_binary,
-    resolve_council_rs_dir, resolve_spawn_base_dir, validate_serve_port, DEFAULT_SERVE_PORT,
+    resolve_council_rs_dir, resolve_spawn_base_dir, validate_serve_port,
 };
 use private_config::{
     ensure_writable_base_overlay, gui_login_environment, load_or_create_private_config,
@@ -159,7 +159,7 @@ fn stop_tracked_council_server(app: &AppHandle) {
             }
         }
         // Best-effort listener release after owned child death.
-        let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(3));
+        let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(3));
     }
 }
 
@@ -717,7 +717,7 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<GatewayPackStatus, String
             ));
         }
         stop_tracked_council_server(&app);
-        let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
+        let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
         match try_start_council_server(
             &app,
             config.council_path.as_deref(),
@@ -768,7 +768,7 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<GatewayPackStatus, Strin
         };
         if had_child {
             stop_tracked_council_server(&app);
-            let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
+            let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
                 &app,
                 config.council_path.as_deref(),
@@ -816,7 +816,7 @@ async fn gateway_pack_stop(app: AppHandle) -> Result<GatewayPackStatus, String> 
         };
         if had_child {
             stop_tracked_council_server(&app);
-            let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
+            let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
                 &app,
                 config.council_path.as_deref(),
@@ -861,7 +861,7 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<GatewayPackStatus, Str
         };
         if had_child {
             stop_tracked_council_server(&app);
-            let _ = wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5));
+            let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
                 &app,
                 config.council_path.as_deref(),
