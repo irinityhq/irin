@@ -28,9 +28,27 @@ Run one from the CLI:
 
 War Room's Cabinet selector (`GET /api/cabinets`) lists every registry
 cabinet as a chip, split into embedded cabinets and domain triads. Each chip
-shows seat count, round count, and — when compared against `GET
-/api/discover` — which providers that cabinet needs that are not currently
-available.
+shows seat count, round count, and — when compared against
+`GET /api/health` → `providers_available` — which providers that cabinet needs
+that are not currently available. Unavailable chips stay selectable and show a
+muted `(need …)` note; danger styling is reserved for real action or system
+errors (for example next to Convene when the selected cabinet cannot run).
+
+### Default cabinet on first load
+
+The documented default name is `standard`. On an **untouched** Deliberate
+first load — once cabinets and provider health are known — War Room applies
+this stable rule once:
+
+1. Keep `standard` when every seat and chair transport is available.
+2. Otherwise select the first runnable cabinet in API list order, preferring
+   non-triad (embedded) cabinets before domain triads.
+3. If no cabinet is runnable, keep the current selection and show one
+   actionable explanation near Convene (not a grid of danger-red cards).
+
+An explicit `initialCabinet` from the Cabinets editor, any manual chip click,
+and the result of that one-shot auto decision are all locked for the rest of
+the idle mount. Health flaps must not re-auto-switch the selection.
 
 ## Customization
 
@@ -46,10 +64,11 @@ for the exact transport IDs a seat's `provider` field can use.
 
 ## Partial-seat behavior
 
-A cabinet that references a provider transport Discover does not currently
-detect is not hidden — it stays visible, shown at reduced emphasis with a
+A cabinet that references a provider transport health does not currently
+list is not hidden — it stays visible, shown at reduced emphasis with a muted
 "need `<provider>`" note listing exactly which seats are missing. Council
 does not silently drop or reroute a missing seat to a different provider.
+Convene stays blocked for that selection with one warning near the action.
 Fix availability (export the missing API key, authenticate the CLI, or edit
 the cabinet to a provider you have) before running that cabinet live. For a
 local CLI, Discover proves only that the supported binary is present; the

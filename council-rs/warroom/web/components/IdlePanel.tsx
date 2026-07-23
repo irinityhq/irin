@@ -16,6 +16,11 @@ import {
   type GatewayPackStatus,
 } from "@/lib/tauri";
 import {
+  DEFAULT_CABINET_NAME,
+  noRunnableCabinetExplanation,
+  resolveUntouchedCabinetSelection,
+} from "@/lib/cabinet-selection";
+import {
   getProviderOption,
   providerOptionLabel,
   unsupportedGatewayTransportReason,
@@ -62,14 +67,27 @@ export default function IdlePanel({
   variant?: "standalone" | "shell";
 }) {
   const [topic, setTopic] = useState("");
-  const [cabinetName, setCabinetName] = useState(initialCabinet || "standard");
+  const [cabinetName, setCabinetName] = useState(
+    initialCabinet || DEFAULT_CABINET_NAME,
+  );
+  // Explicit editor handoff or any operator click locks selection permanently
+  // for this idle mount — health flaps must not re-auto-switch.
+  const selectionLocked = useRef(!!initialCabinet);
+  const autoSelectDone = useRef(false);
   const consumedInitialCabinet = useRef(false);
   useEffect(() => {
     if (!consumedInitialCabinet.current && initialCabinet) {
       consumedInitialCabinet.current = true;
+      selectionLocked.current = true;
       onConsumeInitialCabinet?.();
     }
   }, [initialCabinet, onConsumeInitialCabinet]);
+
+  const selectCabinet = useCallback((name: string) => {
+    selectionLocked.current = true;
+    autoSelectDone.current = true;
+    setCabinetName(name);
+  }, []);
   const [context, setContext] = useState("");
   const [mapDir, setMapDir] = useState("");
   const [blind, setBlind] = useState(false);
@@ -150,6 +168,26 @@ export default function IdlePanel({
   // Validator choices are exact transport identities. Keep unavailable choices
   // visible for explanation, but never allow them to be selected or launched.
   const { data: discoverData, loading: discoverLoading, error: discoverError, providerOptions } = useDiscover();
+
+  // Untouched first load: once health inventory is known, prefer a stable
+  // runnable cabinet over a blocked default (see lib/cabinet-selection.ts).
+  useEffect(() => {
+    if (autoSelectDone.current || selectionLocked.current) return;
+    if (!health) return;
+    const next = resolveUntouchedCabinetSelection({
+      cabinets,
+      providersAvailable: health.providers_available,
+      currentName: cabinetName,
+      selectionLocked: selectionLocked.current,
+    });
+    autoSelectDone.current = true;
+    if (next && next !== cabinetName) {
+      setCabinetName(next);
+    }
+    // Lock after the first decision so later health changes never re-pick.
+    selectionLocked.current = true;
+  }, [cabinets, health, cabinetName]);
+
   const validatorProviders = useMemo(() => {
     const allowed = [
       "grok_build",
@@ -234,11 +272,18 @@ export default function IdlePanel({
   const gatewayProviderProblem = viaGateway
     ? unsupportedGatewayTransportReason(providerOptions, selectedProviderIds)
     : null;
+  const noRunnableExplanation = noRunnableCabinetExplanation(
+    cabinets,
+    health?.providers_available,
+  );
   const providerSelectionProblem = discoverError
     ? `Provider discovery failed: ${discoverError}`
     : !discoverData || discoverLoading
       ? "Provider availability is still being checked."
-      : cabinetProviderProblem ?? validatorProviderProblem ?? gatewayProviderProblem;
+      : noRunnableExplanation
+        ?? cabinetProviderProblem
+        ?? validatorProviderProblem
+        ?? gatewayProviderProblem;
   const canStart = topic.trim().length > 4 && !providerSelectionProblem;
 
   const submit = () => {
@@ -323,7 +368,7 @@ export default function IdlePanel({
               embedded
               cabinets={cabinets}
               selected={cabinetName}
-              onSelect={setCabinetName}
+              onSelect={selectCabinet}
               health={health}
             />
           </div>
@@ -331,7 +376,7 @@ export default function IdlePanel({
           <CabinetSelector
             cabinets={cabinets}
             selected={cabinetName}
-            onSelect={setCabinetName}
+            onSelect={selectCabinet}
             health={health}
           />
         )}
