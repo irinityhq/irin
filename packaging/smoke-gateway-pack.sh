@@ -443,9 +443,17 @@ for attempt in $(seq 1 240); do
       kc_pepper=1
     fi
     # Same admin predicate as product admin_surface_ready (not 502/503/504/000).
+    # Also wait for enable_complete — Keychain presence alone can race ahead of
+    # blank-bootstrap recreate + Council governed restart.
+    enable_done=0
+    LIFE="$APP_SUPPORT_ROOT/gateway/lifecycle.log"
+    if [[ -f "$LIFE" ]] && grep -q 'stage=enable_complete detail=authenticated' "$LIFE" 2>/dev/null; then
+      enable_done=1
+    fi
     if [[ "$ADMIN_CODE" != "000" && "$ADMIN_CODE" != "502" \
       && "$ADMIN_CODE" != "503" && "$ADMIN_CODE" != "504" ]] \
-      && [[ "$kc_key" == 1 && "$kc_pepper" == 1 ]]; then
+      && [[ "$kc_key" == 1 && "$kc_pepper" == 1 ]] \
+      && [[ "$enable_done" == 1 ]]; then
       ready=1
       break
     fi
