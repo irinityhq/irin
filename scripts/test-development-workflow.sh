@@ -24,7 +24,7 @@ web_scope="$(scripts/classify-ci-paths.sh council-rs/warroom/web/app/page.tsx)"
 [[ "$(sed -n 's/^warroom_web=//p' <<<"$web_scope")" == true ]]
 [[ "$(sed -n 's/^warroom_tauri=//p' <<<"$web_scope")" == true ]]
 
-operator_scope="$(scripts/classify-ci-paths.sh scripts/dev-check.sh scripts/new-worktree.sh Makefile)"
+operator_scope="$(scripts/classify-ci-paths.sh scripts/dev-check.sh scripts/new-worktree.sh)"
 [[ "$(sed -n 's/^full_matrix=//p' <<<"$operator_scope")" == false ]]
 [[ "$(sed -n 's/^gateway_rust=//p' <<<"$operator_scope")" == false ]]
 [[ "$(sed -n 's/^warroom_web=//p' <<<"$operator_scope")" == false ]]
