@@ -8,6 +8,12 @@
 //!
 //! Production uses macOS Security.framework with atomic add/update and
 //! `kSecAttrAccessibleWhenUnlockedThisDeviceOnly`. Unit tests use in-memory.
+//!
+//! Keychain selection is independent of Application Support location. Remapping
+//! `HOME` for app-data isolation is wrong: it leaves Security.framework without
+//! a default login keychain (`errSecNoDefaultKeychain`) and can present a
+//! "Keychain Not Found" modal. Use `IRIN_APP_SUPPORT_ROOT` for app-data
+//! isolation and keep the operator login keychain.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -18,6 +24,11 @@ pub const KEYCHAIN_SERVICE: &str = "com.sovereign.council.warroom";
 pub const GW_API_KEY_ACCOUNT: &str = "gateway-client-gw-api-key";
 /// Account label for the long-lived auth pepper (never co-mingled with client key).
 pub const AUTH_PEPPER_ACCOUNT: &str = "gateway-pack-auth-pepper";
+
+/// Fixed fail-fast token when no usable login keychain is available.
+/// Never request interactive Keychain management (Reset To Defaults, create, etc.).
+pub const KEYCHAIN_UNAVAILABLE: &str =
+    "login keychain unavailable; refusing interactive Keychain management";
 
 /// Abstraction so tests never touch the real Keychain.
 pub trait SecretStore: Send + Sync {
@@ -72,20 +83,32 @@ mod macos_keychain {
     use core_foundation::string::CFString;
     use core_foundation_sys::string::CFStringRef;
     use security_framework::base::Result as SfResult;
+    use security_framework::os::macos::keychain::SecKeychain;
     use security_framework::passwords::delete_generic_password;
     use security_framework_sys::access_control::kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
     use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound, errSecSuccess};
     use security_framework_sys::item::{
-        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecValueData,
+        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecUseKeychain,
+        kSecUseAuthenticationUI, kSecUseAuthenticationUISkip, kSecValueData,
     };
     use security_framework_sys::keychain_item::{SecItemAdd, SecItemUpdate};
+    use std::ffi::CStr;
+    use std::path::{Path, PathBuf};
+    use std::ptr;
+
+    use super::KEYCHAIN_UNAVAILABLE;
 
     // kSecAttrAccessible is the attribute *key*; protection class values live in
     // access_control. Not re-exported by security-framework-sys item module.
+    // kSecUseAuthenticationUIFail fails closed without presenting UI.
     #[link(name = "Security", kind = "framework")]
     extern "C" {
         static kSecAttrAccessible: CFStringRef;
+        static kSecUseAuthenticationUIFail: CFStringRef;
     }
+
+    /// errSecNoDefaultKeychain — no default keychain in the current session.
+    const ERR_SEC_NO_DEFAULT_KEYCHAIN: i32 = -25315;
 
     fn is_not_found(err: &security_framework::base::Error) -> bool {
         err.code() == errSecItemNotFound
@@ -94,55 +117,125 @@ mod macos_keychain {
             || err.to_string().contains("-25300")
     }
 
+    fn is_no_default_keychain(err: &security_framework::base::Error) -> bool {
+        err.code() == ERR_SEC_NO_DEFAULT_KEYCHAIN
+            || err.to_string().contains("No keychain is available")
+            || err.to_string().contains("no default keychain")
+            || err.to_string().contains("-25315")
+    }
+
+    /// Resolve the existing login keychain for the current uid only.
+    /// Never creates, resets, or rewrites the search list. Never logs the path.
+    fn open_existing_login_keychain() -> Result<SecKeychain, String> {
+        let path = existing_login_keychain_path().ok_or_else(|| KEYCHAIN_UNAVAILABLE.to_string())?;
+        SecKeychain::open(&path).map_err(|_| KEYCHAIN_UNAVAILABLE.to_string())
+    }
+
+    fn existing_login_keychain_path() -> Option<PathBuf> {
+        let home = pw_dir_for_current_uid()?;
+        let db = home.join("Library/Keychains/login.keychain-db");
+        if db.is_file() {
+            return Some(db);
+        }
+        let legacy = home.join("Library/Keychains/login.keychain");
+        if legacy.is_file() {
+            return Some(legacy);
+        }
+        None
+    }
+
+    fn pw_dir_for_current_uid() -> Option<PathBuf> {
+        // getpwuid(getuid) — session user's home, not process HOME (smoke may
+        // isolate app data without remapping Keychain).
+        unsafe {
+            let uid = libc::getuid();
+            let pw = libc::getpwuid(uid);
+            if pw.is_null() {
+                return None;
+            }
+            let dir = (*pw).pw_dir;
+            if dir.is_null() {
+                return None;
+            }
+            let c = CStr::from_ptr(dir);
+            let s = c.to_str().ok()?;
+            if s.is_empty() {
+                return None;
+            }
+            Some(PathBuf::from(s))
+        }
+    }
+
+    /// Resolve a usable keychain for this call (never logged).
+    /// Prefer the session default; if absent, open the existing login keychain
+    /// for the current uid only (never create/reset).
+    fn resolved_keychain() -> Result<SecKeychain, String> {
+        resolve_usable_keychain()
+    }
+
+    fn resolve_usable_keychain() -> Result<SecKeychain, String> {
+        match SecKeychain::default() {
+            Ok(kc) => Ok(kc),
+            Err(e) if is_no_default_keychain(&e) => open_existing_login_keychain(),
+            Err(_) => {
+                // Default failed for another reason — still try existing login only.
+                open_existing_login_keychain()
+            }
+        }
+    }
+
+    /// Fail-fast preflight: usable login keychain must already exist.
+    /// Never presents interactive Keychain management UI.
+    pub fn preflight_keychain_available() -> Result<(), String> {
+        resolved_keychain().map(|_| ())
+    }
+
     /// Atomic add-or-update with WhenUnlockedThisDeviceOnly accessibility.
-    /// Never delete-then-add (that creates a loss window under concurrent readers).
+    /// Never delete-then-add (that creates a loss window under concurrent readers
+    /// and must not be used as an ACL reclaim path).
     ///
     /// Uses `kSecAttrAccessible` (not SecAccessControl) so ad-hoc/unsigned test
     /// binaries work without a keychain-access-groups entitlement; Developer ID
     /// signed app continuity remains release ceremony.
     ///
-    /// Non-interactive: never present Keychain UI (packaged smoke / headless
-    /// automation must fail closed rather than hang on a modal).
+    /// Non-interactive: authentication-UI flags fail closed. They do **not**
+    /// fix `errSecNoDefaultKeychain` — preflight + explicit `kSecUseKeychain`
+    /// against the existing login keychain do.
     pub fn set_password_device_local(
         service: &str,
         account: &str,
         password: &[u8],
     ) -> Result<(), String> {
+        let keychain = resolved_keychain()?;
         // 1) Prefer update of existing item (password only — preserves identity).
-        match update_password(service, account, password) {
+        match update_password(service, account, password, &keychain) {
             Ok(()) => return Ok(()),
             Err(e) if is_not_found(&e) => {}
             Err(e) => {
-                // Fall through to add; some items may reject update if ACL differs
-                // (e.g. prior Developer ID vs ad-hoc identity).
+                // Fall through to add; some items may reject update if ACL differs.
+                // Do **not** delete-and-readd operator items.
                 let _ = e;
             }
         }
         // 2) Add with explicit device-local accessibility class.
-        match add_password_device_local(service, account, password) {
+        match add_password_device_local(service, account, password, &keychain) {
             Ok(()) => Ok(()),
             Err(e) if e.code() == errSecDuplicateItem => {
-                // Race or ACL-blocked update: delete then re-add so ad-hoc / signed
-                // identity can reclaim the item. Brief loss window only when the
-                // preferred update path already failed.
-                let _ = delete_password_raw(service, account);
-                add_password_device_local(service, account, password)
-                    .map_err(|e2| format!("keychain re-add after reclaim failed: {e2}"))
+                // Race: another writer added between update-miss and add.
+                update_password(service, account, password, &keychain)
+                    .map_err(|e| format!("keychain update after race failed: {e}"))
             }
-            Err(e) => {
-                // Last resort: reclaim and re-add (covers ACL-denied update+add).
-                let _ = delete_password_raw(service, account);
-                match add_password_device_local(service, account, password) {
-                    Ok(()) => Ok(()),
-                    Err(e2) => Err(format!(
-                        "keychain add failed: {e}; reclaim re-add failed: {e2}"
-                    )),
-                }
-            }
+            Err(e) if is_no_default_keychain(&e) => Err(KEYCHAIN_UNAVAILABLE.to_string()),
+            Err(e) => Err(format!("keychain add failed: {e}")),
         }
     }
 
-    fn update_password(service: &str, account: &str, password: &[u8]) -> SfResult<()> {
+    fn update_password(
+        service: &str,
+        account: &str,
+        password: &[u8],
+        keychain: &SecKeychain,
+    ) -> SfResult<()> {
         let query = CFDictionary::from_CFType_pairs(&[
             (
                 unsafe { CFString::wrap_under_get_rule(kSecClass) },
@@ -155,6 +248,16 @@ mod macos_keychain {
             (
                 unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) },
                 CFString::from(account).into_CFType(),
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecUseKeychain) },
+                unsafe { CFType::wrap_under_get_rule(keychain.as_CFTypeRef()) },
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
+                unsafe {
+                    CFString::wrap_under_get_rule(kSecUseAuthenticationUIFail).into_CFType()
+                },
             ),
         ]);
         let update = CFDictionary::from_CFType_pairs(&[(
@@ -171,7 +274,12 @@ mod macos_keychain {
         }
     }
 
-    fn add_password_device_local(service: &str, account: &str, password: &[u8]) -> SfResult<()> {
+    fn add_password_device_local(
+        service: &str,
+        account: &str,
+        password: &[u8],
+        keychain: &SecKeychain,
+    ) -> SfResult<()> {
         let pairs: Vec<(CFString, CFType)> = vec![
             (
                 unsafe { CFString::wrap_under_get_rule(kSecClass) },
@@ -193,12 +301,23 @@ mod macos_keychain {
                 },
             ),
             (
+                unsafe { CFString::wrap_under_get_rule(kSecUseKeychain) },
+                unsafe { CFType::wrap_under_get_rule(keychain.as_CFTypeRef()) },
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
+                // Prefer Skip on add (no auth UI); Fail on query/update above.
+                unsafe {
+                    CFString::wrap_under_get_rule(kSecUseAuthenticationUISkip).into_CFType()
+                },
+            ),
+            (
                 unsafe { CFString::wrap_under_get_rule(kSecValueData) },
                 CFData::from_buffer(password).into_CFType(),
             ),
         ];
         let params = CFDictionary::from_CFType_pairs(&pairs);
-        let mut ret = std::ptr::null();
+        let mut ret = ptr::null();
         let status = unsafe { SecItemAdd(params.as_concrete_TypeRef(), &mut ret) };
         if status == errSecSuccess {
             Ok(())
@@ -208,11 +327,55 @@ mod macos_keychain {
     }
 
     pub fn delete_password_raw(service: &str, account: &str) -> Result<(), String> {
+        // Preflight so missing default keychain fails with fixed token.
+        let _ = resolved_keychain()?;
         match delete_generic_password(service, account) {
             Ok(()) => Ok(()),
             Err(e) if is_not_found(&e) => Ok(()),
+            Err(e) if is_no_default_keychain(&e) => Err(KEYCHAIN_UNAVAILABLE.to_string()),
             Err(e) => Err(format!("keychain delete failed: {e}")),
         }
+    }
+
+    pub fn get_password_raw(service: &str, account: &str) -> Result<Option<String>, String> {
+        let _ = resolved_keychain()?;
+        match security_framework::passwords::get_generic_password(service, account) {
+            Ok(bytes) => {
+                let s = String::from_utf8(bytes.to_vec())
+                    .map_err(|_| "keychain item is not valid UTF-8".to_string())?;
+                Ok(Some(s))
+            }
+            Err(e) => {
+                let msg = e.to_string();
+                let code = e.code();
+                if is_not_found(&e)
+                    || msg.contains("could not be found")
+                    || msg.contains("not found")
+                    || msg.contains("-25300")
+                    || code == errSecItemNotFound
+                {
+                    Ok(None)
+                } else if is_no_default_keychain(&e) {
+                    Err(KEYCHAIN_UNAVAILABLE.to_string())
+                } else {
+                    Err(format!("keychain get failed: {e}"))
+                }
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn login_keychain_file_exists() -> bool {
+        existing_login_keychain_path().is_some()
+    }
+
+    /// True when `root` contains a nested login.keychain-db (must never happen
+    /// under an isolated app-support root). Path is not logged.
+    pub fn app_support_contains_login_keychain(root: &Path) -> bool {
+        let a = root.join("Library/Keychains/login.keychain-db");
+        let b = root.join("Keychains/login.keychain-db");
+        let c = root.join("login.keychain-db");
+        a.is_file() || b.is_file() || c.is_file()
     }
 }
 
@@ -223,43 +386,23 @@ impl SecretStore for KeychainSecretStore {
     }
 
     fn get_password(&self, service: &str, account: &str) -> Result<Option<String>, String> {
-        match security_framework::passwords::get_generic_password(service, account) {
-            Ok(bytes) => {
-                let s = String::from_utf8(bytes.to_vec())
-                    .map_err(|_| "keychain item is not valid UTF-8".to_string())?;
-                Ok(Some(s))
-            }
-            Err(e) => {
-                let msg = e.to_string();
-                let code = e.code();
-                if msg.contains("could not be found")
-                    || msg.contains("not found")
-                    || msg.contains("-25300")
-                    || code == security_framework_sys::base::errSecItemNotFound
-                {
-                    Ok(None)
-                } else if msg.contains("User interaction is not allowed")
-                    || msg.contains("interaction is not allowed")
-                    || msg.contains("-25308")
-                    || msg.contains("auth")
-                    || msg.contains("ACL")
-                    || msg.contains("denied")
-                    || code == -25293 // errSecAuthFailed
-                    || code == -25308 // errSecInteractionNotAllowed
-                {
-                    // Unreadable under this process identity (prior ACL / lock).
-                    // Treat as absent so set_password can reclaim the item.
-                    Ok(None)
-                } else {
-                    Err(format!("keychain get failed: {e}"))
-                }
-            }
-        }
+        macos_keychain::get_password_raw(service, account)
     }
 
     fn delete_password(&self, service: &str, account: &str) -> Result<(), String> {
         macos_keychain::delete_password_raw(service, account)
     }
+}
+
+/// Public preflight for enable path / diagnostics (non-secret fixed error only).
+#[cfg(target_os = "macos")]
+pub fn preflight_keychain_available() -> Result<(), String> {
+    macos_keychain::preflight_keychain_available()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn preflight_keychain_available() -> Result<(), String> {
+    Err("Keychain is only available on macOS".to_string())
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -339,6 +482,11 @@ pub fn gw_api_key_present(store: &dyn SecretStore) -> Result<bool, String> {
     Ok(load_gw_api_key(store)?.is_some())
 }
 
+/// Presence-only probe for AUTH_PEPPER account.
+pub fn auth_pepper_present(store: &dyn SecretStore) -> Result<bool, String> {
+    Ok(load_auth_pepper(store)?.is_some())
+}
+
 /// Redact a secret for logs: never include the raw value.
 pub fn redact_secret(value: &str) -> String {
     if value.is_empty() {
@@ -395,6 +543,7 @@ mod tests {
         assert_eq!(load_auth_pepper(&store).unwrap().unwrap(), pepper);
         // Client key account remains empty.
         assert!(load_gw_api_key(&store).unwrap().is_none());
+        assert!(auth_pepper_present(&store).unwrap());
         delete_all_gateway_pack_secrets(&store).unwrap();
         assert!(load_auth_pepper(&store).unwrap().is_none());
     }
@@ -422,6 +571,13 @@ mod tests {
         assert!(!is_valid_gw_raw_key(&format!("gw_{}", "d".repeat(31))));
         assert!(!is_valid_gw_raw_key("sk-foo"));
     }
+
+    #[test]
+    fn unavailable_token_is_fixed_and_non_secret() {
+        assert!(KEYCHAIN_UNAVAILABLE.contains("login keychain unavailable"));
+        assert!(!KEYCHAIN_UNAVAILABLE.contains('/'));
+        assert!(!KEYCHAIN_UNAVAILABLE.to_lowercase().contains("password"));
+    }
 }
 
 /// Live Keychain integration test — only runs when explicitly enabled so CI/unit
@@ -431,6 +587,15 @@ mod keychain_live_tests {
     use super::*;
     use std::sync::Arc;
     use std::thread;
+
+    #[test]
+    fn live_keychain_preflight_ok_on_operator_session() {
+        if std::env::var("IRIN_KEYCHAIN_LIVE_TEST").ok().as_deref() != Some("1") {
+            eprintln!("skip live keychain preflight (set IRIN_KEYCHAIN_LIVE_TEST=1)");
+            return;
+        }
+        preflight_keychain_available().expect("login keychain must be available");
+    }
 
     #[test]
     fn live_keychain_create_read_update_delete_unique_service() {
@@ -506,5 +671,39 @@ mod keychain_live_tests {
             .get_password(&service, "no-such-account")
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn live_keychain_pepper_and_key_presence_only_unique_service() {
+        if std::env::var("IRIN_KEYCHAIN_LIVE_TEST").ok().as_deref() != Some("1") {
+            return;
+        }
+        let service = format!(
+            "com.sovereign.council.warroom.test.presence.{}",
+            std::process::id()
+        );
+        let store = KeychainSecretStore;
+        let key = format!("gw_{}", "a".repeat(32));
+        let pepper = "cd".repeat(32);
+        store
+            .set_password(&service, GW_API_KEY_ACCOUNT, &key)
+            .unwrap();
+        store
+            .set_password(&service, AUTH_PEPPER_ACCOUNT, &pepper)
+            .unwrap();
+        assert!(store
+            .get_password(&service, GW_API_KEY_ACCOUNT)
+            .unwrap()
+            .is_some());
+        assert!(store
+            .get_password(&service, AUTH_PEPPER_ACCOUNT)
+            .unwrap()
+            .is_some());
+        store
+            .delete_password(&service, GW_API_KEY_ACCOUNT)
+            .unwrap();
+        store
+            .delete_password(&service, AUTH_PEPPER_ACCOUNT)
+            .unwrap();
     }
 }

@@ -50,6 +50,9 @@ FINAL_RESULT="FAIL"
 FINAL_ERROR=""
 HOST_PID=""
 OWNED_COUNCIL_PIDS=""
+# Only this run may `compose down --volumes` the fixed desktop project.
+DESKTOP_PREEXISTING=false
+OWNED_DESKTOP_TEARDOWN=false
 
 die() {
   FINAL_ERROR="$*"
@@ -142,13 +145,31 @@ graceful_quit_app() {
   set -e
 }
 
+desktop_project_present() {
+  # Any container (running or stopped) under the fixed desktop project name.
+  if "$DOCKER_BIN" compose -p irin-desktop-gateway ps -a -q 2>/dev/null | grep -q .; then
+    return 0
+  fi
+  # compose ls covers named projects that still hold networks/volumes.
+  if "$DOCKER_BIN" compose ls -a 2>/dev/null | grep -q 'irin-desktop-gateway'; then
+    return 0
+  fi
+  return 1
+}
+
 cleanup() {
   local ec=$?
   set +e
   log "cleanup_begin=true"
   graceful_quit_app
-  # Desktop pack project only - never project "gateway".
-  "$DOCKER_BIN" compose -p irin-desktop-gateway down --volumes --remove-orphans >/dev/null 2>&1 || true
+  # Desktop pack project only when this run created it — never project "gateway",
+  # never a pre-existing operator desktop pack.
+  if [[ "$OWNED_DESKTOP_TEARDOWN" == "true" ]]; then
+    "$DOCKER_BIN" compose -p irin-desktop-gateway down --volumes --remove-orphans >/dev/null 2>&1 || true
+    log "owned_desktop_teardown=true"
+  else
+    log "owned_desktop_teardown=false"
+  fi
   "$DOCKER_BIN" compose -p "$FOREIGN_PROJECT" down --volumes --remove-orphans >/dev/null 2>&1 || true
   "$DOCKER_BIN" volume rm "$FOREIGN_VOLUME" >/dev/null 2>&1 || true
   "$SECURITY_BIN" delete-generic-password -s "$FOREIGN_KC_SERVICE" -a "$FOREIGN_KC_ACCOUNT" >/dev/null 2>&1 || true
@@ -164,6 +185,16 @@ cleanup() {
   # Do not dump TEST_HOME (may contain non-secret private.json only).
 }
 trap cleanup EXIT
+
+# Refuse before Enable if the fixed desktop project already exists (do not
+# destroy a pre-existing operator pack with down --volumes).
+if desktop_project_present; then
+  DESKTOP_PREEXISTING=true
+  log "desktop_preexisting=true"
+  die "refuse: irin-desktop-gateway already exists; stop/remove it before smoke (will not down --volumes a foreign desktop pack)"
+fi
+DESKTOP_PREEXISTING=false
+log "desktop_preexisting=false"
 
 # Port 18080 must not be owned by canonical/foreign project.
 if "$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:18080/health" >/dev/null 2>&1; then
@@ -193,10 +224,16 @@ log "foreign_project=$FOREIGN_PROJECT"
 log "foreign_volume=$FOREIGN_VOLUME"
 log "foreign_keychain_service=$FOREIGN_KC_SERVICE"
 
+# Isolate app data only. Keep real HOME so Security.framework retains the
+# operator login keychain (remapping HOME causes Keychain Not Found modal).
 rm -rf "$TEST_HOME"
-mkdir -p "$TEST_HOME/tmp" "$TEST_HOME/Library/Application Support"
-export HOME="$TEST_HOME"
+APP_SUPPORT_ROOT="$TEST_HOME/$APP_SUPPORT_REL"
+mkdir -p "$TEST_HOME/tmp" "$APP_SUPPORT_ROOT"
+export IRIN_APP_SUPPORT_ROOT="$APP_SUPPORT_ROOT"
 export TMPDIR="$TEST_HOME/tmp"
+# Do not export HOME=$TEST_HOME — Keychain must use the current login session.
+log "app_support_root_override=set"
+log "home_remapped=false"
 # Never inherit a parent-shell DOCKER_CONFIG (debug/harness pollution).
 # The packaged host injects its own managed plugin config under app support.
 unset DOCKER_CONFIG
@@ -309,7 +346,7 @@ ax_click_button_busy() {
       break
     fi
     # Some transitions finish very fast; pack marker / status also proves run.
-    if [[ -f "$TEST_HOME/$PACK_MARKER_REL" ]] && [[ "$label" == "Enable Gateway" ]]; then
+    if [[ -f "$APP_SUPPORT_ROOT/gateway/pack-installed.json" ]] && [[ "$label" == "Enable Gateway" ]]; then
       busy_seen=1
       break
     fi
@@ -322,10 +359,11 @@ ax_click_button_busy() {
 # --- a) Launch Direct ---
 : >"$HOST_LOG"
 (
-  export HOME="$TEST_HOME"
+  export IRIN_APP_SUPPORT_ROOT="$APP_SUPPORT_ROOT"
   export TMPDIR="$TEST_HOME/tmp"
   unset DOCKER_CONFIG
   # Never pass provider secrets into the smoke host environment from the harness.
+  # Keep real HOME for login Keychain; app data goes to IRIN_APP_SUPPORT_ROOT.
   env -u DOCKER_CONFIG "$HOST" >>"$HOST_LOG" 2>&1 &
   echo $! >"$PIDFILE"
 )
@@ -375,7 +413,7 @@ log "ax_settings=$SETTINGS_CLICK"
   || die "could not identify/click Settings AXButton (Accessibility fail-closed)"
 
 # Pre-state: pack not installed
-[[ ! -f "$TEST_HOME/$PACK_MARKER_REL" ]] || die "pack already installed before Enable"
+[[ ! -f "$APP_SUPPORT_ROOT/gateway/pack-installed.json" ]] || die "pack already installed before Enable"
 wait_ax_button_enabled "Enable Gateway" 45 \
   || die "Enable Gateway AXButton never became enabled after Settings"
 ax_click_button_busy "Enable Gateway"
@@ -386,17 +424,19 @@ for attempt in $(seq 1 240); do
   if "$DOCKER_BIN" compose -p irin-desktop-gateway ps -q 2>/dev/null | grep -q . \
     && "$CURL_BIN" -fsS --max-time 3 "http://127.0.0.1:18080/health" >/dev/null 2>&1; then
     ready=1
+    # This run created the desktop project via Enable.
+    OWNED_DESKTOP_TEARDOWN=true
     break
   fi
   # Fail early if pack marker never appears (command did not reach install).
-  if [[ "$attempt" -eq 30 && ! -f "$TEST_HOME/$PACK_MARKER_REL" ]]; then
+  if [[ "$attempt" -eq 30 && ! -f "$APP_SUPPORT_ROOT/gateway/pack-installed.json" ]]; then
     die "Enable did not install pack assets (marker missing); native command may not have run"
   fi
   sleep 1
 done
 if [[ "$ready" != 1 ]]; then
   # Non-secret lifecycle stages only (product writes lifecycle.log).
-  LIFE="$TEST_HOME/$APP_SUPPORT_REL/gateway/lifecycle.log"
+  LIFE="$APP_SUPPORT_ROOT/gateway/lifecycle.log"
   if [[ -f "$LIFE" ]]; then
     log "lifecycle_log_present=true"
     # Only stage= and detail= tokens; never raw dumps of unknown content beyond fixed lines.
@@ -410,10 +450,20 @@ if [[ "$ready" != 1 ]]; then
   fi
   die "Gateway pack did not become healthy after Enable"
 fi
-[[ -f "$TEST_HOME/$PACK_MARKER_REL" ]] || die "pack-installed.json missing after Enable"
+[[ -f "$APP_SUPPORT_ROOT/gateway/pack-installed.json" ]] || die "pack-installed.json missing after Enable"
+OWNED_DESKTOP_TEARDOWN=true
+log "owned_desktop_teardown_armed=true"
 log "gateway_health=200"
 log "project=irin-desktop-gateway"
 log "pack_installed_marker=present"
+# Isolated app-data root must never grow a login keychain (Keychain stays session).
+if [[ -f "$APP_SUPPORT_ROOT/Library/Keychains/login.keychain-db" ]] \
+  || [[ -f "$APP_SUPPORT_ROOT/Keychains/login.keychain-db" ]] \
+  || [[ -f "$APP_SUPPORT_ROOT/login.keychain-db" ]] \
+  || [[ -f "$TEST_HOME/Library/Keychains/login.keychain-db" ]]; then
+  die "login.keychain-db created under isolated app-data root (Keychain isolation leak)"
+fi
+log "isolated_login_keychain_absent=true"
 
 # Sidecar/admin readiness (non-secret status codes only)
 ADMIN_CODE="$("$CURL_BIN" -sS -o /dev/null -w '%{http_code}' --max-time 5 \
@@ -430,12 +480,18 @@ log "watch_probe=${WATCH_PROBE//$'\n'/ }"
 echo "$WATCH_PROBE" | grep -q 'producer=false' || die "WATCH_PRODUCER_ENABLED not false"
 echo "$WATCH_PROBE" | grep -q 'dispatcher=false' || die "WATCH_DISPATCHER_ENABLED not false"
 
-# Keychain presence (production account) without reading value - fail closed.
+# Keychain presence (production accounts) without reading values - fail closed.
 if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
   -a "gateway-client-gw-api-key" >/dev/null 2>&1; then
   log "keychain_gw_api_key=present"
 else
   die "app Keychain item gateway-client-gw-api-key missing after Enable"
+fi
+if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
+  -a "gateway-pack-auth-pepper" >/dev/null 2>&1; then
+  log "keychain_auth_pepper=present"
+else
+  die "app Keychain item gateway-pack-auth-pepper missing after Enable"
 fi
 
 # Council PID must change after governed restart - fail closed.
@@ -513,7 +569,7 @@ graceful_quit_app
 sleep 1
 : >"$ROOT/packaging/build/gw-pack-ui-relaunch.log"
 (
-  export HOME="$TEST_HOME"
+  export IRIN_APP_SUPPORT_ROOT="$APP_SUPPORT_ROOT"
   export TMPDIR="$TEST_HOME/tmp"
   unset DOCKER_CONFIG
   env -u DOCKER_CONFIG "$HOST" >>"$ROOT/packaging/build/gw-pack-ui-relaunch.log" 2>&1 &
@@ -522,7 +578,7 @@ sleep 1
 HOST_PID="$(cat "$PIDFILE")"
 log "relaunch_host_pid=$HOST_PID"
 wait_health || die "relaunch health failed"
-PRIV="$TEST_HOME/$APP_SUPPORT_REL/private.json"
+PRIV="$APP_SUPPORT_ROOT/private.json"
 [[ -f "$PRIV" ]] || die "private.json missing after relaunch"
 "$PYTHON_BIN" - <<'PY' "$PRIV"
 import json,sys
@@ -594,7 +650,7 @@ for i in $(seq 1 40); do
     break
   fi
   # Command ran: gateway data removed or project gone.
-  if [[ ! -d "$TEST_HOME/$APP_SUPPORT_REL/gateway" ]]; then
+  if [[ ! -d "$APP_SUPPORT_ROOT/gateway" ]]; then
     busy_seen=1
     break
   fi
@@ -624,15 +680,21 @@ if "$DOCKER_BIN" compose -p irin-desktop-gateway ps -q 2>/dev/null | grep -q .; 
   die "desktop project still present after Uninstall"
 fi
 log "desktop_project_removed=true"
-if [[ -d "$TEST_HOME/$APP_SUPPORT_REL/gateway" ]]; then
+if [[ -d "$APP_SUPPORT_ROOT/gateway" ]]; then
   die "app-owned gateway data dir still present after Uninstall"
 fi
 log "app_gateway_data_removed=true"
 if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
   -a "gateway-client-gw-api-key" >/dev/null 2>&1; then
-  die "app Keychain item still present after Uninstall"
+  die "app Keychain item gateway-client-gw-api-key still present after Uninstall"
+fi
+if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
+  -a "gateway-pack-auth-pepper" >/dev/null 2>&1; then
+  die "app Keychain item gateway-pack-auth-pepper still present after Uninstall"
 fi
 log "app_keychain_removed=true"
+# Uninstall owns teardown of the project this run created.
+OWNED_DESKTOP_TEARDOWN=false
 
 log "owned_council_pids=$OWNED_COUNCIL_PIDS"
 log "host_pid_final=$HOST_PID"

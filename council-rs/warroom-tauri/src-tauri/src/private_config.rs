@@ -1,8 +1,14 @@
 //! First-launch private configuration for the packaged desktop app.
 //!
-//! Lives under Application Support (or `$HOME/Library/Application Support/...`
-//! when HOME is redirected for isolated testing). Never reads live IRIN
-//! gateway.env, shell profiles, or operator secrets outside this app's tree.
+//! Lives under Application Support:
+//! - Default: `$HOME/Library/Application Support/com.sovereign.council.warroom`
+//! - Override: absolute path in `IRIN_APP_SUPPORT_ROOT` (test / portable-state only)
+//!
+//! `IRIN_APP_SUPPORT_ROOT` relocates **app data only** (private.json, gateway pack
+//! tree, overlays). It must never change Keychain selection, login session, or
+//! the operator search list — keep the real process `HOME` when Keychain is
+//! required. Never reads live IRIN gateway.env, shell profiles, or operator
+//! secrets outside this app's tree.
 
 use serde::{Deserialize, Serialize};
 use std::fs;
@@ -13,6 +19,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 const APP_SUPPORT_DIR_NAME: &str = "com.sovereign.council.warroom";
 const PRIVATE_CONFIG_FILE: &str = "private.json";
 const CONFIG_VERSION: u32 = 1;
+
+/// Absolute path override for this app's Application Support directory.
+///
+/// Test and portable-state only. Locates IRIN app data; does **not** select or
+/// create a Keychain. Relative or empty values are ignored (fall through).
+pub const APP_SUPPORT_ROOT_ENV: &str = "IRIN_APP_SUPPORT_ROOT";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrivateConfig {
@@ -67,8 +79,18 @@ fn new_install_id() -> String {
     format!("{:016x}{:016x}", h.finish(), unix_now().wrapping_mul(0x9e37))
 }
 
-/// Resolve Application Support directory for this app (HOME-redirectable).
+/// Resolve Application Support directory for this app.
+///
+/// Precedence:
+/// 1. `IRIN_APP_SUPPORT_ROOT` — absolute path to the app support dir itself
+/// 2. `$HOME/Library/Application Support/<id>`
+/// 3. `/tmp/<id>` last resort
+///
+/// The env override never affects Keychain APIs.
 pub fn app_support_dir() -> PathBuf {
+    if let Some(root) = validated_app_support_root_override() {
+        return root;
+    }
     if let Ok(home) = std::env::var("HOME") {
         let trimmed = home.trim();
         if !trimmed.is_empty() {
@@ -79,6 +101,26 @@ pub fn app_support_dir() -> PathBuf {
         }
     }
     PathBuf::from("/tmp").join(APP_SUPPORT_DIR_NAME)
+}
+
+/// Parse and validate `IRIN_APP_SUPPORT_ROOT` (absolute, non-empty, no NUL).
+/// Invalid overrides are ignored so a bad test env cannot silently misplace data
+/// under a relative path.
+pub fn validated_app_support_root_override() -> Option<PathBuf> {
+    let raw = std::env::var(APP_SUPPORT_ROOT_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.contains('\0') {
+        return None;
+    }
+    let path = PathBuf::from(trimmed);
+    if !path.is_absolute() {
+        return None;
+    }
+    // Refuse "." / empty file name components that are not meaningful roots.
+    if path.components().count() < 2 {
+        return None;
+    }
+    Some(path)
 }
 
 pub fn private_config_path() -> PathBuf {
@@ -362,14 +404,19 @@ for k,v in os.environ.items():
     }
 }
 
+/// Run `cmd` with a hard wall-clock timeout, owning the live child handle.
+///
+/// - Successful early exit cancels the timeout: no later signal is sent.
+/// - On timeout, kill/reap **exactly** this child once (never a bare recycled PID).
+/// - Does not arm a fire-and-forget sleeper that can outlive `wait`.
 fn run_login_capture_timeout(
     mut cmd: std::process::Command,
     timeout: std::time::Duration,
 ) -> Result<std::process::Output, ()> {
     use std::io::Read;
     use std::process::Stdio;
-    use std::sync::{Arc, Mutex};
     use std::thread;
+    use std::time::{Duration, Instant};
 
     cmd.stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -391,29 +438,35 @@ fn run_login_capture_timeout(
         }
         b
     });
-    let pid = child.id();
-    let timed = Arc::new(Mutex::new(false));
-    let timed2 = Arc::clone(&timed);
-    let killer = thread::spawn(move || {
-        thread::sleep(timeout);
-        *timed2.lock().unwrap_or_else(|e| e.into_inner()) = true;
-        #[cfg(unix)]
-        {
-            extern "C" {
-                fn kill(pid: i32, sig: i32) -> i32;
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    // Own the handle: kill then reap this child only.
+                    let _ = child.kill();
+                    let reaped = child.wait().map_err(|_| ())?;
+                    let _ = out_h.join();
+                    let _ = err_h.join();
+                    let _ = reaped;
+                    return Err(());
+                }
+                thread::sleep(Duration::from_millis(20));
             }
-            let _ = unsafe { kill(pid as i32, 15) };
-            thread::sleep(std::time::Duration::from_millis(150));
-            let _ = unsafe { kill(pid as i32, 9) };
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                let _ = out_h.join();
+                let _ = err_h.join();
+                return Err(());
+            }
         }
-    });
-    let status = child.wait().map_err(|_| ())?;
+    };
+
     let stdout = out_h.join().unwrap_or_default();
     let stderr = err_h.join().unwrap_or_default();
-    let _ = killer.join();
-    if *timed.lock().unwrap_or_else(|e| e.into_inner()) && !status.success() {
-        return Err(());
-    }
     Ok(std::process::Output {
         status,
         stdout,
@@ -583,5 +636,78 @@ mod tests {
         let pairs = parse_printenv_null(raw);
         assert_eq!(pairs.len(), 3);
         assert_eq!(pairs[1], ("XAI_API_KEY".into(), "marker".into()));
+    }
+
+    #[test]
+    fn app_support_root_override_takes_precedence_over_home() {
+        let _g = test_env_lock();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_root = std::env::var(APP_SUPPORT_ROOT_ENV).ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "irin-app-support-root-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        let override_dir = tmp.join("portable-app-support");
+        let decoy_home = tmp.join("decoy-home");
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&override_dir).unwrap();
+        fs::create_dir_all(&decoy_home).unwrap();
+        std::env::set_var("HOME", &decoy_home);
+        std::env::set_var(APP_SUPPORT_ROOT_ENV, &override_dir);
+
+        assert_eq!(app_support_dir(), override_dir);
+        assert!(validated_app_support_root_override().is_some());
+
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_root {
+            Some(v) => std::env::set_var(APP_SUPPORT_ROOT_ENV, v),
+            None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn app_support_root_rejects_relative_override() {
+        let _g = test_env_lock();
+        let prev_root = std::env::var(APP_SUPPORT_ROOT_ENV).ok();
+        std::env::set_var(APP_SUPPORT_ROOT_ENV, "relative/not/absolute");
+        assert!(validated_app_support_root_override().is_none());
+        match prev_root {
+            Some(v) => std::env::set_var(APP_SUPPORT_ROOT_ENV, v),
+            None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),
+        }
+    }
+
+    #[test]
+    fn login_capture_timeout_fast_exit_no_full_wait() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+        let mut cmd = Command::new("/bin/echo");
+        cmd.arg("ok");
+        let start = Instant::now();
+        let out = run_login_capture_timeout(cmd, Duration::from_secs(8)).expect("fast exit");
+        assert!(out.status.success());
+        assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn login_capture_timeout_kills_slow_child_once() {
+        use std::process::Command;
+        use std::time::{Duration, Instant};
+        let mut cmd = Command::new("/bin/sleep");
+        cmd.arg("30");
+        let start = Instant::now();
+        let res = run_login_capture_timeout(cmd, Duration::from_millis(200));
+        assert!(res.is_err(), "slow child must time out");
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "timeout path must not wait full sleep"
+        );
+        // Child is reaped inside the helper; no delayed bare-PID kill remains.
     }
 }

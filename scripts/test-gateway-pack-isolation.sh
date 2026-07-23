@@ -92,6 +92,20 @@ rg -q 'run_command_timeout|DOCKER_CMD_TIMEOUT' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "docker timeout"
 rg -q 'WhenUnlockedThisDeviceOnly|kSecAttrAccessibleWhenUnlockedThisDeviceOnly' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/keychain.rs" || die "keychain accessibility"
+rg -q 'IRIN_APP_SUPPORT_ROOT' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/private_config.rs" || die "app support root override"
+rg -q 'login keychain unavailable' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/keychain.rs" || die "keychain preflight token"
+rg -q 'OWNED_DESKTOP_TEARDOWN|desktop_preexisting' \
+  "$ROOT/packaging/smoke-gateway-pack.sh" \
+  "$ROOT/scripts/test-gateway-pack-integration-smoke.sh" || die "desktop ownership flags"
+# Never reclaim via delete-then-readd of operator Keychain items.
+if rg -n 'reclaim re-add|delete then re-add|re-add after reclaim' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/keychain.rs" 2>/dev/null; then
+  die "keychain must not delete-and-readd operator items"
+fi
+rg -q 'try_wait' \
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/private_config.rs" || die "cancelable login timeout"
 rg -q 'redact_process_text' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "redactor"
 rg -q 'is_pack_installed' \

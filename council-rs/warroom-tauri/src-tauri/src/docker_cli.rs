@@ -322,22 +322,13 @@ pub fn docker_cli_plugin_extra_dirs() -> Vec<&'static str> {
 /// Managed Docker CLI config directory (non-secret). Contains only plugin path
 /// hints and, when available, a merge of the operator's existing config.json so
 /// production `docker pull` auth still works. Never logs config contents.
+///
+/// Lives under `app_support_dir()` so `IRIN_APP_SUPPORT_ROOT` isolation applies
+/// without remapping `HOME` (Keychain stays on the operator login keychain).
 pub fn ensure_managed_docker_config_dir() -> Result<PathBuf, String> {
-    let dir = if let Ok(home) = std::env::var("HOME") {
-        let home = home.trim();
-        if !home.is_empty() {
-            PathBuf::from(home)
-                .join("Library")
-                .join("Application Support")
-                .join("com.sovereign.council.warroom")
-                .join("gateway")
-                .join(".docker-cli")
-        } else {
-            std::env::temp_dir().join("irin-docker-cli-config")
-        }
-    } else {
-        std::env::temp_dir().join("irin-docker-cli-config")
-    };
+    let dir = crate::private_config::app_support_dir()
+        .join("gateway")
+        .join(".docker-cli");
     fs::create_dir_all(&dir).map_err(|e| format!("create managed docker config dir: {e}"))?;
 
     let extra = docker_cli_plugin_extra_dirs();

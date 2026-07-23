@@ -50,6 +50,15 @@ Disable/stop keeps pack data. Destructive uninstall is a separate explicit
 action and only targets the fixed `irin-desktop-gateway` project + app-owned
 gateway directory (+ Keychain item for this app identity).
 
+### `IRIN_APP_SUPPORT_ROOT` (test / portable-state)
+
+Absolute path override for this app's Application Support directory only
+(private.json, gateway pack tree, overlays, managed Docker CLI config). It does
+**not** change Keychain selection, the login session, or the operator search
+list. Packaged UI smoke uses this so app data stays isolated while the process
+keeps the real `HOME` and existing login keychain. Never create a login
+keychain under the override path.
+
 ## Image immutability
 
 - Production manifests accept only `name@sha256:<64-hex>` image references.
