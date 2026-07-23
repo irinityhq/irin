@@ -60,8 +60,8 @@ Product features ship first. Do not open methodology, gate, CI, or process PRs
 unless a gate is broken or the operator explicitly named that work. Prefer
 `make check` while iterating; run `make ship-check` once before the PR, then
 only again if `origin/main` moved or the receipt failed. Keep WIP to one product
-PR (two only when path lanes cannot overlap). Cap automated review fix loops at
-two rounds, then stop and report. After merge, remove the worktree
+PR (two only when path lanes cannot overlap). Cap automated bot-comment fix
+rounds at two, then stop and report. After merge, remove the worktree
 (`make worktree-remove` or `make worktree-gc APPLY=1`). Do not spawn multi-agent
 fleets for one- or two-file fixes.
 
