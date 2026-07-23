@@ -172,7 +172,8 @@ cleanup() {
   fi
   "$DOCKER_BIN" compose -p "$FOREIGN_PROJECT" down --volumes --remove-orphans >/dev/null 2>&1 || true
   "$DOCKER_BIN" volume rm "$FOREIGN_VOLUME" >/dev/null 2>&1 || true
-  "$SECURITY_BIN" delete-generic-password -s "$FOREIGN_KC_SERVICE" -a "$FOREIGN_KC_ACCOUNT" >/dev/null 2>&1 || true
+  # Never delete Keychain items from the harness (including the foreign fixture).
+  # Presence-only checks during the run; operator/manual cleanup only.
   log "cleanup_done=true"
   if [[ -z "${FINAL_ERROR}" && "$ec" -ne 0 && "$FINAL_RESULT" != "PASS" ]]; then
     FINAL_RESULT="FAIL"
@@ -321,11 +322,20 @@ return "not_found"
 APPLESCRIPT
 }
 
-# Click an enabled button and require busy transition (disabled) proving the command started.
+# Click an enabled button. Prefer an observable busy (disabled) transition.
 # Retries the find+click atomically: WebKit AX can drop buttons during pack-status re-renders.
+#
+# Fast Disable/Stop may omit a disabled/busy hold (button vanishes on re-render).
+# A vanished button alone is NOT final proof — callers must assert independent
+# postconditions (Disable: new Council PID + Direct + no gateway provider;
+# Stop: pack stopped while Direct remains healthy).
 ax_click_button_busy() {
   local label="$1"
   local after click_rc busy_seen=0 i attempt
+  local allow_fast=0
+  if [[ "$label" == "Disable" ]] || [[ "$label" == "Stop pack" ]]; then
+    allow_fast=1
+  fi
   click_rc="not_found"
   for attempt in $(seq 1 40); do
     click_rc="$(ax_click_button "$label" || true)"
@@ -345,28 +355,23 @@ ax_click_button_busy() {
       busy_seen=1
       break
     fi
-    # Some transitions finish very fast; pack marker / status also proves run.
+    # Enable: pack marker proves the native install path started.
     if [[ -f "$APP_SUPPORT_ROOT/gateway/pack-installed.json" ]] && [[ "$label" == "Enable Gateway" ]]; then
       busy_seen=1
       break
     fi
-    # Fast Disable/Stop: button can disappear on re-render before disabled is observed.
-    if [[ "$after" == "not_found" ]] && { [[ "$label" == "Disable" ]] || [[ "$label" == "Stop pack" ]]; }; then
-      busy_seen=1
-      break
-    fi
-    # Disable also flips via_gateway_default in private.json (non-secret).
-    if [[ "$label" == "Disable" ]] && [[ -f "$APP_SUPPORT_ROOT/private.json" ]]; then
-      if "$PYTHON_BIN" -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("via_gateway_default") is False else 1)' \
-        "$APP_SUPPORT_ROOT/private.json" 2>/dev/null; then
-        busy_seen=1
-        break
-      fi
-    fi
     sleep 0.15
   done
   log "ax_busy_${label// /_}=$busy_seen after=${after:-unknown}"
-  [[ "$busy_seen" == 1 ]] || die "no busy/state transition after click: $label (command may not have run)"
+  if [[ "$busy_seen" == 1 ]]; then
+    return 0
+  fi
+  if [[ "$allow_fast" == 1 ]]; then
+    # Intermediate only — independent postconditions after return are authoritative.
+    log "ax_busy_${label// /_}_fast_transition=true (postconditions_required)"
+    return 0
+  fi
+  die "no busy/state transition after click: $label (command may not have run)"
 }
 
 # --- a) Launch Direct ---
@@ -396,11 +401,33 @@ print("direct_health_ok build_sha=", (d.get("build_sha") or "")[:12])
 print("direct_gateway_provider=", "gateway" in (d.get("providers_available") or []))
 assert "providers_available" in d and "providers_missing" in d
 assert "council_version" in d
+assert d.get("council_version"), "council_version empty"
+PY
+# Genuine War Room surface: bundled cabinets are listable (not bare health only).
+CABINETS_JSON="$("$CURL_BIN" -fsS --max-time 5 "http://127.0.0.1:8765/api/cabinets" || true)"
+[[ -n "$CABINETS_JSON" ]] || die "Direct /api/cabinets empty (War Room surface missing)"
+"$PYTHON_BIN" - <<'PY' "$CABINETS_JSON"
+import json,sys
+raw=sys.argv[1]
+d=json.loads(raw)
+# Accept list or {cabinets:[...]} shapes.
+if isinstance(d, list):
+    n=len(d)
+elif isinstance(d, dict):
+    n=len(d.get("cabinets") or d.get("items") or [])
+    if n==0 and d:
+        n=len(d)
+else:
+    raise SystemExit("unexpected cabinets payload")
+assert n>=1, "no cabinets in Direct War Room"
+print("direct_cabinets_count=", n)
 PY
 log "step_a=direct_ok"
 
 # Wait until an enabled AXButton with the given name is present (pack status
 # refresh can leave the Settings panel without action buttons for a few seconds).
+# Re-activate + re-open Settings periodically so a closed panel does not starve
+# the poll for Enable/Disable/Stop/Uninstall.
 wait_ax_button_enabled() {
   local label="$1"
   local timeout_s="${2:-60}"
@@ -410,6 +437,11 @@ wait_ax_button_enabled() {
     if [[ "$st" == "enabled" ]]; then
       log "ax_wait_${label// /_}=enabled_after_${i}s"
       return 0
+    fi
+    if (( i % 5 == 0 )); then
+      "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
+      # Keep Settings open without requiring the Settings button every tick.
+      ax_click_button "Settings" >/dev/null 2>&1 || true
     fi
     sleep 1
   done
@@ -547,7 +579,7 @@ log "post_enable_council_pid=$PID2"
 log "council_pid_changed=true"
 OWNED_COUNCIL_PIDS="$OWNED_COUNCIL_PIDS,$PID2"
 
-# d) Fake/unregistered provider: governed preflight before provider call.
+# d) Governed discovery + fake/unregistered route fails before provider inference.
 HEALTH2="$("$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:8765/api/health")"
 "$PYTHON_BIN" - <<'PY' "$HEALTH2"
 import json,sys
@@ -557,10 +589,20 @@ assert "gateway" in avail, "governed health must list gateway when key present"
 print("providers_has_gateway=true")
 print("execution_hint=governed_if_gateway_present")
 PY
-# Unauthenticated models must fail closed
+# Unauthenticated models must fail closed (no provider inference without a key).
 CODE="$("$CURL_BIN" -sS -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:18080/v1/models" || true)"
 log "models_unauth_http=$CODE"
 [[ "$CODE" == "401" || "$CODE" == "403" ]] || die "models not fail-closed"
+# Unauthenticated chat with a fake model must also fail closed at the Gateway
+# auth/route boundary (never reach a provider). Body is non-secret.
+FAKE_CODE="$("$CURL_BIN" -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+  -X POST -H 'Content-Type: application/json' \
+  -d '{"model":"irin-fake-unregistered-model-xyz","messages":[{"role":"user","content":"ping"}]}' \
+  "http://127.0.0.1:18080/v1/chat/completions" || true)"
+log "fake_route_unauth_http=$FAKE_CODE"
+[[ "$FAKE_CODE" == "401" || "$FAKE_CODE" == "403" || "$FAKE_CODE" == "404" || "$FAKE_CODE" == "400" ]] \
+  || die "fake unregistered route did not fail closed before provider inference ($FAKE_CODE)"
+log "fake_route_fail_closed=true"
 log "step_enable=ok"
 
 # e) Disable - actual button only
@@ -570,19 +612,45 @@ ax_click_button "Settings" >/dev/null 2>&1 || true
 wait_ax_button_enabled "Disable" 30 \
   || die "Disable AXButton never became enabled"
 ax_click_button_busy "Disable"
-sleep 2
+# Independent Disable postconditions (authoritative; busy hold is optional).
+# 1) Council PID must change (governed -> Direct restart).
+# 2) Direct mode restored (via_gateway_default false).
+# 3) Governed gateway provider absent from discovery.
+ready_disable=0
+for i in $(seq 1 60); do
+  wait_health || true
+  PID3="$(listen_pid 8765)"
+  if [[ -n "$PID3" && "$PID2" != "$PID3" ]]; then
+    HEALTH3="$("$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:8765/api/health" || true)"
+    PRIV_DIS="$APP_SUPPORT_ROOT/private.json"
+    if [[ -n "$HEALTH3" && -f "$PRIV_DIS" ]]; then
+      if "$PYTHON_BIN" - <<'PY' "$HEALTH3" "$PRIV_DIS"
+import json,sys
+h=json.loads(sys.argv[1])
+p=json.load(open(sys.argv[2]))
+avail=h.get("providers_available") or []
+# Direct mode: governed flag off and gateway provider not advertised.
+if p.get("via_gateway_default") is not False:
+    raise SystemExit(1)
+if "gateway" in avail:
+    raise SystemExit(2)
+print("post_disable_gateway_provider=False")
+print("via_gateway_default=False")
+PY
+      then
+        ready_disable=1
+        break
+      fi
+    fi
+  fi
+  sleep 0.5
+done
 PID3="$(listen_pid 8765)"
 log "post_disable_council_pid=$PID3"
 [[ -n "$PID3" ]] || die "Council not healthy after disable"
-[[ "$PID2" != "$PID3" ]] || die "Council PID unchanged after Disable"
+[[ "$PID2" != "$PID3" ]] || die "Council PID unchanged after Disable (command may not have run)"
+[[ "$ready_disable" == 1 ]] || die "Disable postconditions failed (Direct mode / gateway provider still present)"
 wait_health || die "Direct health after disable failed"
-HEALTH3="$("$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:8765/api/health")"
-"$PYTHON_BIN" - <<'PY' "$HEALTH3"
-import json,sys
-d=json.loads(sys.argv[1])
-# After disable, gateway key may still be in child env of a prior process; Direct restart should drop it.
-print("post_disable_gateway_provider=", "gateway" in (d.get("providers_available") or []))
-PY
 log "step_disable=ok"
 OWNED_COUNCIL_PIDS="$OWNED_COUNCIL_PIDS,$PID3"
 
@@ -593,19 +661,28 @@ ax_click_button "Settings" >/dev/null 2>&1 || true
 wait_ax_button_enabled "Stop pack" 30 \
   || die "Stop pack AXButton never became enabled"
 ax_click_button_busy "Stop pack"
-sleep 3
+# Independent Stop postconditions: pack must stop; Direct must stay healthy.
+# Project rows may remain stopped; no healthy listener on :18080; no running
+# desktop containers.
+ready_stop=0
+for i in $(seq 1 60); do
+  if wait_health; then
+    gw_up=0
+    if "$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:18080/health" >/dev/null 2>&1; then
+      gw_up=1
+    fi
+    running_q="$("$DOCKER_BIN" compose -p irin-desktop-gateway ps -q --status running 2>/dev/null || true)"
+    if [[ "$gw_up" == 0 && -z "$running_q" ]]; then
+      ready_stop=1
+      break
+    fi
+  fi
+  sleep 0.5
+done
 wait_health || die "Direct Council unhealthy after stop"
 log "direct_after_stop=ok"
-# Project may still exist stopped; must not be required healthy.
-if "$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:18080/health" >/dev/null 2>&1; then
-  # If health still answers, ensure it is still our project (not foreign reclaim).
-  if ! "$DOCKER_BIN" compose -p irin-desktop-gateway ps -q 2>/dev/null | grep -q .; then
-    die "port 18080 healthy after stop but not desktop project"
-  fi
-  log "gateway_after_stop=still_up_or_draining"
-else
-  log "gateway_after_stop=down"
-fi
+[[ "$ready_stop" == 1 ]] || die "Stop postconditions failed (Gateway still up or containers still running)"
+log "gateway_after_stop=down"
 log "step_stop=ok"
 
 # g) Relaunch continuity (non-secret) - graceful quit first
