@@ -63,10 +63,24 @@ for path in "${paths[@]}"; do
     *.md|docs/*|gateway/docs/*|sentinel/docs/*|council-rs/docs/*|council-rs/warroom/docs/*)
       ;;
 
+    # Root build and test commands cover every member of the Rust workspace.
+    Makefile)
+      gateway_rust=true
+      council_rust=true
+      sentinel_rust=true
+      workspace_supply_chain=true
+      ;;
+
+    # The bootstrap installs cargo-deny for both dependency-policy lanes.
+    scripts/bootstrap-dev-tools.sh)
+      workspace_supply_chain=true
+      tauri_supply_chain=true
+      ;;
+
     # Operator methodology / shipping tooling: light always-on checks plus the
     # workflow self-tests inside make ship-check. Do not tax product lanes
     # (Rust matrix, War Room, Tauri visual) for script-only edits.
-    scripts/dev-*.sh|scripts/new-worktree.sh|scripts/remove-worktree.sh|scripts/worktree-gc.sh|scripts/gortex-worktree.sh|scripts/bootstrap-dev-tools.sh|scripts/check-*.sh|scripts/test-development-workflow.sh|scripts/with-test-ports.sh|Makefile)
+    scripts/dev-*.sh|scripts/new-worktree.sh|scripts/remove-worktree.sh|scripts/worktree-gc.sh|scripts/gortex-worktree.sh|scripts/check-*.sh|scripts/test-development-workflow.sh|scripts/with-test-ports.sh)
       ;;
 
     # Root workspace manifests affect every member. The standalone Tauri crate
