@@ -34,11 +34,32 @@ if [[ -f "$destination/.irin-worktree.env" ]]; then
   export IRIN_REQUIRE_GORTEX=1
 fi
 if [[ -n "$runtime_state_dir" ]]; then
-  allowed_prefix="${HOME}/.local/state/irin/worktrees/"
-  [[ "$runtime_state_dir" == "$allowed_prefix"* && "$runtime_state_dir" != "$allowed_prefix" ]] || {
+  allowed_root="$(cd "${HOME}/.local/state/irin/worktrees" 2>/dev/null && pwd -P)" || {
+    printf 'ERROR: refusing unresolved runtime state root\n' >&2
+    exit 1
+  }
+  if [[ -d "$runtime_state_dir" ]]; then
+    resolved_runtime_state_dir="$(cd "$runtime_state_dir" 2>/dev/null && pwd -P)" || {
+      printf 'ERROR: refusing unresolved runtime state path: %s\n' "$runtime_state_dir" >&2
+      exit 1
+    }
+  else
+    runtime_leaf="$(basename "$runtime_state_dir")"
+    runtime_parent="$(cd "$(dirname "$runtime_state_dir")" 2>/dev/null && pwd -P)" || {
+      printf 'ERROR: refusing unresolved runtime state path: %s\n' "$runtime_state_dir" >&2
+      exit 1
+    }
+    [[ "$runtime_leaf" != "." && "$runtime_leaf" != ".." ]] || {
+      printf 'ERROR: refusing unexpected runtime state path: %s\n' "$runtime_state_dir" >&2
+      exit 1
+    }
+    resolved_runtime_state_dir="${runtime_parent}/${runtime_leaf}"
+  fi
+  [[ "$(dirname "$resolved_runtime_state_dir")" == "$allowed_root" ]] || {
     printf 'ERROR: refusing unexpected runtime state path: %s\n' "$runtime_state_dir" >&2
     exit 1
   }
+  runtime_state_dir="$resolved_runtime_state_dir"
 fi
 
 make -s -C "$destination" runtime-down >/dev/null 2>&1 || true

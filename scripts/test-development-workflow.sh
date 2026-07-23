@@ -41,6 +41,20 @@ set -e
 grep -Fq 'native visual proof cannot be disabled' <<<"$disabled_native"
 grep -Fq 'env -u IRIN_NATIVE_APP' scripts/dev-check.sh
 grep -Fq 'requires the native macOS visual proof' scripts/dev-check.sh
+grep -Fq 'command -v shasum' scripts/dev-check.sh
+grep -Fq 'sha256sum' scripts/dev-check.sh
+
+if [[ "$(uname -s)" == Darwin ]]; then
+  set +e
+  invalid_pid_output="$(swift scripts/macos-window-proof.swift \
+    --pid not-a-pid \
+    --output "${TMPDIR:-/tmp}/unused-window-proof.png" \
+    --contains 'Council War Room' 2>&1)"
+  invalid_pid_status=$?
+  set -e
+  [[ "$invalid_pid_status" -ne 0 ]]
+  grep -Fq 'invalid PID: not-a-pid' <<<"$invalid_pid_output"
+fi
 
 ! grep -Fq 'kill -9' council-rs/scripts/warroom-browser-dev.sh
 grep -Fq 'make -C council-rs warroom-check' .github/workflows/ci.yml
@@ -82,6 +96,29 @@ grep -Fq 'feature branch' <<<"$main_output"
 git -C "$tmp/repo" switch -qc feature/workflow
 (cd "$tmp/repo" && PATH=/usr/bin:/bin IRIN_REQUIRE_GORTEX=0 IRIN_PREFLIGHT_SKIP_FETCH=1 scripts/dev-preflight.sh >/dev/null)
 [[ -s "$tmp/repo/.irin-worktree-base" ]]
+
+test_home="$tmp/home"
+cleanup_worktree="$tmp/cleanup-worktree"
+outside_state="$test_home/.local/state/irin/outside"
+mkdir -p "$test_home/.local/state/irin/worktrees" "$outside_state"
+printf 'preserve\n' >"$outside_state/sentinel"
+printf '.irin-worktree.env\n' >>"$tmp/repo/.git/info/exclude"
+git -C "$tmp/repo" worktree add -q -b feature/cleanup "$cleanup_worktree" main
+printf 'IRIN_RUNTIME_STATE_DIR=%s\n' \
+  "$test_home/.local/state/irin/worktrees/../outside" \
+  >"$cleanup_worktree/.irin-worktree.env"
+set +e
+cleanup_escape_output="$(
+  cd "$tmp/repo" &&
+    HOME="$test_home" PATH=/usr/bin:/bin \
+      "$ROOT/scripts/remove-worktree.sh" "$cleanup_worktree" 2>&1
+)"
+cleanup_escape_status=$?
+set -e
+[[ "$cleanup_escape_status" -ne 0 ]]
+grep -Fq 'refusing unexpected runtime state path' <<<"$cleanup_escape_output"
+[[ -f "$outside_state/sentinel" ]]
+[[ -d "$cleanup_worktree" ]]
 
 printf 'dirty\n' >>"$tmp/repo/README.md"
 set +e

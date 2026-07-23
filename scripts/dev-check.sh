@@ -59,7 +59,7 @@ printf 'Selected lanes:\n%s\n' "$classifier"
 
 receipt=""
 fingerprint_paths() {
-  local fingerprint_input path object mode_marker
+  local fingerprint_input path object mode_marker digest
   fingerprint_input="$(mktemp "${TMPDIR:-/tmp}/irin-tested-tree.XXXXXX")"
   for path in "$@"; do
     if [[ -e "$path" || -L "$path" ]]; then
@@ -74,8 +74,17 @@ fingerprint_paths() {
     fi
     printf '%s %s %s\n' "$mode_marker" "$object" "$path" >>"$fingerprint_input"
   done
-  shasum -a 256 "$fingerprint_input" | awk '{print $1}'
+  if command -v shasum >/dev/null 2>&1; then
+    digest="$(shasum -a 256 "$fingerprint_input" | awk '{print $1}')"
+  elif command -v sha256sum >/dev/null 2>&1; then
+    digest="$(sha256sum "$fingerprint_input" | awk '{print $1}')"
+  else
+    rm -f "$fingerprint_input"
+    printf 'ERROR: shasum or sha256sum is required\n' >&2
+    return 1
+  fi
   rm -f "$fingerprint_input"
+  printf '%s\n' "$digest"
 }
 if [[ "$mode" == "ship" && "$dry_run" != "1" ]]; then
   mkdir -p .irin-receipts

@@ -22,7 +22,12 @@ func parseOptions() throws -> Options {
         }
         let value = CommandLine.arguments[index + 1]
         switch arg {
-        case "--pid": pid = pid_t(value)
+        case "--pid":
+            guard let parsedPid = pid_t(value), parsedPid > 0 else {
+                throw NSError(domain: "window-proof", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "invalid PID: \(value)"])
+            }
+            pid = parsedPid
         case "--output": output = value
         case "--contains": required.append(value)
         default:
