@@ -29,6 +29,12 @@ operator_scope="$(scripts/classify-ci-paths.sh scripts/dev-check.sh scripts/new-
 [[ "$(sed -n 's/^gateway_rust=//p' <<<"$operator_scope")" == false ]]
 [[ "$(sed -n 's/^warroom_web=//p' <<<"$operator_scope")" == false ]]
 
+makefile_scope="$(scripts/classify-ci-paths.sh Makefile)"
+[[ "$(sed -n 's/^full_matrix=//p' <<<"$makefile_scope")" == true ]]
+[[ "$(sed -n 's/^gateway_rust=//p' <<<"$makefile_scope")" == true ]]
+[[ "$(sed -n 's/^warroom_web=//p' <<<"$makefile_scope")" == true ]]
+[[ "$(sed -n 's/^warroom_tauri=//p' <<<"$makefile_scope")" == true ]]
+
 gateway_ship="$(scripts/dev-check.sh --ship --dry-run gateway/sidecar-rs/src/main.rs)"
 grep -Fq 'Package tests (gateway-sidecar)' <<<"$gateway_ship"
 ! grep -Fq 'Workspace tests' <<<"$gateway_ship"
@@ -142,6 +148,81 @@ git -C "$tmp/repo" add README.md scripts
 git -C "$tmp/repo" commit -qm baseline
 git -C "$tmp/repo" branch -M main
 git -C "$tmp/repo" push -q -u origin main
+
+gc_origin="$tmp/gc-origin.git"
+gc_repo="$tmp/gc-repo"
+git init -q --bare "$gc_origin"
+git clone -q "$gc_origin" "$gc_repo"
+git -C "$gc_repo" config user.name test
+git -C "$gc_repo" config user.email test@example.invalid
+mkdir -p "$gc_repo/scripts"
+cp scripts/worktree-gc.sh scripts/remove-worktree.sh "$gc_repo/scripts/"
+printf 'runtime-down:\n\t@:\n' >"$gc_repo/Makefile"
+printf 'baseline\n' >"$gc_repo/README.md"
+git -C "$gc_repo" add Makefile README.md scripts
+git -C "$gc_repo" commit -qm baseline
+git -C "$gc_repo" branch -M main
+git -C "$gc_repo" push -q -u origin main
+
+active_worktree="$tmp/irin-wt-active-unpushed"
+git -C "$gc_repo" worktree add -q -b feature/active-unpushed "$active_worktree" main
+active_worktree="$(cd "$active_worktree" && pwd -P)"
+git -C "$active_worktree" branch --set-upstream-to=origin/main >/dev/null
+printf 'active\n' >"$active_worktree/active.txt"
+git -C "$active_worktree" add active.txt
+git -C "$active_worktree" commit -qm 'active unpushed work'
+
+merged_worktree="$tmp/irin-wt-merged"
+git -C "$gc_repo" worktree add -q -b feature/merged "$merged_worktree" main
+merged_worktree="$(cd "$merged_worktree" && pwd -P)"
+printf 'merged\n' >"$merged_worktree/merged.txt"
+git -C "$merged_worktree" add merged.txt
+git -C "$merged_worktree" commit -qm 'merged work'
+git -C "$gc_repo" merge -q --ff-only feature/merged
+git -C "$gc_repo" push -q origin main
+
+deleted_worktree="$tmp/irin-wt-deleted-tracking"
+git -C "$gc_repo" worktree add -q -b feature/deleted-tracking "$deleted_worktree" main
+deleted_worktree="$(cd "$deleted_worktree" && pwd -P)"
+printf 'squash merged\n' >"$deleted_worktree/squash.txt"
+git -C "$deleted_worktree" add squash.txt
+git -C "$deleted_worktree" commit -qm 'squash merged work'
+git -C "$deleted_worktree" push -q -u origin feature/deleted-tracking
+git -C "$gc_repo" merge -q --squash feature/deleted-tracking
+git -C "$gc_repo" commit -qm 'squash feature/deleted-tracking'
+git -C "$gc_repo" push -q origin main
+git -C "$gc_repo" push -q origin --delete feature/deleted-tracking
+
+dirty_worktree="$tmp/irin-wt-dirty"
+git -C "$gc_repo" worktree add -q -b feature/dirty "$dirty_worktree" main
+dirty_worktree="$(cd "$dirty_worktree" && pwd -P)"
+printf 'dirty\n' >"$dirty_worktree/dirty.txt"
+
+gc_dry_run="$(cd "$gc_repo" && PATH=/usr/bin:/bin scripts/worktree-gc.sh)"
+grep -Fq "KEEP active: $active_worktree (feature/active-unpushed)" <<<"$gc_dry_run"
+grep -Fq "SKIP dirty: $dirty_worktree (feature/dirty)" <<<"$gc_dry_run"
+grep -Fq "CANDIDATE [merged-into-origin/main]: $merged_worktree (feature/merged)" \
+  <<<"$gc_dry_run"
+grep -Fq "CANDIDATE [origin-branch-gone-and-cherry-empty]: $deleted_worktree (feature/deleted-tracking)" \
+  <<<"$gc_dry_run"
+[[ -d "$active_worktree" && -d "$merged_worktree" && -d "$deleted_worktree" \
+  && -d "$dirty_worktree" ]]
+
+origin_url="$(git -C "$gc_repo" remote get-url origin)"
+git -C "$gc_repo" remote set-url origin "$tmp/missing-origin.git"
+set +e
+gc_offline="$(cd "$gc_repo" && PATH=/usr/bin:/bin scripts/worktree-gc.sh --apply 2>&1)"
+gc_offline_status=$?
+set -e
+git -C "$gc_repo" remote set-url origin "$origin_url"
+[[ "$gc_offline_status" -ne 0 ]]
+grep -Fq 'unable to refresh and prune origin; no worktrees were changed' <<<"$gc_offline"
+[[ -d "$merged_worktree" && -d "$deleted_worktree" ]]
+
+gc_apply="$(cd "$gc_repo" && PATH=/usr/bin:/bin scripts/worktree-gc.sh --apply)"
+grep -Fq 'worktree-gc: removed 2 of 2 candidate(s)' <<<"$gc_apply"
+[[ -d "$active_worktree" && -d "$dirty_worktree" ]]
+[[ ! -d "$merged_worktree" && ! -d "$deleted_worktree" ]]
 
 gortex_fake_bin="$tmp/gortex-fake-bin"
 gortex_fake_state="$tmp/gortex-fake-state"

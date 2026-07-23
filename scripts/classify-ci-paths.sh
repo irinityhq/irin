@@ -63,14 +63,6 @@ for path in "${paths[@]}"; do
     *.md|docs/*|gateway/docs/*|sentinel/docs/*|council-rs/docs/*|council-rs/warroom/docs/*)
       ;;
 
-    # Root build and test commands cover every member of the Rust workspace.
-    Makefile)
-      gateway_rust=true
-      council_rust=true
-      sentinel_rust=true
-      workspace_supply_chain=true
-      ;;
-
     # The bootstrap installs cargo-deny for both dependency-policy lanes.
     scripts/bootstrap-dev-tools.sh)
       workspace_supply_chain=true

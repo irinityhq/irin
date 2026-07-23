@@ -19,7 +19,10 @@ elif [[ -n "${1:-}" ]]; then
   exit 2
 fi
 
-git fetch origin main >/dev/null 2>&1 || true
+if ! git fetch --prune origin >/dev/null; then
+  printf 'ERROR: unable to refresh and prune origin; no worktrees were changed\n' >&2
+  exit 1
+fi
 origin_main="$(git rev-parse origin/main 2>/dev/null || true)"
 [[ -n "$origin_main" ]] || {
   printf 'ERROR: origin/main is required\n' >&2
@@ -57,13 +60,30 @@ while IFS= read -r line; do
     merged=1
   fi
   # Squash merges leave local tips that are not ancestors of origin/main.
-  # Require both: remote branch gone AND no unique commits vs origin/main
-  # (empty cherry list means every patch is already on main).
+  # Only consider a deleted branch when this local branch is configured to
+  # track that exact origin ref, the ref is confirmed absent, and every local
+  # patch is already represented on origin/main.
   remote_gone=0
-  if ! git show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null \
-    && ! git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1; then
-    if [[ -z "$(git -C "$dest" cherry origin/main HEAD 2>/dev/null)" ]]; then
-      remote_gone=1
+  tracking_remote="$(git config --get "branch.$branch.remote" 2>/dev/null || true)"
+  tracking_merge="$(git config --get "branch.$branch.merge" 2>/dev/null || true)"
+  if [[ "$tracking_remote" == origin \
+    && "$tracking_merge" == "refs/heads/$branch" ]] \
+    && ! git show-ref --verify --quiet "refs/remotes/origin/$branch" 2>/dev/null; then
+    remote_status=0
+    git ls-remote --exit-code --heads origin "refs/heads/$branch" >/dev/null 2>&1 \
+      || remote_status=$?
+    if [[ "$remote_status" == 2 ]]; then
+      cherry="$(git -C "$dest" cherry origin/main HEAD)" || {
+        printf 'ERROR: unable to compare %s with origin/main\n' "$branch" >&2
+        exit 1
+      }
+      if ! grep -q '^+' <<<"$cherry"; then
+        remote_gone=1
+      fi
+    elif [[ "$remote_status" != 0 ]]; then
+      printf 'ERROR: unable to verify origin branch %s; no worktrees were changed\n' \
+        "$branch" >&2
+      exit 1
     fi
   fi
 
