@@ -77,6 +77,11 @@ export async function startCouncilServer(
   });
 }
 
+/** Record that the embedded webview completed its initial Council requests. */
+export async function reportCouncilRuntimeReady(port: number): Promise<void> {
+  await invoke("report_council_runtime_ready", { port });
+}
+
 export async function stopCouncilServer(): Promise<string> {
   return invoke<string>("stop_council_server");
 }

@@ -87,7 +87,27 @@ fn desktop_runtime_config_value(port: u16) -> serde_json::Value {
 
 #[tauri::command]
 fn desktop_runtime_config() -> Result<serde_json::Value, String> {
-    Ok(desktop_runtime_config_value(default_serve_port()?))
+    let port = default_serve_port()?;
+    eprintln!("[runtime-config] selected Council port: {port}");
+    Ok(desktop_runtime_config_value(port))
+}
+
+fn validate_runtime_ready_port(port: u16, expected: u16) -> Result<(), String> {
+    if port == expected {
+        Ok(())
+    } else {
+        Err(format!(
+            "webview reported Council port {port}, expected {expected}"
+        ))
+    }
+}
+
+#[tauri::command]
+fn report_council_runtime_ready(port: u16) -> Result<(), String> {
+    let expected = default_serve_port()?;
+    validate_runtime_ready_port(port, expected)?;
+    eprintln!("[runtime-config] webview Council requests ready on :{port}");
+    Ok(())
 }
 
 fn show_main_window(app: &AppHandle) {
@@ -141,6 +161,7 @@ fn try_start_council_server(
         None => default_serve_port()?,
     };
     validate_serve_port(port)?;
+    eprintln!("[council-runtime] start requested on :{port}");
 
     let council_rs_path = resolve_council_rs_dir();
 
@@ -159,6 +180,7 @@ fn try_start_council_server(
         auth_token,
     ) {
         CouncilServerProbe::MatchingBuild => {
+            eprintln!("[council-runtime] adopted exact build on :{port}");
             return Ok(format!(
                 "adopted canonical Council already running on :{port} (managed by external IRIN runtime)"
             ));
@@ -320,8 +342,8 @@ fn try_start_council_server(
 /// in a debug build used for desktop development.
 /// Sets `COUNCIL_CORS_ORIGINS` for Tauri asset origins and Next dev (3010) / API port.
 /// `COUNCIL_DEV_NO_AUTH` is set only in debug builds; release requires `COUNCIL_AUTH_TOKEN`.
-/// The default port comes from `IRIN_COUNCIL_PORT` in isolated worktrees and
-/// remains 8765 for the canonical installed runtime.
+/// The default port is selected at build time from `IRIN_COUNCIL_PORT` in
+/// isolated worktrees and remains 8765 for the canonical installed runtime.
 /// `council_root` (Settings councilRoot, camelCase over invoke) overrides
 /// `--base-dir` after validation; blank/absent uses the repo root.
 #[tauri::command]
@@ -546,7 +568,8 @@ pub fn run() {
             save_synthesis,
             save_pdf,
             desktop_runtime_mode,
-            desktop_runtime_config
+            desktop_runtime_config,
+            report_council_runtime_ready
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -625,7 +648,9 @@ pub fn run() {
 
 #[cfg(test)]
 mod runtime_mode_tests {
-    use super::{desktop_runtime_config_value, desktop_runtime_mode_value};
+    use super::{
+        desktop_runtime_config_value, desktop_runtime_mode_value, validate_runtime_ready_port,
+    };
 
     #[test]
     fn runtime_mode_matches_the_native_build_profile() {
@@ -646,5 +671,11 @@ mod runtime_mode_tests {
                 "wsBase": "ws://127.0.0.1:20321",
             })
         );
+    }
+
+    #[test]
+    fn runtime_ready_receipt_accepts_only_the_selected_port() {
+        assert!(validate_runtime_ready_port(20_321, 20_321).is_ok());
+        assert!(validate_runtime_ready_port(8_765, 20_321).is_err());
     }
 }

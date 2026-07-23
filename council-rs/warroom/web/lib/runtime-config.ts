@@ -148,6 +148,23 @@ function readNativeConfig(): Partial<RuntimeConfig> {
   return native && typeof native === "object" ? native : {};
 }
 
+/**
+ * The desktop-selected Council endpoints are authoritative in Tauri because
+ * the app CSP is built for those exact origins. Browser War Room has no native
+ * values, so its saved endpoints remain configurable.
+ */
+export function mergeNativeAndLocalConfig(
+  native: Partial<RuntimeConfig>,
+  local: Partial<RuntimeConfig>,
+): Partial<RuntimeConfig> {
+  return {
+    ...local,
+    ...native,
+    apiBase: pickConfigValue(native.apiBase, local.apiBase ?? ""),
+    wsBase: pickConfigValue(native.wsBase, local.wsBase ?? ""),
+  };
+}
+
 async function fetchNativeConfig(): Promise<Partial<RuntimeConfig>> {
   if (!isBrowser()) return {};
   const w = window as Window & {
@@ -169,7 +186,10 @@ function mergedRuntimeConfig(): RuntimeConfig {
     isBrowser() ? window.location.href : undefined,
   );
   const local = dropRemoteLoopbackOverrides(readLocalStorage(), defaults);
-  return mergeConfigSources({ ...local, ...readNativeConfig() }, defaults);
+  return mergeConfigSources(
+    mergeNativeAndLocalConfig(readNativeConfig(), local),
+    defaults,
+  );
 }
 
 function writeLocalStorage(partial: Partial<RuntimeConfig>): void {

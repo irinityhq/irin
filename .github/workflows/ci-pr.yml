@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   ci:
-    # Use the graph from the pull request commit so workflow changes prove
-    # themselves before merge. Keeping this job id stable preserves the
-    # required `ci / CI required` check context.
-    uses: ./.github/workflows/ci.yml
+    # Keep runner selection on reviewed main so pull-request code cannot select
+    # a self-hosted runner. The pinned graph checks out and actionlints the PR
+    # revision, while this stable job id preserves `ci / CI required`.
+    uses: irinityhq/irin/.github/workflows/ci.yml@main

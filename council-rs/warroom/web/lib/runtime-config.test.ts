@@ -4,6 +4,7 @@ import {
   defaultsForPage,
   dropRemoteLoopbackOverrides,
   mergeConfigSources,
+  mergeNativeAndLocalConfig,
   pickConfigValue,
   pickOptionalConfigValue,
 } from "./runtime-config";
@@ -41,6 +42,57 @@ describe("runtime-config merge", () => {
       mergeConfigSources({ gatewayBase: " http://127.0.0.1:8080 " }, defaults)
         .gatewayBase,
     ).toBe("http://127.0.0.1:8080");
+  });
+
+  it("keeps desktop-selected endpoints authoritative over saved browser settings", () => {
+    expect(
+      mergeNativeAndLocalConfig(
+        {
+          apiBase: "http://127.0.0.1:20321",
+          wsBase: "ws://127.0.0.1:20321",
+        },
+        {
+          apiBase: "http://127.0.0.1:8765",
+          wsBase: "ws://127.0.0.1:8765",
+        },
+      ),
+    ).toMatchObject({
+      apiBase: "http://127.0.0.1:20321",
+      wsBase: "ws://127.0.0.1:20321",
+    });
+    expect(
+      mergeNativeAndLocalConfig(
+        { apiBase: "http://127.0.0.1:20321" },
+        {},
+      ),
+    ).toMatchObject({ apiBase: "http://127.0.0.1:20321" });
+    expect(
+      mergeNativeAndLocalConfig(
+        {
+          apiBase: "http://127.0.0.1:20321",
+          wsBase: "ws://127.0.0.1:20321",
+        },
+        { apiBase: "http://127.0.0.1:8765", wsBase: "ws://127.0.0.1:8765" },
+      ),
+    ).toMatchObject({
+      apiBase: "http://127.0.0.1:20321",
+      wsBase: "ws://127.0.0.1:20321",
+    });
+  });
+
+  it("keeps browser-saved endpoints configurable when no native config exists", () => {
+    expect(
+      mergeNativeAndLocalConfig(
+        {},
+        {
+          apiBase: "http://127.0.0.1:20321",
+          wsBase: "ws://127.0.0.1:20321",
+        },
+      ),
+    ).toMatchObject({
+      apiBase: "http://127.0.0.1:20321",
+      wsBase: "ws://127.0.0.1:20321",
+    });
   });
 
   it("mergeConfigSources lets optional gatewayBase be cleared", () => {
