@@ -44,8 +44,15 @@ echo "=== GHCR login ($REGISTRY) ==="
 if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
   echo "${GITHUB_TOKEN}" | docker login "$REGISTRY" -u "${GITHUB_ACTOR:-github-actions}" --password-stdin
 else
+  # Default to the operator's gh login (needs write:packages scope:
+  # gh auth refresh -h github.com -s write:packages). Explicit
+  # GHCR_USERNAME/GHCR_TOKEN still wins when set.
+  if [[ -z "${GHCR_TOKEN:-}" ]] && command -v gh >/dev/null; then
+    GHCR_TOKEN="$(gh auth token 2>/dev/null || true)"
+    GHCR_USERNAME="${GHCR_USERNAME:-$(gh api user --jq .login 2>/dev/null || true)}"
+  fi
   [[ -n "${GHCR_USERNAME:-}" && -n "${GHCR_TOKEN:-}" ]] \
-    || die "local run requires GHCR_USERNAME + GHCR_TOKEN (PAT with write:packages)"
+    || die "local run requires gh auth (write:packages) or GHCR_USERNAME + GHCR_TOKEN"
   echo "${GHCR_TOKEN}" | docker login "$REGISTRY" -u "${GHCR_USERNAME}" --password-stdin
 fi
 
