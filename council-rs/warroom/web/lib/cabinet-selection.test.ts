@@ -123,6 +123,17 @@ describe("resolveUntouchedCabinetSelection", () => {
     ).toBeNull();
   });
 
+  it("waits until the cabinet list is non-empty", () => {
+    expect(
+      resolveUntouchedCabinetSelection({
+        cabinets: [],
+        providersAvailable: ["nvidia"],
+        currentName: "standard",
+        selectionLocked: false,
+      }),
+    ).toBeNull();
+  });
+
   it("keeps selection when no cabinet is runnable (caller explains once)", () => {
     expect(
       resolveUntouchedCabinetSelection({

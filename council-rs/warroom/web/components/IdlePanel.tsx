@@ -169,11 +169,13 @@ export default function IdlePanel({
   // visible for explanation, but never allow them to be selected or launched.
   const { data: discoverData, loading: discoverLoading, error: discoverError, providerOptions } = useDiscover();
 
-  // Untouched first load: once health inventory is known, prefer a stable
-  // runnable cabinet over a blocked default (see lib/cabinet-selection.ts).
+  // Untouched first load: once cabinets AND health inventory are known, prefer
+  // a stable runnable cabinet over a blocked default (see cabinet-selection.ts).
   useEffect(() => {
     if (autoSelectDone.current || selectionLocked.current) return;
-    if (!health) return;
+    // Wait for both inventories — deciding on an empty list would lock on the
+    // preferred default and never re-evaluate when cabinets arrive.
+    if (!health || cabinets.length === 0) return;
     const next = resolveUntouchedCabinetSelection({
       cabinets,
       providersAvailable: health.providers_available,
