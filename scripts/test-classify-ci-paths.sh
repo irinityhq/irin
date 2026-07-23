@@ -29,6 +29,8 @@ cases=(
   "schedule forces full|$full_proof|__scheduled_proof__"
   "integrated main forces full|$full_pr|__integrated_main__"
   "unknown forces full|$full_pr|new-surface/config.json"
+  "operator ship scripts stay light|$all_false|scripts/dev-check.sh scripts/new-worktree.sh scripts/gortex-worktree.sh scripts/dev-preflight.sh Makefile"
+  "classifier scripts still force full|$full_pr|scripts/classify-ci-paths.sh"
   "gateway Rust source|false true false false false false false false false|gateway/sidecar-rs/src/main.rs"
   "gateway manifest|false true false false false false true false false|gateway/sidecar-rs/Cargo.toml"
   "gateway non-Rust runtime|false true false false false false false false false|gateway/docker-compose.yml gateway/lua/auth.lua"

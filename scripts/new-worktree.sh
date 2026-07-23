@@ -97,6 +97,10 @@ done
   exit 1
 }
 short="$(printf '%03d' "$slot")"
+# Share one Cargo target dir across worktrees so the second tree is not a
+# cold multi-GB rebuild. Concurrent cargo still serializes via target locks.
+cargo_target_dir="${IRIN_CARGO_TARGET_DIR:-${HOME}/.cache/irin/cargo-target}"
+mkdir -p "$cargo_target_dir"
 cat >"$destination/.irin-worktree.env" <<EOF
 IRIN_RUNTIME_PROFILE=worktree
 IRIN_COMPOSE_PROJECT=irin-wt-$short
@@ -106,6 +110,7 @@ IRIN_GATEWAY_PORT=$((24000 + slot))
 IRIN_RUNTIME_STATE_DIR=${HOME}/.local/state/irin/worktrees/$short-$slug
 IRIN_RUNTIME_LAUNCHD_LABEL=com.irinity.irin-runtime.worktree-$short
 IRIN_TAILSCALE_SERVE=0
+CARGO_TARGET_DIR=$cargo_target_dir
 EOF
 chmod 600 "$destination/.irin-worktree.env"
 rmdir "$slot_lock"

@@ -63,6 +63,12 @@ for path in "${paths[@]}"; do
     *.md|docs/*|gateway/docs/*|sentinel/docs/*|council-rs/docs/*|council-rs/warroom/docs/*)
       ;;
 
+    # Operator methodology / shipping tooling: light always-on checks plus the
+    # workflow self-tests inside make ship-check. Do not tax product lanes
+    # (Rust matrix, War Room, Tauri visual) for script-only edits.
+    scripts/dev-*.sh|scripts/new-worktree.sh|scripts/remove-worktree.sh|scripts/worktree-gc.sh|scripts/gortex-worktree.sh|scripts/bootstrap-dev-tools.sh|scripts/check-*.sh|scripts/test-development-workflow.sh|scripts/with-test-ports.sh|Makefile)
+      ;;
+
     # Root workspace manifests affect every member. The standalone Tauri crate
     # is intentionally excluded from the root workspace.
     Cargo.toml|Cargo.lock)

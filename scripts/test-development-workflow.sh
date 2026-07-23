@@ -12,6 +12,7 @@ scripts_to_parse=(
   scripts/bootstrap-actionlint.sh
   scripts/new-worktree.sh
   scripts/remove-worktree.sh
+  scripts/worktree-gc.sh
   scripts/smoke-macos-tauri-app.sh
   scripts/with-test-ports.sh
   council-rs/scripts/warroom-browser-dev.sh
@@ -22,6 +23,23 @@ for script in "${scripts_to_parse[@]}"; do bash -n "$script"; done
 web_scope="$(scripts/classify-ci-paths.sh council-rs/warroom/web/app/page.tsx)"
 [[ "$(sed -n 's/^warroom_web=//p' <<<"$web_scope")" == true ]]
 [[ "$(sed -n 's/^warroom_tauri=//p' <<<"$web_scope")" == true ]]
+
+operator_scope="$(scripts/classify-ci-paths.sh scripts/dev-check.sh scripts/new-worktree.sh Makefile)"
+[[ "$(sed -n 's/^full_matrix=//p' <<<"$operator_scope")" == false ]]
+[[ "$(sed -n 's/^gateway_rust=//p' <<<"$operator_scope")" == false ]]
+[[ "$(sed -n 's/^warroom_web=//p' <<<"$operator_scope")" == false ]]
+
+gateway_ship="$(scripts/dev-check.sh --ship --dry-run gateway/sidecar-rs/src/main.rs)"
+grep -Fq 'Package tests (gateway-sidecar)' <<<"$gateway_ship"
+! grep -Fq 'Workspace tests' <<<"$gateway_ship"
+
+operator_ship="$(scripts/dev-check.sh --ship --dry-run scripts/dev-check.sh)"
+! grep -Fq 'Workspace tests' <<<"$operator_ship"
+! grep -Fq 'Hosted, embedded-export, and Tauri regression' <<<"$operator_ship"
+grep -Fq 'Release tree' <<<"$operator_ship"
+
+grep -Fq 'CARGO_TARGET_DIR' scripts/new-worktree.sh
+grep -Fq 'worktree-gc' Makefile
 
 check_plan="$(scripts/dev-check.sh --dry-run council-rs/warroom/web/app/page.tsx)"
 grep -Fq 'War Room dependencies' <<<"$check_plan"

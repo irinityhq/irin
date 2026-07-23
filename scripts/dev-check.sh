@@ -125,9 +125,39 @@ run() {
 }
 
 any_rust=false
-for key in gateway_rust council_rust sentinel_rust; do
-  [[ "$(lane "$key")" != true ]] || any_rust=true
-done
+rust_packages=()
+if [[ "$(lane gateway_rust)" == true ]]; then
+  any_rust=true
+  rust_packages+=("gateway-sidecar")
+fi
+if [[ "$(lane council_rust)" == true ]]; then
+  any_rust=true
+  rust_packages+=("council-rs")
+fi
+if [[ "$(lane sentinel_rust)" == true ]]; then
+  any_rust=true
+  rust_packages+=("sovereign-protocol")
+fi
+# Full matrix and multi-crate fan-out still prove the integrated workspace.
+use_workspace_rust=false
+if [[ "$(lane full_matrix)" == true ]] || (( ${#rust_packages[@]} > 1 )); then
+  use_workspace_rust=true
+fi
+
+run_rust_ship_proof() {
+  if [[ "$use_workspace_rust" == true ]]; then
+    run "Workspace formatting" cargo fmt --all -- --check
+    run "Workspace clippy" cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+    run "Workspace tests" cargo test --workspace --locked
+    return 0
+  fi
+  local pkg
+  for pkg in "${rust_packages[@]}"; do
+    run "Package formatting ($pkg)" cargo fmt -p "$pkg" -- --check
+    run "Package clippy ($pkg)" cargo clippy -p "$pkg" --all-targets --all-features --locked -- -D warnings
+    run "Package tests ($pkg)" cargo test -p "$pkg" --locked
+  done
+}
 
 if [[ "$mode" == "check" ]]; then
   run "Gortex detect_changes continuity receipt" scripts/gortex-worktree.sh detect "$ROOT"
@@ -166,9 +196,7 @@ run "Pinned actionlint" scripts/bootstrap-actionlint.sh
 run "GitHub Actions lint" .irin-tools/bin/actionlint -color
 
 if [[ "$any_rust" == true ]]; then
-  run "Workspace formatting" cargo fmt --all -- --check
-  run "Workspace clippy" cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
-  run "Workspace tests" cargo test --workspace --locked
+  run_rust_ship_proof
 fi
 
 deny_bin=""
