@@ -79,6 +79,13 @@ This builds, atomically installs, and launches the macOS app. It uses the
 same Council and War Room runtime `make setup` already started and never
 starts a competing backend.
 
+**Signed macOS app (Apple silicon):** the notarized `IRIN_<ver>_aarch64.dmg`
+on [GitHub Releases](https://github.com/irinityhq/irin/releases) installs
+**IRIN.app** — the same Council + War Room with the optional Gateway Pack
+bundled and off by default, no source checkout or Docker required for Direct
+mode. Verify the download against `HASHES.txt` attached to the same release.
+macOS on Apple silicon only; Intel Macs are not supported.
+
 ### Ubuntu — browser War Room
 
 Install Rust, Node.js 20+, Git, `make`, `curl`, and `lsof`, then run:

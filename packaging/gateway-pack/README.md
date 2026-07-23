@@ -69,11 +69,17 @@ keychain under the override path.
 
 ## Keychain continuity note
 
-Final stable Developer ID signing must prove Keychain item continuity across
-app upgrades under the stable app identity
-`com.irinity.irin`. Ad-hoc signed local builds may not retain
-Keychain access across identity changes; that is a release ceremony item, not
-proven by local DMG smoke.
+The installed app holds Gateway Pack secrets (`GW_API_KEY`, `AUTH_PEPPER`) as
+device-local generic passwords under the service `com.irinity.irin`, matching
+the stable Developer ID bundle identity. Items provisioned by the retired
+"Council War Room" identity (`com.sovereign.council.warroom`) are copied
+forward on first launch and never deleted by migration; if a copy is refused
+by Keychain ACL, Enable simply re-provisions. Developer ID continuity across
+app upgrades is proven before any release ships: the production dry-run gate
+(`scripts/release-transaction.sh --dry-run-rc`) exercises first-run migration
+and Keychain continuity under the real signed identity, and the PR may not
+merge without it. Ad-hoc signed local builds may not retain Keychain access
+across identity changes.
 
 ## Operator flow (installed release)
 
