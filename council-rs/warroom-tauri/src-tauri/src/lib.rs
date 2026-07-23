@@ -14,7 +14,7 @@ use gateway_pack::{GatewayPackStatus, GatewayPackState};
 use keychain::{load_gw_api_key, KeychainSecretStore};
 use paths::{
     build_cors_origins, default_serve_port, is_packaged_install, resolve_council_binary,
-    resolve_council_rs_dir, resolve_spawn_base_dir, validate_serve_port,
+    resolve_council_rs_dir, resolve_spawn_base_dir, validate_serve_port, DEFAULT_SERVE_PORT,
 };
 use private_config::{
     ensure_writable_base_overlay, gui_login_environment, load_or_create_private_config,
