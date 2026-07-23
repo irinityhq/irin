@@ -13,8 +13,21 @@ dry_run="${IRIN_CHECK_DRY_RUN:-0}"
 if [[ "${1:-}" == "--ship" ]]; then mode=ship; shift; fi
 if [[ "${1:-}" == "--dry-run" ]]; then dry_run=1; shift; fi
 
+if [[ -f "$ROOT/.irin-worktree.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  . "$ROOT/.irin-worktree.env"
+  set +a
+fi
+
 if [[ "$mode" == "ship" || -f "$ROOT/.irin-worktree.env" ]]; then
   export IRIN_REQUIRE_GORTEX=1
+fi
+# Prefer the worktree-shared target dir when set so ship-check does not fill a
+# per-tree multi-GB target next to the sources.
+if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
+  mkdir -p "$CARGO_TARGET_DIR"
+  export CARGO_TARGET_DIR
 fi
 if [[ "$mode" == "ship" ]]; then
   if (( $# > 0 )) && [[ "$dry_run" != "1" ]]; then
