@@ -1,10 +1,9 @@
 name: IRIN CI
 
 on:
-  # Phase one of the trusted-runner handoff: this lets a thin PR dispatcher
-  # invoke the reviewed CI graph from `main`, rather than scheduling a PR-ref
-  # workflow against the restricted R740 runner group. The dispatcher itself
-  # is added only after this reusable entrypoint exists on `main`.
+  # Pull requests enter through ci-pr.yml, which calls this workflow from the
+  # same revision under review. That keeps workflow changes self-testing while
+  # the runner predicate below keeps public and untrusted code on hosted runners.
   workflow_call:
   push:
     branches: ["main"]
@@ -26,6 +25,20 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
+  actionlint:
+    name: GitHub Actions lint
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install pinned actionlint
+        run: scripts/bootstrap-actionlint.sh
+
+      - name: Validate GitHub Actions workflows
+        run: .irin-tools/bin/actionlint -color
+
   detect-changes:
     name: Detect CI scope
     runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
@@ -440,9 +453,7 @@ jobs:
           cp target/release/council council-rs/target/release/council
 
       - name: Run isolated hosted and embedded-export regression
-        env:
-          WARROOM_SMOKE_SKIP_TAURI_TESTS: "1"
-        run: make -C council-rs warroom-check
+        run: make -C council-rs warroom-web-check
 
   warroom-tauri:
     name: War Room Tauri macOS
@@ -474,9 +485,9 @@ jobs:
         working-directory: council-rs/warroom-tauri
         run: npm ci
 
-      - name: Run War Room Tauri macOS smoke
+      - name: Run Tauri Rust and embedded-export smoke
         working-directory: council-rs
-        run: WARROOM_SMOKE_SKIP_WEB_LINT=1 bash warroom-tauri/scripts/smoke-hybrid-build.sh
+        run: make warroom-tauri-check
 
       - name: Build and launch native Tauri application (process proof)
         env:
@@ -697,6 +708,7 @@ jobs:
     timeout-minutes: 5
     if: always()
     needs:
+      - actionlint
       - detect-changes
       - gitleaks
       - release-tree

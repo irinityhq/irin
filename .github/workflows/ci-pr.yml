@@ -12,6 +12,6 @@ permissions:
 jobs:
   ci:
     # Use the graph from the pull request commit so workflow changes prove
-    # themselves before merge. Public-repository PR lanes resolve only to
-    # GitHub-hosted runners in ci.yml.
+    # themselves before merge. Keeping this job id stable preserves the
+    # required `ci / CI required` check context.
     uses: ./.github/workflows/ci.yml

@@ -140,8 +140,10 @@ if [[ "$mode" == "check" ]]; then
   if [[ "$(lane sentinel_rust)" == true ]]; then
     run "Protocol focused tests" cargo test -p sovereign-protocol
   fi
-  if [[ "$(lane warroom_web)" == true ]]; then
+  if [[ "$(lane warroom_web)" == true || "$(lane warroom_tauri)" == true ]]; then
     run "War Room dependencies" npm --prefix council-rs/warroom/web ci
+  fi
+  if [[ "$(lane warroom_web)" == true ]]; then
     run "War Room lint" npm --prefix council-rs/warroom/web run lint
     run "War Room typecheck" npm --prefix council-rs/warroom/web run typecheck
     run "War Room unit tests" npm --prefix council-rs/warroom/web run test:unit
@@ -158,6 +160,8 @@ run "Current-base and Gortex preflight" scripts/dev-preflight.sh ship
 run "Gortex detect_changes continuity receipt" scripts/gortex-worktree.sh detect "$ROOT"
 run "Classifier self-test" scripts/test-classify-ci-paths.sh
 run "Workflow-script self-test" scripts/test-development-workflow.sh
+run "Pinned actionlint" scripts/bootstrap-actionlint.sh
+run "GitHub Actions lint" .irin-tools/bin/actionlint -color
 
 if [[ "$any_rust" == true ]]; then
   run "Workspace formatting" cargo fmt --all -- --check

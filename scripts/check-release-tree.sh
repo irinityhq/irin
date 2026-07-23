@@ -38,6 +38,7 @@ required=(
   council-rs/scripts/warroom-tauri-dev.sh
   council-rs/warroom/web/playwright.export.config.ts
   scripts/check-contract-surface-declaration.sh
+  scripts/bootstrap-actionlint.sh
   scripts/bootstrap-dev-tools.sh
   scripts/dev-check.sh
   scripts/dev-preflight.sh

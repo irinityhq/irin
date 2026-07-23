@@ -1,16 +1,18 @@
-# Advisory review coverage. GitHub branch-protection enforcement is configured separately.
-* @iws17 @Raphael1717
-
-# Authority-bearing surfaces are explicit even though the same owners currently
-# cover the whole repository. This keeps the review boundary visible if general
-# ownership changes later.
+# Required review is limited to authority-bearing surfaces so ordinary changes
+# do not create a solo-maintainer approval bottleneck.
+/.github/CODEOWNERS @iws17 @Raphael1717
 /.github/workflows/ @iws17 @Raphael1717
+/.github/actions/ @iws17 @Raphael1717
+/Makefile @iws17 @Raphael1717
+/scripts/ @iws17 @Raphael1717
+/council-rs/Makefile @iws17 @Raphael1717
+/council-rs/scripts/warroom-* @iws17 @Raphael1717
+/council-rs/warroom-tauri/scripts/ @iws17 @Raphael1717
 /council-rs/src/engine/directive_fence.rs @iws17 @Raphael1717
 /gateway/sidecar-rs/src/comms/ @iws17 @Raphael1717
+/gateway/sidecar-rs/src/budget.rs @iws17 @Raphael1717
 /gateway/sidecar-rs/src/keymgmt.rs @iws17 @Raphael1717
 /gateway/sidecar-rs/src/ledger.rs @iws17 @Raphael1717
-/gateway/sidecar-rs/src/watch/dispatcher.rs @iws17 @Raphael1717
-/gateway/sidecar-rs/src/watch/outbox.rs @iws17 @Raphael1717
-/gateway/sidecar-rs/src/watch/worker.rs @iws17 @Raphael1717
+/gateway/sidecar-rs/src/watch/ @iws17 @Raphael1717
 /sentinel/COMMS_CONTRACT.md @iws17 @Raphael1717
 /sentinel/sovereign-protocol/ @iws17 @Raphael1717

@@ -12,7 +12,9 @@ help:
 	@echo "  warroom-browser          Run Council + browser War Room for development"
 	@echo "  warroom-build            Build and locally sign the Tauri bundle"
 	@echo "  warroom-export           Build static War Room assets"
-	@echo "  warroom-check            Run the complete War Room frontend/Tauri gate"
+	@echo "  warroom-web-check        Run the Linux-safe War Room web/export gate"
+	@echo "  warroom-tauri-check      Run Tauri export markers and Rust tests"
+	@echo "  warroom-check            Run the complete macOS War Room gate"
 	@echo "  warroom-product-check    Exercise the exact embedded export in Chromium"
 	@echo "  warroom-native-smoke     Build and prove the native macOS app window"
 	@echo "  audit-rust               Audit Council Rust dependencies"
@@ -53,7 +55,7 @@ check-no-legacy-reqwest:
 
 .PHONY: check-no-legacy-reqwest
 
-.PHONY: warroom-dev warroom-build warroom-sign warroom-export warroom-check warroom-check-isolated warroom-product-check warroom-native-smoke warroom-browser
+.PHONY: warroom-dev warroom-build warroom-sign warroom-export warroom-web-check warroom-web-check-isolated warroom-tauri-check warroom-check warroom-check-isolated warroom-product-check warroom-native-smoke warroom-browser
 
 # --------------------------------------------------------------------------
 # warroom-browser — one command: council :8765 + Next.js :3010 (post-reboot)
@@ -87,17 +89,26 @@ warroom-sign:
 warroom-export:
 	bash warroom-tauri/scripts/build-warroom-assets.sh
 
-warroom-check:
-	bash ../scripts/with-test-ports.sh $(MAKE) warroom-check-isolated
+warroom-web-check:
+	bash ../scripts/with-test-ports.sh $(MAKE) warroom-web-check-isolated
 
-warroom-check-isolated:
+warroom-web-check-isolated:
 	cd warroom/web && npm ci
 	cd warroom/web && npm audit --omit=dev --audit-level=high
 	cd warroom/web && npm run lint
 	cd warroom/web && npm run typecheck
 	cd warroom/web && npm run test:ci
 	$(MAKE) warroom-product-check
+
+warroom-tauri-check:
 	WARROOM_SMOKE_SKIP_WEB_LINT=1 bash warroom-tauri/scripts/smoke-hybrid-build.sh
+
+warroom-check:
+	bash ../scripts/with-test-ports.sh $(MAKE) warroom-check-isolated
+
+warroom-check-isolated:
+	$(MAKE) warroom-web-check-isolated
+	$(MAKE) warroom-tauri-check
 
 warroom-product-check:
 	cd warroom/web && [ -d node_modules ] || npm ci
