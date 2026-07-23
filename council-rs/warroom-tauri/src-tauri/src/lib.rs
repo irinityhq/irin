@@ -805,6 +805,7 @@ async fn gateway_pack_stop(app: AppHandle) -> Result<GatewayPackStatus, String> 
                 config.librarian_base.as_deref(),
             )
             .map_err(|e| {
+                gateway_pack::lifecycle_stage("stop_handler_complete", "error");
                 format!("Gateway pack stopped but Council Direct restart failed: {e}")
             })?;
         }
@@ -812,6 +813,7 @@ async fn gateway_pack_stop(app: AppHandle) -> Result<GatewayPackStatus, String> 
         if status.docker == "ready" {
             st.message = "Gateway pack stopped; Council is in Direct mode.".into();
         }
+        gateway_pack::lifecycle_stage("stop_handler_complete", "ok");
         Ok(st)
     })
     .await

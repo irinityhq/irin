@@ -950,7 +950,7 @@ fn compose_up(
 
 /// Append a single non-secret lifecycle stage line for operator/smoke diagnosis.
 /// Never logs values, keys, paths that may contain credentials, or command output.
-fn lifecycle_stage(stage: &str, detail: &str) {
+pub(crate) fn lifecycle_stage(stage: &str, detail: &str) {
     let dir = gateway_data_dir();
     let _ = fs::create_dir_all(&dir);
     let path = dir.join("lifecycle.log");
@@ -1260,8 +1260,10 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
             lifecycle_stage("stop_config", "error");
             return Err(err);
         }
+        lifecycle_stage("stop_config", "updated_direct");
+    } else {
+        lifecycle_stage("stop_config", "already_direct");
     }
-    lifecycle_stage("stop_config", "direct");
 
     if let Some(pack_root) = installed_pack_root() {
         let compose = compose_file(&pack_root);
@@ -1673,6 +1675,48 @@ mod tests {
         match prev {
             Some(v) => std::env::set_var("HOME", v),
             None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn stop_without_installed_pack_emits_ordered_lifecycle_contract() {
+        let _g = test_env_lock();
+        let prev_home = std::env::var("HOME").ok();
+        let prev_support = std::env::var("IRIN_APP_SUPPORT_ROOT").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "gw-pack-stop-stages-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        std::env::set_var("HOME", &tmp);
+        std::env::remove_var("IRIN_APP_SUPPORT_ROOT");
+
+        let store = MemorySecretStore::default();
+        stop_gateway_pack(&store).unwrap();
+
+        let log = fs::read_to_string(gateway_data_dir().join("lifecycle.log")).unwrap();
+        let begin = log.find(" stage=stop_begin detail=ok\n").unwrap();
+        let lock = log.find(" stage=stop_lock detail=ok\n").unwrap();
+        let config = log
+            .find(" stage=stop_config detail=already_direct\n")
+            .unwrap();
+        let complete = log.find(" stage=stop_complete detail=ok\n").unwrap();
+        assert!(begin < lock && lock < config && config < complete);
+        assert!(!log.contains(" stage=stop_compose detail="));
+
+        match prev_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        match prev_support {
+            Some(v) => std::env::set_var("IRIN_APP_SUPPORT_ROOT", v),
+            None => std::env::remove_var("IRIN_APP_SUPPORT_ROOT"),
         }
         let _ = fs::remove_dir_all(&tmp);
     }

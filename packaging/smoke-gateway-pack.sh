@@ -671,11 +671,13 @@ wait_ax_button_enabled "Stop pack" 30 \
   || die "Stop pack AXButton never became enabled"
 LIFECYCLE_LOG="$APP_SUPPORT_ROOT/gateway/lifecycle.log"
 stop_begin_before="$(grep -c ' stage=stop_begin detail=ok$' "$LIFECYCLE_LOG" 2>/dev/null || true)"
+stop_complete_before="$(grep -c ' stage=stop_complete detail=ok$' "$LIFECYCLE_LOG" 2>/dev/null || true)"
+stop_handler_before="$(grep -c ' stage=stop_handler_complete detail=ok$' "$LIFECYCLE_LOG" 2>/dev/null || true)"
 ax_click_button_busy "Stop pack"
 # Prove that the WebView click crossed the native command boundary. Stop is
 # intentionally instrumented with categories only; no command output or values.
 stop_begin_seen=0
-for i in $(seq 1 20); do
+for i in $(seq 1 180); do
   stop_begin_after="$(grep -c ' stage=stop_begin detail=ok$' "$LIFECYCLE_LOG" 2>/dev/null || true)"
   if (( stop_begin_after > stop_begin_before )); then
     stop_begin_seen=1
@@ -688,36 +690,46 @@ log "stop_native_begin=ok"
 # Independent Stop postconditions: pack must stop; Direct must stay healthy.
 # Project rows may remain stopped; no healthy listener on :18080; no running
 # desktop containers. Two native Docker attempts may each consume the bounded
-# 45-second command timeout, so the smoke deadline must exceed that product bound.
+# 45-second command timeout. The outer deadline also covers the Council restart
+# and port-release wait, and every loop probe is single-shot so it cannot nest
+# another long health deadline.
 ready_stop=0
-stop_deadline=$((SECONDS + 120))
+stop_deadline=$((SECONDS + 180))
 while (( SECONDS < stop_deadline )); do
-  if wait_health; then
-    gw_up=0
-    if "$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:18080/health" >/dev/null 2>&1; then
-      gw_up=1
-    fi
-    running_q="$("$DOCKER_BIN" ps -q \
-      --filter label=com.docker.compose.project=irin-desktop-gateway \
-      --filter status=running 2>/dev/null || true)"
-    stop_complete="$(grep -c ' stage=stop_complete detail=ok$' "$LIFECYCLE_LOG" 2>/dev/null || true)"
-    if [[ "$gw_up" == 0 && -z "$running_q" && "$stop_complete" -gt 0 ]]; then
-      ready_stop=1
-      break
-    fi
+  direct_up=0
+  if "$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:8765/api/health" >/dev/null 2>&1; then
+    direct_up=1
+  fi
+  gw_up=0
+  if "$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:18080/health" >/dev/null 2>&1; then
+    gw_up=1
+  fi
+  running_q="$("$DOCKER_BIN" ps -q \
+    --filter label=com.docker.compose.project=irin-desktop-gateway \
+    --filter status=running 2>/dev/null || true)"
+  stop_complete_after="$(grep -c ' stage=stop_complete detail=ok$' "$LIFECYCLE_LOG" 2>/dev/null || true)"
+  stop_handler_after="$(grep -c ' stage=stop_handler_complete detail=ok$' "$LIFECYCLE_LOG" 2>/dev/null || true)"
+  if [[ "$direct_up" == 1 && "$gw_up" == 0 && -z "$running_q" ]] \
+    && (( stop_complete_after > stop_complete_before )) \
+    && (( stop_handler_after > stop_handler_before )); then
+    ready_stop=1
+    break
   fi
   sleep 0.5
 done
 if [[ "$ready_stop" != 1 ]]; then
   log "stop_timeout_gateway_up=${gw_up:-unknown}"
+  log "stop_timeout_direct_up=${direct_up:-unknown}"
   log "stop_timeout_running_containers=$(printf '%s\n' "${running_q:-}" | sed '/^$/d' | wc -l | tr -d ' ')"
-  log "stop_timeout_native_complete=${stop_complete:-0}"
+  log "stop_timeout_pack_complete_delta=$(( ${stop_complete_after:-0} - stop_complete_before ))"
+  log "stop_timeout_handler_complete_delta=$(( ${stop_handler_after:-0} - stop_handler_before ))"
 fi
 wait_health || die "Direct Council unhealthy after stop"
 log "direct_after_stop=ok"
 [[ "$ready_stop" == 1 ]] || die "Stop postconditions failed (Gateway still up or containers still running)"
-# The native command also restarts its owned Council child before the handler
-# returns. A re-enabled button proves the invoke/finally path completed.
+# stop_complete means the pack stop finished. stop_handler_complete, the
+# re-enabled button, and the PID transition prove the full Tauri command
+# returned after restarting its owned Council child.
 wait_ax_button_enabled "Stop pack" 30 \
   || die "Stop pack native command did not return"
 PID4="$(listen_pid 8765)"
