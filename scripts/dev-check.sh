@@ -131,6 +131,7 @@ done
 
 if [[ "$mode" == "check" ]]; then
   run "Gortex detect_changes continuity receipt" scripts/gortex-worktree.sh detect "$ROOT"
+  run "Gortex affected-test analysis" scripts/gortex-worktree.sh affected "$ROOT" "${paths[@]}"
   if [[ "$(lane gateway_rust)" == true ]]; then
     run "Gateway focused tests" cargo test -p gateway-sidecar
   fi
@@ -158,6 +159,7 @@ fi
 
 run "Current-base and Gortex preflight" scripts/dev-preflight.sh ship
 run "Gortex detect_changes continuity receipt" scripts/gortex-worktree.sh detect "$ROOT"
+run "Gortex affected-test analysis" scripts/gortex-worktree.sh affected "$ROOT" "${paths[@]}"
 run "Classifier self-test" scripts/test-classify-ci-paths.sh
 run "Workflow-script self-test" scripts/test-development-workflow.sh
 run "Pinned actionlint" scripts/bootstrap-actionlint.sh

@@ -32,12 +32,24 @@ raise SystemExit(3)
 }
 
 wait_for_fresh_index() {
-  local record="" stale="true"
+  local record="" fresh="false" expected
+  expected="$(git -C "$path" rev-parse HEAD)"
   for _ in $(seq 1 "${IRIN_GORTEX_INDEX_CHECKS:-60}"); do
     record="$(repo_record 2>/dev/null || true)"
     if [[ -n "$record" ]]; then
-      stale="$(python3 -c 'import json,sys; print(str(json.loads(sys.argv[1]).get("stale", True)).lower())' "$record")"
-      if [[ "$stale" == "false" ]]; then
+      fresh="$(python3 -c '
+import json, sys
+repo = json.loads(sys.argv[1])
+expected = sys.argv[2]
+fresh = (
+    repo.get("stale", True) is False
+    and repo.get("indexed", False) is True
+    and repo.get("head_commit") == expected
+    and repo.get("indexed_commit") == expected
+)
+print(str(fresh).lower())
+' "$record" "$expected")"
+      if [[ "$fresh" == "true" ]]; then
         printf '%s\n' "$record"
         return 0
       fi
@@ -49,15 +61,62 @@ wait_for_fresh_index() {
   return 1
 }
 
+refresh_index() {
+  # v0.61 advertises reindex_repository in parts of its catalog but rejects the
+  # call, and re-running track on a stale record can leave indexed_commit
+  # unchanged despite reporting success. Re-register only the graph record;
+  # source and runtime state are untouched.
+  if repo_record >/dev/null 2>&1; then
+    if ! gortex untrack "$path" >/dev/null; then
+      printf 'ERROR: Gortex failed to unregister stale graph for %s\n' "$path" >&2
+      return 1
+    fi
+  fi
+  if ! gortex track "$path" --as-worktree --wait \
+    --wait-timeout "${IRIN_GORTEX_TRACK_TIMEOUT:-10m}" >/dev/null; then
+    return 1
+  fi
+  if ! wait_for_fresh_index; then
+    return 1
+  fi
+}
+
+require_fresh_index() {
+  local record fresh expected
+  record="$(repo_record 2>/dev/null)" || {
+    printf 'ERROR: Gortex does not track exact worktree %s\n' "$path" >&2
+    return 1
+  }
+  expected="$(git -C "$path" rev-parse HEAD)"
+  fresh="$(python3 -c '
+import json, sys
+repo = json.loads(sys.argv[1])
+expected = sys.argv[2]
+fresh = (
+    repo.get("stale", True) is False
+    and repo.get("indexed", False) is True
+    and repo.get("head_commit") == expected
+    and repo.get("indexed_commit") == expected
+)
+print(str(fresh).lower())
+' "$record" "$expected")"
+  if [[ "$fresh" != "true" ]]; then
+    printf 'Gortex index: STALE OR COMMIT-MISMATCHED; refreshing exact worktree before continuing\n' >&2
+    if ! record="$(refresh_index)"; then
+      printf 'ERROR: Gortex failed to refresh exact worktree %s\n' "$path" >&2
+      return 1
+    fi
+  fi
+  printf '%s\n' "$record"
+}
+
 case "$action" in
   track)
     if ! have_gortex; then without_gortex; exit $?; fi
-    if ! repo_record >/dev/null 2>&1; then
-      gortex track "$path" --as-worktree
-      gortex daemon reload >/dev/null
+    if ! record="$(refresh_index)"; then
+      printf 'ERROR: Gortex failed to track exact worktree %s\n' "$path" >&2
+      exit 1
     fi
-    gortex call index_repository --index "$path" --arg "path=$path" --format text >/dev/null
-    record="$(wait_for_fresh_index)"
     printf 'Gortex: TRACKED %s\n' "$path"
     printf 'Gortex index: %s\n' "$record"
     ;;
@@ -93,13 +152,7 @@ for name in ("codex", "claude-code", "cursor"):
       printf 'Run: scripts/gortex-worktree.sh track %q\n' "$path" >&2
       exit 1
     fi
-    record="$(repo_record)"
-    stale="$(python3 -c 'import json,sys; print(str(json.loads(sys.argv[1]).get("stale", True)).lower())' "$record")"
-    if [[ "$stale" == "true" ]]; then
-      printf 'Gortex index: STALE; refreshing exact worktree before continuing\n'
-      gortex call index_repository --index "$path" --arg "path=$path" --format text >/dev/null
-      record="$(wait_for_fresh_index)"
-    fi
+    record="$(require_fresh_index)"
     printf 'Gortex index: FRESH %s\n' "$record"
     ;;
 
@@ -107,10 +160,8 @@ for name in ("codex", "claude-code", "cursor"):
     if ! have_gortex; then without_gortex; exit $?; fi
     # Agents use MCP detect_changes first. This is the named continuity path
     # when the client reports that the MCP tool is not mounted/discoverable.
-    repo_record >/dev/null 2>&1 || {
-      printf 'ERROR: cannot run Gortex detect_changes: exact worktree is untracked\n' >&2
-      exit 1
-    }
+    record="$(require_fresh_index)"
+    printf 'Gortex index: FRESH %s\n' "$record"
     printf 'Gortex CLI continuity: detect_changes (MCP must be attempted first by the agent)\n'
     python3 - "$path" "${IRIN_GORTEX_DETECT_TIMEOUT:-180}" <<'PY'
 import json
@@ -175,8 +226,49 @@ while True:
 PY
     ;;
 
+  affected)
+    if ! have_gortex; then without_gortex; exit $?; fi
+    record="$(require_fresh_index)"
+    printf 'Gortex index: FRESH %s\n' "$record"
+    printf 'Gortex CLI continuity: affected-test analysis\n'
+    set +e
+    if (( $# > 2 )); then
+      affected_output="$(gortex affected --index "$path" --json "${@:3}" 2>&1)"
+      affected_status=$?
+    else
+      affected_output="$(gortex affected --index "$path" --json --stdin 2>&1)"
+      affected_status=$?
+    fi
+    set -e
+    case "$affected_status" in
+      0)
+        python3 -c '
+import json, sys
+payload = json.loads(sys.argv[1])
+tests = payload.get("affected_tests")
+if not isinstance(tests, list) or not tests:
+    raise SystemExit(
+        "ERROR: Gortex returned exit 0 without a non-empty affected_tests list"
+    )
+' "$affected_output"
+        printf 'Gortex affected tests: SELECTED (advisory; classifier lanes execute the proof)\n%s\n' \
+          "$affected_output"
+        ;;
+      3)
+        printf 'Gortex affected tests: NONE\n'
+        [[ -z "$affected_output" ]] || printf '%s\n' "$affected_output"
+        ;;
+      *)
+        printf 'ERROR: Gortex affected-test analysis failed (exit=%s)\n' \
+          "$affected_status" >&2
+        [[ -z "$affected_output" ]] || printf '%s\n' "$affected_output" >&2
+        exit "$affected_status"
+        ;;
+    esac
+    ;;
+
   *)
-    printf 'usage: %s {doctor|track|untrack|detect} [worktree-path]\n' "$0" >&2
+    printf 'usage: %s {doctor|track|untrack|detect|affected} [worktree-path] [changed-path ...]\n' "$0" >&2
     exit 2
     ;;
 esac

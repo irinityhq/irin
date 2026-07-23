@@ -7,7 +7,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   printf 'ERROR: native Tauri smoke requires macOS\n' >&2
   exit 1
 }
-for command in make xcrun codesign env curl python3; do
+for command in make xcrun codesign env curl open pgrep python3; do
   command -v "$command" >/dev/null 2>&1 || {
     printf 'ERROR: missing native-smoke command: %s\n' "$command" >&2
     exit 1
@@ -45,6 +45,8 @@ fi
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/irin-native-smoke.XXXXXX")"
 pid=""
 council_pid=""
+launcher_pid=""
+binary_pattern=""
 port_is_free() {
   python3 -c '
 import socket, sys
@@ -73,6 +75,13 @@ wait_for_port_release() {
 cleanup() {
   status=$?
   trap - EXIT INT TERM
+  if [[ -n "$launcher_pid" ]] && kill -0 "$launcher_pid" 2>/dev/null; then
+    kill "$launcher_pid" 2>/dev/null || true
+    wait "$launcher_pid" 2>/dev/null || true
+  fi
+  if [[ -z "$pid" && -n "$binary_pattern" ]]; then
+    pid="$(pgrep -f -x "$binary_pattern" | head -n 1 || true)"
+  fi
   if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
     kill "$pid" 2>/dev/null || true
     wait "$pid" 2>/dev/null || true
@@ -136,6 +145,7 @@ fi
 app="${IRIN_NATIVE_APP:-$ROOT/council-rs/warroom-tauri/src-tauri/target/release/bundle/macos/Council War Room.app}"
 binary="$app/Contents/MacOS/council-warroom-tauri"
 [[ -x "$binary" ]] || { printf 'ERROR: native app binary missing: %s\n' "$binary" >&2; exit 1; }
+binary_pattern="$(printf '%s\n' "$binary" | sed 's/[][\\.^$*+?{}()|]/\\&/g')"
 codesign --verify --deep --strict "$app"
 
 mkdir -p "$tmp/home" "$ROOT/.irin-receipts"
@@ -192,24 +202,38 @@ assert health.get("build_dirty") is expected_dirty, health
 printf 'native Council exact-build health: PASS (port %s, sha %s, dirty=%s)\n' \
   "$IRIN_COUNCIL_PORT" "$expected_sha" "$expected_dirty"
 
+if pgrep -f -x "$binary_pattern" >/dev/null 2>&1; then
+  printf 'ERROR: exact native app is already running: %s\n' "$binary" >&2
+  exit 1
+fi
+
+# Launch the bundle through LaunchServices. Executing the Mach-O directly from
+# a background shell keeps the process alive but can leave its initial window
+# unordered and invisible, producing a false native-product proof.
 env \
   -u ANTHROPIC_API_KEY -u DEEPSEEK_API_KEY -u GEMINI_API_KEY -u GOOGLE_API_KEY \
   -u GROQ_API_KEY -u MISTRAL_API_KEY -u NVIDIA_API_KEY -u NOUS_API_KEY \
   -u OPENAI_API_KEY -u OPENROUTER_API_KEY -u TOGETHER_API_KEY -u XAI_API_KEY \
-  HOME="$tmp/home" COUNCIL_RS_DIR="$ROOT/council-rs" \
-  COUNCIL_DEV_NO_AUTH=1 COUNCIL_WS_SMOKE_ONLY=1 \
-  "$binary" >"$tmp/app.log" 2>&1 &
-pid=$!
+  open -n -F -W -o "$tmp/app.log" --stderr "$tmp/app.log" \
+    --env "HOME=$tmp/home" \
+    --env "COUNCIL_RS_DIR=$ROOT/council-rs" \
+    --env COUNCIL_DEV_NO_AUTH=1 \
+    --env COUNCIL_WS_SMOKE_ONLY=1 \
+    "$app" &
+launcher_pid=$!
 
 stable=0
 for _ in $(seq 1 "${IRIN_NATIVE_PROCESS_CHECKS:-20}"); do
-  if kill -0 "$pid" 2>/dev/null; then
+  pid="$(pgrep -f -x "$binary_pattern" | head -n 1 || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
     stable=$((stable + 1))
     (( stable >= 3 )) && break
-  else
-    printf 'ERROR: native Tauri process exited during launch\n' >&2
+  elif ! kill -0 "$launcher_pid" 2>/dev/null; then
+    printf 'ERROR: LaunchServices exited before the native app appeared\n' >&2
     tail -n 40 "$tmp/app.log" >&2 || true
     exit 1
+  else
+    stable=0
   fi
   sleep 0.5
 done
