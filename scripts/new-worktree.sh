@@ -101,6 +101,11 @@ short="$(printf '%03d' "$slot")"
 # cold multi-GB rebuild. Concurrent cargo still serializes via target locks.
 cargo_target_dir="${IRIN_CARGO_TARGET_DIR:-${HOME}/.cache/irin/cargo-target}"
 mkdir -p "$cargo_target_dir"
+# Symlink so path-based tools (Playwright, scripts) see target/release/* while
+# cargo still writes into the shared cache via CARGO_TARGET_DIR.
+if [[ ! -e "$destination/target" ]]; then
+  ln -sfn "$cargo_target_dir" "$destination/target"
+fi
 cat >"$destination/.irin-worktree.env" <<EOF
 IRIN_RUNTIME_PROFILE=worktree
 IRIN_COMPOSE_PROJECT=irin-wt-$short

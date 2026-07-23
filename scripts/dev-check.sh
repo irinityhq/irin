@@ -23,10 +23,14 @@ fi
 if [[ "$mode" == "ship" || -f "$ROOT/.irin-worktree.env" ]]; then
   export IRIN_REQUIRE_GORTEX=1
 fi
-# Prefer the worktree-shared target dir when set so ship-check does not fill a
-# per-tree multi-GB target next to the sources.
+# Prefer a worktree-shared cargo target so each tree does not grow its own
+# multi-GB build. Symlink ./target at the shared dir so tools that look for
+# target/release/* (Playwright, scripts) still resolve the binary.
 if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
   mkdir -p "$CARGO_TARGET_DIR"
+  if [[ ! -e "$ROOT/target" ]]; then
+    ln -sfn "$CARGO_TARGET_DIR" "$ROOT/target"
+  fi
   export CARGO_TARGET_DIR
 fi
 if [[ "$mode" == "ship" ]]; then
