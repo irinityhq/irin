@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test worktree-gc
+.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-prod-images production-manifest release-transaction worktree-gc
 setup: ## macOS: prepare config, start the managed runtime, and enable login recovery
 	bash scripts/setup-local.sh
 
@@ -94,6 +94,15 @@ gateway-pack-test: ## Static + isolation tests for the optional Gateway Pack
 
 gateway-pack-integration-smoke: ## Isolated compose smoke (local-dev images; preserves foreign fixtures)
 	bash scripts/test-gateway-pack-integration-smoke.sh
+
+gateway-pack-prod-images: ## Build + push production GHCR images (IRIN_PACK_IMAGES_TAG=vX.Y.Z|rc-<sha>)
+	bash scripts/build-gateway-pack-prod-images.sh
+
+production-manifest: ## Pin production manifest from live GHCR digests (IRIN_PACK_IMAGES_TAG=...)
+	bash scripts/generate-production-manifest.sh
+
+release-transaction: ## Fail-closed release ladder (scripts/release-transaction.sh --tag vX.Y.Z | --dry-run-rc)
+	bash scripts/release-transaction.sh $(ARGS)
 
 build: ## Build the full Rust workspace in release mode
 	cargo build --workspace --release
