@@ -213,6 +213,19 @@ test.describe("core War Room surface states", () => {
     await expect(need).toBeVisible();
     await expect(need).toHaveClass(/text-fg-muted/);
     await expect(need).not.toHaveClass(/text-danger/);
+
+    // The editor keeps one aggregate blocker instead of repeating a red
+    // warning under every unavailable seat and chair field.
+    await page.getByRole("button", { name: "Cabinets", exact: true }).click();
+    const providerWarning = page.getByTestId("cabinet-provider-warning");
+    await expect(providerWarning).toContainText(
+      "Unavailable or legacy provider transports: grok_hermes, gemini_agy, claude_code",
+    );
+    await expect(providerWarning).toHaveClass(/text-warning/);
+    await expect(providerWarning).not.toHaveClass(/text-danger/);
+    await expect(
+      page.getByText(/is unavailable or is a legacy provider ID/),
+    ).toHaveCount(0);
   });
 
   test("Settings persist across reload", async ({ page }) => {
