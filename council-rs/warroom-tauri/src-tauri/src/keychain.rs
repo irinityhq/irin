@@ -113,7 +113,8 @@ mod macos_keychain {
             Ok(()) => return Ok(()),
             Err(e) if is_not_found(&e) => {}
             Err(e) => {
-                // Fall through to add; some items may reject update if ACL differs.
+                // Fall through to add; some items may reject update if ACL differs
+                // (e.g. prior Developer ID vs ad-hoc identity).
                 let _ = e;
             }
         }
@@ -121,11 +122,23 @@ mod macos_keychain {
         match add_password_device_local(service, account, password) {
             Ok(()) => Ok(()),
             Err(e) if e.code() == errSecDuplicateItem => {
-                // Race: another writer added between update-miss and add.
-                update_password(service, account, password)
-                    .map_err(|e| format!("keychain update after race failed: {e}"))
+                // Race or ACL-blocked update: delete then re-add so ad-hoc / signed
+                // identity can reclaim the item. Brief loss window only when the
+                // preferred update path already failed.
+                let _ = delete_password_raw(service, account);
+                add_password_device_local(service, account, password)
+                    .map_err(|e2| format!("keychain re-add after reclaim failed: {e2}"))
             }
-            Err(e) => Err(format!("keychain add failed: {e}")),
+            Err(e) => {
+                // Last resort: reclaim and re-add (covers ACL-denied update+add).
+                let _ = delete_password_raw(service, account);
+                match add_password_device_local(service, account, password) {
+                    Ok(()) => Ok(()),
+                    Err(e2) => Err(format!(
+                        "keychain add failed: {e}; reclaim re-add failed: {e2}"
+                    )),
+                }
+            }
         }
     }
 
@@ -218,11 +231,24 @@ impl SecretStore for KeychainSecretStore {
             }
             Err(e) => {
                 let msg = e.to_string();
+                let code = e.code();
                 if msg.contains("could not be found")
                     || msg.contains("not found")
                     || msg.contains("-25300")
-                    || e.code() == security_framework_sys::base::errSecItemNotFound
+                    || code == security_framework_sys::base::errSecItemNotFound
                 {
+                    Ok(None)
+                } else if msg.contains("User interaction is not allowed")
+                    || msg.contains("interaction is not allowed")
+                    || msg.contains("-25308")
+                    || msg.contains("auth")
+                    || msg.contains("ACL")
+                    || msg.contains("denied")
+                    || code == -25293 // errSecAuthFailed
+                    || code == -25308 // errSecInteractionNotAllowed
+                {
+                    // Unreadable under this process identity (prior ACL / lock).
+                    // Treat as absent so set_password can reclaim the item.
                     Ok(None)
                 } else {
                     Err(format!("keychain get failed: {e}"))
