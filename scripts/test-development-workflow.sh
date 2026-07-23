@@ -9,6 +9,7 @@ scripts_to_parse=(
   scripts/dev-preflight.sh
   scripts/dev-check.sh
   scripts/bootstrap-dev-tools.sh
+  scripts/bootstrap-actionlint.sh
   scripts/new-worktree.sh
   scripts/remove-worktree.sh
   scripts/smoke-macos-tauri-app.sh
@@ -42,8 +43,12 @@ set -e
 grep -Fq 'native visual proof cannot be disabled' <<<"$disabled_native"
 grep -Fq 'env -u IRIN_NATIVE_APP' scripts/dev-check.sh
 grep -Fq 'requires the native macOS visual proof' scripts/dev-check.sh
+grep -Fq 'GitHub Actions lint' scripts/dev-check.sh
 grep -Fq 'command -v shasum' scripts/dev-check.sh
 grep -Fq 'sha256sum' scripts/dev-check.sh
+grep -Fq 'IRIN_GORTEX_DETECT_TIMEOUT' scripts/gortex-worktree.sh
+grep -Fq 'subprocess.TimeoutExpired' scripts/gortex-worktree.sh
+grep -Fq 'partial_results' scripts/gortex-worktree.sh
 
 if [[ "$(uname -s)" == Darwin ]]; then
   set +e
@@ -58,13 +63,14 @@ if [[ "$(uname -s)" == Darwin ]]; then
 fi
 
 ! grep -Fq 'kill -9' council-rs/scripts/warroom-browser-dev.sh
-grep -Fq 'make -C council-rs warroom-check' .github/workflows/ci.yml
+grep -Fq 'uses: ./.github/workflows/ci.yml' .github/workflows/ci-pr.yml
+! grep -Fq 'uses: irinityhq/irin/.github/workflows/ci.yml@main' .github/workflows/ci-pr.yml
+grep -Fq 'make -C council-rs warroom-web-check' .github/workflows/ci.yml
+grep -Fq 'make warroom-tauri-check' .github/workflows/ci.yml
 grep -Fq 'changed=(__integrated_main__)' .github/workflows/ci.yml
 grep -Fq 'with-test-ports.sh' council-rs/Makefile
 grep -Fq 'npm audit --omit=dev --audit-level=high' council-rs/Makefile
 grep -Fq 'cargo build --release -p council-rs --locked' council-rs/Makefile
-grep -Fq 'uses: ./.github/workflows/ci.yml' .github/workflows/ci-pr.yml
-grep -Fq 'WARROOM_SMOKE_SKIP_TAURI_TESTS: "1"' .github/workflows/ci.yml
 grep -Fq 'WARROOM_SMOKE_SKIP_TAURI_TESTS' \
   council-rs/warroom-tauri/scripts/smoke-hybrid-build.sh
 [[ "$(grep -Fc 'git diff --check origin/main --' scripts/dev-check.sh)" == 2 ]]
@@ -76,6 +82,9 @@ target = makefile.split("warroom-product-check:", 1)[1].split("\n\n", 1)[0]
 assert target.index("build-warroom-assets.sh") < target.index("npm run test:export")
 workflow = Path(".github/workflows/ci.yml").read_text()
 assert "npm run build:tauri\n          npm run test:export" not in workflow
+web_job = workflow.split("  warroom-web:", 1)[1].split("\n  warroom-tauri:", 1)[0]
+assert "warroom-web-check" in web_job
+assert "warroom-check" not in web_job.replace("warroom-web-check", "")
 PY
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/irin-workflow-test.XXXXXX")"
@@ -92,6 +101,60 @@ git -C "$tmp/repo" add README.md scripts
 git -C "$tmp/repo" commit -qm baseline
 git -C "$tmp/repo" branch -M main
 git -C "$tmp/repo" push -q -u origin main
+
+gortex_fake_bin="$tmp/gortex-fake-bin"
+gortex_fake_state="$tmp/gortex-fake-state"
+mkdir -p "$gortex_fake_bin"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'set -eu' \
+  'case "${1:-}" in' \
+  '  repos)' \
+  '    printf '"'"'[{"path":"%s","stale":false}]\n'"'"' "$IRIN_GORTEX_TEST_REPO"' \
+  '    ;;' \
+  '  call)' \
+  '    if [ "${IRIN_GORTEX_TEST_MODE:-partial}" = sleep ]; then sleep 10; fi' \
+  '    count=0' \
+  '    [ ! -f "$IRIN_GORTEX_TEST_STATE" ] || count="$(cat "$IRIN_GORTEX_TEST_STATE")"' \
+  '    count=$((count + 1))' \
+  '    printf '"'"'%s\n'"'"' "$count" >"$IRIN_GORTEX_TEST_STATE"' \
+  '    if [ "$count" -eq 1 ]; then' \
+  '      printf '"'"'%s\n'"'"' '"'"'{"warming":{"partial_results":true,"percent":50}}'"'"'' \
+  '    else' \
+  '      printf '"'"'%s\n'"'"' '"'"'{"warming":{"partial_results":false},"changed_files":["README.md"],"risk":"LOW"}'"'"'' \
+  '    fi' \
+  '    ;;' \
+  '  *) exit 2 ;;' \
+  'esac' \
+  >"$gortex_fake_bin/gortex"
+chmod +x "$gortex_fake_bin/gortex"
+
+partial_output="$(
+  cd "$tmp/repo" &&
+    PATH="$gortex_fake_bin:/usr/bin:/bin" \
+    IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+    IRIN_GORTEX_TEST_STATE="$gortex_fake_state" \
+    IRIN_GORTEX_DETECT_TIMEOUT=5 \
+      "$ROOT/scripts/gortex-worktree.sh" detect "$tmp/repo" 2>&1
+)"
+grep -Fq 'partial graph (50%)' <<<"$partial_output"
+grep -Fq '"README.md"' <<<"$partial_output"
+[[ "$(cat "$gortex_fake_state")" == 2 ]]
+
+set +e
+timeout_output="$(
+  cd "$tmp/repo" &&
+    PATH="$gortex_fake_bin:/usr/bin:/bin" \
+    IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+    IRIN_GORTEX_TEST_STATE="$gortex_fake_state" \
+    IRIN_GORTEX_TEST_MODE=sleep \
+    IRIN_GORTEX_DETECT_TIMEOUT=1 \
+      "$ROOT/scripts/gortex-worktree.sh" detect "$tmp/repo" 2>&1
+)"
+timeout_status=$?
+set -e
+[[ "$timeout_status" -eq 124 ]]
+grep -Fq 'exceeded 1s' <<<"$timeout_output"
 
 set +e
 main_output="$(cd "$tmp/repo" && PATH=/usr/bin:/bin IRIN_REQUIRE_GORTEX=0 IRIN_PREFLIGHT_SKIP_FETCH=1 scripts/dev-preflight.sh 2>&1)"

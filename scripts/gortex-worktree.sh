@@ -112,7 +112,67 @@ for name in ("codex", "claude-code", "cursor"):
       exit 1
     }
     printf 'Gortex CLI continuity: detect_changes (MCP must be attempted first by the agent)\n'
-    gortex call detect_changes --index "$path" --arg scope=all --format text
+    python3 - "$path" "${IRIN_GORTEX_DETECT_TIMEOUT:-180}" <<'PY'
+import json
+import subprocess
+import sys
+import time
+
+path = sys.argv[1]
+timeout = int(sys.argv[2])
+command = [
+    "gortex",
+    "call",
+    "detect_changes",
+    "--index",
+    path,
+    "--arg",
+    "scope=all",
+    "--format",
+    "json",
+]
+deadline = time.monotonic() + timeout
+while True:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        print(
+            f"ERROR: Gortex detect_changes did not produce a complete result "
+            f"within {timeout}s",
+            file=sys.stderr,
+        )
+        raise SystemExit(124)
+    try:
+        completed = subprocess.run(
+            command,
+            capture_output=True,
+            check=True,
+            text=True,
+            timeout=remaining,
+        )
+    except subprocess.TimeoutExpired:
+        print(
+            f"ERROR: Gortex detect_changes exceeded {timeout}s; "
+            "the daemon remains required, but this check will not hang indefinitely",
+            file=sys.stderr,
+        )
+        raise SystemExit(124)
+    except subprocess.CalledProcessError as error:
+        sys.stdout.write(error.stdout or "")
+        sys.stderr.write(error.stderr or "")
+        raise SystemExit(error.returncode)
+
+    result = json.loads(completed.stdout)
+    warming = result.get("warming") or {}
+    if not warming.get("partial_results", False):
+        print(json.dumps(result, indent=2, sort_keys=True))
+        break
+    print(
+        "Gortex detect_changes: partial graph "
+        f"({warming.get('percent', '?')}%); waiting for a complete result",
+        file=sys.stderr,
+    )
+    time.sleep(min(2, max(0, deadline - time.monotonic())))
+PY
     ;;
 
   *)

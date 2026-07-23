@@ -98,9 +98,11 @@ Run immediately before claiming completion or updating the pull request. It:
   complete changed-file set, deterministic tested-tree fingerprint, lanes,
   commands, results, and completion time.
 
-If the pinned `cargo-deny` binary is absent, the gate downloads version
-0.19.9 into the ignored `.irin-tools/` directory and verifies the published
-SHA-256 before execution. `make tools` performs that bootstrap explicitly.
+If pinned tooling is absent, the gate downloads `cargo-deny` 0.19.9 and
+actionlint 1.7.12 into the ignored `.irin-tools/` directory and verifies each
+published SHA-256 before execution. Actionlint validates every GitHub Actions
+workflow as part of the ship receipt. `make tools` performs both bootstraps
+explicitly.
 
 No current passing receipt means no `done`, `ready`, or `safe to merge` claim.
 If another pull request merges first, update from `origin/main`, rerun

@@ -1,9 +1,10 @@
 # CI operating model
 
-IRIN uses one required aggregate check, `ci / CI required`, backed by scoped
-proof lanes. The model is local-first: trusted project work can use persistent
-self-hosted capacity, while code outside the trust predicate runs only on
-GitHub-hosted runners.
+IRIN uses a stable CI aggregate, `ci / CI required`, backed by scoped proof
+lanes. Branch protection pairs it with stable CodeQL, dependency-review, and
+automated-review checks. The model is local-first: trusted project work can use
+persistent self-hosted capacity, while code outside the trust predicate runs
+only on GitHub-hosted runners.
 
 ## Event contracts
 
@@ -16,11 +17,13 @@ GitHub-hosted runners.
 | Nightly schedule | Restricted runner group while private; `ubuntu-latest` when public; Tauri shell work uses `macos-15` | Full matrix |
 | Release tag | `ubuntu-latest` in `release.yml` | Release build and release checks |
 
-Pull requests enter through the thin `ci-pr.yml` dispatcher, which calls the
-reviewed `ci.yml` graph from `main`. GitHub preserves the pull request event
-context for that graph, so scope classification and label-gated lanes retain
-their normal behavior. Called job names receive the `ci /` prefix; this is why
-the required aggregate context is `ci / CI required`.
+Pull requests enter through the thin `ci-pr.yml` dispatcher, whose stable `ci`
+job calls `./.github/workflows/ci.yml` from the same commit under review.
+GitHub preserves the pull request event context for that graph, so scope
+classification and label-gated lanes retain their normal behavior. The local
+reusable call prevents workflow changes from being tested against an older
+copy on `main`. Called job names receive the `ci /` prefix; keeping the caller
+job id stable preserves the required `ci / CI required` context.
 
 The IRIN CI workflow repeats the full code matrix on every push to `main`. This is
 the integrated-tree receipt: individually green pull requests can still interact
@@ -36,6 +39,7 @@ trust posture, not a claim that persistent runners are safe for arbitrary code.
 
 Every pull request reports these jobs, including documentation-only changes:
 
+- GitHub Actions lint;
 - path classification;
 - root secret scan;
 - release-tree hygiene;
@@ -43,10 +47,13 @@ Every pull request reports these jobs, including documentation-only changes:
 - the `ci / CI required` aggregate.
 
 The aggregate accepts successful or intentionally skipped scoped lanes and
-fails if any selected lane fails. The detection job first runs the classifier's
+fails if any selected lane fails. Actionlint is installed from a pinned,
+checksum-verified release and validates every workflow before the aggregate can
+pass. The detection job first runs the classifier's
 self-test and validates its complete Boolean output schema, so broken or missing
 classification output fails closed rather than skipping every heavy lane. It is
-the only required branch-protection context.
+the stable aggregate for the scoped CI lanes; the security and automated-review
+workflows remain separate required branch-protection contexts.
 
 `scripts/classify-ci-paths.sh` is the path-to-lane contract. Its table-driven
 self-test covers documentation, component runtime source, War Room web, Tauri,
@@ -59,16 +66,18 @@ The heavy lanes are intentionally separate:
 - Gateway, Council, and Sentinel Rust source select their applicable Rust
   checks. Cargo manifests, lockfiles, and the shared deny policy select the
   applicable supply-chain checks; ordinary source edits do not rerun them.
-- War Room web source and npm lockfiles select Linux web lint, typecheck,
-  hosted and embedded builds, unit tests, hosted browser tests, embedded-export
-  browser tests, a production npm advisory gate, and the macOS Tauri lane. They do not select Council Rust or
-  Cargo SBOM work.
+- War Room web source and npm lockfiles select a Linux-safe web gate: lint,
+  typecheck, unit tests, hosted browser tests, embedded-export browser tests,
+  the exact static export, and a production npm advisory gate. They also select
+  the macOS Tauri lane because the desktop shell embeds that export. They do not
+  select Council Rust or Cargo SBOM work.
 - Tauri source selects the native-shell smoke on `macos-15`. Its manifest or
   lockfile selects the standalone Tauri Cargo audit and deny checks; the shared
-  deny policy also selects that supply-chain lane. The Web lane owns behavioral
-  proof for the exact embedded export; the macOS lane owns native bundle,
-  process and Tauri Rust evidence. The required local ship gate owns the native
-  visual/window evidence because hosted CI records only a headless process proof.
+  deny policy also selects that supply-chain lane. The Linux Web lane never
+  compiles the unsupported native Linux Tauri shell. The macOS lane owns Tauri
+  Rust tests, native bundle, and process evidence. The required local macOS ship
+  gate aggregates both suites and owns native visual/window evidence because
+  hosted CI records only a headless process proof.
 - SBOMs are generated by scheduled and manual full proofs, not by ordinary pull
   requests.
 
@@ -113,21 +122,37 @@ packages instead of reinstalling them for each run.
 
 ## CodeQL advanced setup
 
-`CodeQL Advanced` runs only on a schedule or by manual dispatch. It uses the
-restricted runner group while the repository is private and GitHub-hosted
-capacity when public. It analyzes Actions, JavaScript/TypeScript, Python, and
-Rust independently and is not part of `ci / CI required`.
+`CodeQL Advanced` runs on pull requests, pushes to `main`, a weekly schedule,
+and manual dispatch. It uses the restricted runner group only for the private,
+same-repository trusted path and GitHub-hosted capacity otherwise. It analyzes
+Actions, JavaScript/TypeScript, Python, and Rust independently, then reports
+the stable `CodeQL required` aggregate. The aggregate is a separate
+branch-protection context rather than part of `ci / CI required`.
 
-The repository setting transition is deliberately two-step after the promotion
-pull request merges, because GitHub dispatches a workflow only after that
-workflow exists on the default branch:
+Dependency review runs on pull requests with read-only permissions and a
+full-SHA-pinned GitHub action. Its stable `Dependency Review` check rejects
+newly introduced vulnerabilities of moderate severity or higher.
 
-1. Run the advanced workflow successfully on `main` and confirm all four
-   language analyses reach code scanning.
-2. Disable CodeQL default setup only after that proof succeeds.
+The repository's automated review service reports a stable status check.
+Repository configuration enables status checks and re-review on updates;
+branch protection enforces the check conclusion separately from the service's
+review-sensitivity setting.
 
-This permits one bounded overlap for the proof, then prevents ongoing duplicate
-default and advanced scans while preserving a proven rollback point.
+## Branch-protection contract
+
+Once all contexts have appeared on a real pull request, `main` requires:
+
+- `ci / CI required`;
+- `CodeQL required`;
+- `Dependency Review`; and
+- the configured automated-review status check.
+
+The exact names are operating contracts. Rename a caller job or aggregate only
+in a maintenance window where the replacement context first registers on a
+real pull request. Main protection also applies to administrators. Code-owner
+review is required only for the authority-bearing paths in `CODEOWNERS`, and a
+new push dismisses stale approval so the reviewed SHA remains the mergeable
+SHA. Ordinary paths retain a zero-approval solo-maintainer posture.
 
 ## Promotion and pre-public checklist
 
@@ -135,7 +160,7 @@ CI architecture changes are developed as stacked commits on one branch and
 promoted through one pull request after the full stack is locally verified and
 explicitly approved.
 
-Before making the repository public:
+For the public repository:
 
 - confirm every workflow routes to GitHub-hosted runners when the repository is
   public, while private trusted work still routes to the restricted group;
@@ -143,6 +168,11 @@ Before making the repository public:
 - keep the trusted author and same-repository predicate enforced;
 - revisit runner ephemerality when untrusted code can enter the trusted path;
 - confirm merges do not trigger duplicate post-merge IRIN CI;
+- prove workflow changes execute their own same-SHA graph;
+- register required check names before changing branch protection;
+- use a deliberately failing pull request to prove every required context
+  blocks merge, including an automated-review score below its configured
+  threshold;
 - retain one branch, stacked commits, and one promotion pull request; and
-- after the promotion merge, prove advanced CodeQL setup on `main`, then disable
-  default setup at the approved seam.
+- keep release attestation, signed-commit enforcement, and a narrower Actions
+  allowlist as separately reviewed hardening rather than overstating them here.
