@@ -63,14 +63,19 @@ if [[ "$(uname -s)" == Darwin ]]; then
 fi
 
 ! grep -Fq 'kill -9' council-rs/scripts/warroom-browser-dev.sh
-grep -Fq 'uses: ./.github/workflows/ci.yml' .github/workflows/ci-pr.yml
-! grep -Fq 'uses: irinityhq/irin/.github/workflows/ci.yml@main' .github/workflows/ci-pr.yml
+grep -Fq 'uses: irinityhq/irin/.github/workflows/ci.yml@main' .github/workflows/ci-pr.yml
+! grep -Fq 'uses: ./.github/workflows/ci.yml' .github/workflows/ci-pr.yml
 grep -Fq 'make -C council-rs warroom-web-check' .github/workflows/ci.yml
 grep -Fq 'make warroom-tauri-check' .github/workflows/ci.yml
 grep -Fq 'changed=(__integrated_main__)' .github/workflows/ci.yml
 grep -Fq 'with-test-ports.sh' council-rs/Makefile
 grep -Fq 'npm audit --omit=dev --audit-level=high' council-rs/Makefile
-grep -Fq 'cargo build --release -p council-rs --locked' council-rs/Makefile
+grep -Fq 'cargo build --release -p council-rs --bin council --locked' council-rs/Makefile
+grep -Fq 'com.sovereign.council.warroom.smoke' scripts/smoke-macos-tauri-app.sh
+grep -Fq 'a non-default IRIN_COUNCIL_PORT requires TAURI_CONFIG with exact' \
+  council-rs/warroom-tauri/src-tauri/build.rs
+grep -Fq 'native exact-build adoption proof: PASS' scripts/smoke-macos-tauri-app.sh
+grep -Fq 'native webview Council request proof: PASS' scripts/smoke-macos-tauri-app.sh
 grep -Fq 'WARROOM_SMOKE_SKIP_TAURI_TESTS' \
   council-rs/warroom-tauri/scripts/smoke-hybrid-build.sh
 [[ "$(grep -Fc 'git diff --check origin/main --' scripts/dev-check.sh)" == 2 ]]

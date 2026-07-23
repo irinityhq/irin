@@ -11,6 +11,35 @@ fn main() {
 
     println!("cargo:rustc-env=IRIN_TAURI_BUILD_GIT_SHA={sha}");
     println!("cargo:rustc-env=IRIN_TAURI_BUILD_DIRTY={dirty}");
+    println!("cargo:rerun-if-env-changed=IRIN_COUNCIL_PORT");
+    println!("cargo:rerun-if-env-changed=TAURI_CONFIG");
+    let council_port = std::env::var("IRIN_COUNCIL_PORT")
+        .ok()
+        .filter(|raw| !raw.trim().is_empty())
+        .unwrap_or_else(|| "8765".to_string());
+    let parsed_port = council_port
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|port| *port != 0)
+        .unwrap_or_else(|| {
+            panic!("IRIN_COUNCIL_PORT must be a non-zero TCP port (got {council_port:?})")
+        });
+    if parsed_port != 8765 {
+        let tauri_config = std::env::var("TAURI_CONFIG").unwrap_or_default();
+        let required_origins = [
+            format!("http://127.0.0.1:{parsed_port}"),
+            format!("ws://127.0.0.1:{parsed_port}"),
+        ];
+        assert!(
+            required_origins
+                .iter()
+                .all(|origin| tauri_config.contains(origin)),
+            "a non-default IRIN_COUNCIL_PORT requires TAURI_CONFIG with exact \
+             HTTP and WebSocket CSP origins for that port"
+        );
+    }
+    println!("cargo:rustc-env=IRIN_TAURI_COUNCIL_PORT={parsed_port}");
     emit_git_rerun_paths(&manifest_dir);
     for path in build_support::tracked_file_rerun_paths(&manifest_dir) {
         println!("cargo:rerun-if-changed={}", path.display());
