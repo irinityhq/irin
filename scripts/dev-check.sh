@@ -40,12 +40,10 @@ if [[ -n "$shared_cargo_target" ]]; then
   # Keep ambient cargo on the symlinked paths, not a detached target dir.
   unset CARGO_TARGET_DIR
 fi
-# Ship product proofs must not inherit the worktree runtime Council port into
-# ambient Tauri builds (build.rs requires matching TAURI_CONFIG CSP). Preflight
-# and the native smoke re-read .irin-worktree.env or pick their own ports.
-if [[ "$mode" == "ship" ]]; then
-  unset IRIN_COUNCIL_PORT IRIN_WEB_PORT IRIN_GATEWAY_PORT
-fi
+# Product checks must not inherit worktree runtime ports into ambient Tauri
+# builds (build.rs requires matching TAURI_CONFIG CSP). Preflight and the native
+# smoke re-read .irin-worktree.env or pick their own ports.
+unset IRIN_COUNCIL_PORT IRIN_WEB_PORT IRIN_GATEWAY_PORT
 if [[ "$mode" == "ship" ]]; then
   if (( $# > 0 )) && [[ "$dry_run" != "1" ]]; then
     printf 'ERROR: ship scope is always the complete working-tree diff; explicit paths are not allowed\n' >&2

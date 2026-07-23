@@ -230,6 +230,10 @@ mkdir -p "$gortex_fake_bin"
 printf '%s\n' \
   '#!/bin/sh' \
   'set -eu' \
+  'if [ -n "${IRIN_COUNCIL_PORT:-}" ]; then' \
+  '  printf '\''%s\n'\'' '\''IRIN_COUNCIL_PORT leaked into a check command'\'' >&2' \
+  '  exit 24' \
+  'fi' \
   'case "${1:-}" in' \
   '  repos)' \
   '    stale=false' \
@@ -267,6 +271,22 @@ printf '%s\n' \
   'esac' \
   >"$gortex_fake_bin/gortex"
 chmod +x "$gortex_fake_bin/gortex"
+
+printf '%s\n' \
+  'IRIN_COUNCIL_PORT=48765' \
+  'IRIN_WEB_PORT=48766' \
+  'IRIN_GATEWAY_PORT=48767' \
+  >"$tmp/repo/.irin-worktree.env"
+port_neutralized_output="$(
+  cd "$tmp/repo" &&
+    PATH="$gortex_fake_bin:/usr/bin:/bin" \
+    IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+    IRIN_GORTEX_TEST_STATE="$gortex_fake_state-port" \
+    IRIN_GORTEX_DETECT_TIMEOUT=5 \
+      scripts/dev-check.sh README.md 2>&1
+)"
+grep -Fq 'Mode: check' <<<"$port_neutralized_output"
+rm "$tmp/repo/.irin-worktree.env"
 
 partial_output="$(
   cd "$tmp/repo" &&
