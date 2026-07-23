@@ -24,14 +24,21 @@ if [[ "$mode" == "ship" || -f "$ROOT/.irin-worktree.env" ]]; then
   export IRIN_REQUIRE_GORTEX=1
 fi
 # Prefer a worktree-shared cargo target so each tree does not grow its own
-# multi-GB build. Symlink ./target at the shared dir so tools that look for
-# target/release/* (Playwright, scripts) still resolve the binary.
-if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
-  mkdir -p "$CARGO_TARGET_DIR"
+# multi-GB build. Use symlinks only — do not export CARGO_TARGET_DIR, or Tauri
+# and Playwright path discovery (./target, src-tauri/target) break.
+shared_cargo_target="${CARGO_TARGET_DIR:-}"
+if [[ -n "$shared_cargo_target" ]]; then
+  mkdir -p "$shared_cargo_target"
   if [[ ! -e "$ROOT/target" ]]; then
-    ln -sfn "$CARGO_TARGET_DIR" "$ROOT/target"
+    ln -sfn "$shared_cargo_target" "$ROOT/target"
   fi
-  export CARGO_TARGET_DIR
+  tauri_target="$ROOT/council-rs/warroom-tauri/src-tauri/target"
+  if [[ ! -e "$tauri_target" ]]; then
+    mkdir -p "$(dirname "$tauri_target")"
+    ln -sfn "$shared_cargo_target" "$tauri_target"
+  fi
+  # Keep ambient cargo on the symlinked paths, not a detached target dir.
+  unset CARGO_TARGET_DIR
 fi
 # Ship product proofs must not inherit the worktree runtime Council port into
 # ambient Tauri builds (build.rs requires matching TAURI_CONFIG CSP). Preflight

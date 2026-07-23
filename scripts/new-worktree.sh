@@ -101,10 +101,16 @@ short="$(printf '%03d' "$slot")"
 # cold multi-GB rebuild. Concurrent cargo still serializes via target locks.
 cargo_target_dir="${IRIN_CARGO_TARGET_DIR:-${HOME}/.cache/irin/cargo-target}"
 mkdir -p "$cargo_target_dir"
-# Symlink so path-based tools (Playwright, scripts) see target/release/* while
-# cargo still writes into the shared cache via CARGO_TARGET_DIR.
+# Symlink workspace and Tauri target dirs at the shared cache. Do not export
+# CARGO_TARGET_DIR in the process environment for builds — path-based tools
+# (Playwright, warroom-sign) resolve ./target and src-tauri/target directly.
 if [[ ! -e "$destination/target" ]]; then
   ln -sfn "$cargo_target_dir" "$destination/target"
+fi
+tauri_target="$destination/council-rs/warroom-tauri/src-tauri/target"
+if [[ ! -e "$tauri_target" ]]; then
+  mkdir -p "$(dirname "$tauri_target")"
+  ln -sfn "$cargo_target_dir" "$tauri_target"
 fi
 cat >"$destination/.irin-worktree.env" <<EOF
 IRIN_RUNTIME_PROFILE=worktree
