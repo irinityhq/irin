@@ -418,15 +418,37 @@ wait_ax_button_enabled "Enable Gateway" 45 \
   || die "Enable Gateway AXButton never became enabled after Settings"
 ax_click_button_busy "Enable Gateway"
 
-# Wait for pack ready: project + /health + admin surface (aligned with product timeouts).
+# Wait for pack ready: project + /health + admin surface + Keychain presence.
+# Do not treat bare /health as Enable-complete — product still provisions after
+# health answers (wait_control_plane + admin keys + Keychain store).
 ready=0
+ADMIN_CODE=""
 for attempt in $(seq 1 240); do
+  if "$DOCKER_BIN" compose -p irin-desktop-gateway ps -q 2>/dev/null | grep -q .; then
+    OWNED_DESKTOP_TEARDOWN=true
+  fi
   if "$DOCKER_BIN" compose -p irin-desktop-gateway ps -q 2>/dev/null | grep -q . \
     && "$CURL_BIN" -fsS --max-time 3 "http://127.0.0.1:18080/health" >/dev/null 2>&1; then
-    ready=1
-    # This run created the desktop project via Enable.
-    OWNED_DESKTOP_TEARDOWN=true
-    break
+    ADMIN_CODE="$("$CURL_BIN" -sS -o /dev/null -w '%{http_code}' --max-time 5 \
+      -X POST -H 'Content-Type: application/json' -d '{}' \
+      "http://127.0.0.1:18080/admin/keys" || true)"
+    kc_key=0
+    kc_pepper=0
+    if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
+      -a "gateway-client-gw-api-key" >/dev/null 2>&1; then
+      kc_key=1
+    fi
+    if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
+      -a "gateway-pack-auth-pepper" >/dev/null 2>&1; then
+      kc_pepper=1
+    fi
+    # Same admin predicate as product admin_surface_ready (not 502/503/504/000).
+    if [[ "$ADMIN_CODE" != "000" && "$ADMIN_CODE" != "502" \
+      && "$ADMIN_CODE" != "503" && "$ADMIN_CODE" != "504" ]] \
+      && [[ "$kc_key" == 1 && "$kc_pepper" == 1 ]]; then
+      ready=1
+      break
+    fi
   fi
   # Fail early if pack marker never appears (command did not reach install).
   if [[ "$attempt" -eq 30 && ! -f "$APP_SUPPORT_ROOT/gateway/pack-installed.json" ]]; then
@@ -448,6 +470,7 @@ if [[ "$ready" != 1 ]]; then
   else
     log "lifecycle_log_present=false"
   fi
+  log "admin_surface_http_last=${ADMIN_CODE:-none}"
   die "Gateway pack did not become healthy after Enable"
 fi
 [[ -f "$APP_SUPPORT_ROOT/gateway/pack-installed.json" ]] || die "pack-installed.json missing after Enable"
@@ -465,12 +488,12 @@ if [[ -f "$APP_SUPPORT_ROOT/Library/Keychains/login.keychain-db" ]] \
 fi
 log "isolated_login_keychain_absent=true"
 
-# Sidecar/admin readiness (non-secret status codes only)
+# Sidecar/admin readiness (non-secret status codes only) — re-probe after wait.
 ADMIN_CODE="$("$CURL_BIN" -sS -o /dev/null -w '%{http_code}' --max-time 5 \
   -X POST -H 'Content-Type: application/json' -d '{}' \
   "http://127.0.0.1:18080/admin/keys" || true)"
 log "admin_surface_http=$ADMIN_CODE"
-[[ "$ADMIN_CODE" != "000" && "$ADMIN_CODE" != "502" && "$ADMIN_CODE" != "503" ]] \
+[[ "$ADMIN_CODE" != "000" && "$ADMIN_CODE" != "502" && "$ADMIN_CODE" != "503" && "$ADMIN_CODE" != "504" ]] \
   || die "admin surface not ready"
 
 # Watch forced off - inspect compose project env via docker inspect (names only).
