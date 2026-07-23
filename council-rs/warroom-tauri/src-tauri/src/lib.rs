@@ -78,6 +78,18 @@ fn desktop_runtime_mode() -> &'static str {
     desktop_runtime_mode_value()
 }
 
+fn desktop_runtime_config_value(port: u16) -> serde_json::Value {
+    serde_json::json!({
+        "apiBase": format!("http://127.0.0.1:{port}"),
+        "wsBase": format!("ws://127.0.0.1:{port}"),
+    })
+}
+
+#[tauri::command]
+fn desktop_runtime_config() -> Result<serde_json::Value, String> {
+    Ok(desktop_runtime_config_value(default_serve_port()?))
+}
+
 fn show_main_window(app: &AppHandle) {
     let Some(window) = app.get_webview_window("main") else {
         eprintln!("[tray] main War Room window is unavailable");
@@ -533,7 +545,8 @@ pub fn run() {
             clear_server_logs,
             save_synthesis,
             save_pdf,
-            desktop_runtime_mode
+            desktop_runtime_mode,
+            desktop_runtime_config
         ])
         .setup(|app| {
             let handle = app.handle().clone();
@@ -612,7 +625,7 @@ pub fn run() {
 
 #[cfg(test)]
 mod runtime_mode_tests {
-    use super::desktop_runtime_mode_value;
+    use super::{desktop_runtime_config_value, desktop_runtime_mode_value};
 
     #[test]
     fn runtime_mode_matches_the_native_build_profile() {
@@ -622,5 +635,16 @@ mod runtime_mode_tests {
             "installed-release"
         };
         assert_eq!(desktop_runtime_mode_value(), expected);
+    }
+
+    #[test]
+    fn desktop_runtime_config_uses_the_selected_loopback_port() {
+        assert_eq!(
+            desktop_runtime_config_value(20_321),
+            serde_json::json!({
+                "apiBase": "http://127.0.0.1:20321",
+                "wsBase": "ws://127.0.0.1:20321",
+            })
+        );
     }
 }

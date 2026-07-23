@@ -439,7 +439,9 @@ jobs:
           mkdir -p council-rs/target/release
           cp target/release/council council-rs/target/release/council
 
-      - name: Run isolated hosted, embedded-export, and Tauri regression
+      - name: Run isolated hosted and embedded-export regression
+        env:
+          WARROOM_SMOKE_SKIP_TAURI_TESTS: "1"
         run: make -C council-rs warroom-check
 
   warroom-tauri:

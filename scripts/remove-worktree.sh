@@ -62,7 +62,11 @@ if [[ -n "$runtime_state_dir" ]]; then
   runtime_state_dir="$resolved_runtime_state_dir"
 fi
 
-make -s -C "$destination" runtime-down >/dev/null 2>&1 || true
+if ! make -s -C "$destination" runtime-down; then
+  printf 'ERROR: runtime teardown failed; retaining worktree and runtime state: %s\n' \
+    "$destination" >&2
+  exit 1
+fi
 if [[ "${IRIN_REQUIRE_GORTEX:-0}" == 1 ]]; then
   command -v gortex >/dev/null 2>&1 || {
     printf 'ERROR: Gortex CLI is required to remove a managed worktree cleanly\n' >&2

@@ -148,6 +148,21 @@ function readNativeConfig(): Partial<RuntimeConfig> {
   return native && typeof native === "object" ? native : {};
 }
 
+async function fetchNativeConfig(): Promise<Partial<RuntimeConfig>> {
+  if (!isBrowser()) return {};
+  const w = window as Window & {
+    __TAURI__?: unknown;
+    __TAURI_INTERNALS__?: unknown;
+  };
+  if (!w.__TAURI__ && !w.__TAURI_INTERNALS__) return {};
+  try {
+    const { invoke } = await import("@tauri-apps/api/core");
+    return await invoke<Partial<RuntimeConfig>>("desktop_runtime_config");
+  } catch {
+    return {};
+  }
+}
+
 function mergedRuntimeConfig(): RuntimeConfig {
   const defaults = defaultsForPage(
     BUILD_DEFAULTS,
@@ -173,7 +188,13 @@ function markReady(cfg: RuntimeConfig): RuntimeConfig {
 export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
   if (cache) return cache;
   if (!loadPromise) {
-    loadPromise = Promise.resolve().then(() => {
+    loadPromise = fetchNativeConfig().then((native) => {
+      if (isBrowser() && Object.keys(native).length > 0) {
+        window.__WARROOM_NATIVE_CONFIG__ = {
+          ...readNativeConfig(),
+          ...native,
+        };
+      }
       cache = markReady(mergedRuntimeConfig());
       return cache;
     });
@@ -223,6 +244,17 @@ export function isLoopbackUrl(url: string): boolean {
     return host === "127.0.0.1" || host === "localhost" || host === "::1";
   } catch {
     return false;
+  }
+}
+
+export function councilPortFromApiBase(apiBase: string): number {
+  try {
+    const url = new URL(apiBase.trim());
+    if (!isLoopbackUrl(url.origin)) return 8765;
+    const port = Number(url.port || (url.protocol === "https:" ? "443" : "80"));
+    return Number.isInteger(port) && port > 0 && port <= 65535 ? port : 8765;
+  } catch {
+    return 8765;
   }
 }
 

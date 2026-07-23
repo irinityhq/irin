@@ -4,6 +4,7 @@
 
 import {
   getAuthToken,
+  councilPortFromApiBase,
   getCouncilPath,
   getCouncilRoot,
   getLibrarianBase,
@@ -51,7 +52,7 @@ export async function onCouncilLog(
 
 export async function startCouncilServer(
   councilPath?: string,
-  serverPort = 8765,
+  serverPort?: number,
   authToken?: string,
   councilRoot?: string,
   librarianBase?: string,
@@ -65,9 +66,11 @@ export async function startCouncilServer(
   // older shells without the council_root command arg simply ignore it.
   const root = (councilRoot ?? getCouncilRoot()).trim();
   const libBase = (librarianBase ?? getLibrarianBase()).trim();
+  const resolvedPort =
+    serverPort ?? councilPortFromApiBase(getRuntimeConfig().apiBase);
   return invoke<string>("start_council_server", {
     councilPath: path || null,
-    serverPort,
+    serverPort: resolvedPort,
     authToken: token.trim() ? token.trim() : null,
     councilRoot: root || null,
     librarianBase: libBase || null,

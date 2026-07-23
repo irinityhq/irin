@@ -141,6 +141,7 @@ if [[ "$mode" == "check" ]]; then
     run "Protocol focused tests" cargo test -p sovereign-protocol
   fi
   if [[ "$(lane warroom_web)" == true ]]; then
+    run "War Room dependencies" npm --prefix council-rs/warroom/web ci
     run "War Room lint" npm --prefix council-rs/warroom/web run lint
     run "War Room typecheck" npm --prefix council-rs/warroom/web run typecheck
     run "War Room unit tests" npm --prefix council-rs/warroom/web run test:unit
@@ -149,7 +150,7 @@ if [[ "$mode" == "check" ]]; then
     run "Embedded export build" npm --prefix council-rs/warroom/web run build:tauri
     run "Tauri Rust tests" cargo test --manifest-path council-rs/warroom-tauri/src-tauri/Cargo.toml
   fi
-  run "Diff whitespace" git diff --check
+  run "Diff whitespace" git diff --check origin/main --
   exit 0
 fi
 
@@ -200,7 +201,7 @@ fi
 run "Release tree" make release-check
 run "Public-language checker self-test" scripts/check-public-pr-language.sh --self-test
 run "Public commit language" scripts/check-public-pr-language.sh --range "origin/main..HEAD"
-run "Diff whitespace" git diff --check
+run "Diff whitespace" git diff --check origin/main --
 gitleaks_bin="$(command -v gitleaks 2>/dev/null || true)"
 [[ -n "$gitleaks_bin" ]] || [[ ! -x /opt/homebrew/bin/gitleaks ]] || gitleaks_bin=/opt/homebrew/bin/gitleaks
 if [[ -n "$gitleaks_bin" || "$dry_run" == "1" ]]; then
