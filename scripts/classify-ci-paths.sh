@@ -50,6 +50,10 @@ for path in "${paths[@]}"; do
       sbom=true
       ;;
 
+    __integrated_main__)
+      set_full_matrix
+      ;;
+
     __*__|.github/workflows/*|.github/actions/*|*/.github/workflows/*|*/.github/actions/*|scripts/classify-ci-paths.sh|scripts/test-classify-ci-paths.sh)
       set_full_matrix
       ;;
@@ -91,6 +95,14 @@ for path in "${paths[@]}"; do
 
     council-rs/warroom/web/*)
       warroom_web=true
+      # The desktop shell embeds this tree. A browser-only green result is not
+      # sufficient evidence that the product export or native shell still works.
+      warroom_tauri=true
+      ;;
+
+    council-rs/scripts/warroom-*|scripts/smoke-macos-tauri-app.sh|scripts/macos-window-proof.swift)
+      warroom_web=true
+      warroom_tauri=true
       ;;
 
     council-rs/warroom-tauri/src-tauri/Cargo.toml|council-rs/warroom-tauri/src-tauri/Cargo.lock|council-rs/src-tauri/Cargo.toml|council-rs/src-tauri/Cargo.lock)

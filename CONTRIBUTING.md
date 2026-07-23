@@ -37,6 +37,15 @@ make test          # cargo test --workspace
 make release-check # release-tree completeness and hygiene
 ```
 
+Maintainer worktrees use the complete lifecycle documented in
+[`docs/development-workflow.md`](docs/development-workflow.md): `make
+preflight`, `make check` while iterating, and `make ship-check` before opening
+or updating a pull request. The last command records the exact base, selected
+lanes, commands, and results. A focused feature test alone is not sufficient
+evidence that the product remains healthy. Gortex accelerates the maintainer
+workflow but is optional for public contributors; source reads and the same
+test commands remain authoritative.
+
 The separate integration proof exercises the disarmed, no-provider
 Sentinel-to-signed-directive lane in an isolated Docker stack:
 
