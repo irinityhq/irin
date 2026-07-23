@@ -350,6 +350,19 @@ ax_click_button_busy() {
       busy_seen=1
       break
     fi
+    # Fast Disable/Stop: button can disappear on re-render before disabled is observed.
+    if [[ "$after" == "not_found" ]] && { [[ "$label" == "Disable" ]] || [[ "$label" == "Stop pack" ]]; }; then
+      busy_seen=1
+      break
+    fi
+    # Disable also flips via_gateway_default in private.json (non-secret).
+    if [[ "$label" == "Disable" ]] && [[ -f "$APP_SUPPORT_ROOT/private.json" ]]; then
+      if "$PYTHON_BIN" -c 'import json,sys; d=json.load(open(sys.argv[1])); sys.exit(0 if d.get("via_gateway_default") is False else 1)' \
+        "$APP_SUPPORT_ROOT/private.json" 2>/dev/null; then
+        busy_seen=1
+        break
+      fi
+    fi
     sleep 0.15
   done
   log "ax_busy_${label// /_}=$busy_seen after=${after:-unknown}"
