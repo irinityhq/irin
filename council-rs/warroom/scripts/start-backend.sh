@@ -1,5 +1,5 @@
 #!/bin/bash
-# Council War Room — Backend launcher (launchd)
+# IRIN — Backend launcher (launchd)
 set -euo pipefail
 source "$(dirname "$0")/env.sh"
 

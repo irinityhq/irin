@@ -1,6 +1,6 @@
 #!/usr/bin/env swift
 // Deterministic packaged War Room webview evidence:
-//   capture  — locate the host PID's Council War Room window, screenshot only that
+//   capture  — locate the host PID's IRIN window, screenshot only that
 //              window, OCR it, require app-specific markers (fail closed).
 //   verify   — OCR an existing PNG and apply the same marker predicate.
 //   selftest — unit-test the predicate + reject a known-bad image if provided.
@@ -130,13 +130,13 @@ func listCandidateWindows(ownerPid: pid_t) -> [WindowHit] {
 func isWarRoomIdentity(owner: String, title: String) -> Bool {
   let o = owner.lowercased()
   let t = title.lowercased()
-  if o.contains("council war room") { return true }
-  if t.contains("council war room") { return true }
-  if o.contains("council-warroom-tauri") && (t.contains("war room") || t.contains("council")) {
+  if o.contains("irin") { return true }
+  if t.contains("irin") { return true }
+  if o.contains("council-warroom-tauri") && (t.contains("war room") || t.contains("irin")) {
     return true
   }
   // Empty title is common for some WKWebView layers; owner name still binds us.
-  if o == "council war room" { return true }
+  if o == "irin" { return true }
   if o.contains("council-warroom") { return true }
   return false
 }
@@ -159,7 +159,8 @@ func selectWarRoomWindow(ownerPid: pid_t) throws -> WindowHit {
   if identified.isEmpty {
     let owner = best.ownerName.lowercased()
     let okOwner =
-      owner.contains("council")
+      owner.contains("irin")
+      || owner.contains("council")
       || owner.contains("warroom")
       || owner.contains("war room")
     if !okOwner {
@@ -212,7 +213,7 @@ enum EvidenceError: Error, CustomStringConvertible {
     case .loadFailed(let p): return "failed to load image: \(p)"
     case .decodeFailed(let p): return "failed to decode image: \(p)"
     case .noWindow(let pid): return "no on-screen window for packaged host pid=\(pid)"
-    case .wrongWindow(let d): return "window is not Council War Room: \(d)"
+    case .wrongWindow(let d): return "window is not IRIN: \(d)"
     case .captureFailed(let d): return "window capture failed: \(d)"
     case .markersFailed(let hits, let misses):
       return "webview markers insufficient: hits=\(hits.joined(separator: ",")) misses=\(misses.joined(separator: ",")) need>=\(minRequiredHits)"

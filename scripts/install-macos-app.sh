@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build, verify, and atomically install the local Council War Room app.
+# Build, verify, and atomically install the local IRIN app.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -17,8 +17,8 @@ done
 
 make -C "$ROOT/council-rs" warroom-build
 
-source_app="${IRIN_APP_SOURCE:-$ROOT/council-rs/warroom-tauri/src-tauri/target/release/bundle/macos/Council War Room.app}"
-dest_app="${IRIN_APP_DESTINATION:-/Applications/Council War Room.app}"
+source_app="${IRIN_APP_SOURCE:-$ROOT/council-rs/warroom-tauri/src-tauri/target/release/bundle/macos/IRIN.app}"
+dest_app="${IRIN_APP_DESTINATION:-/Applications/IRIN.app}"
 app_binary_name="${IRIN_APP_BINARY_NAME:-council-warroom-tauri}"
 source_binary="$source_app/Contents/MacOS/$app_binary_name"
 dest_binary="$dest_app/Contents/MacOS/$app_binary_name"
@@ -72,8 +72,8 @@ app_process_running() {
 }
 
 parent="$(dirname "$dest_app")"
-stage="$parent/.Council War Room.app.new.$$"
-backup="$parent/.Council War Room.app.old.$$"
+stage="$parent/.IRIN.app.new.$$"
+backup="$parent/.IRIN.app.old.$$"
 
 cleanup() {
   local status=$?
@@ -90,7 +90,7 @@ trap cleanup EXIT
 
 ditto "$source_app" "$stage"
 codesign --verify --deep --strict "$stage"
-osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
+osascript -e 'tell application "IRIN" to quit' >/dev/null 2>&1 || true
 
 # Replacing a bundle while its executable still runs can leave Launch Services
 # pointing at the retired inode. Wait boundedly for the exact installed bundle
@@ -100,7 +100,7 @@ for ((check = 1; check <= quit_checks; check++)); do
     break
   fi
   if (( check == quit_checks )); then
-    die "Council War Room did not exit before app replacement"
+    die "IRIN did not exit before app replacement"
   fi
   sleep "$quit_check_delay"
 done

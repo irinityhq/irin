@@ -24,7 +24,7 @@ const plexMono = IBM_Plex_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Council War Room — Gen 9.15",
+  title: "IRIN — Gen 9.15",
   description:
     "Sovereign multi-model deliberation. Streaming rounds, mid-flight steering, precedent intelligence.",
 };

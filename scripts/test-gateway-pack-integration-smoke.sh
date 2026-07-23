@@ -20,7 +20,7 @@ COMPOSE="$ROOT/packaging/gateway-pack/docker-compose.yml"
 MANIFEST_LOCAL="$ROOT/packaging/build/gateway-pack/image-manifest.local.json"
 FOREIGN_PROJECT="irin-foreign-isolation-probe"
 FOREIGN_VOLUME="irin_foreign_isolation_vol"
-TEST_SERVICE="com.sovereign.council.warroom.test.pack-smoke.$$"
+TEST_SERVICE="com.irinity.irin.test.pack-smoke.$$"
 TEST_ACCOUNT="gateway-client-gw-api-key-test"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/irin-gw-pack-smoke.XXXXXX")"
 DESKTOP_PREEXISTING=false
@@ -144,7 +144,7 @@ log "foreign_project_started=$FOREIGN_PROJECT"
 log "foreign_volume=$FOREIGN_VOLUME"
 
 # Unrelated Keychain item (unique service) — must survive cleanup of desktop item.
-FOREIGN_KC_SERVICE="com.sovereign.council.warroom.test.foreign.$$"
+FOREIGN_KC_SERVICE="com.irinity.irin.test.foreign.$$"
 security add-generic-password -U -s "$FOREIGN_KC_SERVICE" -a "foreign-item" -w "not-a-secret-marker" >/dev/null 2>&1 \
   || security delete-generic-password -s "$FOREIGN_KC_SERVICE" -a "foreign-item" >/dev/null 2>&1
 security add-generic-password -U -s "$FOREIGN_KC_SERVICE" -a "foreign-item" -w "not-a-secret-marker" >/dev/null

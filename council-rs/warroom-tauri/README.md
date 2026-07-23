@@ -1,4 +1,4 @@
-# Council War Room (Desktop)
+# IRIN (Desktop)
 
 Primary operator UI for council-rs: a **Tauri v2** desktop shell hosting the full
 **Next.js** War Room from `warroom/web/` (including Deliberation, Outbox,

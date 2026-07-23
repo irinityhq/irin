@@ -9,8 +9,8 @@ source "$ROOT/packaging/env.sh"
 
 TEST_APPS="$ROOT/packaging/test-apps"
 MOUNT="$ROOT/packaging/build/dmg-mount"
-DMG="${IRIN_DMG_PATH:-$ROOT/packaging/artifacts/Council War Room_0.1.0_aarch64.dmg}"
-APP_NAME="Council War Room.app"
+DMG="${IRIN_DMG_PATH:-$ROOT/packaging/artifacts/IRIN_0.1.0_aarch64.dmg}"
+APP_NAME="IRIN.app"
 DEST_APP="$TEST_APPS/$APP_NAME"
 REPORT="$ROOT/packaging/receipts/VERIFY.txt"
 

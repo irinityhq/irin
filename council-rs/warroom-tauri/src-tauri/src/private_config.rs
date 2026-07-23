@@ -1,8 +1,12 @@
 //! First-launch private configuration for the packaged desktop app.
 //!
 //! Lives under Application Support:
-//! - Default: `$HOME/Library/Application Support/com.sovereign.council.warroom`
+//! - Default: `$HOME/Library/Application Support/com.irinity.irin`
 //! - Override: absolute path in `IRIN_APP_SUPPORT_ROOT` (test / portable-state only)
+//!
+//! First launch under the default location adopts operator state left by the
+//! retired "Council War Room" directory (`com.sovereign.council.warroom`) as a
+//! non-destructive one-time copy; the legacy directory is never deleted.
 //!
 //! `IRIN_APP_SUPPORT_ROOT` relocates **app data only** (private.json, gateway pack
 //! tree, overlays). It must never change Keychain selection, login session, or
@@ -16,7 +20,11 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-const APP_SUPPORT_DIR_NAME: &str = "com.sovereign.council.warroom";
+const APP_SUPPORT_DIR_NAME: &str = "com.irinity.irin";
+/// Legacy Application Support directory name from the retired "Council War
+/// Room" product identity. Read-only source for first-launch adoption of
+/// existing operator state; this app never writes or deletes here.
+const LEGACY_APP_SUPPORT_DIR_NAME: &str = "com.sovereign.council.warroom";
 const PRIVATE_CONFIG_FILE: &str = "private.json";
 const CONFIG_VERSION: u32 = 1;
 
@@ -83,7 +91,7 @@ fn new_install_id() -> String {
 ///
 /// Precedence:
 /// 1. `IRIN_APP_SUPPORT_ROOT` — absolute path to the app support dir itself
-/// 2. `$HOME/Library/Application Support/<id>`
+/// 2. `$HOME/Library/Application Support/<id>` — may first adopt legacy state
 /// 3. `/tmp/<id>` last resort
 ///
 /// The env override never affects Keychain APIs.
@@ -94,13 +102,71 @@ pub fn app_support_dir() -> PathBuf {
     if let Ok(home) = std::env::var("HOME") {
         let trimmed = home.trim();
         if !trimmed.is_empty() {
-            return PathBuf::from(trimmed)
+            let home_dir = PathBuf::from(trimmed);
+            adopt_legacy_app_support_dir(&home_dir);
+            return home_dir
                 .join("Library")
                 .join("Application Support")
                 .join(APP_SUPPORT_DIR_NAME);
         }
     }
     PathBuf::from("/tmp").join(APP_SUPPORT_DIR_NAME)
+}
+
+/// Best-effort, non-destructive adoption of Application Support state written
+/// by the legacy "Council War Room" build (`com.sovereign.council.warroom`).
+///
+/// Runs only for the default `$HOME/Library/Application Support` resolution —
+/// an explicit `IRIN_APP_SUPPORT_ROOT` override never triggers it. The copy
+/// happens only while the new directory does not exist yet (the idempotent
+/// precondition), and is skipped while a legacy app process is running so two
+/// writers never race. The legacy directory is never deleted. Failures
+/// degrade to an ordinary fresh first-launch directory.
+fn adopt_legacy_app_support_dir(home: &Path) {
+    let base = home.join("Library").join("Application Support");
+    let new_dir = base.join(APP_SUPPORT_DIR_NAME);
+    let legacy_dir = base.join(LEGACY_APP_SUPPORT_DIR_NAME);
+    if new_dir.exists() || !legacy_dir.is_dir() {
+        return;
+    }
+    if legacy_app_process_running() {
+        eprintln!(
+            "legacy app process is running; skipping one-time Application Support \
+             migration (retried on next launch)"
+        );
+        return;
+    }
+    if let Err(e) = copy_legacy_app_support_dir(&legacy_dir, &new_dir) {
+        eprintln!(
+            "legacy Application Support migration failed: {e}; continuing with fresh state"
+        );
+        // A partial copy must not satisfy the new-dir-exists precondition on
+        // the next launch; remove only what this copy attempt just created.
+        let _ = fs::remove_dir_all(&new_dir);
+    }
+}
+
+/// Copy `legacy_dir` to `new_dir` when, and only when, `new_dir` does not yet
+/// exist and `legacy_dir` does. Returns whether a copy happened. Split out
+/// from `adopt_legacy_app_support_dir` so tests can drive it with temp dirs.
+fn copy_legacy_app_support_dir(legacy_dir: &Path, new_dir: &Path) -> std::io::Result<bool> {
+    if new_dir.exists() || !legacy_dir.is_dir() {
+        return Ok(false);
+    }
+    copy_dir_recursive(legacy_dir, new_dir)?;
+    Ok(true)
+}
+
+/// True when the legacy "Council War Room" app appears to be running.
+fn legacy_app_process_running() -> bool {
+    std::process::Command::new("pgrep")
+        .args(["-f", "Council War Room"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
 }
 
 /// Parse and validate `IRIN_APP_SUPPORT_ROOT` (absolute, non-empty, no NUL).
@@ -680,6 +746,42 @@ mod tests {
             Some(v) => std::env::set_var(APP_SUPPORT_ROOT_ENV, v),
             None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),
         }
+    }
+
+    #[test]
+    fn legacy_app_support_copy_happens_only_when_new_absent() {
+        let tmp = std::env::temp_dir().join(format!(
+            "irin-legacy-support-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        let legacy = tmp.join(LEGACY_APP_SUPPORT_DIR_NAME);
+        let new = tmp.join(APP_SUPPORT_DIR_NAME);
+        fs::create_dir_all(legacy.join("nested")).unwrap();
+        fs::write(legacy.join("private.json"), b"{\"version\":1}\n").unwrap();
+        fs::write(legacy.join("nested/state.txt"), b"operator state\n").unwrap();
+
+        // Copy happens when the new directory is absent.
+        assert!(copy_legacy_app_support_dir(&legacy, &new).unwrap());
+        assert_eq!(
+            fs::read_to_string(new.join("private.json")).unwrap(),
+            "{\"version\":1}\n"
+        );
+        assert!(new.join("nested/state.txt").is_file());
+        // Legacy tree is left intact (non-destructive).
+        assert!(legacy.join("nested/state.txt").is_file());
+
+        // No copy (and no clobber) when the new directory already exists.
+        fs::write(new.join("operator.yaml"), b"name: operator\n").unwrap();
+        fs::write(legacy.join("operator.yaml"), b"name: legacy\n").unwrap();
+        assert!(!copy_legacy_app_support_dir(&legacy, &new).unwrap());
+        assert_eq!(
+            fs::read_to_string(new.join("operator.yaml")).unwrap(),
+            "name: operator\n"
+        );
+
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

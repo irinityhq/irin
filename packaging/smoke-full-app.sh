@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Full-app packaged smoke + promotion gate for Council War Room DMG installs.
+# Full-app packaged smoke + promotion gate for IRIN DMG installs.
 #
 # Modes:
 #   default / BOUNDED: may report BOUNDED_PASS when :8765 is intentionally
@@ -19,12 +19,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT/packaging/env.sh"
 
 PROMOTION="${PROMOTION:-0}"
-APP_NAME="Council War Room.app"
+APP_NAME="IRIN.app"
 TEST_APPS="$ROOT/packaging/test-apps"
 DEST_APP="${IRIN_SMOKE_APP:-$TEST_APPS/$APP_NAME}"
 TEST_HOME="$ROOT/packaging/test-home/smoke-$$"
 MOUNT="$ROOT/packaging/build/dmg-mount"
-DMG="${IRIN_DMG_PATH:-$ROOT/packaging/artifacts/Council War Room_0.1.0_aarch64.dmg}"
+DMG="${IRIN_DMG_PATH:-$ROOT/packaging/artifacts/IRIN_0.1.0_aarch64.dmg}"
 REPORT="$ROOT/packaging/receipts/FULL_APP_SMOKE.txt"
 WEBVIEW_SHOT="$ROOT/packaging/receipts/webview-smoke.png"
 PIDFILE="$ROOT/packaging/build/smoke-host.pid"
@@ -118,7 +118,7 @@ is_our_packaged_listener() {
 
 # Gracefully stop the packaged host and any sidecar it left behind on :8765.
 stop_packaged_host() {
-  osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
+  osascript -e 'tell application "IRIN" to quit' >/dev/null 2>&1 || true
   if [[ -f "$PIDFILE" ]]; then
     local p
     p="$(cat "$PIDFILE" 2>/dev/null || true)"
@@ -182,7 +182,7 @@ cleanup() {
     fi
     rm -f "$SIDECAR_PIDFILE"
   fi
-  osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
+  osascript -e 'tell application "IRIN" to quit' >/dev/null 2>&1 || true
   # Never kill FOREIGN_8765.
   if [[ -n "${TEST_HOME:-}" && -d "${TEST_HOME:-}" ]]; then
     # Keep receipt evidence; drop isolated login profile so marker values are not retained.
@@ -208,7 +208,7 @@ EOF
 export HOME="$TEST_HOME"
 export TMPDIR="$TEST_HOME/tmp"
 
-SUPPORT_DIR="$TEST_HOME/Library/Application Support/com.sovereign.council.warroom"
+SUPPORT_DIR="$TEST_HOME/Library/Application Support/com.irinity.irin"
 SESSIONS="$SUPPORT_DIR/sessions"
 mkdir -p "$SESSIONS"
 
@@ -231,7 +231,7 @@ if [[ -n "$FOREIGN_8765" ]]; then
     die "foreign Council PID changed ($BEFORE -> $AFTER) — isolation violated"
   fi
   log "port_conflict_ok=true (foreign listener unchanged)"
-  osascript -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
+  osascript -e 'tell application "IRIN" to quit' >/dev/null 2>&1 || true
   sleep 1
 
   if [[ "$PROMOTION" == "1" ]]; then
@@ -449,7 +449,7 @@ command -v swift >/dev/null 2>&1 || die "swift required for webview evidence"
 kill -0 "$HOST_PID" 2>/dev/null || die "packaged host pid $HOST_PID not running for webview capture"
 # Best-effort activate so the window is on-screen (capture still keys off PID).
 osascript >/dev/null 2>&1 <<'APPLESCRIPT' || true
-tell application "Council War Room" to activate
+tell application "IRIN" to activate
 delay 1
 APPLESCRIPT
 rm -f "$WEBVIEW_SHOT"

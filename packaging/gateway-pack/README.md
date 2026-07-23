@@ -40,7 +40,7 @@ path does not weaken the production digest requirement.
 
 | Path | Purpose | Permissions |
 | --- | --- | --- |
-| `~/Library/Application Support/com.sovereign.council.warroom/gateway/` | Pack data root | `0700` |
+| `~/Library/Application Support/com.irinity.irin/gateway/` | Pack data root | `0700` |
 | `…/gateway/ledger_key` | Ledger signing seed (bind-mount only) | `0600` |
 | `…/gateway/runtime.env` | Non-renderer secrets for Compose | `0600` |
 | `private.json` | Non-secret: enabled flag, key id, pack version | `0600` |
@@ -71,7 +71,7 @@ keychain under the override path.
 
 Final stable Developer ID signing must prove Keychain item continuity across
 app upgrades under the stable app identity
-`com.sovereign.council.warroom`. Ad-hoc signed local builds may not retain
+`com.irinity.irin`. Ad-hoc signed local builds may not retain
 Keychain access across identity changes; that is a release ceremony item, not
 proven by local DMG smoke.
 

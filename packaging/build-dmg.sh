@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build a self-contained aarch64 Council War Room .app + .dmg from this monorepo.
+# Build a self-contained aarch64 IRIN .app + .dmg from this monorepo.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -106,7 +106,7 @@ echo "=== tauri build (app + dmg) ==="
 # Resolve the app strictly from this build's pinned target dir (env.sh).
 # Never scavenge other target dirs: a stale foreign build (e.g. a port-isolated
 # smoke app with a different baked-in Council port) would be packaged silently.
-APP="$CARGO_TARGET_DIR/release/bundle/macos/Council War Room.app"
+APP="$CARGO_TARGET_DIR/release/bundle/macos/IRIN.app"
 [[ -d "$APP" ]] || die "app bundle not found at $APP (tauri build did not produce it)"
 
 echo "=== ad-hoc codesign (build artifact only; never use production credentials) ==="
@@ -123,8 +123,8 @@ if [[ ! -d "$APP/Contents/Resources/council-base/cabinets" ]]; then
 fi
 
 mkdir -p "$ROOT/packaging/artifacts"
-DEST_APP="$ROOT/packaging/artifacts/Council War Room.app"
-DEST_DMG="$ROOT/packaging/artifacts/Council War Room_0.1.0_aarch64.dmg"
+DEST_APP="$ROOT/packaging/artifacts/IRIN.app"
+DEST_DMG="$ROOT/packaging/artifacts/IRIN_0.1.0_aarch64.dmg"
 rm -rf "$DEST_APP"
 ditto "$APP" "$DEST_APP"
 codesign --force --deep --sign - "$DEST_APP"
@@ -134,10 +134,10 @@ echo "=== hdiutil DMG from ad-hoc signed app ==="
 STAGE="$ROOT/packaging/build/dmg-stage"
 rm -rf "$STAGE"
 mkdir -p "$STAGE"
-ditto "$DEST_APP" "$STAGE/Council War Room.app"
+ditto "$DEST_APP" "$STAGE/IRIN.app"
 ln -sf /Applications "$STAGE/Applications"
 rm -f "$DEST_DMG"
-hdiutil create -volname "Council War Room" -srcfolder "$STAGE" -ov -format UDZO "$DEST_DMG"
+hdiutil create -volname "IRIN" -srcfolder "$STAGE" -ov -format UDZO "$DEST_DMG"
 
 {
   echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"

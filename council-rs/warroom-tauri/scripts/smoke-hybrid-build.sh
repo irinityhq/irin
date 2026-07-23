@@ -51,7 +51,7 @@ assert_markers() {
   exit 1
 }
 
-assert_markers "Council War Room" "War Room title"
+assert_markers "IRIN" "IRIN app title"
 assert_markers "Outbox" "Outbox surface asset"
 assert_markers "Librarian" "Librarian surface asset"
 assert_markers "Drift" "Drift surface asset"

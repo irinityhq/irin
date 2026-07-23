@@ -27,7 +27,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/packaging/env.sh"
 
-APP_NAME="Council War Room.app"
+APP_NAME="IRIN.app"
 TEST_APPS="$ROOT/packaging/test-apps"
 DEST_APP="${IRIN_SMOKE_APP:-$TEST_APPS/$APP_NAME}"
 TEST_HOME="$ROOT/packaging/test-home/gw-pack-smoke-$$"
@@ -36,7 +36,7 @@ PIDFILE="$ROOT/packaging/build/gw-pack-ui-host.pid"
 HOST_LOG="$ROOT/packaging/build/gw-pack-ui-host.log"
 FOREIGN_PROJECT="irin-foreign-isolation-probe"
 FOREIGN_VOLUME="irin_foreign_isolation_vol"
-FOREIGN_KC_SERVICE="com.sovereign.council.warroom.test.foreign-ui-$$"
+FOREIGN_KC_SERVICE="com.irinity.irin.test.foreign-ui-$$"
 FOREIGN_KC_ACCOUNT="foreign-item"
 DOCKER_BIN="/usr/local/bin/docker"
 [[ -x "$DOCKER_BIN" ]] || DOCKER_BIN="/Applications/Docker.app/Contents/Resources/bin/docker"
@@ -99,7 +99,7 @@ log "docker_bin=$DOCKER_BIN"
 HOST="$DEST_APP/Contents/MacOS/council-warroom-tauri"
 [[ -x "$HOST" ]] || die "host missing"
 
-APP_SUPPORT_REL="Library/Application Support/com.sovereign.council.warroom"
+APP_SUPPORT_REL="Library/Application Support/com.irinity.irin"
 PACK_MARKER_REL="$APP_SUPPORT_REL/gateway/pack-installed.json"
 
 reclaim_owned_listeners() {
@@ -118,7 +118,7 @@ reclaim_owned_listeners() {
 
 graceful_quit_app() {
   set +e
-  "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to quit' >/dev/null 2>&1 || true
+  "$OSASCRIPT_BIN" -e 'tell application "IRIN" to quit' >/dev/null 2>&1 || true
   # Wait for orderly RunEvent cleanup (owned Council stop).
   local i
   for i in $(seq 1 30); do
@@ -260,7 +260,7 @@ ax_click_button() {
   local label="$1"
   "$OSASCRIPT_BIN" <<APPLESCRIPT
 tell application "System Events"
-  tell process "Council War Room"
+  tell process "IRIN"
     set frontmost to true
     delay 0.4
     -- Top-level window buttons first
@@ -293,7 +293,7 @@ ax_button_enabled() {
   local label="$1"
   "$OSASCRIPT_BIN" <<APPLESCRIPT
 tell application "System Events"
-  tell process "Council War Room"
+  tell process "IRIN"
     try
       set b to first button of window 1 whose name is "${label}"
       if enabled of b then
@@ -439,7 +439,7 @@ wait_ax_button_enabled() {
       return 0
     fi
     if (( i % 5 == 0 )); then
-      "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
+      "$OSASCRIPT_BIN" -e 'tell application "IRIN" to activate' >/dev/null 2>&1 || true
       # Keep Settings open without requiring the Settings button every tick.
       ax_click_button "Settings" >/dev/null 2>&1 || true
     fi
@@ -450,7 +450,7 @@ wait_ax_button_enabled() {
 }
 
 # --- b/c) Accessibility: Settings -> Enable Gateway ---
-"$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
+"$OSASCRIPT_BIN" -e 'tell application "IRIN" to activate' >/dev/null 2>&1 || true
 sleep 1
 SETTINGS_CLICK="not_found"
 for i in $(seq 1 30); do
@@ -459,7 +459,7 @@ for i in $(seq 1 30); do
     log "ax_settings_ready_after=${i}s"
     break
   fi
-  "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
+  "$OSASCRIPT_BIN" -e 'tell application "IRIN" to activate' >/dev/null 2>&1 || true
   sleep 1
 done
 log "ax_settings=$SETTINGS_CLICK"
@@ -488,11 +488,11 @@ for attempt in $(seq 1 240); do
       "http://127.0.0.1:18080/admin/keys" || true)"
     kc_key=0
     kc_pepper=0
-    if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
+    if "$SECURITY_BIN" find-generic-password -s "com.irinity.irin" \
       -a "gateway-client-gw-api-key" >/dev/null 2>&1; then
       kc_key=1
     fi
-    if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
+    if "$SECURITY_BIN" find-generic-password -s "com.irinity.irin" \
       -a "gateway-pack-auth-pepper" >/dev/null 2>&1; then
       kc_pepper=1
     fi
@@ -566,13 +566,13 @@ echo "$WATCH_PROBE" | grep -q 'producer=false' || die "WATCH_PRODUCER_ENABLED no
 echo "$WATCH_PROBE" | grep -q 'dispatcher=false' || die "WATCH_DISPATCHER_ENABLED not false"
 
 # Keychain presence (production accounts) without reading values - fail closed.
-if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
+if "$SECURITY_BIN" find-generic-password -s "com.irinity.irin" \
   -a "gateway-client-gw-api-key" >/dev/null 2>&1; then
   log "keychain_gw_api_key=present"
 else
   die "app Keychain item gateway-client-gw-api-key missing after Enable"
 fi
-if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
+if "$SECURITY_BIN" find-generic-password -s "com.irinity.irin" \
   -a "gateway-pack-auth-pepper" >/dev/null 2>&1; then
   log "keychain_auth_pepper=present"
 else
@@ -615,7 +615,7 @@ log "fake_route_fail_closed=true"
 log "step_enable=ok"
 
 # e) Disable - actual button only
-"$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
+"$OSASCRIPT_BIN" -e 'tell application "IRIN" to activate' >/dev/null 2>&1 || true
 sleep 0.5
 ax_click_button "Settings" >/dev/null 2>&1 || true
 wait_ax_button_enabled "Disable" 30 \
@@ -664,7 +664,7 @@ log "step_disable=ok"
 OWNED_COUNCIL_PIDS="$OWNED_COUNCIL_PIDS,$PID3"
 
 # f) Stop pack - actual button only (no compose fallback)
-"$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
+"$OSASCRIPT_BIN" -e 'tell application "IRIN" to activate' >/dev/null 2>&1 || true
 sleep 0.5
 ax_click_button "Settings" >/dev/null 2>&1 || true
 wait_ax_button_enabled "Stop pack" 30 \
@@ -765,7 +765,7 @@ print("private_keys=", sorted(d.keys()))
 print("via_gateway_default=", d.get("via_gateway_default"))
 print("has_key_id=", bool(d.get("gateway_key_id")))
 PY
-if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
+if "$SECURITY_BIN" find-generic-password -s "com.irinity.irin" \
   -a "gateway-client-gw-api-key" >/dev/null 2>&1; then
   log "keychain_gw_api_key_after_relaunch=present"
 else
@@ -776,7 +776,7 @@ log "relaunch_continuity=ok"
 # h) Uninstall via actual AX only (no compose fallback).
 # Note: packBusy is set only AFTER window.confirm accepts - so we click the
 # button, confirm the dialog, then require a busy transition / removal proof.
-"$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
+"$OSASCRIPT_BIN" -e 'tell application "IRIN" to activate' >/dev/null 2>&1 || true
 sleep 0.5
 ax_click_button "Settings" >/dev/null 2>&1 || true
 wait_ax_button_enabled "Uninstall pack" 30 \
@@ -792,7 +792,7 @@ sleep 0.4
 CONFIRM_RC="$(
   "$OSASCRIPT_BIN" 2>/dev/null <<'APPLESCRIPT' || true
 tell application "System Events"
-  tell process "Council War Room"
+  tell process "IRIN"
     -- Prefer explicit confirm buttons
     try
       click button "OK" of window 1
@@ -860,11 +860,11 @@ if [[ -d "$APP_SUPPORT_ROOT/gateway" ]]; then
   die "app-owned gateway data dir still present after Uninstall"
 fi
 log "app_gateway_data_removed=true"
-if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
+if "$SECURITY_BIN" find-generic-password -s "com.irinity.irin" \
   -a "gateway-client-gw-api-key" >/dev/null 2>&1; then
   die "app Keychain item gateway-client-gw-api-key still present after Uninstall"
 fi
-if "$SECURITY_BIN" find-generic-password -s "com.sovereign.council.warroom" \
+if "$SECURITY_BIN" find-generic-password -s "com.irinity.irin" \
   -a "gateway-pack-auth-pepper" >/dev/null 2>&1; then
   die "app Keychain item gateway-pack-auth-pepper still present after Uninstall"
 fi

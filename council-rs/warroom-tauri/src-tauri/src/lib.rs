@@ -11,7 +11,7 @@ mod private_config;
 mod sidecar;
 
 use gateway_pack::{GatewayPackStatus, GatewayPackState};
-use keychain::{load_gw_api_key, KeychainSecretStore};
+use keychain::{load_gw_api_key, migrate_legacy_secrets, KeychainSecretStore};
 use paths::{
     build_cors_origins, default_serve_port, is_packaged_install, resolve_council_binary,
     resolve_council_rs_dir, resolve_spawn_base_dir, validate_serve_port,
@@ -496,7 +496,7 @@ fn try_start_council_server(
     let _ = app
         .notification()
         .builder()
-        .title("Council War Room")
+        .title("IRIN")
         .body(format!("Sidecar council --serve started on :{port}"))
         .show();
 
@@ -976,6 +976,12 @@ pub fn run() {
             report_council_runtime_ready
         ])
         .setup(|app| {
+            // One-time, non-destructive adoption of Keychain secrets stored by
+            // the legacy "Council War Room" build (never deletes legacy items).
+            {
+                let store = KeychainSecretStore;
+                migrate_legacy_secrets(&store);
+            }
             let handle = app.handle().clone();
             let menu = Menu::with_items(
                 app,
@@ -985,7 +991,7 @@ pub fn run() {
                 ],
             )?;
             let mut tray_builder = TrayIconBuilder::new()
-                .tooltip("Council War Room")
+                .tooltip("IRIN")
                 .menu(&menu);
             if let Some(icon) = app.default_window_icon() {
                 tray_builder = tray_builder.icon(icon.clone());

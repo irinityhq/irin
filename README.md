@@ -105,7 +105,7 @@ engineering lane. See
 | War Room Web | `http://127.0.0.1:3010` |
 | Council API/WebSocket | `http://127.0.0.1:8765` |
 | Gateway | `http://127.0.0.1:18080` with macOS `make setup`, or when started separately on Ubuntu |
-| Desktop app | `Council War Room.app` on macOS, same backend as above |
+| Desktop app | `IRIN.app` on macOS, same backend as above |
 | Private phone | macOS `make setup` only: `https://<your-device>.<tailnet>.ts.net` when Tailscale is installed and connected — never a public URL |
 
 ## Discover, then deliberate

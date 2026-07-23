@@ -7,7 +7,7 @@ setup: ## macOS: prepare config, start the managed runtime, and enable login rec
 setup-prepare: ## Prepare private local config and signing material without starting services
 	bash scripts/setup-local.sh --prepare-only
 
-app-install: ## Build, atomically install, and launch the Council War Room app
+app-install: ## Build, atomically install, and launch the IRIN app
 	bash scripts/install-macos-app.sh
 
 release-check: ## Verify product completeness and tree hygiene
@@ -72,7 +72,7 @@ warroom-tauri: ## Open the War Room native desktop shell (Tauri)
 warroom-tauri-build: ## Package the War Room native desktop shell (Tauri)
 	$(MAKE) -C council-rs warroom-build
 
-dmg-build: ## Build ad-hoc signed Council War Room .app + .dmg (Apple silicon)
+dmg-build: ## Build ad-hoc signed IRIN .app + .dmg (Apple silicon)
 	bash packaging/build-dmg.sh
 
 dmg-verify: ## Verify DMG layout/codesign on an untouched copy (never re-signs)

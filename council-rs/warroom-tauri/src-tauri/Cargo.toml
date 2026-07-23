@@ -1,7 +1,7 @@
 [package]
 name = "council-warroom-tauri"
 version = "0.1.0"
-description = "Council War Room desktop shell (Tauri)"
+description = "IRIN desktop shell (Tauri)"
 authors = ["Sovereign Council"]
 edition = "2021"
 license = "Apache-2.0"

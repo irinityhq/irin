@@ -19,7 +19,11 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 
 /// Stable app identity — must match tauri.conf.json `identifier`.
-pub const KEYCHAIN_SERVICE: &str = "com.sovereign.council.warroom";
+pub const KEYCHAIN_SERVICE: &str = "com.irinity.irin";
+/// Legacy app identity from the retired "Council War Room" product name.
+/// Read-only: first launch adopts existing operator secrets from this service
+/// (see `migrate_legacy_secrets`); the app never writes or deletes items here.
+pub const LEGACY_KEYCHAIN_SERVICE: &str = "com.sovereign.council.warroom";
 /// Account label for the Council service-role client key.
 pub const GW_API_KEY_ACCOUNT: &str = "gateway-client-gw-api-key";
 /// Account label for the long-lived auth pepper (never co-mingled with client key).
@@ -458,6 +462,47 @@ pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), St
     Ok(())
 }
 
+/// One-time, non-destructive adoption of secrets stored by the legacy
+/// "Council War Room" build under `LEGACY_KEYCHAIN_SERVICE`.
+///
+/// For each known account: when the new IRIN service has no item and the
+/// legacy service has one, copy the value into the new service. Never
+/// deletes the legacy item (a still-installed legacy app keeps working) and
+/// never overwrites an existing new item. Per-item errors are tolerated with
+/// a secret-free warning: Gateway Pack Enable re-provisions the secret
+/// anyway. Called once at app startup.
+pub fn migrate_legacy_secrets(store: &impl SecretStore) {
+    for account in [GW_API_KEY_ACCOUNT, AUTH_PEPPER_ACCOUNT] {
+        let already_present = match store.get_password(KEYCHAIN_SERVICE, account) {
+            Ok(value) => value.is_some(),
+            Err(e) => {
+                eprintln!(
+                    "legacy keychain migration: cannot probe {account} under new service ({e}); skipping"
+                );
+                continue;
+            }
+        };
+        if already_present {
+            continue;
+        }
+        match store.get_password(LEGACY_KEYCHAIN_SERVICE, account) {
+            Ok(Some(value)) => {
+                if let Err(e) = store.set_password(KEYCHAIN_SERVICE, account, &value) {
+                    eprintln!(
+                        "legacy keychain migration: cannot write {account} under new service ({e}); skipping"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!(
+                    "legacy keychain migration: cannot read {account} under legacy service ({e}); skipping"
+                );
+            }
+        }
+    }
+}
+
 /// Gateway client keys are `gw_` + 32 hex chars (see sidecar auth.rs).
 pub fn is_valid_gw_raw_key(key: &str) -> bool {
     let b = key.as_bytes();
@@ -578,6 +623,75 @@ mod tests {
         assert!(!KEYCHAIN_UNAVAILABLE.contains('/'));
         assert!(!KEYCHAIN_UNAVAILABLE.to_lowercase().contains("password"));
     }
+
+    #[test]
+    fn migrate_legacy_secrets_copies_only_when_new_absent() {
+        let store = MemorySecretStore::default();
+        let legacy_key = fake_gateway_key('7');
+        let legacy_pepper = "ef".repeat(32);
+        store
+            .set_password(LEGACY_KEYCHAIN_SERVICE, GW_API_KEY_ACCOUNT, &legacy_key)
+            .unwrap();
+        store
+            .set_password(LEGACY_KEYCHAIN_SERVICE, AUTH_PEPPER_ACCOUNT, &legacy_pepper)
+            .unwrap();
+
+        migrate_legacy_secrets(&store);
+        // Copy happened for both accounts.
+        assert_eq!(
+            store
+                .get_password(KEYCHAIN_SERVICE, GW_API_KEY_ACCOUNT)
+                .unwrap(),
+            Some(legacy_key.clone())
+        );
+        assert_eq!(
+            store
+                .get_password(KEYCHAIN_SERVICE, AUTH_PEPPER_ACCOUNT)
+                .unwrap(),
+            Some(legacy_pepper.clone())
+        );
+        // Legacy items are left intact (non-destructive).
+        assert_eq!(
+            store
+                .get_password(LEGACY_KEYCHAIN_SERVICE, GW_API_KEY_ACCOUNT)
+                .unwrap(),
+            Some(legacy_key.clone())
+        );
+        assert_eq!(
+            store
+                .get_password(LEGACY_KEYCHAIN_SERVICE, AUTH_PEPPER_ACCOUNT)
+                .unwrap(),
+            Some(legacy_pepper)
+        );
+    }
+
+    #[test]
+    fn migrate_legacy_secrets_never_overwrites_existing_new_value() {
+        let store = MemorySecretStore::default();
+        let new_key = fake_gateway_key('9');
+        let legacy_key = fake_gateway_key('7');
+        store
+            .set_password(KEYCHAIN_SERVICE, GW_API_KEY_ACCOUNT, &new_key)
+            .unwrap();
+        store
+            .set_password(LEGACY_KEYCHAIN_SERVICE, GW_API_KEY_ACCOUNT, &legacy_key)
+            .unwrap();
+
+        migrate_legacy_secrets(&store);
+        assert_eq!(
+            store
+                .get_password(KEYCHAIN_SERVICE, GW_API_KEY_ACCOUNT)
+                .unwrap(),
+            Some(new_key)
+        );
+        // Legacy item is left intact even when no copy was needed.
+        assert_eq!(
+            store
+                .get_password(LEGACY_KEYCHAIN_SERVICE, GW_API_KEY_ACCOUNT)
+                .unwrap(),
+            Some(legacy_key)
+        );
+    }
 }
 
 /// Live Keychain integration test — only runs when explicitly enabled so CI/unit
@@ -604,7 +718,7 @@ mod keychain_live_tests {
             return;
         }
         let service = format!(
-            "com.sovereign.council.warroom.test.{}",
+            "com.irinity.irin.test.{}",
             std::process::id()
         );
         let account = "gateway-client-gw-api-key-test";
@@ -632,7 +746,7 @@ mod keychain_live_tests {
             return;
         }
         let service = format!(
-            "com.sovereign.council.warroom.test.conc.{}",
+            "com.irinity.irin.test.conc.{}",
             std::process::id()
         );
         let account = "gateway-client-gw-api-key-test";
@@ -663,7 +777,7 @@ mod keychain_live_tests {
             return;
         }
         let service = format!(
-            "com.sovereign.council.warroom.test.missing.{}",
+            "com.irinity.irin.test.missing.{}",
             std::process::id()
         );
         let store = KeychainSecretStore;
@@ -679,7 +793,7 @@ mod keychain_live_tests {
             return;
         }
         let service = format!(
-            "com.sovereign.council.warroom.test.presence.{}",
+            "com.irinity.irin.test.presence.{}",
             std::process::id()
         );
         let store = KeychainSecretStore;

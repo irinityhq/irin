@@ -1438,10 +1438,7 @@ mod tests {
     #[test]
     fn project_constant() {
         assert_eq!(DESKTOP_COMPOSE_PROJECT, "irin-desktop-gateway");
-        assert_eq!(
-            crate::keychain::KEYCHAIN_SERVICE,
-            "com.sovereign.council.warroom"
-        );
+        assert_eq!(crate::keychain::KEYCHAIN_SERVICE, "com.irinity.irin");
     }
 
     #[test]
@@ -1601,8 +1598,7 @@ mod tests {
                 .unwrap_or(0)
         ));
         let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(tmp.join("Library/Application Support/com.sovereign.council.warroom"))
-            .unwrap();
+        fs::create_dir_all(tmp.join("Library/Application Support/com.irinity.irin")).unwrap();
         std::env::set_var("HOME", &tmp);
         let path = crate::private_config::private_config_path();
         fs::write(

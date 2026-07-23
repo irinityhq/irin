@@ -88,7 +88,7 @@ if [[ "$(uname -s)" == Darwin ]]; then
   invalid_pid_output="$(swift scripts/macos-window-proof.swift \
     --pid not-a-pid \
     --output "${TMPDIR:-/tmp}/unused-window-proof.png" \
-    --contains 'Council War Room' 2>&1)"
+    --contains 'IRIN' 2>&1)"
   invalid_pid_status=$?
   set -e
   [[ "$invalid_pid_status" -ne 0 ]]
@@ -104,7 +104,7 @@ grep -Fq 'changed=(__integrated_main__)' .github/workflows/ci.yml
 grep -Fq 'with-test-ports.sh' council-rs/Makefile
 grep -Fq 'npm audit --omit=dev --audit-level=high' council-rs/Makefile
 grep -Fq 'cargo build --release -p council-rs --bin council --locked' council-rs/Makefile
-grep -Fq 'com.sovereign.council.warroom.smoke' scripts/smoke-macos-tauri-app.sh
+grep -Fq 'com.irinity.irin.smoke' scripts/smoke-macos-tauri-app.sh
 grep -Fq 'a non-default IRIN_COUNCIL_PORT requires TAURI_CONFIG with exact' \
   council-rs/warroom-tauri/src-tauri/build.rs
 grep -Fq 'native exact-build adoption proof: PASS' scripts/smoke-macos-tauri-app.sh
