@@ -1,10 +1,14 @@
 import { test, expect } from "@playwright/test";
 import { FakeDeliberationHarness } from "./fixtures/fake-deliberation";
-import { installAvailableProviderDiscovery } from "./fixtures/available-provider-discovery";
+import {
+  installAvailableProviderDiscovery,
+  installAvailableProviderHealth,
+} from "./fixtures/available-provider-discovery";
 
 test("record head pins under app chrome on scroll", async ({ page }) => {
   test.setTimeout(60_000);
   await installAvailableProviderDiscovery(page);
+  await installAvailableProviderHealth(page);
   await page.setViewportSize({ width: 1280, height: 520 });
 
   const harness = new FakeDeliberationHarness({
