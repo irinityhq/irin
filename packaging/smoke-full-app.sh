@@ -418,7 +418,8 @@ assert 'auth_token' in d
 log "overlay_seeded=true"
 
 # Discover via host-owned sidecar (login env merged by host).
-curl -fsS --max-time 5 "http://127.0.0.1:8765/api/discover" \
+# Cold first probe can take >5s while /models catalogs are fetched; keep fail-closed but allow cold budget.
+curl -fsS --max-time 30 "http://127.0.0.1:8765/api/discover" \
   >"$ROOT/packaging/build/smoke-discover.json"
 python3 -c "
 import json
