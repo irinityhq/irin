@@ -32,6 +32,16 @@ COUNCIL_BIN="$(locate_council_bin)"
 mkdir -p "$PID_DIR"
 cd "$ROOT"
 
+# Refuse a sibling worktree's Web listener before doing builds or starting
+# Council. A collision is a preflight failure, not cleanup authority.
+PIDS=$(lsof -tiTCP:"$WEB_PORT" -sTCP:LISTEN 2>/dev/null || true)
+if [[ -n "$PIDS" ]]; then
+  echo "✗ Port ${WEB_PORT} is already in use."
+  echo "  Refusing to kill another worktree's listener (pid(s): ${PIDS//$'\n'/,})."
+  echo "  Stop the owning worktree or choose WARROOM_WEB_PORT explicitly."
+  exit 1
+fi
+
 if [[ ! -x "$COUNCIL_BIN" ]]; then
   echo "→ Building council (release)…"
   cargo build --release
@@ -157,14 +167,6 @@ if [[ -f "$NEXT_ENV_FILE" ]]; then
 fi
 
 start_council
-
-# Also guard the Next dev port (3010). The browser script and Tauri dev share it.
-PIDS=$(lsof -tiTCP:"$WEB_PORT" -sTCP:LISTEN 2>/dev/null || true)
-if [ -n "$PIDS" ]; then
-  echo "→ Port ${WEB_PORT} in use — killing previous Next listener..."
-  kill -9 $PIDS 2>/dev/null || true
-  sleep 0.3
-fi
 
 echo ""
 echo "┌────────────────────────────────────────────────────────┐"

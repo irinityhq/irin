@@ -6,6 +6,8 @@ on:
   # workflow against the restricted R740 runner group. The dispatcher itself
   # is added only after this reusable entrypoint exists on `main`.
   workflow_call:
+  push:
+    branches: ["main"]
   workflow_dispatch:
     inputs:
       run_gateway_smoke:
@@ -21,7 +23,7 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   detect-changes:
@@ -57,6 +59,9 @@ jobs:
               ;;
             schedule)
               changed=(__scheduled_proof__)
+              ;;
+            push)
+              changed=(__integrated_main__)
               ;;
             pull_request)
               base="${{ github.event.pull_request.base.sha }}"
@@ -434,18 +439,8 @@ jobs:
           mkdir -p council-rs/target/release
           cp target/release/council council-rs/target/release/council
 
-      - name: Run web lint, typecheck, build, and browser tests
-        working-directory: council-rs/warroom/web
-        env:
-          TAURI_LANE_SELECTED: ${{ needs.detect-changes.outputs.warroom_tauri }}
-        run: |
-          npm run lint
-          npm run typecheck
-          npm run build
-          if [[ "$TAURI_LANE_SELECTED" != "true" ]]; then
-            npm run build:tauri
-          fi
-          npm run test:ci
+      - name: Run isolated hosted, embedded-export, and Tauri regression
+        run: make -C council-rs warroom-check
 
   warroom-tauri:
     name: War Room Tauri macOS
@@ -473,9 +468,18 @@ jobs:
         working-directory: council-rs/warroom/web
         run: npm ci
 
+      - name: Install Tauri CLI dependencies
+        working-directory: council-rs/warroom-tauri
+        run: npm ci
+
       - name: Run War Room Tauri macOS smoke
         working-directory: council-rs
         run: WARROOM_SMOKE_SKIP_WEB_LINT=1 bash warroom-tauri/scripts/smoke-hybrid-build.sh
+
+      - name: Build and launch native Tauri application (process proof)
+        env:
+          IRIN_NATIVE_VISUAL: "0"
+        run: scripts/smoke-macos-tauri-app.sh
 
   sentinel-rust:
     name: Sentinel Sovereign-Protocol Rust

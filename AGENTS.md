@@ -54,6 +54,35 @@ make test             # cargo test --workspace
 make release-check    # release-tree completeness and hygiene guard
 ```
 
+## Worktree and shipping lifecycle
+
+Every non-trivial change follows one executable path:
+
+```bash
+make worktree BRANCH=fix/example
+make preflight
+make check
+make ship-check
+```
+
+Use one named branch and one owner per worktree. Do not ship from `main`, a
+detached checkout, or a branch whose recorded `origin/main` base has moved.
+After another branch merges, update the remaining branch and rerun
+`make ship-check`. A feature-specific test is not a completion claim: the ship
+receipt must include every selected product lane, including the embedded and
+native Tauri surfaces for a War Room Web change. See
+[`docs/development-workflow.md`](docs/development-workflow.md).
+
+Gortex is the primary code-intelligence surface for the operator workflow.
+Agents must try its MCP tools first: `smart_context` at task entry,
+`get_editing_context` before non-trivial edits, and `detect_changes` plus
+affected-test analysis before completion. The daemon is expected to remain up.
+If a client fails to mount or discover the MCP, report that integration failure
+and immediately use `gortex call`/the dedicated CLI through
+`scripts/gortex-worktree.sh`; do not silently skip the graph pass. Public
+contributors without Gortex use source reads and the same deterministic test
+gates. Gortex never replaces source inspection or tests.
+
 `make verify` is the fastest way to prove a change did not break the
 Sentinel-to-signed-directive path without spending on a provider call.
 `make setup` and `make runtime-*` are macOS-only and start real local services

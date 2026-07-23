@@ -32,9 +32,22 @@ required=(
   docs/architecture.md
   docs/cabinets.md
   docs/ci-operating-model.md
+  docs/development-workflow.md
   docs/security-claims-vs-reality.md
   docs/troubleshooting.md
+  council-rs/scripts/warroom-tauri-dev.sh
+  council-rs/warroom/web/playwright.export.config.ts
   scripts/check-contract-surface-declaration.sh
+  scripts/bootstrap-dev-tools.sh
+  scripts/dev-check.sh
+  scripts/dev-preflight.sh
+  scripts/gortex-worktree.sh
+  scripts/with-test-ports.sh
+  scripts/macos-window-proof.swift
+  scripts/new-worktree.sh
+  scripts/remove-worktree.sh
+  scripts/smoke-macos-tauri-app.sh
+  scripts/test-development-workflow.sh
   scripts/irin-runtime.sh
   scripts/setup-local.sh
   council-rs/src/main.rs
@@ -96,7 +109,7 @@ for path in "${files[@]}"; do
         council-rs/docs/operator-guide.md|council-rs/docs/persistence.md|\
         council-rs/docs/providers.md|council-rs/docs/war-room.md|\
         council-rs/warroom-tauri/README.md|council-rs/warroom/docs/TAURI-AUTH.md|\
-        docs/architecture.md|docs/cabinets.md|docs/ci-operating-model.md|docs/security-claims-vs-reality.md|\
+        docs/architecture.md|docs/cabinets.md|docs/ci-operating-model.md|docs/development-workflow.md|docs/security-claims-vs-reality.md|\
         docs/surface-map.md|docs/troubleshooting.md|\
         gateway/COUNCIL_GATEWAY_CONTRACT.md|gateway/README.md|gateway/SECURITY.md|\
         gateway/docs/gateway-core-surfaces.md|gateway/docs/operator-quickstart.md|gateway/docs/runbook.md|\

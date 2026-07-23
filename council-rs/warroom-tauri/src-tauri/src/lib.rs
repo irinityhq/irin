@@ -7,8 +7,8 @@ mod paths;
 mod sidecar;
 
 use paths::{
-    build_cors_origins, resolve_council_binary, resolve_council_rs_dir, validate_serve_port,
-    DEFAULT_SERVE_PORT,
+    build_cors_origins, default_serve_port, resolve_council_binary, resolve_council_rs_dir,
+    validate_serve_port,
 };
 use sidecar::{
     compose_sidecar_args, compose_sidecar_env, probe_council_server, validate_council_root,
@@ -47,6 +47,7 @@ struct CouncilServer(Mutex<TrackedChild>);
 #[derive(Default, Clone)]
 struct LastSpawnConfig {
     council_path: Option<String>,
+    server_port: Option<u16>,
     auth_token: Option<String>,
     council_root: Option<String>,
     librarian_base: Option<String>,
@@ -123,7 +124,10 @@ fn try_start_council_server(
         return Ok("council server already tracked as running".to_string());
     }
 
-    let port = server_port.unwrap_or(DEFAULT_SERVE_PORT);
+    let port = match server_port {
+        Some(port) => port,
+        None => default_serve_port()?,
+    };
     validate_serve_port(port)?;
 
     let council_rs_path = resolve_council_rs_dir();
@@ -274,6 +278,7 @@ fn try_start_council_server(
         if let Ok(mut config_guard) = config_state.0.lock() {
             *config_guard = LastSpawnConfig {
                 council_path: council_path.map(str::to_string),
+                server_port: Some(port),
                 auth_token: auth_token.map(str::to_string),
                 council_root: council_root.map(str::to_string),
                 librarian_base: librarian_base.map(str::to_string),
@@ -303,7 +308,8 @@ fn try_start_council_server(
 /// in a debug build used for desktop development.
 /// Sets `COUNCIL_CORS_ORIGINS` for Tauri asset origins and Next dev (3010) / API port.
 /// `COUNCIL_DEV_NO_AUTH` is set only in debug builds; release requires `COUNCIL_AUTH_TOKEN`.
-/// Only port **8765** is accepted until a runtime config bridge exists.
+/// The default port comes from `IRIN_COUNCIL_PORT` in isolated worktrees and
+/// remains 8765 for the canonical installed runtime.
 /// `council_root` (Settings councilRoot, camelCase over invoke) overrides
 /// `--base-dir` after validation; blank/absent uses the repo root.
 #[tauri::command]
@@ -342,7 +348,7 @@ async fn stop_council_server(
 }
 
 /// Restart the council sidecar with gateway routing toggled.
-/// Kills the tracked child (if any), waits for :8765 to free up, and respawns
+/// Kills the tracked child (if any), waits for its configured port to free up, and respawns
 /// with `COUNCIL_VIA_GATEWAY=1` when `via_gateway` is true ("0" when false —
 /// explicit off, since the child inherits the parent env). Reuses the cached
 /// spawn config so the pairing token survives the restart; if no sidecar is
@@ -384,10 +390,14 @@ async fn restart_sidecar(
             let guard = state.0.lock().map_err(|e| e.to_string())?;
             guard.child.is_some()
         };
+        let port = match config.server_port {
+            Some(port) => port,
+            None => default_serve_port()?,
+        };
         if !had_child {
             let (expected_sha, expected_dirty) = bundled_build_identity();
             match probe_council_server(
-                DEFAULT_SERVE_PORT,
+                port,
                 Duration::from_millis(750),
                 expected_sha,
                 expected_dirty,
@@ -400,16 +410,14 @@ async fn restart_sidecar(
                     );
                 }
                 CouncilServerProbe::DifferentBuild => {
-                    return Err(
-                        "Council on :8765 has a different source identity; run `make setup` and rebuild this app from the same checkout"
-                            .to_string(),
-                    );
+                    return Err(format!(
+                        "Council on :{port} has a different source identity; run `make setup` and rebuild this app from the same checkout"
+                    ));
                 }
                 CouncilServerProbe::Unavailable => {
-                    if !wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_millis(0)) {
+                    if !wait_for_port_release(port, Duration::from_millis(0)) {
                         return Err(
-                            "port 8765 is occupied by a non-canonical or unhealthy process"
-                                .to_string(),
+                            format!("port {port} is occupied by a non-canonical or unhealthy process"),
                         );
                     }
                 }
@@ -418,12 +426,12 @@ async fn restart_sidecar(
         stop_tracked_council_server(&app);
         if had_child {
             // kill() returns before the OS releases the listener; wait so the
-            // respawn does not lose the bind race on :8765.
-            if !wait_for_port_release(DEFAULT_SERVE_PORT, Duration::from_secs(5)) {
+            // respawn does not lose the bind race on the configured port.
+            if !wait_for_port_release(port, Duration::from_secs(5)) {
                 let _ = app.emit(
                     "council-log",
                     format!(
-                        "[system] restart: port {DEFAULT_SERVE_PORT} still busy after 5s; spawning anyway"
+                        "[system] restart: port {port} still busy after 5s; spawning anyway"
                     ),
                 );
             }
@@ -432,7 +440,7 @@ async fn restart_sidecar(
         try_start_council_server(
             &app,
             config.council_path.as_deref(),
-            None,
+            Some(port),
             config.auth_token.as_deref(),
             Some(via_gateway),
             effective_root.as_deref(),

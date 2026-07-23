@@ -322,7 +322,8 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
-        let p = std::env::temp_dir().join(format!("librarian_test_{nanos}"));
+        let unique = Uuid::new_v4().simple();
+        let p = std::env::temp_dir().join(format!("librarian_test_{nanos}_{unique}"));
         fs::create_dir_all(&p).unwrap();
         p
     }

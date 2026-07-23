@@ -13,6 +13,8 @@ help:
 	@echo "  warroom-build            Build and locally sign the Tauri bundle"
 	@echo "  warroom-export           Build static War Room assets"
 	@echo "  warroom-check            Run the complete War Room frontend/Tauri gate"
+	@echo "  warroom-product-check    Exercise the exact embedded export in Chromium"
+	@echo "  warroom-native-smoke     Build and prove the native macOS app window"
 	@echo "  audit-rust               Audit Council Rust dependencies"
 	@echo "  check-no-legacy-reqwest  Reject the retired reqwest/native-TLS stack"
 
@@ -51,7 +53,7 @@ check-no-legacy-reqwest:
 
 .PHONY: check-no-legacy-reqwest
 
-.PHONY: warroom-dev warroom-build warroom-sign warroom-export warroom-check warroom-browser
+.PHONY: warroom-dev warroom-build warroom-sign warroom-export warroom-check warroom-check-isolated warroom-product-check warroom-native-smoke warroom-browser
 
 # --------------------------------------------------------------------------
 # warroom-browser — one command: council :8765 + Next.js :3010 (post-reboot)
@@ -63,15 +65,7 @@ warroom-browser:
 # warroom-dev / warroom-build — Council War Room desktop (Tauri, Phase 2 hybrid Next.js)
 # --------------------------------------------------------------------------
 warroom-dev:
-	@PIDS=$$(lsof -tiTCP:3010 -sTCP:LISTEN 2>/dev/null || true); \
-	if [ -n "$$PIDS" ]; then \
-	  echo "→ Freeing port 3010 (stale Next dev listener)..."; \
-	  kill -9 $$PIDS 2>/dev/null || true; \
-	  sleep 0.3; \
-	fi
-	cd warroom/web && [ -d node_modules ] || npm ci
-	cd warroom-tauri && [ -d node_modules ] || npm ci
-	cd warroom-tauri && npm run tauri dev
+	bash scripts/warroom-tauri-dev.sh
 
 warroom-build:
 	cd warroom/web && npm ci
@@ -93,5 +87,21 @@ warroom-export:
 	bash warroom-tauri/scripts/build-warroom-assets.sh
 
 warroom-check:
+	bash ../scripts/with-test-ports.sh $(MAKE) warroom-check-isolated
+
+warroom-check-isolated:
 	cd warroom/web && npm ci
-	bash warroom-tauri/scripts/smoke-hybrid-build.sh
+	cd warroom/web && npm audit --omit=dev --audit-level=high
+	cd warroom/web && npm run lint
+	cd warroom/web && npm run typecheck
+	cd warroom/web && npm run test:ci
+	$(MAKE) warroom-product-check
+	WARROOM_SMOKE_SKIP_WEB_LINT=1 bash warroom-tauri/scripts/smoke-hybrid-build.sh
+
+warroom-product-check:
+	cd warroom/web && [ -d node_modules ] || npm ci
+	bash warroom-tauri/scripts/build-warroom-assets.sh
+	cd warroom/web && npm run test:export
+
+warroom-native-smoke:
+	bash ../scripts/smoke-macos-tauri-app.sh

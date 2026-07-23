@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup setup-prepare app-install release-check worktree verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build build test
+.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build build test
 
 setup: ## macOS: prepare config, start the managed runtime, and enable login recovery
 	bash scripts/setup-local.sh
@@ -17,6 +17,22 @@ release-check: ## Verify product completeness and tree hygiene
 worktree: ## Create an isolated development worktree (BRANCH=feature/example)
 	@test -n "$(BRANCH)" || (echo "usage: make worktree BRANCH=feature/example"; exit 2)
 	bash scripts/new-worktree.sh "$(BRANCH)" "$(DEST)"
+
+worktree-remove: ## Stop, untrack, and remove a clean development worktree (DEST=/path)
+	@test -n "$(DEST)" || (echo "usage: make worktree-remove DEST=/absolute/path/to/worktree"; exit 2)
+	bash scripts/remove-worktree.sh "$(DEST)"
+
+tools: ## Install checksum-verified ship tools into ignored repo-local state
+	bash scripts/bootstrap-dev-tools.sh
+
+preflight: ## Prove branch, base, worktree isolation, and Gortex readiness before editing
+	bash scripts/dev-preflight.sh
+
+check: ## Run fast tests selected from the current diff
+	bash scripts/dev-check.sh
+
+ship-check: ## Run the complete diff-selected product proof and emit a receipt
+	bash scripts/dev-check.sh --ship
 
 verify: ## Prove the loop ($0, no keys): one signed directive lands in the outbox
 	$(MAKE) -C gateway verify
@@ -41,10 +57,14 @@ docker-cache-prune: ## Reclaim rebuildable Docker BuildKit cache (keeps images, 
 	docker builder prune --all --force
 
 warroom: ## macOS/Ubuntu: run Council + War Room Web in the foreground
-	$(MAKE) -C council-rs warroom-browser
+	@set -a; test ! -f .irin-worktree.env || . ./.irin-worktree.env; set +a; \
+	COUNCIL_PORT="$${IRIN_COUNCIL_PORT:-8765}" WARROOM_WEB_PORT="$${IRIN_WEB_PORT:-3010}" \
+		$(MAKE) -C council-rs warroom-browser
 
 warroom-tauri: ## Open the War Room native desktop shell (Tauri)
-	$(MAKE) -C council-rs warroom-dev
+	@set -a; test ! -f .irin-worktree.env || . ./.irin-worktree.env; set +a; \
+	COUNCIL_PORT="$${IRIN_COUNCIL_PORT:-8765}" WARROOM_WEB_PORT="$${IRIN_WEB_PORT:-3010}" \
+		$(MAKE) -C council-rs warroom-dev
 
 warroom-tauri-build: ## Package the War Room native desktop shell (Tauri)
 	$(MAKE) -C council-rs warroom-build

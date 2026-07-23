@@ -27,6 +27,7 @@ cases=(
   "action forces full|$full_pr|.github/actions/rust-setup/action.yml"
   "manual forces full|$full_proof|__manual_dispatch__"
   "schedule forces full|$full_proof|__scheduled_proof__"
+  "integrated main forces full|$full_pr|__integrated_main__"
   "unknown forces full|$full_pr|new-surface/config.json"
   "gateway Rust source|false true false false false false false false false|gateway/sidecar-rs/src/main.rs"
   "gateway manifest|false true false false false false true false false|gateway/sidecar-rs/Cargo.toml"
@@ -38,14 +39,16 @@ cases=(
   "council manifest|false false true false false false true false false|council-rs/Cargo.toml"
   "council non-Rust runtime|false false true false false false false false false|council-rs/prompts/chair.md.j2"
   "council docs stay light|$all_false|council-rs/README.md council-rs/docs/providers.md"
-  "web source and locks|false false false false true false false false false|council-rs/warroom/web/app/page.tsx council-rs/warroom/web/package-lock.json"
+  "web source and locks also select the embedded desktop|false false false false true true false false false|council-rs/warroom/web/app/page.tsx council-rs/warroom/web/package-lock.json"
+  "warroom launchers select both product lanes|false false false false true true false false false|council-rs/scripts/warroom-tauri-dev.sh"
+  "native proof selects both product lanes|false false false false true true false false false|scripts/smoke-macos-tauri-app.sh scripts/macos-window-proof.swift"
   "tauri source|false false false false false true false false false|council-rs/warroom-tauri/src-tauri/src/lib.rs"
   "tauri lock|false false false false false true false true false|council-rs/warroom-tauri/src-tauri/Cargo.lock"
   "root cargo workspace|false true true true false false true false false|Cargo.toml Cargo.lock"
   "shared deny policy|false false false false false false true true false|deny.toml"
   "shared protocol source fans out|false true true true false false false false false|sentinel/sovereign-protocol/src/lib.rs"
   "shared protocol manifest fans out|false true true true false false true false false|sentinel/sovereign-protocol/Cargo.toml"
-  "mixed paths union lanes|false true false false true false false false false|gateway/lua/auth.lua council-rs/warroom/web/package.json"
+  "mixed paths union lanes|false true false false true true false false false|gateway/lua/auth.lua council-rs/warroom/web/package.json"
 )
 
 failures=0

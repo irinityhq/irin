@@ -1,4 +1,5 @@
 import path from "node:path";
+import { existsSync } from "node:fs";
 import { defineConfig } from "@playwright/test";
 
 const DEFAULT_COUNCIL_PORT = 8765;
@@ -45,7 +46,18 @@ function resolvePort(name: string, fallback: number): number {
 }
 
 const councilRsRoot = resolveCouncilRsRoot();
-const councilBin = path.join(councilRsRoot, "target/release/council");
+const councilBinCandidates = [
+  path.join(councilRsRoot, "target/release/council"),
+  path.join(councilRsRoot, "../target/release/council"),
+];
+const councilBin = councilBinCandidates.find((candidate) =>
+  existsSync(candidate),
+);
+if (!councilBin) {
+  throw new Error(
+    `Council release binary not found; checked: ${councilBinCandidates.join(", ")}`,
+  );
+}
 const sessionsDir = path.join(councilRsRoot, "sessions");
 const runsDir = path.join(councilRsRoot, "runs");
 const councilPort = resolvePort("PW_COUNCIL_PORT", DEFAULT_COUNCIL_PORT);
@@ -64,6 +76,9 @@ export default defineConfig({
   testDir: "./e2e",
   timeout: 30_000,
   retries: 0,
+  // This suite validates behavior, not Council load. A single worker avoids
+  // turning the tiny no-provider smoke server into a source of false failures.
+  workers: 1,
   use: {
     baseURL: webBaseUrl,
     headless: true,
@@ -95,7 +110,7 @@ export default defineConfig({
       command: `env ${providerEnvUnsetArgs} "${councilBin}" --serve --port ${councilPort}`,
       cwd: councilRsRoot,
       port: councilPort,
-      reuseExistingServer: true,
+      reuseExistingServer: false,
       timeout: 10_000,
       env: {
         COUNCIL_DEV_NO_AUTH: "1",
@@ -107,7 +122,7 @@ export default defineConfig({
     {
       command: `npm run start -- --hostname 127.0.0.1 --port ${webPort}`,
       port: webPort,
-      reuseExistingServer: true,
+      reuseExistingServer: false,
       timeout: 10_000,
       env: {
         NEXT_PUBLIC_API_BASE: apiBase,

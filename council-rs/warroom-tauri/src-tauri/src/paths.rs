@@ -5,6 +5,21 @@ use std::path::{Path, PathBuf};
 /// Default `--serve` port for the council sidecar.
 pub const DEFAULT_SERVE_PORT: u16 = 8765;
 
+/// Resolve the worktree-aware default Council port inherited by the desktop
+/// launcher. Ordinary installs retain 8765.
+pub fn default_serve_port() -> Result<u16, String> {
+    match std::env::var("IRIN_COUNCIL_PORT") {
+        Ok(raw) if !raw.trim().is_empty() => {
+            let port = raw.trim().parse::<u16>().map_err(|_| {
+                format!("IRIN_COUNCIL_PORT must be a non-zero TCP port (got {raw:?})")
+            })?;
+            validate_serve_port(port)?;
+            Ok(port)
+        }
+        _ => Ok(DEFAULT_SERVE_PORT),
+    }
+}
+
 /// Resolve the council-rs repository root.
 ///
 /// Priority: non-empty `COUNCIL_RS_DIR` env → parent of `warroom-tauri/` derived from
@@ -72,16 +87,12 @@ pub fn build_cors_origins(port: u16) -> String {
     .replace([' ', '\n'], "")
 }
 
-/// War Room desktop only supports the default council `--serve` port until a runtime config bridge exists.
+/// Validate a loopback Council port supplied by the embedded runtime config.
 pub fn validate_serve_port(port: u16) -> Result<(), String> {
-    if port == DEFAULT_SERVE_PORT {
+    if port != 0 {
         Ok(())
     } else {
-        Err(format!(
-            "War Room desktop only supports council --serve on port {} (requested {}). \
-             API/WS URLs are fixed at build time via NEXT_PUBLIC_*; a runtime port bridge is not implemented yet.",
-            DEFAULT_SERVE_PORT, port
-        ))
+        Err("War Room desktop council --serve port must be non-zero".to_string())
     }
 }
 
@@ -243,11 +254,24 @@ mod tests {
     }
 
     #[test]
-    fn validate_serve_port_rejects_non_default() {
-        let err = validate_serve_port(9999).unwrap_err();
-        assert!(err.contains("8765"));
-        assert!(err.contains("9999"));
-        assert!(validate_serve_port(8765).is_ok());
+    fn validate_serve_port_accepts_isolated_worktree_ports() {
+        assert!(validate_serve_port(DEFAULT_SERVE_PORT).is_ok());
+        assert!(validate_serve_port(20_321).is_ok());
+        assert!(validate_serve_port(0).is_err());
+    }
+
+    #[test]
+    fn default_serve_port_honors_worktree_env() {
+        let _guard = env_lock();
+        let previous = std::env::var("IRIN_COUNCIL_PORT").ok();
+        std::env::set_var("IRIN_COUNCIL_PORT", "20321");
+        assert_eq!(default_serve_port().unwrap(), 20_321);
+        std::env::set_var("IRIN_COUNCIL_PORT", "0");
+        assert!(default_serve_port().is_err());
+        match previous {
+            Some(value) => std::env::set_var("IRIN_COUNCIL_PORT", value),
+            None => std::env::remove_var("IRIN_COUNCIL_PORT"),
+        }
     }
 
     #[test]
