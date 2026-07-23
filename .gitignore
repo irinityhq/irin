@@ -1,4 +1,6 @@
+# Directory or symlink to the shared cargo cache.
 /target/
+/target
 .demo-state/
 .env.demo
 *.log
