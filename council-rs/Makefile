@@ -68,6 +68,7 @@ warroom-dev:
 	bash scripts/warroom-tauri-dev.sh
 
 warroom-build:
+	cargo build --release -p council-rs --locked
 	cd warroom/web && npm ci
 	cd warroom-tauri && npm ci && npm run tauri build
 	$(MAKE) warroom-sign

@@ -135,7 +135,7 @@ export default function WarRoom() {
       sidecarAutoStartRef.current = true;
       void startCouncilServer(
         cfg.councilPath || undefined,
-        8765,
+        undefined,
         cfg.authToken,
         cfg.councilRoot || undefined,
         cfg.librarianBase || undefined,

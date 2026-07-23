@@ -56,7 +56,11 @@ assert_markers "Outbox" "Outbox surface asset"
 assert_markers "Librarian" "Librarian surface asset"
 assert_markers "Drift" "Drift surface asset"
 
-echo "Running Rust unit tests (src-tauri)..."
-(cd "$ROOT/src-tauri" && cargo test)
+if [ "${WARROOM_SMOKE_SKIP_TAURI_TESTS:-}" = "1" ]; then
+  echo "Skipping Tauri Rust tests (covered by the dedicated macOS Tauri lane)"
+else
+  echo "Running Rust unit tests (src-tauri)..."
+  (cd "$ROOT/src-tauri" && cargo test)
+fi
 
-echo "OK: lint + typecheck + hybrid export + surface markers + cargo test succeeded"
+echo "OK: requested hybrid export and Tauri checks succeeded"

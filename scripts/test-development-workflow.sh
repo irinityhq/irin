@@ -23,6 +23,7 @@ web_scope="$(scripts/classify-ci-paths.sh council-rs/warroom/web/app/page.tsx)"
 [[ "$(sed -n 's/^warroom_tauri=//p' <<<"$web_scope")" == true ]]
 
 check_plan="$(scripts/dev-check.sh --dry-run council-rs/warroom/web/app/page.tsx)"
+grep -Fq 'War Room dependencies' <<<"$check_plan"
 grep -Fq 'War Room unit tests' <<<"$check_plan"
 grep -Fq 'Embedded export build' <<<"$check_plan"
 grep -Fq 'Tauri Rust tests' <<<"$check_plan"
@@ -61,6 +62,12 @@ grep -Fq 'make -C council-rs warroom-check' .github/workflows/ci.yml
 grep -Fq 'changed=(__integrated_main__)' .github/workflows/ci.yml
 grep -Fq 'with-test-ports.sh' council-rs/Makefile
 grep -Fq 'npm audit --omit=dev --audit-level=high' council-rs/Makefile
+grep -Fq 'cargo build --release -p council-rs --locked' council-rs/Makefile
+grep -Fq 'uses: ./.github/workflows/ci.yml' .github/workflows/ci-pr.yml
+grep -Fq 'WARROOM_SMOKE_SKIP_TAURI_TESTS: "1"' .github/workflows/ci.yml
+grep -Fq 'WARROOM_SMOKE_SKIP_TAURI_TESTS' \
+  council-rs/warroom-tauri/scripts/smoke-hybrid-build.sh
+[[ "$(grep -Fc 'git diff --check origin/main --' scripts/dev-check.sh)" == 2 ]]
 python3 - <<'PY'
 from pathlib import Path
 
@@ -120,6 +127,25 @@ grep -Fq 'refusing unexpected runtime state path' <<<"$cleanup_escape_output"
 [[ -f "$outside_state/sentinel" ]]
 [[ -d "$cleanup_worktree" ]]
 
+teardown_worktree="$tmp/teardown-worktree"
+git -C "$tmp/repo" worktree add -q -b feature/teardown "$teardown_worktree" main
+fake_bin="$tmp/fake-bin"
+mkdir -p "$fake_bin"
+printf '%s\n' '#!/bin/sh' 'exit 23' >"$fake_bin/make"
+chmod +x "$fake_bin/make"
+set +e
+teardown_output="$(
+  cd "$tmp/repo" &&
+    PATH="$fake_bin:/usr/bin:/bin" \
+      "$ROOT/scripts/remove-worktree.sh" "$teardown_worktree" 2>&1
+)"
+teardown_status=$?
+set -e
+[[ "$teardown_status" -ne 0 ]]
+grep -Fq 'runtime teardown failed; retaining worktree and runtime state' <<<"$teardown_output"
+[[ -d "$teardown_worktree" ]]
+git -C "$tmp/repo" worktree remove --force "$teardown_worktree"
+
 printf 'dirty\n' >>"$tmp/repo/README.md"
 set +e
 dirty_output="$(cd "$tmp/repo" && PATH=/usr/bin:/bin IRIN_REQUIRE_GORTEX=0 IRIN_PREFLIGHT_SKIP_FETCH=1 scripts/dev-preflight.sh 2>&1)"
@@ -140,6 +166,21 @@ set -e
 [[ "$override_status" -ne 0 ]]
 grep -Fq 'explicit paths are not allowed' <<<"$override_output"
 rm "$tmp/repo/new-untracked.rs"
+
+printf 'committed whitespace  \n' >>"$tmp/repo/README.md"
+git -C "$tmp/repo" add README.md
+git -C "$tmp/repo" commit -qm 'committed whitespace fixture'
+set +e
+whitespace_output="$(
+  cd "$tmp/repo" &&
+    PATH=/usr/bin:/bin IRIN_REQUIRE_GORTEX=0 \
+      scripts/dev-check.sh README.md 2>&1
+)"
+whitespace_status=$?
+set -e
+[[ "$whitespace_status" -ne 0 ]]
+grep -Fq 'trailing whitespace' <<<"$whitespace_output"
+git -C "$tmp/repo" reset -q --hard origin/main
 
 printf 'ship failure\n' >>"$tmp/repo/README.md"
 set +e

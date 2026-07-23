@@ -461,7 +461,7 @@ export default function SettingsPanel() {
                 try {
                   const msg = await startCouncilServer(
                     form.councilPath || undefined,
-                    8765,
+                    undefined,
                     form.authToken,
                     form.councilRoot || undefined,
                     form.librarianBase || undefined,

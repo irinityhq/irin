@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  councilPortFromApiBase,
   defaultsForPage,
   dropRemoteLoopbackOverrides,
   mergeConfigSources,
@@ -85,5 +86,12 @@ describe("runtime-config merge", () => {
         remote,
       ),
     ).toEqual({ authToken: "kept" });
+  });
+
+  it("derives the isolated native Council port from loopback API config", () => {
+    expect(councilPortFromApiBase("http://127.0.0.1:20321")).toBe(20321);
+    expect(councilPortFromApiBase("http://localhost:8765")).toBe(8765);
+    expect(councilPortFromApiBase("https://example.test")).toBe(8765);
+    expect(councilPortFromApiBase("not-a-url")).toBe(8765);
   });
 });
