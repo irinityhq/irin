@@ -50,3 +50,33 @@ async function fulfillDiscovery(route: Route): Promise<void> {
 export async function installAvailableProviderDiscovery(page: Page): Promise<void> {
   await page.route("**/api/discover", fulfillDiscovery);
 }
+
+async function fulfillHealth(route: Route): Promise<void> {
+  if (route.request().method() === "OPTIONS") {
+    await route.fulfill({ status: 204, headers: CORS_HEADERS });
+    return;
+  }
+  await route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    headers: CORS_HEADERS,
+    body: JSON.stringify({
+      council_version: "e2e",
+      stream_version: "1.0.0",
+      providers_available: [...CABINET_PROVIDER_IDS],
+      providers_missing: [],
+      sessions_dir: "/tmp",
+      index_path: "/tmp/index.json",
+      index_exists: false,
+    }),
+  });
+}
+
+/**
+ * Convene gating reads provider availability from /api/health, not
+ * /api/discover. Launch-flow tests must not depend on host CLIs: CI runners
+ * have none, so an unmocked health probe disables the Convene button.
+ */
+export async function installAvailableProviderHealth(page: Page): Promise<void> {
+  await page.route("**/api/health", fulfillHealth);
+}
