@@ -3,24 +3,73 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { api } from "@/lib/api";
 import { normalizeDiscoverResponse } from "./discover";
+import {
+  fetchWithDiscoverRetry,
+  type DiscoverRetryHooks,
+} from "./discover-retry";
 import type { DiscoverProvider, DiscoverResponse } from "@/lib/types";
 
 // Module-level cache and listeners for deduped fetches across components.
 let cache: DiscoverResponse | null = null;
 let inFlight: Promise<DiscoverResponse> | null = null;
-const listeners = new Set<(data: DiscoverResponse | null, loading: boolean, error: string | null) => void>();
+let lastLoading = false;
+let lastError: string | null = null;
+const listeners = new Set<
+  (data: DiscoverResponse | null, loading: boolean, error: string | null) => void
+>();
 
+/** Test/diag seam — not part of the product UI contract. */
+export type DiscoverFetchDeps = {
+  fetchOnce?: () => Promise<DiscoverResponse>;
+  retry?: DiscoverRetryHooks;
+};
+
+let testDeps: DiscoverFetchDeps | null = null;
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function notify(
+  data: DiscoverResponse | null,
+  loading: boolean,
+  error: string | null,
+) {
+  lastLoading = loading;
+  lastError = error;
+  listeners.forEach((l) => l(data, loading, error));
+}
+
+async function runDiscoverFetch(): Promise<DiscoverResponse> {
+  const fetchOnce =
+    testDeps?.fetchOnce ??
+    (async () => {
+      const raw = await api.discover();
+      return normalizeDiscoverResponse(raw);
+    });
+
+  const normalized = await fetchWithDiscoverRetry(fetchOnce, testDeps?.retry);
+  cache = normalized;
+  notify(cache, false, null);
+  return normalized;
+}
+
+/**
+ * Shared discover load. Concurrent callers share one in-flight promise.
+ * Transient cold-start failures retry with backoff; terminal HTTP errors
+ * surface immediately. Successful completion clears the error for every listener.
+ */
 async function doFetch(): Promise<DiscoverResponse> {
   if (inFlight) return inFlight;
   inFlight = (async () => {
+    notify(cache, true, null);
     try {
-      const raw = await api.discover();
-      const normalized = normalizeDiscoverResponse(raw);
-      cache = normalized;
-      notify(cache, false, null);
-      return normalized;
+      return await runDiscoverFetch();
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = errorMessage(err);
+      // Terminal (or exhausted) failure: drop stale optimistic data so the UI
+      // does not show a previous scan as current.
+      cache = null;
       notify(null, false, msg);
       throw err;
     } finally {
@@ -30,26 +79,33 @@ async function doFetch(): Promise<DiscoverResponse> {
   return inFlight;
 }
 
-function notify(data: DiscoverResponse | null, loading: boolean, error: string | null) {
-  listeners.forEach((l) => l(data, loading, error));
-}
-
 export function useDiscover() {
   const [data, setData] = useState<DiscoverResponse | null>(cache);
-  const [loading, setLoading] = useState<boolean>(false);
-  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState<boolean>(lastLoading || !!inFlight || !cache);
+  const [error, setError] = useState<string | null>(lastError);
 
-  const listener = useCallback((d: DiscoverResponse | null, l: boolean, e: string | null) => {
-    setData(d);
-    setLoading(l);
-    setError(e);
-  }, []);
+  const listener = useCallback(
+    (d: DiscoverResponse | null, l: boolean, e: string | null) => {
+      setData(d);
+      setLoading(l);
+      setError(e);
+    },
+    [],
+  );
 
   useEffect(() => {
     listeners.add(listener);
+    // Sync late subscribers to the shared module snapshot (cache / in-flight / error).
     if (cache) {
       setData(cache);
-    } else if (!inFlight) {
+      setLoading(!!inFlight);
+      setError(inFlight ? null : lastError);
+    } else if (inFlight) {
+      setLoading(true);
+      setError(null);
+    } else {
+      // No cache and idle: start a shared load (covers first mount and a
+      // remount after a prior terminal failure — still one in-flight request).
       setLoading(true);
       setError(null);
       doFetch().catch(() => {});
@@ -63,11 +119,21 @@ export function useDiscover() {
     setLoading(true);
     setError(null);
     try {
+      // Wait for any shared in-flight request, then force a fresh scan.
+      if (inFlight) {
+        try {
+          await inFlight;
+        } catch {
+          // previous attempt failed; continue into a fresh rescan below
+        }
+      }
+      // Clear cache so doFetch actually re-hits the network.
+      cache = null;
       await doFetch();
     } catch {
       // error already notified
     } finally {
-      setLoading(false);
+      setLoading(lastLoading);
     }
   }, []);
 
@@ -185,4 +251,47 @@ export function unsupportedGatewayTransportReason(
   });
   if (unsupported.length === 0) return null;
   return `Gateway has no adapter for transport${unsupported.length === 1 ? "" : "s"}: ${unsupported.join(", ")}. Choose a Gateway-supported transport or use Direct mode.`;
+}
+
+// --- Test seams (deterministic unit coverage for cache / retry / listeners) ---
+
+/** Reset module cache, in-flight, listeners, and optional fetch deps. */
+export function __resetDiscoverForTests(deps: DiscoverFetchDeps | null = null): void {
+  cache = null;
+  inFlight = null;
+  lastLoading = false;
+  lastError = null;
+  listeners.clear();
+  testDeps = deps;
+}
+
+export function __getDiscoverSnapshotForTests(): {
+  data: DiscoverResponse | null;
+  loading: boolean;
+  error: string | null;
+  inFlight: boolean;
+  listenerCount: number;
+} {
+  return {
+    data: cache,
+    loading: lastLoading,
+    error: lastError,
+    inFlight: !!inFlight,
+    listenerCount: listeners.size,
+  };
+}
+
+/** Drive a shared load without mounting React (unit tests). */
+export function __loadDiscoverForTests(): Promise<DiscoverResponse> {
+  return doFetch();
+}
+
+export function __subscribeDiscoverForTests(
+  listener: (data: DiscoverResponse | null, loading: boolean, error: string | null) => void,
+): () => void {
+  listeners.add(listener);
+  listener(cache, lastLoading || !!inFlight, lastError);
+  return () => {
+    listeners.delete(listener);
+  };
 }
