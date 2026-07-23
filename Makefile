@@ -1,7 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test
-
+.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test worktree-gc
 setup: ## macOS: prepare config, start the managed runtime, and enable login recovery
 	bash scripts/setup-local.sh
 
@@ -21,6 +20,9 @@ worktree: ## Create an isolated development worktree (BRANCH=feature/example)
 worktree-remove: ## Stop, untrack, and remove a clean development worktree (DEST=/path)
 	@test -n "$(DEST)" || (echo "usage: make worktree-remove DEST=/absolute/path/to/worktree"; exit 2)
 	bash scripts/remove-worktree.sh "$(DEST)"
+
+worktree-gc: ## List (or APPLY=1 remove) clean worktrees already merged into origin/main
+	@if [ "$(APPLY)" = "1" ]; then bash scripts/worktree-gc.sh --apply; else bash scripts/worktree-gc.sh; fi
 
 tools: ## Install checksum-verified ship tools into ignored repo-local state
 	bash scripts/bootstrap-dev-tools.sh

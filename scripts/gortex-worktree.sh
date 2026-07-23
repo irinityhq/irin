@@ -62,20 +62,24 @@ print(str(fresh).lower())
 }
 
 refresh_index() {
-  # v0.61 advertises reindex_repository in parts of its catalog but rejects the
-  # call, and re-running track on a stale record can leave indexed_commit
-  # unchanged despite reporting success. Re-register only the graph record;
-  # source and runtime state are untouched.
+  # Register (or re-register) the exact worktree, then poll repos --json for a
+  # fresh index. Prefer track without --wait: some daemon builds fail
+  # index_repository under --wait even though ordinary track + background
+  # indexing still produces a usable graph. Source and runtime state are
+  # never touched here.
   if repo_record >/dev/null 2>&1; then
     if ! gortex untrack "$path" >/dev/null; then
       printf 'ERROR: Gortex failed to unregister stale graph for %s\n' "$path" >&2
       return 1
     fi
   fi
-  if ! gortex track "$path" --as-worktree --wait \
-    --wait-timeout "${IRIN_GORTEX_TRACK_TIMEOUT:-10m}" >/dev/null; then
+  if ! gortex track "$path" --as-worktree >/dev/null; then
+    printf 'ERROR: Gortex failed to track exact worktree %s\n' "$path" >&2
     return 1
   fi
+  # Best-effort explicit wait for daemons that support it; ignore tool gaps.
+  gortex track "$path" --as-worktree --wait \
+    --wait-timeout "${IRIN_GORTEX_TRACK_TIMEOUT:-2m}" >/dev/null 2>&1 || true
   if ! wait_for_fresh_index; then
     return 1
   fi

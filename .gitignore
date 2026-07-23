@@ -1,4 +1,6 @@
+# Directory or symlink to the shared cargo cache.
 /target/
+/target
 .demo-state/
 .env.demo
 *.log
@@ -23,3 +25,6 @@ runs/
 /packaging/test-home/
 /packaging/test-apps/
 /packaging/receipts/
+# Shared or local Tauri target (dir or symlink)
+council-rs/warroom-tauri/src-tauri/target/
+council-rs/warroom-tauri/src-tauri/target
