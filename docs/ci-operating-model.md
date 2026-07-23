@@ -149,10 +149,11 @@ Once all contexts have appeared on a real pull request, `main` requires:
 
 The exact names are operating contracts. Rename a caller job or aggregate only
 in a maintenance window where the replacement context first registers on a
-real pull request. Main protection also applies to administrators. Code-owner
-review is required only for the authority-bearing paths in `CODEOWNERS`, and a
-new push dismisses stale approval so the reviewed SHA remains the mergeable
-SHA. Ordinary paths retain a zero-approval solo-maintainer posture.
+real pull request. Main protection also applies to administrators.
+`CODEOWNERS` records the maintainer for authority-bearing paths, but does not
+require a second personal account to approve the primary maintainer's changes.
+The required CI, CodeQL, dependency-review, automated-review, current-base,
+and conversation-resolution gates provide the solo-maintainer merge boundary.
 
 ## Promotion and pre-public checklist
 

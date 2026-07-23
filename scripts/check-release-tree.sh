@@ -89,6 +89,12 @@ else
 fi
 
 for path in "${files[@]}"; do
+  [[ "$path" == "build.rs" || "$path" == */build.rs ]] || continue
+  grep -Fqx "/$path @iws17" .github/CODEOWNERS \
+    || fail "build-time authority path lacks explicit CODEOWNERS ownership: $path"
+done
+
+for path in "${files[@]}"; do
   case "/$path/" in
     */CLAUDE.md/*|*/RTK.md/*|*/.docs-lab/*|*/.codex/*|*/.claude/*|*/.cursor/*|*/.grok/*|*/.gortex.yaml/*|*/.mcp.json/*|*/state/*|*/sessions/*|*/runs/*|*/librarian_chats/*|*/warroom-ios/*|*/docs/media/*|*/docs/audits/*|*/docs/plans/*|*/docs/specs/*|*/eval/run-*|*/target/*|*/node_modules/*|*/.next/*|*/out/*|*/dist/*|*/build/*|*/coverage/*|*/.turbo/*|*/.vercel/*|*/warroom-web-dist/*|*/__pycache__/*|*.tsbuildinfo/*|*/playwright-report/*|*/test-results/*)
       fail "private or generated path included: $path"
