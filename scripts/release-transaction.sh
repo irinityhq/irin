@@ -63,16 +63,13 @@ echo "source_sha=$SHA images_tag=$IMAGES_TAG mode=$MODE"
 
 note "images: ensure published digests exist"
 if [[ "$MODE" == "rc" ]]; then
-  gh workflow run release-images.yml --ref HEAD -f ref=HEAD \
-    || die "failed to dispatch rc image build"
-  echo "waiting for rc image publish..."
-  for i in $(seq 1 60); do
-    if docker buildx imagetools inspect "ghcr.io/irinityhq/irin-gateway:$IMAGES_TAG" --format '{{.Manifest.Digest}}' >/dev/null 2>&1; then
-      break
-    fi
-    [[ $i -lt 60 ]] || die "rc images never appeared in the registry"
-    sleep 30
-  done
+  # The rc lane cannot dispatch release-images.yml: workflow_dispatch only
+  # works for workflows already on the default branch, and this workflow
+  # arrives with the product PR. Build and push rc images locally with
+  # operator GHCR credentials instead (GHCR_USERNAME + GHCR_TOKEN, PAT with
+  # write:packages — revocable once the tag lane runs on merged source).
+  command -v rsync >/dev/null || die "rsync required for the image context"
+  IRIN_PACK_IMAGES_TAG="$IMAGES_TAG" bash scripts/build-gateway-pack-prod-images.sh
 fi
 
 note "manifest: generate from the live registry"
