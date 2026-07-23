@@ -2,22 +2,24 @@
 
 use std::path::{Path, PathBuf};
 
-/// Default `--serve` port for the council sidecar.
-pub const DEFAULT_SERVE_PORT: u16 = 8765;
+#[cfg(test)]
+const DEFAULT_SERVE_PORT: u16 = 8765;
 
-/// Resolve the worktree-aware default Council port inherited by the desktop
-/// launcher. Ordinary installs retain 8765.
+/// Resolve the Council port selected when this desktop binary was built.
+///
+/// The Tauri CSP is also fixed at build time, so a later process environment
+/// must not redirect a built app to an origin its CSP does not allow.
 pub fn default_serve_port() -> Result<u16, String> {
-    match std::env::var("IRIN_COUNCIL_PORT") {
-        Ok(raw) if !raw.trim().is_empty() => {
-            let port = raw.trim().parse::<u16>().map_err(|_| {
-                format!("IRIN_COUNCIL_PORT must be a non-zero TCP port (got {raw:?})")
-            })?;
-            validate_serve_port(port)?;
-            Ok(port)
-        }
-        _ => Ok(DEFAULT_SERVE_PORT),
-    }
+    serve_port_from_build_value(env!("IRIN_TAURI_COUNCIL_PORT"))
+}
+
+fn serve_port_from_build_value(raw: &str) -> Result<u16, String> {
+    let port = raw
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| format!("built-in Council port must be a non-zero TCP port (got {raw:?})"))?;
+    validate_serve_port(port)?;
+    Ok(port)
 }
 
 /// Bundled sidecar binary name inside the macOS app (`Contents/MacOS/council`).
@@ -393,17 +395,21 @@ mod tests {
     }
 
     #[test]
-    fn default_serve_port_honors_worktree_env() {
+    fn default_serve_port_is_build_selected() {
         let _guard = env_lock();
         let previous = std::env::var("IRIN_COUNCIL_PORT").ok();
-        std::env::set_var("IRIN_COUNCIL_PORT", "20321");
-        assert_eq!(default_serve_port().unwrap(), 20_321);
-        std::env::set_var("IRIN_COUNCIL_PORT", "0");
-        assert!(default_serve_port().is_err());
+        std::env::set_var("IRIN_COUNCIL_PORT", "20322");
+        assert_eq!(
+            default_serve_port().unwrap(),
+            env!("IRIN_TAURI_COUNCIL_PORT").parse::<u16>().unwrap()
+        );
         match previous {
             Some(value) => std::env::set_var("IRIN_COUNCIL_PORT", value),
             None => std::env::remove_var("IRIN_COUNCIL_PORT"),
         }
+        assert_eq!(serve_port_from_build_value("20321").unwrap(), 20_321);
+        assert!(serve_port_from_build_value("0").is_err());
+        assert!(serve_port_from_build_value("not-a-port").is_err());
     }
 
     #[test]

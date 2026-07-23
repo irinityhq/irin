@@ -1,16 +1,22 @@
-# Advisory review coverage. GitHub branch-protection enforcement is configured separately.
-* @iws17 @Raphael1717
-
-# Authority-bearing surfaces are explicit even though the same owners currently
-# cover the whole repository. This keeps the review boundary visible if general
-# ownership changes later.
-/.github/workflows/ @iws17 @Raphael1717
-/council-rs/src/engine/directive_fence.rs @iws17 @Raphael1717
-/gateway/sidecar-rs/src/comms/ @iws17 @Raphael1717
-/gateway/sidecar-rs/src/keymgmt.rs @iws17 @Raphael1717
-/gateway/sidecar-rs/src/ledger.rs @iws17 @Raphael1717
-/gateway/sidecar-rs/src/watch/dispatcher.rs @iws17 @Raphael1717
-/gateway/sidecar-rs/src/watch/outbox.rs @iws17 @Raphael1717
-/gateway/sidecar-rs/src/watch/worker.rs @iws17 @Raphael1717
-/sentinel/COMMS_CONTRACT.md @iws17 @Raphael1717
-/sentinel/sovereign-protocol/ @iws17 @Raphael1717
+# Authority ownership remains explicit while automated branch protection
+# provides the merge gate for this solo-maintainer repository.
+/.github/CODEOWNERS @iws17
+/.github/workflows/ @iws17
+/.github/actions/ @iws17
+/Makefile @iws17
+/scripts/ @iws17
+/council-rs/Makefile @iws17
+/council-rs/build.rs @iws17
+/council-rs/scripts/warroom-* @iws17
+/council-rs/warroom-tauri/src-tauri/build.rs @iws17
+/council-rs/warroom-tauri/scripts/ @iws17
+/council-rs/src/engine/directive_fence.rs @iws17
+/gateway/sidecar-rs/src/comms/ @iws17
+/gateway/sidecar-rs/src/budget.rs @iws17
+/gateway/sidecar-rs/src/keymgmt.rs @iws17
+/gateway/sidecar-rs/src/ledger.rs @iws17
+/gateway/sidecar-rs/src/watch/ @iws17
+/gateway/sidecar-rs/build.rs @iws17
+/sentinel/COMMS_CONTRACT.md @iws17
+/sentinel/sovereign-protocol/build.rs @iws17
+/sentinel/sovereign-protocol/ @iws17

@@ -280,12 +280,24 @@ export default function SettingsPanel() {
           value={form.apiBase}
           onChange={(v) => update("apiBase", v)}
           placeholder="http://127.0.0.1:8765"
+          disabled={inTauri}
+          hint={
+            inTauri
+              ? "Managed by the desktop app and matched to its exact allowed origin."
+              : undefined
+          }
         />
         <Field
           label="WebSocket base"
           value={form.wsBase}
           onChange={(v) => update("wsBase", v)}
           placeholder="ws://127.0.0.1:8765"
+          disabled={inTauri}
+          hint={
+            inTauri
+              ? "Managed by the desktop app and matched to its exact allowed origin."
+              : undefined
+          }
         />
         <Field
           label="Gateway health base (optional)"
@@ -722,6 +734,7 @@ function Field({
   placeholder,
   hint,
   type = "text",
+  disabled = false,
 }: {
   label: string;
   value: string;
@@ -729,6 +742,7 @@ function Field({
   placeholder?: string;
   hint?: string;
   type?: "text" | "password";
+  disabled?: boolean;
 }) {
   return (
     <div>
@@ -740,6 +754,7 @@ function Field({
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         autoComplete={type === "password" ? "off" : undefined}
+        disabled={disabled}
       />
       {hint && <p className="text-[10px] text-fg-dim mt-1">{hint}</p>}
     </div>

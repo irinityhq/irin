@@ -9,6 +9,7 @@ scripts_to_parse=(
   scripts/dev-preflight.sh
   scripts/dev-check.sh
   scripts/bootstrap-dev-tools.sh
+  scripts/bootstrap-actionlint.sh
   scripts/new-worktree.sh
   scripts/remove-worktree.sh
   scripts/smoke-macos-tauri-app.sh
@@ -42,8 +43,21 @@ set -e
 grep -Fq 'native visual proof cannot be disabled' <<<"$disabled_native"
 grep -Fq 'env -u IRIN_NATIVE_APP' scripts/dev-check.sh
 grep -Fq 'requires the native macOS visual proof' scripts/dev-check.sh
+grep -Fq 'GitHub Actions lint' scripts/dev-check.sh
 grep -Fq 'command -v shasum' scripts/dev-check.sh
 grep -Fq 'sha256sum' scripts/dev-check.sh
+grep -Fq 'IRIN_GORTEX_DETECT_TIMEOUT' scripts/gortex-worktree.sh
+grep -Fq 'subprocess.TimeoutExpired' scripts/gortex-worktree.sh
+grep -Fq 'partial_results' scripts/gortex-worktree.sh
+grep -Fq -- '--wait-timeout' scripts/gortex-worktree.sh
+! grep -Eq 'call[[:space:]]+index_repository' scripts/gortex-worktree.sh
+[[ "$(grep -Fc 'Gortex affected-test analysis' scripts/dev-check.sh)" == 2 ]]
+grep -Fq 'binary_sha=' scripts/bootstrap-dev-tools.sh
+grep -Fq 'cargo-deny executable checksum mismatch' scripts/bootstrap-dev-tools.sh
+grep -Fq 'open -n -F -W' scripts/smoke-macos-tauri-app.sh
+grep -Fq 'binary_pattern="$(printf' scripts/smoke-macos-tauri-app.sh
+[[ "$(grep -Fc 'pgrep -f -x "$binary_pattern"' scripts/smoke-macos-tauri-app.sh)" == 3 ]]
+grep -Fq 'kill "$launcher_pid"' scripts/smoke-macos-tauri-app.sh
 
 if [[ "$(uname -s)" == Darwin ]]; then
   set +e
@@ -58,13 +72,19 @@ if [[ "$(uname -s)" == Darwin ]]; then
 fi
 
 ! grep -Fq 'kill -9' council-rs/scripts/warroom-browser-dev.sh
-grep -Fq 'make -C council-rs warroom-check' .github/workflows/ci.yml
+grep -Fq 'uses: irinityhq/irin/.github/workflows/ci.yml@main' .github/workflows/ci-pr.yml
+! grep -Fq 'uses: ./.github/workflows/ci.yml' .github/workflows/ci-pr.yml
+grep -Fq 'make -C council-rs warroom-web-check' .github/workflows/ci.yml
+grep -Fq 'make warroom-tauri-check' .github/workflows/ci.yml
 grep -Fq 'changed=(__integrated_main__)' .github/workflows/ci.yml
 grep -Fq 'with-test-ports.sh' council-rs/Makefile
 grep -Fq 'npm audit --omit=dev --audit-level=high' council-rs/Makefile
-grep -Fq 'cargo build --release -p council-rs --locked' council-rs/Makefile
-grep -Fq 'uses: ./.github/workflows/ci.yml' .github/workflows/ci-pr.yml
-grep -Fq 'WARROOM_SMOKE_SKIP_TAURI_TESTS: "1"' .github/workflows/ci.yml
+grep -Fq 'cargo build --release -p council-rs --bin council --locked' council-rs/Makefile
+grep -Fq 'com.sovereign.council.warroom.smoke' scripts/smoke-macos-tauri-app.sh
+grep -Fq 'a non-default IRIN_COUNCIL_PORT requires TAURI_CONFIG with exact' \
+  council-rs/warroom-tauri/src-tauri/build.rs
+grep -Fq 'native exact-build adoption proof: PASS' scripts/smoke-macos-tauri-app.sh
+grep -Fq 'native webview Council request proof: PASS' scripts/smoke-macos-tauri-app.sh
 grep -Fq 'WARROOM_SMOKE_SKIP_TAURI_TESTS' \
   council-rs/warroom-tauri/scripts/smoke-hybrid-build.sh
 [[ "$(grep -Fc 'git diff --check origin/main --' scripts/dev-check.sh)" == 2 ]]
@@ -76,6 +96,17 @@ target = makefile.split("warroom-product-check:", 1)[1].split("\n\n", 1)[0]
 assert target.index("build-warroom-assets.sh") < target.index("npm run test:export")
 workflow = Path(".github/workflows/ci.yml").read_text()
 assert "npm run build:tauri\n          npm run test:export" not in workflow
+web_job = workflow.split("  warroom-web:", 1)[1].split("\n  warroom-tauri:", 1)[0]
+assert "warroom-web-check" in web_job
+assert "warroom-check" not in web_job.replace("warroom-web-check", "")
+codeowners = Path(".github/CODEOWNERS").read_text()
+for build_script in (
+    "/council-rs/build.rs",
+    "/council-rs/warroom-tauri/src-tauri/build.rs",
+    "/gateway/sidecar-rs/build.rs",
+    "/sentinel/sovereign-protocol/build.rs",
+):
+    assert f"{build_script} @iws17" in codeowners
 PY
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/irin-workflow-test.XXXXXX")"
@@ -86,12 +117,182 @@ git -C "$tmp/repo" config user.name test
 git -C "$tmp/repo" config user.email test@example.invalid
 mkdir -p "$tmp/repo/scripts"
 cp scripts/dev-preflight.sh scripts/gortex-worktree.sh scripts/dev-check.sh \
+  scripts/bootstrap-dev-tools.sh \
   scripts/classify-ci-paths.sh "$tmp/repo/scripts/"
 printf 'baseline\n' >"$tmp/repo/README.md"
 git -C "$tmp/repo" add README.md scripts
 git -C "$tmp/repo" commit -qm baseline
 git -C "$tmp/repo" branch -M main
 git -C "$tmp/repo" push -q -u origin main
+
+gortex_fake_bin="$tmp/gortex-fake-bin"
+gortex_fake_state="$tmp/gortex-fake-state"
+mkdir -p "$gortex_fake_bin"
+printf '%s\n' \
+  '#!/bin/sh' \
+  'set -eu' \
+  'case "${1:-}" in' \
+  '  repos)' \
+  '    stale=false' \
+  '    if [ "${IRIN_GORTEX_TEST_MODE:-partial}" = stale ] && [ ! -f "$IRIN_GORTEX_TEST_STATE.reindexed" ]; then stale=true; fi' \
+  '    head="$(git -C "$IRIN_GORTEX_TEST_REPO" rev-parse HEAD)"' \
+  '    indexed="$head"' \
+  '    if [ "${IRIN_GORTEX_TEST_MODE:-partial}" = mismatch ] && [ ! -f "$IRIN_GORTEX_TEST_STATE.reindexed" ]; then indexed=0000000000000000000000000000000000000000; fi' \
+  '    printf '"'"'[{"path":"%s","stale":%s,"indexed":true,"head_commit":"%s","indexed_commit":"%s"}]\n'"'"' "$IRIN_GORTEX_TEST_REPO" "$stale" "$head" "$indexed"' \
+  '    ;;' \
+  '  call)' \
+  '    if [ "${IRIN_GORTEX_TEST_MODE:-partial}" = sleep ]; then sleep 10; fi' \
+  '    count=0' \
+  '    [ ! -f "$IRIN_GORTEX_TEST_STATE" ] || count="$(cat "$IRIN_GORTEX_TEST_STATE")"' \
+  '    count=$((count + 1))' \
+  '    printf '"'"'%s\n'"'"' "$count" >"$IRIN_GORTEX_TEST_STATE"' \
+  '    if [ "$count" -eq 1 ]; then' \
+  '      printf '"'"'%s\n'"'"' '"'"'{"warming":{"partial_results":true,"percent":50}}'"'"'' \
+  '    else' \
+  '      printf '"'"'%s\n'"'"' '"'"'{"warming":{"partial_results":false},"changed_files":["README.md"],"risk":"LOW"}'"'"'' \
+  '    fi' \
+  '    ;;' \
+  '  track)' \
+  '    if [ "${IRIN_GORTEX_TEST_MODE:-partial}" = refresh-fail ]; then exit 23; fi' \
+  '    : >"$IRIN_GORTEX_TEST_STATE.reindexed"' \
+  '    ;;' \
+  '  untrack)' \
+  '    ;;' \
+  '  affected)' \
+  '    if [ "${IRIN_GORTEX_TEST_MODE:-partial}" = affected-fail ]; then exit 1; fi' \
+  '    if [ "${IRIN_GORTEX_TEST_MODE:-partial}" = affected-none ]; then exit 3; fi' \
+  '    if [ "${IRIN_GORTEX_TEST_MODE:-partial}" = affected-empty ]; then printf '"'"'%s\n'"'"' '"'"'{"affected_tests":[]}'"'"'; exit 0; fi' \
+  '    printf '"'"'%s\n'"'"' '"'"'{"affected_tests":["tests/readme_test.rs"]}'"'"'' \
+  '    ;;' \
+  '  *) exit 2 ;;' \
+  'esac' \
+  >"$gortex_fake_bin/gortex"
+chmod +x "$gortex_fake_bin/gortex"
+
+partial_output="$(
+  cd "$tmp/repo" &&
+    PATH="$gortex_fake_bin:/usr/bin:/bin" \
+    IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+    IRIN_GORTEX_TEST_STATE="$gortex_fake_state" \
+    IRIN_GORTEX_DETECT_TIMEOUT=5 \
+      "$ROOT/scripts/gortex-worktree.sh" detect "$tmp/repo" 2>&1
+)"
+grep -Fq 'partial graph (50%)' <<<"$partial_output"
+grep -Fq '"README.md"' <<<"$partial_output"
+[[ "$(cat "$gortex_fake_state")" == 2 ]]
+
+affected_output="$(
+  PATH="$gortex_fake_bin:/usr/bin:/bin" \
+  IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+  IRIN_GORTEX_TEST_STATE="$gortex_fake_state" \
+    "$ROOT/scripts/gortex-worktree.sh" affected "$tmp/repo" README.md 2>&1
+)"
+grep -Fq 'Gortex affected tests: SELECTED' <<<"$affected_output"
+grep -Fq 'tests/readme_test.rs' <<<"$affected_output"
+
+set +e
+empty_output="$(
+  PATH="$gortex_fake_bin:/usr/bin:/bin" \
+  IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+  IRIN_GORTEX_TEST_STATE="$gortex_fake_state" \
+  IRIN_GORTEX_TEST_MODE=affected-empty \
+    "$ROOT/scripts/gortex-worktree.sh" affected "$tmp/repo" README.md 2>&1
+)"
+empty_status=$?
+set -e
+[[ "$empty_status" -ne 0 ]]
+grep -Fq 'without a non-empty affected_tests list' <<<"$empty_output"
+
+none_output="$(
+  PATH="$gortex_fake_bin:/usr/bin:/bin" \
+  IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+  IRIN_GORTEX_TEST_STATE="$gortex_fake_state" \
+  IRIN_GORTEX_TEST_MODE=affected-none \
+    "$ROOT/scripts/gortex-worktree.sh" affected "$tmp/repo" README.md 2>&1
+)"
+grep -Fq 'Gortex affected tests: NONE' <<<"$none_output"
+
+set +e
+affected_failure="$(
+  PATH="$gortex_fake_bin:/usr/bin:/bin" \
+  IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+  IRIN_GORTEX_TEST_STATE="$gortex_fake_state" \
+  IRIN_GORTEX_TEST_MODE=affected-fail \
+    "$ROOT/scripts/gortex-worktree.sh" affected "$tmp/repo" README.md 2>&1
+)"
+affected_failure_status=$?
+set -e
+[[ "$affected_failure_status" -eq 1 ]]
+grep -Fq 'affected-test analysis failed' <<<"$affected_failure"
+
+stale_output="$(
+  PATH="$gortex_fake_bin:/usr/bin:/bin" \
+  IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+  IRIN_GORTEX_TEST_STATE="$gortex_fake_state-stale" \
+  IRIN_GORTEX_TEST_MODE=stale \
+  IRIN_GORTEX_DETECT_TIMEOUT=5 \
+    "$ROOT/scripts/gortex-worktree.sh" detect "$tmp/repo" 2>&1
+)"
+grep -Fq 'STALE OR COMMIT-MISMATCHED' <<<"$stale_output"
+[[ -f "$gortex_fake_state-stale.reindexed" ]]
+
+mismatch_output="$(
+  PATH="$gortex_fake_bin:/usr/bin:/bin" \
+  IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+  IRIN_GORTEX_TEST_STATE="$gortex_fake_state-mismatch" \
+  IRIN_GORTEX_TEST_MODE=mismatch \
+  IRIN_GORTEX_DETECT_TIMEOUT=5 \
+    "$ROOT/scripts/gortex-worktree.sh" detect "$tmp/repo" 2>&1
+)"
+grep -Fq 'STALE OR COMMIT-MISMATCHED' <<<"$mismatch_output"
+[[ -f "$gortex_fake_state-mismatch.reindexed" ]]
+
+set +e
+refresh_failure="$(
+  PATH="$gortex_fake_bin:/usr/bin:/bin" \
+  IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+  IRIN_GORTEX_TEST_STATE="$gortex_fake_state-refresh-fail" \
+  IRIN_GORTEX_TEST_MODE=refresh-fail \
+    "$ROOT/scripts/gortex-worktree.sh" track "$tmp/repo" 2>&1
+)"
+refresh_failure_status=$?
+set -e
+[[ "$refresh_failure_status" -ne 0 ]]
+grep -Fq 'failed to track exact worktree' <<<"$refresh_failure"
+
+set +e
+timeout_output="$(
+  cd "$tmp/repo" &&
+    PATH="$gortex_fake_bin:/usr/bin:/bin" \
+    IRIN_GORTEX_TEST_REPO="$tmp/repo" \
+    IRIN_GORTEX_TEST_STATE="$gortex_fake_state" \
+    IRIN_GORTEX_TEST_MODE=sleep \
+    IRIN_GORTEX_DETECT_TIMEOUT=1 \
+      "$ROOT/scripts/gortex-worktree.sh" detect "$tmp/repo" 2>&1
+)"
+timeout_status=$?
+set -e
+[[ "$timeout_status" -eq 124 ]]
+grep -Fq 'exceeded 1s' <<<"$timeout_output"
+
+fake_tool_bin="$tmp/fake-tool-bin"
+mkdir -p "$fake_tool_bin" "$tmp/repo/.irin-tools/bin"
+printf '%s\n' '#!/bin/sh' 'printf "%s\n" "cargo-deny 0.19.9"' \
+  >"$tmp/repo/.irin-tools/bin/cargo-deny"
+chmod +x "$tmp/repo/.irin-tools/bin/cargo-deny"
+printf '%s\n' '#!/bin/sh' 'exit 42' >"$fake_tool_bin/curl"
+chmod +x "$fake_tool_bin/curl"
+set +e
+forged_cache_output="$(
+  cd "$tmp/repo" &&
+    PATH="$fake_tool_bin:/usr/bin:/bin" \
+      scripts/bootstrap-dev-tools.sh 2>&1
+)"
+forged_cache_status=$?
+set -e
+[[ "$forged_cache_status" -eq 42 ]]
+grep -Fq 'cargo-deny cache: rejected' <<<"$forged_cache_output"
+rm -rf "$tmp/repo/.irin-tools"
 
 set +e
 main_output="$(cd "$tmp/repo" && PATH=/usr/bin:/bin IRIN_REQUIRE_GORTEX=0 IRIN_PREFLIGHT_SKIP_FETCH=1 scripts/dev-preflight.sh 2>&1)"

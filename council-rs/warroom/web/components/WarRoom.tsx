@@ -5,6 +5,7 @@ import { AlertTriangle, ArrowLeft, RotateCcw } from "lucide-react";
 import { useDeliberation } from "@/hooks/useDeliberation";
 import { api, apiBase } from "@/lib/api";
 import {
+  councilPortFromApiBase,
   configReady,
   initRuntimeConfig,
   loadRuntimeConfig,
@@ -12,6 +13,7 @@ import {
 import {
   getGatewayPackStatus,
   isTauri,
+  reportCouncilRuntimeReady,
   startCouncilServer,
   type GatewayPackStatus,
 } from "@/lib/tauri";
@@ -92,7 +94,7 @@ export default function WarRoom() {
   };
 
   const loadInitialState = useCallback(async () => {
-    await loadRuntimeConfig();
+    const runtimeConfig = await loadRuntimeConfig();
     setApiStatus("loading");
     setApiError(null);
 
@@ -116,6 +118,16 @@ export default function WarRoom() {
 
     if (packResult.status === "fulfilled") {
       setGatewayPack(packResult.value);
+    }
+
+    if (
+      isTauri() &&
+      healthResult.status === "fulfilled" &&
+      cabinetsResult.status === "fulfilled"
+    ) {
+      void reportCouncilRuntimeReady(
+        councilPortFromApiBase(runtimeConfig.apiBase),
+      ).catch(() => {});
     }
 
     const failures = [
@@ -147,7 +159,7 @@ export default function WarRoom() {
       sidecarAutoStartRef.current = true;
       void startCouncilServer(
         cfg.councilPath || undefined,
-        undefined,
+        councilPortFromApiBase(cfg.apiBase),
         cfg.authToken,
         cfg.councilRoot || undefined,
         cfg.librarianBase || undefined,

@@ -59,9 +59,21 @@ If the MCP is configured but not visible to the current client, state
 scripts/gortex-worktree.sh detect
 ```
 
-That command invokes the daemon's `detect_changes` tool through `gortex call`.
-It keeps work moving while preserving the fact that client discovery needs
-repair. Do not substitute an old main-checkout index for the linked worktree.
+That command first proves the exact worktree index matches its current Git
+HEAD. On v0.61 a stale graph record is unregistered and the exact worktree is
+re-registered through `gortex track --as-worktree --wait`; source and runtime
+state are untouched. The wrapper then invokes the daemon's `detect_changes`
+tool through `gortex call`. The check and ship gates separately
+pass the complete changed-path set to `gortex affected`; selected tests and a
+graph-confirmed empty selection are valid advisory receipts, while an analysis
+failure blocks the gate. The deterministic classifier lanes remain the test
+execution floor. This keeps work moving while preserving the fact that client
+discovery needs repair. Do not substitute an old main-checkout index for the
+linked worktree.
+
+Every tracked `build.rs` is also required to have an explicit CODEOWNERS entry.
+The release-tree gate fails when a new build-time execution surface is added
+without authority review.
 Managed operator worktrees and `make ship-check` require the Gortex CLI
 continuity path to succeed. `make check` remains usable in an ordinary public
 checkout without private operator tooling, and CI does not depend on Gortex.
@@ -98,9 +110,12 @@ Run immediately before claiming completion or updating the pull request. It:
   complete changed-file set, deterministic tested-tree fingerprint, lanes,
   commands, results, and completion time.
 
-If the pinned `cargo-deny` binary is absent, the gate downloads version
-0.19.9 into the ignored `.irin-tools/` directory and verifies the published
-SHA-256 before execution. `make tools` performs that bootstrap explicitly.
+If pinned tooling is absent, the gate downloads `cargo-deny` 0.19.9 and
+actionlint 1.7.12 into the ignored `.irin-tools/` directory. It verifies the
+published archive SHA-256 and the platform-specific executable SHA-256 before
+installation, then rechecks the cached executable on every use. Actionlint
+validates every GitHub Actions workflow as part of the ship receipt. `make
+tools` performs both bootstraps explicitly.
 
 No current passing receipt means no `done`, `ready`, or `safe to merge` claim.
 If another pull request merges first, update from `origin/main`, rerun

@@ -1,6 +1,10 @@
 name: CodeQL Advanced
 
 on:
+  pull_request:
+    branches: ["main", "master"]
+  push:
+    branches: ["main"]
   workflow_dispatch:
   schedule:
     - cron: "41 7 * * 1"
@@ -13,12 +17,12 @@ permissions:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   analyze:
     name: CodeQL (${{ matrix.language }})
-    runs-on: ${{ fromJSON(github.event.repository.private == true && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -48,3 +52,15 @@ jobs:
         uses: github/codeql-action/analyze@eec0bff2f6c15bf3f1e8a0152f94d17664a06a06 # v4
         with:
           category: "/language:${{ matrix.language }}"
+
+  codeql-required:
+    name: CodeQL required
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 5
+    if: always()
+    needs: analyze
+    steps:
+      - name: Require every CodeQL language analysis
+        env:
+          ANALYZE_RESULT: ${{ needs.analyze.result }}
+        run: test "$ANALYZE_RESULT" = success

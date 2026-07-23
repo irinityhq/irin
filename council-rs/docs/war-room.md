@@ -159,6 +159,8 @@ provider.
 For focused frontend work:
 
 ```bash
+make -C council-rs warroom-web-check
+
 cd warroom/web
 npm run lint
 npm run typecheck

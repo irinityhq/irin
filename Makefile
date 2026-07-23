@@ -24,6 +24,7 @@ worktree-remove: ## Stop, untrack, and remove a clean development worktree (DEST
 
 tools: ## Install checksum-verified ship tools into ignored repo-local state
 	bash scripts/bootstrap-dev-tools.sh
+	bash scripts/bootstrap-actionlint.sh
 
 preflight: ## Prove branch, base, worktree isolation, and Gortex readiness before editing
 	bash scripts/dev-preflight.sh

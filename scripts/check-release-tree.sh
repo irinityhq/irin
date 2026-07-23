@@ -38,6 +38,7 @@ required=(
   council-rs/scripts/warroom-tauri-dev.sh
   council-rs/warroom/web/playwright.export.config.ts
   scripts/check-contract-surface-declaration.sh
+  scripts/bootstrap-actionlint.sh
   scripts/bootstrap-dev-tools.sh
   scripts/dev-check.sh
   scripts/dev-preflight.sh
@@ -86,6 +87,12 @@ else
       -o -type f -not -name '*.tsbuildinfo' -print \
       | sed 's#^./##' | sort)
 fi
+
+for path in "${files[@]}"; do
+  [[ "$path" == "build.rs" || "$path" == */build.rs ]] || continue
+  grep -Fqx "/$path @iws17" .github/CODEOWNERS \
+    || fail "build-time authority path lacks explicit CODEOWNERS ownership: $path"
+done
 
 for path in "${files[@]}"; do
   case "/$path/" in
