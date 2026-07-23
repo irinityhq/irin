@@ -452,7 +452,16 @@ wait_ax_button_enabled() {
 # --- b/c) Accessibility: Settings -> Enable Gateway ---
 "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
 sleep 1
-SETTINGS_CLICK="$(ax_click_button "Settings" || true)"
+SETTINGS_CLICK="not_found"
+for i in $(seq 1 30); do
+  SETTINGS_CLICK="$(ax_click_button "Settings" || true)"
+  if [[ "$SETTINGS_CLICK" == clicked_button* ]]; then
+    log "ax_settings_ready_after=${i}s"
+    break
+  fi
+  "$OSASCRIPT_BIN" -e 'tell application "Council War Room" to activate' >/dev/null 2>&1 || true
+  sleep 1
+done
 log "ax_settings=$SETTINGS_CLICK"
 [[ "$SETTINGS_CLICK" == clicked_button* ]] \
   || die "could not identify/click Settings AXButton (Accessibility fail-closed)"
@@ -660,30 +669,64 @@ sleep 0.5
 ax_click_button "Settings" >/dev/null 2>&1 || true
 wait_ax_button_enabled "Stop pack" 30 \
   || die "Stop pack AXButton never became enabled"
+LIFECYCLE_LOG="$APP_SUPPORT_ROOT/gateway/lifecycle.log"
+stop_begin_before="$(grep -c ' stage=stop_begin detail=ok$' "$LIFECYCLE_LOG" 2>/dev/null || true)"
 ax_click_button_busy "Stop pack"
+# Prove that the WebView click crossed the native command boundary. Stop is
+# intentionally instrumented with categories only; no command output or values.
+stop_begin_seen=0
+for i in $(seq 1 20); do
+  stop_begin_after="$(grep -c ' stage=stop_begin detail=ok$' "$LIFECYCLE_LOG" 2>/dev/null || true)"
+  if (( stop_begin_after > stop_begin_before )); then
+    stop_begin_seen=1
+    break
+  fi
+  sleep 0.25
+done
+[[ "$stop_begin_seen" == 1 ]] || die "Stop pack native command did not begin"
+log "stop_native_begin=ok"
 # Independent Stop postconditions: pack must stop; Direct must stay healthy.
 # Project rows may remain stopped; no healthy listener on :18080; no running
-# desktop containers.
+# desktop containers. Two native Docker attempts may each consume the bounded
+# 45-second command timeout, so the smoke deadline must exceed that product bound.
 ready_stop=0
-for i in $(seq 1 60); do
+stop_deadline=$((SECONDS + 120))
+while (( SECONDS < stop_deadline )); do
   if wait_health; then
     gw_up=0
     if "$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:18080/health" >/dev/null 2>&1; then
       gw_up=1
     fi
-    running_q="$("$DOCKER_BIN" compose -p irin-desktop-gateway ps -q --status running 2>/dev/null || true)"
-    if [[ "$gw_up" == 0 && -z "$running_q" ]]; then
+    running_q="$("$DOCKER_BIN" ps -q \
+      --filter label=com.docker.compose.project=irin-desktop-gateway \
+      --filter status=running 2>/dev/null || true)"
+    stop_complete="$(grep -c ' stage=stop_complete detail=ok$' "$LIFECYCLE_LOG" 2>/dev/null || true)"
+    if [[ "$gw_up" == 0 && -z "$running_q" && "$stop_complete" -gt 0 ]]; then
       ready_stop=1
       break
     fi
   fi
   sleep 0.5
 done
+if [[ "$ready_stop" != 1 ]]; then
+  log "stop_timeout_gateway_up=${gw_up:-unknown}"
+  log "stop_timeout_running_containers=$(printf '%s\n' "${running_q:-}" | sed '/^$/d' | wc -l | tr -d ' ')"
+  log "stop_timeout_native_complete=${stop_complete:-0}"
+fi
 wait_health || die "Direct Council unhealthy after stop"
 log "direct_after_stop=ok"
 [[ "$ready_stop" == 1 ]] || die "Stop postconditions failed (Gateway still up or containers still running)"
+# The native command also restarts its owned Council child before the handler
+# returns. A re-enabled button proves the invoke/finally path completed.
+wait_ax_button_enabled "Stop pack" 30 \
+  || die "Stop pack native command did not return"
+PID4="$(listen_pid 8765)"
+log "post_stop_council_pid=$PID4"
+[[ -n "$PID4" ]] || die "Council not healthy after Stop"
+[[ "$PID3" != "$PID4" ]] || die "Council PID unchanged after Stop (native command may not have returned)"
 log "gateway_after_stop=down"
 log "step_stop=ok"
+OWNED_COUNCIL_PIDS="$OWNED_COUNCIL_PIDS,$PID4"
 
 # g) Relaunch continuity (non-secret) - graceful quit first
 graceful_quit_app

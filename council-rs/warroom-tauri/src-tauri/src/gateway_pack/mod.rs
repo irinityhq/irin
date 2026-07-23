@@ -1234,16 +1234,34 @@ pub fn disable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus
 /// Refuses if still enabled (via_gateway_default) — caller must disable first,
 /// or we auto-disable then stop so Council is not left governed against a dead Gateway.
 pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, String> {
-    let _guard = LIFECYCLE_LOCK
-        .lock()
-        .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
+    lifecycle_stage("stop_begin", "ok");
+    let _guard = match LIFECYCLE_LOCK.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            lifecycle_stage("stop_lock", "error");
+            return Err("gateway pack lifecycle lock poisoned".to_string());
+        }
+    };
+    lifecycle_stage("stop_lock", "ok");
 
-    let mut cfg = load_or_create_private_config()?;
+    let mut cfg = match load_or_create_private_config() {
+        Ok(cfg) => cfg,
+        Err(err) => {
+            lifecycle_stage("stop_config", "error");
+            return Err(err);
+        }
+    };
     if cfg.via_gateway_default {
         // Switch to Direct first so we never leave enabled Council against stopped Gateway.
         cfg.via_gateway_default = false;
-        write_private_config_at(&crate::private_config::private_config_path(), &cfg)?;
+        if let Err(err) =
+            write_private_config_at(&crate::private_config::private_config_path(), &cfg)
+        {
+            lifecycle_stage("stop_config", "error");
+            return Err(err);
+        }
     }
+    lifecycle_stage("stop_config", "direct");
 
     if let Some(pack_root) = installed_pack_root() {
         let compose = compose_file(&pack_root);
@@ -1251,28 +1269,49 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
             let env = public_env_path();
             let env_arg = env.is_file().then_some(env.as_path());
             let secret_env = build_compose_secret_env(store, None).unwrap_or_default();
-            let out = compose_command_with_env(
+            lifecycle_stage("stop_compose", "begin");
+            let out = match compose_command_with_env(
                 &compose,
                 env_arg,
                 &["stop"],
                 Some(&secret_env),
                 DOCKER_CMD_TIMEOUT,
-            )?;
+            ) {
+                Ok(out) => out,
+                Err(err) => {
+                    lifecycle_stage("stop_compose", "error");
+                    return Err(err);
+                }
+            };
             if !out.status.success() {
-                let out2 = compose_command_with_env(
+                lifecycle_stage("stop_compose", "nonzero");
+                lifecycle_stage("stop_down", "begin");
+                let out2 = match compose_command_with_env(
                     &compose,
                     env_arg,
                     &["down", "--remove-orphans"],
                     Some(&secret_env),
                     DOCKER_CMD_TIMEOUT,
-                )?;
+                ) {
+                    Ok(out) => out,
+                    Err(err) => {
+                        lifecycle_stage("stop_down", "error");
+                        return Err(err);
+                    }
+                };
                 if !out2.status.success() {
+                    lifecycle_stage("stop_down", "nonzero");
                     return Err(format_cmd_failure("gateway pack stop", &out2));
                 }
+                lifecycle_stage("stop_down", "ok");
+            } else {
+                lifecycle_stage("stop_compose", "ok");
             }
         }
     }
-    Ok(gateway_pack_status(store))
+    let status = gateway_pack_status(store);
+    lifecycle_stage("stop_complete", "ok");
+    Ok(status)
 }
 
 /// Destructive uninstall: only irin-desktop-gateway project + app-owned gateway dir + Keychain items.
