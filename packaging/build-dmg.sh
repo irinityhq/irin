@@ -10,7 +10,6 @@ source "$ROOT/packaging/env.sh"
 [[ "$(uname -m)" == "arm64" ]] || { echo "ERROR: aarch64/Apple silicon only" >&2; exit 1; }
 
 TAURI_DIR="$IRIN_SRC/council-rs/warroom-tauri"
-SRC_TAURI="$TAURI_DIR/src-tauri"
 WEB_DIR="$IRIN_SRC/council-rs/warroom/web"
 STAGE_SCRIPT="$TAURI_DIR/scripts/stage-bundle-inputs.sh"
 
@@ -104,15 +103,11 @@ echo "=== tauri build (app + dmg) ==="
   npm run tauri build -- --bundles app,dmg
 )
 
-APP="$SRC_TAURI/target/release/bundle/macos/Council War Room.app"
-if [[ ! -d "$APP" ]]; then
-  APP="$CARGO_TARGET_DIR/release/bundle/macos/Council War Room.app"
-fi
-if [[ ! -d "$APP" ]]; then
-  FOUND="$(find "$ROOT/packaging/build" "$SRC_TAURI" -type d -name 'Council War Room.app' 2>/dev/null | head -1 || true)"
-  [[ -n "$FOUND" ]] && APP="$FOUND"
-fi
-[[ -d "$APP" ]] || die "app bundle not found after tauri build"
+# Resolve the app strictly from this build's pinned target dir (env.sh).
+# Never scavenge other target dirs: a stale foreign build (e.g. a port-isolated
+# smoke app with a different baked-in Council port) would be packaged silently.
+APP="$CARGO_TARGET_DIR/release/bundle/macos/Council War Room.app"
+[[ -d "$APP" ]] || die "app bundle not found at $APP (tauri build did not produce it)"
 
 echo "=== ad-hoc codesign (build artifact only; never use production credentials) ==="
 codesign --force --deep --sign - "$APP"
