@@ -108,11 +108,12 @@ APP_SUPPORT_REL="Library/Application Support/com.irinity.irin"
 PACK_MARKER_REL="$APP_SUPPORT_REL/gateway/pack-installed.json"
 
 reclaim_owned_listeners() {
-  # Only reclaim :8765 listeners whose command path is the copied app or test home.
+  # Only reclaim :8765 listeners whose command path is harness-owned: the
+  # copied app (any identity generation) or this smoke's test home.
   local p cmd
   for p in $("$LSOF_BIN" -nP -iTCP:8765 -sTCP:LISTEN -t 2>/dev/null || true); do
     cmd="$(ps -p "$p" -o command= 2>/dev/null || true)"
-    if [[ "$cmd" == *"$DEST_APP"* ]] || [[ "$cmd" == *test-home/gw-pack-smoke* ]]; then
+    if [[ "$cmd" == *"packaging/test-apps/"* ]] || [[ "$cmd" == *test-home/gw-pack-smoke* ]]; then
       log "reclaim_owned_listener_pid=$p"
       kill -TERM "$p" 2>/dev/null || true
       sleep 0.2
@@ -218,6 +219,11 @@ if desktop_project_present; then
 fi
 DESKTOP_PREEXISTING=false
 log "desktop_preexisting=false"
+
+# Reap stale harness-owned Council listeners before launch: an orphaned
+# sidecar on :8765 is adopted by the fresh app (no owned child), which breaks
+# every later owned-lifecycle assertion.
+reclaim_owned_listeners
 
 # Port 18080 must not be owned by canonical/foreign project.
 if "$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:18080/health" >/dev/null 2>&1; then
