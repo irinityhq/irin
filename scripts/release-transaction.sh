@@ -54,12 +54,21 @@ case "$MODE" in
     [[ "$(git rev-parse "$TAG^{commit}" 2>/dev/null || true)" == "$SHA" ]] \
       || die "HEAD ($SHA) is not the tagged commit ($TAG)"
     IMAGES_TAG="$TAG"
+    # The production DMG gate requires this to equal the tauri.conf.json
+    # version; a mismatch dies there with the version-bump explanation.
+    IRIN_RELEASE_VERSION="${TAG#v}"
     ;;
   rc)
     IMAGES_TAG="rc-$(git rev-parse --short=12 HEAD)"
+    # No tag in the rc lane: derive the version from the Tauri bundle config
+    # so the production DMG gate passes by construction.
+    IRIN_RELEASE_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' \
+      "$ROOT/council-rs/warroom-tauri/src-tauri/tauri.conf.json")" \
+      || die "could not read version from tauri.conf.json (python3 required)"
     ;;
 esac
-echo "source_sha=$SHA images_tag=$IMAGES_TAG mode=$MODE"
+export IRIN_RELEASE_VERSION
+echo "source_sha=$SHA images_tag=$IMAGES_TAG mode=$MODE release_version=$IRIN_RELEASE_VERSION"
 
 note "images: ensure published digests exist"
 if [[ "$MODE" == "rc" ]]; then
@@ -94,8 +103,8 @@ PROMOTION=1 bash packaging/smoke-full-app.sh
 note "checksums and receipt"
 HASHES="$ROOT/packaging/artifacts/HASHES.txt"
 [[ -f "$HASHES" ]] || die "HASHES.txt missing"
-DMG="$(ls "$ROOT"/packaging/artifacts/IRIN_*_aarch64.dmg 2>/dev/null | head -1)"
-[[ -n "$DMG" ]] || die "DMG artifact missing"
+DMG="$ROOT/packaging/artifacts/IRIN_${IRIN_RELEASE_VERSION}_aarch64.dmg"
+[[ -f "$DMG" ]] || die "DMG artifact missing: $DMG"
 shasum -a 256 "$DMG"
 
 RECEIPT="$ROOT/packaging/receipts/release-transaction-$(date +%Y%m%dT%H%M%S).txt"

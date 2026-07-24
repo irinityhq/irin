@@ -26,6 +26,22 @@ case "$PACK_MODE" in
 esac
 export IRIN_GATEWAY_PACK_MODE="$PACK_MODE"
 
+# Release version names the DMG artifact. local-dev defaults to 0.1.0 for
+# backward compatibility; production must set IRIN_RELEASE_VERSION explicitly
+# (the release transaction exports it from the tag) and it must equal the
+# Tauri bundle version, or the DMG would mislabel the app it ships.
+if [[ "$PACK_MODE" == "production" && -z "${IRIN_RELEASE_VERSION:-}" ]]; then
+  die "production DMG requires IRIN_RELEASE_VERSION set explicitly (the release transaction exports it from the tag)"
+fi
+IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-0.1.0}"
+export IRIN_RELEASE_VERSION
+TAURI_CONF="$TAURI_DIR/src-tauri/tauri.conf.json"
+TAURI_BUNDLE_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$TAURI_CONF")" \
+  || die "could not read version from $TAURI_CONF (python3 required)"
+if [[ "$PACK_MODE" == "production" && "$IRIN_RELEASE_VERSION" != "$TAURI_BUNDLE_VERSION" ]]; then
+  die "IRIN_RELEASE_VERSION=$IRIN_RELEASE_VERSION != tauri.conf.json version=$TAURI_BUNDLE_VERSION; bump the version in council-rs/warroom-tauri/src-tauri/tauri.conf.json in its own commit before running the release transaction"
+fi
+
 REQUIRE_CLEAN="${IRIN_DMG_REQUIRE_CLEAN:-1}"
 if [[ "$REQUIRE_CLEAN" == "1" ]]; then
   if [[ -n "$(git -C "$ROOT" status --porcelain 2>/dev/null || true)" ]]; then
@@ -60,6 +76,7 @@ fi
 echo "=== IRIN DMG build ==="
 echo "ROOT=$ROOT"
 echo "PACK_MODE=$PACK_MODE"
+echo "RELEASE_VERSION=$IRIN_RELEASE_VERSION"
 echo "BUILD_SHA=${IRIN_TAURI_BUILD_GIT_SHA:-unknown}"
 echo "BUILD_DIRTY=${IRIN_TAURI_BUILD_DIRTY:-unknown}"
 echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
@@ -124,7 +141,7 @@ fi
 
 mkdir -p "$ROOT/packaging/artifacts"
 DEST_APP="$ROOT/packaging/artifacts/IRIN.app"
-DEST_DMG="$ROOT/packaging/artifacts/IRIN_0.1.0_aarch64.dmg"
+DEST_DMG="$ROOT/packaging/artifacts/IRIN_${IRIN_RELEASE_VERSION}_aarch64.dmg"
 rm -rf "$DEST_APP"
 ditto "$APP" "$DEST_APP"
 
@@ -168,6 +185,7 @@ fi
 {
   echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "pack_mode=$PACK_MODE"
+  echo "release_version=$IRIN_RELEASE_VERSION"
   echo "releasable=$([[ "$PACK_MODE" == "production" ]] && echo true || echo false)"
   echo "source_sha=${IRIN_TAURI_BUILD_GIT_SHA:-unknown}"
   echo "build_dirty=${IRIN_TAURI_BUILD_DIRTY:-unknown}"
