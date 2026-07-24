@@ -22,6 +22,8 @@ async function fulfillJson(route: Route, data: unknown, status = 200) {
 test.describe("core War Room surface states", () => {
   test("Discover distinguishes failure, empty, and populated rescans", async ({ page }) => {
     let attempts = 0;
+    // Terminal (non-retryable) HTTP failure — transient 502/503/network races
+    // are covered by unit tests with deterministic backoff.
     let state: "failure" | "empty" | "populated" = "failure";
     await page.route("**/api/discover", async (route) => {
       if (route.request().method() === "OPTIONS") {
@@ -30,7 +32,7 @@ test.describe("core War Room surface states", () => {
       }
       attempts += 1;
       if (state === "failure") {
-        await fulfillJson(route, { error: "discovery temporarily unavailable" }, 503);
+        await fulfillJson(route, { error: "discovery auth required" }, 401);
         return;
       }
       if (state === "empty") {
@@ -54,7 +56,7 @@ test.describe("core War Room surface states", () => {
     await page.goto("/");
     await page.getByRole("button", { name: "Discover", exact: true }).click();
 
-    await expect(page.getByText(/Discovery failed:/)).toContainText("503");
+    await expect(page.getByText(/Discovery failed:/)).toContainText("401");
     state = "empty";
     await page.getByTestId("discover-refresh").click();
     await expect(page.getByText("No providers reported. Check council --serve logs.")).toBeVisible();
@@ -64,6 +66,166 @@ test.describe("core War Room surface states", () => {
     await expect(page.getByTestId("discover-provider")).toHaveCount(1);
     await expect(page.getByTestId("discover-provider")).toContainText("nvidia");
     expect(attempts).toBeGreaterThanOrEqual(3);
+  });
+
+  test("Discover recovers from an initial transient failure without Rescan", async ({ page }) => {
+    let attempts = 0;
+    await page.route("**/api/discover", async (route) => {
+      if (route.request().method() === "OPTIONS") {
+        await fulfillJson(route, {});
+        return;
+      }
+      attempts += 1;
+      if (attempts === 1) {
+        await fulfillJson(route, { error: "warming up" }, 503);
+        return;
+      }
+      await fulfillJson(route, {
+        providers: [
+          {
+            name: "nvidia",
+            available: true,
+            source: "env",
+            env_hint: "NVIDIA_API_KEY",
+            models: ["nvidia/free-model"],
+          },
+        ],
+        log: ["NVIDIA_API_KEY detected after cold start"],
+      });
+    });
+
+    await page.goto("/");
+    await page.getByRole("button", { name: "Discover", exact: true }).click();
+    await expect(page.getByTestId("discover-provider")).toBeVisible({
+      timeout: 15_000,
+    });
+    await expect(page.getByTestId("discover-provider")).toContainText("nvidia");
+    await expect(page.getByText(/Discovery failed:/)).toHaveCount(0);
+    expect(attempts).toBeGreaterThanOrEqual(2);
+  });
+
+  test("Deliberate auto-selects a runnable cabinet and mutes unavailable need text", async ({
+    page,
+  }) => {
+    await page.route("**/api/health", async (route) => {
+      if (route.request().method() === "OPTIONS") {
+        await fulfillJson(route, {});
+        return;
+      }
+      await fulfillJson(route, {
+        council_version: "e2e",
+        stream_version: "1.0.0",
+        providers_available: ["nvidia"],
+        providers_missing: ["grok_hermes", "gemini_agy", "claude_code"],
+        sessions_dir: "/tmp",
+        index_path: "/tmp/index.json",
+        index_exists: false,
+      });
+    });
+    await page.route("**/api/cabinets", async (route) => {
+      if (route.request().method() === "OPTIONS") {
+        await fulfillJson(route, {});
+        return;
+      }
+      // Contract: GET /api/cabinets → { cabinets: Cabinet[] }
+      await fulfillJson(route, {
+        cabinets: [
+          {
+            name: "standard",
+            label: "Standard Council",
+            description: "",
+            seats: [
+              { name: "a", provider: "grok_hermes", model: "m", system: "" },
+              { name: "b", provider: "gemini_agy", model: "m", system: "" },
+            ],
+            chair: { provider: "claude_code", model: "m" },
+            rounds: 2,
+            is_triad: false,
+          },
+          {
+            name: "starter-nvidia",
+            label: "starter-nvidia",
+            description: "",
+            seats: [{ name: "n", provider: "nvidia", model: "m", system: "" }],
+            chair: { provider: "nvidia", model: "m" },
+            rounds: 1,
+            is_triad: false,
+          },
+        ],
+      });
+    });
+    await page.route("**/api/discover", async (route) => {
+      if (route.request().method() === "OPTIONS") {
+        await fulfillJson(route, {});
+        return;
+      }
+      await fulfillJson(route, {
+        providers: [
+          {
+            name: "nvidia",
+            available: true,
+            source: "env",
+            env_hint: "NVIDIA_API_KEY",
+            models: ["nvidia/free-model"],
+          },
+          {
+            name: "grok_hermes",
+            available: false,
+            source: "",
+            env_hint: null,
+            models: [],
+          },
+          {
+            name: "gemini_agy",
+            available: false,
+            source: "",
+            env_hint: null,
+            models: [],
+          },
+          {
+            name: "claude_code",
+            available: false,
+            source: "",
+            env_hint: null,
+            models: [],
+          },
+        ],
+        log: [],
+      });
+    });
+
+    await page.goto("/");
+    await expect(page.getByTestId("deliberate-workspace-idle")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    const starter = page.locator('[data-testid="cabinet-chip"][data-cabinet-name="starter-nvidia"]');
+    const standard = page.locator('[data-testid="cabinet-chip"][data-cabinet-name="standard"]');
+    await expect(starter).toHaveAttribute("data-cabinet-available", "true", {
+      timeout: 10_000,
+    });
+    await expect(standard).toHaveAttribute("data-cabinet-available", "false");
+
+    // Auto-select moved off blocked standard onto runnable starter-nvidia.
+    await expect(starter).toHaveClass(/border-amber/);
+    // Need prose stays muted (no danger class on the need label).
+    const need = standard.getByTestId("cabinet-need");
+    await expect(need).toBeVisible();
+    await expect(need).toHaveClass(/text-fg-muted/);
+    await expect(need).not.toHaveClass(/text-danger/);
+
+    // The editor keeps one aggregate blocker instead of repeating a red
+    // warning under every unavailable seat and chair field.
+    await page.getByRole("button", { name: "Cabinets", exact: true }).click();
+    const providerWarning = page.getByTestId("cabinet-provider-warning");
+    await expect(providerWarning).toContainText(
+      "Unavailable or legacy provider transports: grok_hermes, gemini_agy, claude_code",
+    );
+    await expect(providerWarning).toHaveClass(/text-warning/);
+    await expect(providerWarning).not.toHaveClass(/text-danger/);
+    await expect(
+      page.getByText(/is unavailable or is a legacy provider ID/),
+    ).toHaveCount(0);
   });
 
   test("Settings persist across reload", async ({ page }) => {

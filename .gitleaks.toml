@@ -83,7 +83,7 @@ regexes = [
 
 # Council: env loader variable names only; the file reads the private provider env.
 [[allowlists]]
-description = "Council War Room env loader variable names"
+description = "IRIN env loader variable names"
 condition = "AND"
 paths = ['''council-rs/warroom/scripts/env\.sh''']
 regexes = ['''(XAI_API_KEY|OPENAI_API_KEY|ANTHROPIC_API_KEY|NVIDIA_API_KEY|NOUS_API_KEY|DEEPSEEK_API_KEY)''']

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Council War Room — Frontend launcher (launchd)
+# IRIN — Frontend launcher (launchd)
 # Runs production mode: serves pre-built .next/ on port 3000.
 # Rebuild with `npm run build` after code changes.
 set -euo pipefail

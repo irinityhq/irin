@@ -1,14 +1,13 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove worktree-gc tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build build test
-
+.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-prod-images production-manifest release-transaction worktree-gc
 setup: ## macOS: prepare config, start the managed runtime, and enable login recovery
 	bash scripts/setup-local.sh
 
 setup-prepare: ## Prepare private local config and signing material without starting services
 	bash scripts/setup-local.sh --prepare-only
 
-app-install: ## Build, atomically install, and launch the Council War Room app
+app-install: ## Build, atomically install, and launch the IRIN app
 	bash scripts/install-macos-app.sh
 
 release-check: ## Verify product completeness and tree hygiene
@@ -72,6 +71,38 @@ warroom-tauri: ## Open the War Room native desktop shell (Tauri)
 
 warroom-tauri-build: ## Package the War Room native desktop shell (Tauri)
 	$(MAKE) -C council-rs warroom-build
+
+dmg-build: ## Build ad-hoc signed IRIN .app + .dmg (Apple silicon)
+	bash packaging/build-dmg.sh
+
+dmg-verify: ## Verify DMG layout/codesign on an untouched copy (never re-signs)
+	bash packaging/verify-dmg.sh
+
+dmg-smoke: ## Full-app packaged smoke (PROMOTION=1 for strict promotion gate)
+	bash packaging/smoke-full-app.sh
+
+gateway-pack-stage: ## Stage runtime-only Gateway Pack into Tauri resources (gitignored)
+	bash scripts/stage-gateway-pack.sh
+
+gateway-pack-dev-images: ## Build local arm64 Gateway/sidecar images + test-only digest manifest
+	bash scripts/build-gateway-pack-dev-images.sh
+
+gateway-pack-test: ## Static + isolation tests for the optional Gateway Pack
+	bash scripts/test-gateway-pack-assets.sh
+	bash scripts/test-gateway-pack-isolation.sh
+	bash scripts/test-gateway-pack-desktop-ownership.sh
+
+gateway-pack-integration-smoke: ## Isolated compose smoke (local-dev images; foreign fixtures survive the product, harness cleans its own)
+	bash scripts/test-gateway-pack-integration-smoke.sh
+
+gateway-pack-prod-images: ## Build + push production GHCR images (IRIN_PACK_IMAGES_TAG=vX.Y.Z|rc-<sha>)
+	bash scripts/build-gateway-pack-prod-images.sh
+
+production-manifest: ## Pin production manifest from live GHCR digests (IRIN_PACK_IMAGES_TAG=...)
+	bash scripts/generate-production-manifest.sh
+
+release-transaction: ## Fail-closed release ladder (scripts/release-transaction.sh --tag vX.Y.Z | --dry-run-rc)
+	bash scripts/release-transaction.sh $(ARGS)
 
 build: ## Build the full Rust workspace in release mode
 	cargo build --workspace --release

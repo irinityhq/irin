@@ -131,7 +131,7 @@ csp = (
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(
         {
-            "identifier": f"com.sovereign.council.warroom.smoke{port}",
+            "identifier": f"com.irinity.irin.smoke{port}",
             "app": {"security": {"csp": csp}},
         },
         handle,
@@ -142,7 +142,7 @@ if [[ "${IRIN_NATIVE_SKIP_BUILD:-0}" != "1" ]]; then
   make -C "$ROOT/council-rs" warroom-build TAURI_BUILD_CONFIG="$smoke_tauri_config"
 fi
 
-app="${IRIN_NATIVE_APP:-$ROOT/council-rs/warroom-tauri/src-tauri/target/release/bundle/macos/Council War Room.app}"
+app="${IRIN_NATIVE_APP:-$ROOT/council-rs/warroom-tauri/src-tauri/target/release/bundle/macos/IRIN.app}"
 binary="$app/Contents/MacOS/council-warroom-tauri"
 [[ -x "$binary" ]] || { printf 'ERROR: native app binary missing: %s\n' "$binary" >&2; exit 1; }
 # Resolve through worktree target symlinks so pgrep matches the LaunchServices

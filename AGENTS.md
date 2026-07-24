@@ -132,7 +132,11 @@ realistic-looking value outside that allow-list.
 
 ## Contribution boundary
 
-- One logical change per PR; keep unrelated cleanup out.
+- One coherent product change per PR. Prefer a clean stacked commit series
+  inside a single PR over multiple PRs when files share product, release, or
+  verification paths. Review findings are repaired on the owning branch, not
+  as fix-PRs. Process, gate, CI, or methodology PRs do not fly while a
+  product PR is open unless a gate is actually broken.
 - Changes under `sentinel/sovereign-protocol/**`, `**/comms*`, escalation or
   directive envelope code, the outbox, capability-token code, or
   `.github/workflows/**` carry signing, wire-shape, or CI authority and get a

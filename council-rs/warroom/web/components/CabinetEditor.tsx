@@ -15,7 +15,6 @@ import { cn } from "@/lib/cn";
 import {
   buildProviderChoices,
   getModelsForProvider,
-  getProviderOption,
   unavailableProviderReason,
   useDiscover,
 } from "@/lib/use-discover";
@@ -439,11 +438,6 @@ export default function CabinetEditor({
                           onChange={(e) => updateSeat(i, "model", e.target.value)} />
                       )}
                     </div>
-                    {!getProviderOption(providerOptions, s.provider)?.available && discoverData && (
-                      <div className="text-[10px] font-mono text-danger">
-                        {s.provider} is unavailable or is a legacy provider ID. Choose an available transport.
-                      </div>
-                    )}
                     <textarea className="input text-xs" rows={4} value={s.system}
                       onChange={(e) => updateSeat(i, "system", e.target.value)} />
                     {s.system_source && (
@@ -504,14 +498,6 @@ export default function CabinetEditor({
                   );
                 })()}
               </div>
-              {discoverData && !getProviderOption(
-                providerOptions,
-                (draft ?? cab)?.chair?.provider || "",
-              )?.available && (
-                <div className="text-[10px] font-mono text-danger">
-                  {(draft ?? cab)?.chair?.provider} is unavailable or is a legacy provider ID. Choose an available chair transport.
-                </div>
-              )}
             </div>
 
             <div className="cg-command-panel space-y-3">
@@ -571,7 +557,7 @@ export default function CabinetEditor({
               {providerAvailabilityProblem && (
                 <div
                   data-testid="cabinet-provider-warning"
-                  className="text-[11px] font-mono text-danger"
+                  className="text-[11px] font-mono text-warning"
                 >
                   {providerAvailabilityProblem}
                 </div>

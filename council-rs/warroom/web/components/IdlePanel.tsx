@@ -6,9 +6,23 @@ import { motion } from "framer-motion";
 import { api } from "@/lib/api";
 import { cn, providerColor } from "@/lib/cn";
 import { DEFAULT_SENSITIVITY, SENSITIVITY_LEVELS, gatewayStartFields } from "@/lib/gateway-mode";
-import type { Cabinet, EmbeddingStats, HealthResponse, MapmakerResult, PrecedentMatch } from "@/lib/types";
+import { canEnableGovernedProceeding } from "@/lib/gateway-pack";
+import type { Cabinet, EmbeddingStats, MapmakerResult, PrecedentMatch } from "@/lib/types";
 import type { GatewaySensitivity, StartPayload } from "@/lib/ws";
 import {
+  getDesktopRuntimeMode,
+  getGatewayPackStatus,
+  isTauri,
+  type DesktopRuntimeMode,
+  type GatewayPackStatus,
+} from "@/lib/tauri";
+import {
+  DEFAULT_CABINET_NAME,
+  noRunnableCabinetExplanation,
+  resolveUntouchedCabinetSelection,
+} from "@/lib/cabinet-selection";
+import {
+  availableProviderIds,
   getProviderOption,
   providerOptionLabel,
   unsupportedGatewayTransportReason,
@@ -38,7 +52,6 @@ function conveneWireMode(
 export default function IdlePanel({
   cabinets,
   onStart,
-  health,
   onViewDriftReport,
   initialCabinet,
   onConsumeInitialCabinet,
@@ -46,7 +59,6 @@ export default function IdlePanel({
 }: {
   cabinets: Cabinet[];
   onStart: (p: StartPayload) => void;
-  health: HealthResponse | null;
   onViewDriftReport?: (reportFilename: string) => void;
   /** Cabinet selection from the editor, applied once on mount. */
   initialCabinet?: string | null;
@@ -55,14 +67,27 @@ export default function IdlePanel({
   variant?: "standalone" | "shell";
 }) {
   const [topic, setTopic] = useState("");
-  const [cabinetName, setCabinetName] = useState(initialCabinet || "standard");
+  const [cabinetName, setCabinetName] = useState(
+    initialCabinet || DEFAULT_CABINET_NAME,
+  );
+  // Explicit editor handoff or any operator click locks selection permanently
+  // for this idle mount — inventory flaps must not re-auto-switch.
+  const selectionLocked = useRef(!!initialCabinet);
+  const autoSelectDone = useRef(false);
   const consumedInitialCabinet = useRef(false);
   useEffect(() => {
     if (!consumedInitialCabinet.current && initialCabinet) {
       consumedInitialCabinet.current = true;
+      selectionLocked.current = true;
       onConsumeInitialCabinet?.();
     }
   }, [initialCabinet, onConsumeInitialCabinet]);
+
+  const selectCabinet = useCallback((name: string) => {
+    selectionLocked.current = true;
+    autoSelectDone.current = true;
+    setCabinetName(name);
+  }, []);
   const [context, setContext] = useState("");
   const [mapDir, setMapDir] = useState("");
   const [blind, setBlind] = useState(false);
@@ -89,12 +114,97 @@ export default function IdlePanel({
   const [rebuilding, setRebuilding] = useState(false);
   const [reindexingPrecedent, setReindexingPrecedent] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  // Same tri-state as Settings: under Tauri the build mode starts "detecting"
+  // and may end "unavailable"; both must fail the governed gate closed.
+  const [desktopMode, setDesktopMode] = useState<
+    DesktopRuntimeMode | "detecting" | "unavailable"
+  >(isTauri() ? "detecting" : "unavailable");
+  const [packStatus, setPackStatus] = useState<GatewayPackStatus | null>(null);
   const topicRef = useRef<HTMLTextAreaElement>(null);
   const { toast } = useToast();
+
+  useEffect(() => {
+    if (!isTauri()) return;
+    let cancelled = false;
+    void getDesktopRuntimeMode()
+      .then((m) => {
+        if (!cancelled) setDesktopMode(m);
+      })
+      .catch(() => {
+        if (!cancelled) setDesktopMode("unavailable");
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!isTauri() || desktopMode !== "installed-release") return;
+    let cancelled = false;
+    const tick = () => {
+      void getGatewayPackStatus()
+        .then((s) => {
+          if (!cancelled) setPackStatus(s);
+        })
+        .catch(() => {
+          if (!cancelled) setPackStatus(null);
+        });
+    };
+    tick();
+    const id = window.setInterval(tick, 8000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(id);
+    };
+  }, [desktopMode]);
+
+  // Fail closed under Tauri while the build mode is detecting or unavailable;
+  // the browser (no native mode) keeps the permissive development path.
+  const governedAllowed = canEnableGovernedProceeding(packStatus, {
+    requireInstalledRelease: true,
+    desktopMode: isTauri() ? desktopMode : "development",
+  });
+
+  useEffect(() => {
+    if (!governedAllowed && viaGateway) {
+      setViaGateway(false);
+    }
+  }, [governedAllowed, viaGateway]);
 
   // Validator choices are exact transport identities. Keep unavailable choices
   // visible for explanation, but never allow them to be selected or launched.
   const { data: discoverData, loading: discoverLoading, error: discoverError, providerOptions } = useDiscover();
+
+  // Single availability source for runnability, auto-select, and convene
+  // gating: the normalized Discover inventory. `/api/health` stays liveness
+  // only — it deliberately reports host CLI transports as unavailable.
+  const availableIds = useMemo(
+    () => availableProviderIds(discoverData),
+    [discoverData],
+  );
+
+  // Untouched first load: once cabinets AND the Discover inventory are known,
+  // prefer a stable runnable cabinet over a blocked default (see
+  // cabinet-selection.ts).
+  useEffect(() => {
+    if (autoSelectDone.current || selectionLocked.current) return;
+    // Wait for both inputs — deciding on an empty list would lock on the
+    // preferred default and never re-evaluate when cabinets arrive.
+    if (availableIds == null || cabinets.length === 0) return;
+    const next = resolveUntouchedCabinetSelection({
+      cabinets,
+      providersAvailable: availableIds,
+      currentName: cabinetName,
+      selectionLocked: selectionLocked.current,
+    });
+    autoSelectDone.current = true;
+    if (next && next !== cabinetName) {
+      setCabinetName(next);
+    }
+    // Lock after the first decision so later inventory changes never re-pick.
+    selectionLocked.current = true;
+  }, [cabinets, availableIds, cabinetName]);
+
   const validatorProviders = useMemo(() => {
     const allowed = [
       "grok_build",
@@ -179,11 +289,18 @@ export default function IdlePanel({
   const gatewayProviderProblem = viaGateway
     ? unsupportedGatewayTransportReason(providerOptions, selectedProviderIds)
     : null;
+  const noRunnableExplanation = noRunnableCabinetExplanation(
+    cabinets,
+    availableIds,
+  );
   const providerSelectionProblem = discoverError
     ? `Provider discovery failed: ${discoverError}`
     : !discoverData || discoverLoading
       ? "Provider availability is still being checked."
-      : cabinetProviderProblem ?? validatorProviderProblem ?? gatewayProviderProblem;
+      : noRunnableExplanation
+        ?? cabinetProviderProblem
+        ?? validatorProviderProblem
+        ?? gatewayProviderProblem;
   const canStart = topic.trim().length > 4 && !providerSelectionProblem;
 
   const submit = () => {
@@ -268,16 +385,16 @@ export default function IdlePanel({
               embedded
               cabinets={cabinets}
               selected={cabinetName}
-              onSelect={setCabinetName}
-              health={health}
+              onSelect={selectCabinet}
+              providersAvailable={availableIds}
             />
           </div>
         ) : (
           <CabinetSelector
             cabinets={cabinets}
             selected={cabinetName}
-            onSelect={setCabinetName}
-            health={health}
+            onSelect={selectCabinet}
+            providersAvailable={availableIds}
           />
         )}
 
@@ -405,9 +522,24 @@ export default function IdlePanel({
           <div className="rounded-md border border-border bg-bg-overlay/40 p-3 space-y-3" data-testid="gateway-routing">
             <Toggle
               label="Governed via Gateway"
-              sub={viaGateway ? "All model calls fail closed through Gateway" : "Direct provider and CLI calls"}
-              value={viaGateway}
-              onChange={setViaGateway}
+              sub={
+                !governedAllowed && desktopMode === "installed-release"
+                  ? "Requires authenticated Gateway Pack (Settings → Enable Gateway)"
+                  : viaGateway
+                    ? "All model calls fail closed through Gateway"
+                    : "Direct provider and CLI calls"
+              }
+              value={viaGateway && governedAllowed}
+              onChange={(v) => {
+                if (v && !governedAllowed) {
+                  toast(
+                    "error",
+                    "Gateway Pack is not authenticated-ready. Use Settings → Enable Gateway first.",
+                  );
+                  return;
+                }
+                setViaGateway(v);
+              }}
               icon={<Network className="w-4 h-4" />}
               tone="cyan"
               testId="gateway-toggle"

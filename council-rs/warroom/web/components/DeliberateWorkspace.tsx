@@ -21,7 +21,7 @@ import type {
   DeliberationState,
   InterventionPayload,
 } from "@/lib/types";
-import type { Cabinet, HealthResponse } from "@/lib/types";
+import type { Cabinet } from "@/lib/types";
 import type { StartPayload } from "@/lib/ws";
 import InterventionPanel from "./InterventionPanel";
 import IdlePanel from "./IdlePanel";
@@ -40,7 +40,6 @@ function liveMode(state: DeliberationState): string {
 export default function DeliberateWorkspace({
   state,
   cabinets,
-  health,
   onStart,
   onIntervene,
   onReset,
@@ -54,7 +53,6 @@ export default function DeliberateWorkspace({
 }: {
   state: DeliberationState;
   cabinets: Cabinet[];
-  health: HealthResponse | null;
   onStart: (p: StartPayload) => void;
   onIntervene: (p: InterventionPayload) => void;
   onReset: () => void;
@@ -72,7 +70,6 @@ export default function DeliberateWorkspace({
         variant="shell"
         cabinets={cabinets}
         onStart={onStart}
-        health={health}
         onViewDriftReport={onViewDriftReport}
         initialCabinet={initialCabinet}
         onConsumeInitialCabinet={onConsumeInitialCabinet}

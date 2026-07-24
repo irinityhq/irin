@@ -1,0 +1,157 @@
+import { describe, expect, it } from "vitest";
+import {
+  canEnableGovernedProceeding,
+  gatewayPackIsCoreNeutral,
+  gatewayPackStateLabel,
+  type GatewayPackStatus,
+} from "./gateway-pack";
+
+function status(
+  partial: Partial<GatewayPackStatus> & Pick<GatewayPackStatus, "state">,
+): GatewayPackStatus {
+  return {
+    message: "",
+    pack_version: null,
+    manifest_mode: null,
+    gateway_url: "http://127.0.0.1:18080",
+    project: "irin-desktop-gateway",
+    key_id: null,
+    enabled: false,
+    docker: "ready",
+    watch_producer_enabled: false,
+    watch_dispatcher_enabled: false,
+    authenticated: false,
+    council_governed: false,
+    gateway_url_configured: true,
+    support_matrix_summary: "",
+    ...partial,
+  };
+}
+
+describe("gateway pack state labels", () => {
+  it("never labels a bare URL state as ready", () => {
+    expect(gatewayPackStateLabel("not_installed")).not.toMatch(/ready/i);
+    expect(gatewayPackStateLabel("installed_stopped")).not.toMatch(/ready/i);
+    expect(gatewayPackStateLabel("authenticated_ready")).toMatch(/Authenticated ready/);
+  });
+});
+
+describe("core-neutral states", () => {
+  it("treats missing Docker as non-red for core", () => {
+    expect(gatewayPackIsCoreNeutral("docker_missing")).toBe(true);
+    expect(gatewayPackIsCoreNeutral("docker_daemon_down")).toBe(true);
+    expect(gatewayPackIsCoreNeutral("degraded")).toBe(false);
+  });
+});
+
+describe("governed proceeding gate", () => {
+  it("blocks governed on installed-release until authenticated ready", () => {
+    const stopped = status({ state: "installed_stopped" });
+    expect(
+      canEnableGovernedProceeding(stopped, {
+        requireInstalledRelease: true,
+        desktopMode: "installed-release",
+      }),
+    ).toBe(false);
+
+    const ready = status({
+      state: "authenticated_ready",
+      authenticated: true,
+      enabled: true,
+      council_governed: true,
+    });
+    expect(
+      canEnableGovernedProceeding(ready, {
+        requireInstalledRelease: true,
+        desktopMode: "installed-release",
+      }),
+    ).toBe(true);
+  });
+
+  it("requires authenticated flag even if state string is ready", () => {
+    const fake = status({
+      state: "authenticated_ready",
+      authenticated: false,
+    });
+    expect(canEnableGovernedProceeding(fake)).toBe(false);
+  });
+
+  it("allows development mode without pack", () => {
+    expect(
+      canEnableGovernedProceeding(null, { desktopMode: "development" }),
+    ).toBe(true);
+  });
+
+  it("fails closed while the desktop build mode is still detecting", () => {
+    const ready = status({
+      state: "authenticated_ready",
+      authenticated: true,
+      enabled: true,
+      council_governed: true,
+    });
+    expect(
+      canEnableGovernedProceeding(ready, {
+        requireInstalledRelease: true,
+        desktopMode: "detecting",
+      }),
+    ).toBe(false);
+    expect(
+      canEnableGovernedProceeding(null, {
+        requireInstalledRelease: true,
+        desktopMode: "detecting",
+      }),
+    ).toBe(false);
+  });
+
+  it("fails closed when the desktop build mode is unavailable", () => {
+    expect(
+      canEnableGovernedProceeding(null, {
+        requireInstalledRelease: true,
+        desktopMode: "unavailable",
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps the browser path free while the pack status is unknown", () => {
+    expect(
+      canEnableGovernedProceeding(null, {
+        requireInstalledRelease: true,
+        desktopMode: "development",
+      }),
+    ).toBe(true);
+  });
+});
+
+import { gatewayHeaderTruth } from "./gateway-pack";
+
+describe("gateway header truth", () => {
+  it("distinguishes url-set from pack-authenticated and governed", () => {
+    expect(gatewayHeaderTruth(null, true).label).toBe("url set");
+    expect(gatewayHeaderTruth(null, false).label).toBe("not set");
+    expect(
+      gatewayHeaderTruth(
+        status({
+          state: "authenticated_ready",
+          authenticated: true,
+          enabled: true,
+          council_governed: true,
+        }),
+        true,
+      ).label,
+    ).toBe("governed");
+    expect(
+      gatewayHeaderTruth(
+        status({
+          state: "authenticated_ready",
+          authenticated: true,
+          enabled: true,
+          council_governed: false,
+        }),
+        true,
+      ).label,
+    ).toBe("pack auth");
+    expect(
+      gatewayHeaderTruth(status({ state: "docker_missing" }), false).tone,
+    ).toBe("neutral");
+  });
+});

@@ -21,7 +21,6 @@ describe("DeliberateWorkspace Abort state", () => {
       <DeliberateWorkspace
         state={state}
         cabinets={[]}
-        health={null}
         onStart={() => {}}
         onIntervene={() => {}}
         onReset={() => {}}
