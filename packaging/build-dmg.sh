@@ -139,7 +139,7 @@ if [[ "$PACK_MODE" == "production" ]]; then
   codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
     "$DEST_APP"
   codesign --verify --deep --strict "$DEST_APP"
-  codesign -dv "$DEST_APP" 2>&1 | grep -q 'Authority=Developer ID Application' \
+  codesign -dv --verbose=4 "$DEST_APP" 2>&1 | grep -q 'Authority=Developer ID Application' \
     || die "expected Developer ID Application signature"
 else
   codesign --force --deep --sign - "$DEST_APP"

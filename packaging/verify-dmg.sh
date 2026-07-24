@@ -52,7 +52,7 @@ codesign -dv "$DEST_APP" 2>&1 | tee -a "$REPORT" || true
 
 if [[ "${IRIN_DMG_PACK_MODE:-local-dev}" == "production" ]]; then
   log "=== production assertions: identity, Gatekeeper, staple ==="
-  AUTH="$(codesign -dv "$DEST_APP" 2>&1 | grep '^Authority=' | head -1 || true)"
+  AUTH="$(codesign -dv --verbose=4 "$DEST_APP" 2>&1 | grep '^Authority=' | head -1 || true)"
   [[ "$AUTH" == *"Developer ID Application"* ]] \
     || die "production app is not Developer ID signed (got: ${AUTH:-none})"
   spctl --assess --type execute -vv "$DEST_APP" 2>&1 | tee -a "$REPORT" \
