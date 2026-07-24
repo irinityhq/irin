@@ -816,10 +816,15 @@ UNINSTALL_CLICK="$(ax_click_button "Uninstall pack" || true)"
 log "ax_click_Uninstall_pack=$UNINSTALL_CLICK"
 [[ "$UNINSTALL_CLICK" == clicked_button* ]] || die "could not click Uninstall pack AXButton"
 sleep 0.4
-# Second step: the revealed inline Confirm uninstall button.
-wait_ax_button_enabled "Confirm uninstall" 10 \
-  || die "Confirm uninstall AXButton never appeared after first click"
-CONFIRM_RC="$(ax_click_button "Confirm uninstall" || true)"
+# Second step: the revealed inline Confirm uninstall button. WKWebView AX
+# proxies can go stale between the wait and the click, so retry the pair.
+CONFIRM_RC="not_found"
+for try_i in 1 2 3 4 5; do
+  wait_ax_button_enabled "Confirm uninstall" 10 || true
+  CONFIRM_RC="$(ax_click_button "Confirm uninstall" || true)"
+  [[ "$CONFIRM_RC" == clicked_button* ]] && break
+  sleep 0.5
+done
 log "ax_uninstall_confirm=$CONFIRM_RC"
 # Require either confirm click or immediate busy (some stacks auto-accept in test).
 busy_seen=0
