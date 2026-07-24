@@ -63,9 +63,9 @@ modules, see [`surface-map.md`](surface-map.md). Watch operator detail:
 
 Sheldon is the between-round claim validator: after a round of model
 responses, it checks factual claims made in that round and returns a verdict
-per claim — supported, consistent, or no-evidence — before the next round or
-the chair ruling. This runs inside ordinary Council deliberation; it is not a
-Gateway or Sentinel path.
+per claim — supported, consistent, no-evidence, or contradicted — before the
+next round or the chair ruling. This runs inside ordinary Council deliberation;
+it is not a Gateway or Sentinel path.
 
 When validation is enabled, Sheldon gathers bounded evidence before the
 validator model runs, in this order:

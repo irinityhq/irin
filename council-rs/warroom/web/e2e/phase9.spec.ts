@@ -1,6 +1,9 @@
 import { test, expect, type Page, type Route } from "@playwright/test";
 import { BACKEND } from "./support/ports";
-import { installAvailableProviderDiscovery } from "./fixtures/available-provider-discovery";
+import {
+  installAvailableProviderDiscovery,
+  installAvailableProviderHealth,
+} from "./fixtures/available-provider-discovery";
 
 const failuresByPage = new WeakMap<Page, string[]>();
 
@@ -22,6 +25,7 @@ function isOptionalGatewayConsoleNoise(text: string): boolean {
 
 test.beforeEach(async ({ page }) => {
   await installAvailableProviderDiscovery(page);
+  await installAvailableProviderHealth(page);
   const failures: string[] = [];
   failuresByPage.set(page, failures);
   page.on("console", (msg) => {

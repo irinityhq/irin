@@ -164,7 +164,7 @@ the configured Council URL and adopts the canonical runtime if the build
 identity matches. If the app reports it cannot reach Council, the fix is to
 make sure the canonical runtime is up (`make runtime-status`, `make
 runtime-up`), not to restart the app repeatedly. `make app-install` rebuilds,
-atomically replaces `/Applications/Council War Room.app`, and relaunches it;
+atomically replaces `/Applications/IRIN.app`, and relaunches it;
 if automatic launch fails after install, the script tells you the exact
 `open '...'` command to run by hand. See
 [`council-rs/warroom/docs/TAURI-AUTH.md`](../council-rs/warroom/docs/TAURI-AUTH.md)

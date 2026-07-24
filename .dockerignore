@@ -15,6 +15,15 @@ target/
 **/gen/
 **/.DS_Store
 
+# Generated packaging / DMG / app smoke trees — never needed in image builds.
+packaging/build/
+packaging/artifacts/
+packaging/test-home/
+packaging/test-apps/
+packaging/receipts/
+council-rs/warroom-tauri/src-tauri/binaries/
+council-rs/warroom-tauri/src-tauri/resources/
+
 .codex/
 .claude/
 .cursor/

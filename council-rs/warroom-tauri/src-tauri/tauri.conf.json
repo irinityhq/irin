@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Council War Room",
+  "productName": "IRIN",
   "version": "0.1.0",
-  "identifier": "com.sovereign.council.warroom",
+  "identifier": "com.irinity.irin",
   "build": {
     "beforeDevCommand": "cd ../warroom/web && NEXT_PUBLIC_API_BASE=http://127.0.0.1:8765 NEXT_PUBLIC_WS_BASE=ws://127.0.0.1:8765 NEXT_PUBLIC_GATEWAY_BASE=${GATEWAY_URL:-http://127.0.0.1:18080} npm run dev:local",
     "devUrl": "http://127.0.0.1:3010",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Council War Room",
+        "title": "IRIN",
         "width": 1200,
         "height": 800,
         "resizable": true,
@@ -25,13 +25,23 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["app", "dmg"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "externalBin": [
+      "binaries/council"
+    ],
+    "resources": {
+      "resources/council-base": "council-base",
+      "resources/gateway-pack": "gateway-pack"
+    },
+    "macOS": {
+      "minimumSystemVersion": "12.0"
+    }
   }
 }

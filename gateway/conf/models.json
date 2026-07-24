@@ -396,7 +396,7 @@
       "capabilities": { "quality": 0.95, "max_context": 200000, "supports_tools": false, "supports_vision": false, "supports_streaming": false }
     },
     "council-warroom": {
-      "_comment": "Council War Room endpoint using a 5-seat, 3-round cabinet. This route is marked internal and must be explicitly enabled.",
+      "_comment": "IRIN endpoint using a 5-seat, 3-round cabinet. This route is marked internal and must be explicitly enabled.",
       "provider": "council",
       "path": "/api/deliberate",
       "family": "council",

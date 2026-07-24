@@ -88,7 +88,7 @@ if [[ "$(uname -s)" == Darwin ]]; then
   invalid_pid_output="$(swift scripts/macos-window-proof.swift \
     --pid not-a-pid \
     --output "${TMPDIR:-/tmp}/unused-window-proof.png" \
-    --contains 'Council War Room' 2>&1)"
+    --contains 'IRIN' 2>&1)"
   invalid_pid_status=$?
   set -e
   [[ "$invalid_pid_status" -ne 0 ]]
@@ -104,7 +104,7 @@ grep -Fq 'changed=(__integrated_main__)' .github/workflows/ci.yml
 grep -Fq 'with-test-ports.sh' council-rs/Makefile
 grep -Fq 'npm audit --omit=dev --audit-level=high' council-rs/Makefile
 grep -Fq 'cargo build --release -p council-rs --bin council --locked' council-rs/Makefile
-grep -Fq 'com.sovereign.council.warroom.smoke' scripts/smoke-macos-tauri-app.sh
+grep -Fq 'com.irinity.irin.smoke' scripts/smoke-macos-tauri-app.sh
 grep -Fq 'a non-default IRIN_COUNCIL_PORT requires TAURI_CONFIG with exact' \
   council-rs/warroom-tauri/src-tauri/build.rs
 grep -Fq 'native exact-build adoption proof: PASS' scripts/smoke-macos-tauri-app.sh
@@ -198,7 +198,7 @@ git -C "$gc_repo" worktree add -q -b feature/dirty "$dirty_worktree" main
 dirty_worktree="$(cd "$dirty_worktree" && pwd -P)"
 printf 'dirty\n' >"$dirty_worktree/dirty.txt"
 
-gc_dry_run="$(cd "$gc_repo" && PATH=/usr/bin:/bin scripts/worktree-gc.sh)"
+gc_dry_run="$(cd "$gc_repo" && PATH=/usr/bin:/bin IRIN_REQUIRE_GORTEX=0 scripts/worktree-gc.sh)"
 grep -Fq "KEEP active: $active_worktree (feature/active-unpushed)" <<<"$gc_dry_run"
 grep -Fq "SKIP dirty: $dirty_worktree (feature/dirty)" <<<"$gc_dry_run"
 grep -Fq "CANDIDATE [merged-into-origin/main]: $merged_worktree (feature/merged)" \
@@ -211,7 +211,7 @@ grep -Fq "CANDIDATE [origin-branch-gone-and-cherry-empty]: $deleted_worktree (fe
 origin_url="$(git -C "$gc_repo" remote get-url origin)"
 git -C "$gc_repo" remote set-url origin "$tmp/missing-origin.git"
 set +e
-gc_offline="$(cd "$gc_repo" && PATH=/usr/bin:/bin scripts/worktree-gc.sh --apply 2>&1)"
+gc_offline="$(cd "$gc_repo" && PATH=/usr/bin:/bin IRIN_REQUIRE_GORTEX=0 scripts/worktree-gc.sh --apply 2>&1)"
 gc_offline_status=$?
 set -e
 git -C "$gc_repo" remote set-url origin "$origin_url"
@@ -219,7 +219,7 @@ git -C "$gc_repo" remote set-url origin "$origin_url"
 grep -Fq 'unable to refresh and prune origin; no worktrees were changed' <<<"$gc_offline"
 [[ -d "$merged_worktree" && -d "$deleted_worktree" ]]
 
-gc_apply="$(cd "$gc_repo" && PATH=/usr/bin:/bin scripts/worktree-gc.sh --apply)"
+gc_apply="$(cd "$gc_repo" && PATH=/usr/bin:/bin IRIN_REQUIRE_GORTEX=0 scripts/worktree-gc.sh --apply)"
 grep -Fq 'worktree-gc: removed 2 of 2 candidate(s)' <<<"$gc_apply"
 [[ -d "$active_worktree" && -d "$dirty_worktree" ]]
 [[ ! -d "$merged_worktree" && ! -d "$deleted_worktree" ]]

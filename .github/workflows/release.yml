@@ -75,6 +75,10 @@ jobs:
       - name: Upload release artifacts
         uses: softprops/action-gh-release@3d0d9888cb7fd7b750713d6e236d1fcb99157228 # v3.0.2
         with:
+          # Draft: the release transaction attaches the accepted, notarized
+          # IRIN DMG to this same release; it is published only after
+          # re-download verification. Nothing public before acceptance.
+          draft: true
           files: |
             target/release/council
           generate_release_notes: true
