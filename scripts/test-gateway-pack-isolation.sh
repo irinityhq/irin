@@ -12,14 +12,14 @@ pass() { printf 'PASS: %s\n' "$*"; }
 
 # Fixed project name only.
 grep -q 'name: irin-desktop-gateway' "$COMPOSE" || die "project name"
-! grep -E '^\s*build:' "$COMPOSE" || die "no build"
+! grep -E '^[[:space:]]*build:' "$COMPOSE" || die "no build"
 grep -q 'WATCH_PRODUCER_ENABLED=false' "$COMPOSE" || die "producer false"
 grep -q 'WATCH_DISPATCHER_ENABLED=false' "$COMPOSE" || die "dispatcher false"
 grep -q '127.0.0.1:18080:8080' "$COMPOSE" || die "loopback port"
-! grep -E '^\s*-\s*.*(\$\{HOME\}|~/|\$HOME)' "$COMPOSE" || die "no home mounts"
+! grep -E '^[[:space:]]*-\s*.*(\$\{HOME\}|~/|\$HOME)' "$COMPOSE" || die "no home mounts"
 
 # Tag-only image refs must not appear as defaults in pack compose.
-if grep -E 'image:\s*[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+\s*$' "$COMPOSE" >/dev/null; then
+if grep -E 'image:[[:space:]]*[A-Za-z0-9._/-]+:[A-Za-z0-9._-]+\s*$' "$COMPOSE" >/dev/null; then
   die "tag-only image defaults forbidden"
 fi
 grep -q 'IRIN_GATEWAY_IMAGE' "$COMPOSE" || die "gateway image from env"

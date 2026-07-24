@@ -29,13 +29,13 @@ case "$MODE" in
 esac
 
 # Fail closed: production-shaped compose must never ship build: directives or HOME mounts.
-if grep -E '^\s*build:' "$SRC_PACK/docker-compose.yml" >/dev/null; then
+if grep -E '^[[:space:]]*build:' "$SRC_PACK/docker-compose.yml" >/dev/null; then
   die "gateway pack compose must not contain build: directives"
 fi
-if grep -E '^\s*-\s*.*(\$\{HOME\}|~/|\$HOME)' "$SRC_PACK/docker-compose.yml" >/dev/null; then
+if grep -E '^[[:space:]]*-[[:space:]]*.*(\$\{HOME\}|~/|\$HOME)' "$SRC_PACK/docker-compose.yml" >/dev/null; then
   die "gateway pack compose must not mount host-home paths"
 fi
-if grep -E '^\s*-\s*.*(gcloud|\.config/gcloud)' "$SRC_PACK/docker-compose.yml" >/dev/null; then
+if grep -E '^[[:space:]]*-[[:space:]]*.*(gcloud|\.config/gcloud)' "$SRC_PACK/docker-compose.yml" >/dev/null; then
   die "gateway pack compose must not mount gcloud credential dirs"
 fi
 if grep -E 'canary\.yml|docker-compose\.canary' "$SRC_PACK/docker-compose.yml" >/dev/null; then

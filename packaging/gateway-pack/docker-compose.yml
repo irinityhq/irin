@@ -3,6 +3,9 @@
 # No build: directives. No host-home mounts. No canary overlay.
 # Image refs come from IRIN_GATEWAY_IMAGE / IRIN_SIDECAR_IMAGE (digest-pinned).
 # Pack root + ledger key paths are set only by the native allow-listed host.
+# Compose ranks process env above --env-file: every interpolated variable
+# below is forced by the native spawn env from validated sources, and
+# Watch/admin token surfaces are empty literals that accept no env input.
 
 name: irin-desktop-gateway
 
@@ -37,7 +40,9 @@ services:
       - GEMINI_PROXY_TOKEN=
       - GW_ENABLE_STREAMING=${GW_ENABLE_STREAMING:-0}
       - GW_ENABLE_BATCH=${GW_ENABLE_BATCH:-0}
-      - COUNCIL_GATEWAY_TOKEN=${COUNCIL_GATEWAY_TOKEN:-}
+      # Disarmed at the source: never a pack input. The native spawn env also
+      # force-empties it so an ambient parent token cannot re-arm this route.
+      - COUNCIL_GATEWAY_TOKEN=
       - COUNCIL_GATEWAY_KEY_ID=${COUNCIL_GATEWAY_KEY_ID:-}
       - GW_ENABLE_COUNCIL_ENDPOINT=${GW_ENABLE_COUNCIL_ENDPOINT:-0}
       - COUNCIL_BASE_URL=${COUNCIL_BASE_URL:-http://host.docker.internal:8765}
@@ -70,7 +75,10 @@ services:
       - GATEWAY_AUTH_FAIL_CLOSED=${GATEWAY_AUTH_FAIL_CLOSED:-true}
       - AUTH_PEPPER=${AUTH_PEPPER}
       - BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN:-}
-      - WATCH_ADMIN_TOKEN=${WATCH_ADMIN_TOKEN:-}
+      # Watch/admin surfaces stay disarmed in the desktop pack: empty literal,
+      # never interpolated. The native spawn env force-empties it as well, so
+      # an ambient host token cannot re-arm Watch admin APIs.
+      - WATCH_ADMIN_TOKEN=
       # Watch producer and dispatcher must remain disarmed in every pack path.
       - WATCH_DISPATCHER_ENABLED=false
       - WATCH_PRODUCER_ENABLED=false
