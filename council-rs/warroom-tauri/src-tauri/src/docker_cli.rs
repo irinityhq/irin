@@ -271,12 +271,12 @@ pub fn docker_cli_plugin_extra_dirs() -> Vec<&'static str> {
 /// config exists only for deterministic plugin resolution. Never logs config
 /// contents.
 ///
-/// Lives under `app_support_dir()` so `IRIN_APP_SUPPORT_ROOT` isolation applies
-/// without remapping `HOME` (Keychain stays on the operator login keychain).
+/// Lives at the app-support root (NOT under `gateway/`): the managed config
+/// must survive pack uninstall and must never recreate the pack data dir that
+/// `remove_dir_all(gateway/)` just deleted. `IRIN_APP_SUPPORT_ROOT` isolation
+/// still applies without remapping `HOME`.
 pub fn ensure_managed_docker_config_dir() -> Result<PathBuf, String> {
-    let dir = crate::private_config::app_support_dir()
-        .join("gateway")
-        .join(".docker-cli");
+    let dir = crate::private_config::app_support_dir().join(".docker-cli");
     fs::create_dir_all(&dir).map_err(|e| format!("create managed docker config dir: {e}"))?;
 
     let extra = docker_cli_plugin_extra_dirs();
