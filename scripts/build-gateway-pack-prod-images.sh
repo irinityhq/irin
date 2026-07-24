@@ -82,6 +82,8 @@ tag_is_unpublished() {
 # PUSH_GW / PUSH_SC: 1 = build+push this image; 0 = already published, skip.
 # RECEIPT_ONLY: both tags already exist — never overwrite; only re-inspect digests
 # and write the receipt (recovers from a post-push inspect/receipt failure).
+# Provenance SHA comes from image annotations / IRIN_PACK_IMAGES_SOURCE_SHA —
+# never from a possibly different current HEAD (moved-tag safety).
 PUSH_GW=1
 PUSH_SC=1
 RECEIPT_ONLY=0
@@ -147,10 +149,19 @@ docker buildx inspect irin-pack-builder >/dev/null 2>&1 \
   || docker buildx create --name irin-pack-builder --use >/dev/null
 docker buildx use irin-pack-builder
 
+# Provenance on every publish: index annotations + image labels so receipt-only
+# recovery can re-read the commit that actually built these digests.
+OCI_REV_ANNOT=(
+  --annotation "index:org.opencontainers.image.revision=${SHA}"
+  --annotation "manifest:org.opencontainers.image.revision=${SHA}"
+  --label "org.opencontainers.image.revision=${SHA}"
+)
+
 if [[ "$PUSH_GW" -eq 1 ]]; then
   echo "=== build+push gateway image (linux/arm64) $GW_IMAGE:$TAG ==="
   docker buildx build --platform linux/arm64 \
     -f "$ROOT/gateway/Dockerfile.gateway" \
+    "${OCI_REV_ANNOT[@]}" \
     -t "$GW_IMAGE:$TAG" --push "$ROOT/gateway"
 else
   echo "=== skip gateway push (already published, immutable) $GW_IMAGE:$TAG ==="
@@ -160,6 +171,7 @@ if [[ "$PUSH_SC" -eq 1 ]]; then
   echo "=== build+push sidecar image (linux/arm64) $SC_IMAGE:$TAG ==="
   docker buildx build --platform linux/arm64 \
     -f "$ROOT/gateway/sidecar-rs/Dockerfile" \
+    "${OCI_REV_ANNOT[@]}" \
     -t "$SC_IMAGE:$TAG" --push "$SIDECAR_CONTEXT"
 else
   echo "=== skip sidecar push (already published, immutable) $SC_IMAGE:$TAG ==="
@@ -176,11 +188,44 @@ sc_digest="$(docker buildx imagetools inspect "$SC_IMAGE:$TAG" --format '{{.Mani
 [[ "$gw_digest" == sha256:* && "${#gw_digest}" -eq 71 ]] || die "bad gateway digest: $gw_digest"
 [[ "$sc_digest" == sha256:* && "${#sc_digest}" -eq 71 ]] || die "bad sidecar digest: $sc_digest"
 
+# Provenance for the receipt must name the commit that *built* these digests.
+# On a normal publish that is HEAD. On receipt-only recovery we never stamp
+# the current checkout onto foreign digests (e.g. a moved v* tag pointing at
+# a newer main commit while the registry still holds the earlier build).
+image_revision_annotation() {
+  local ref="$1" rev
+  rev="$(docker buildx imagetools inspect "$ref" --format '{{index .Manifest.Annotations "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
+  rev="$(printf '%s' "$rev" | tr -d '[:space:]')"
+  [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s' "$rev"
+}
+
+if [[ "$RECEIPT_ONLY" -eq 1 ]]; then
+  SOURCE_SHA=""
+  # Explicit operator override wins (documented recovery path).
+  if [[ -n "${IRIN_PACK_IMAGES_SOURCE_SHA:-}" ]]; then
+    SOURCE_SHA="$(printf '%s' "$IRIN_PACK_IMAGES_SOURCE_SHA" | tr -d '[:space:]')"
+    [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]       || die "IRIN_PACK_IMAGES_SOURCE_SHA must be a 40-char lowercase git SHA (got ${IRIN_PACK_IMAGES_SOURCE_SHA})"
+  else
+    gw_rev="$(image_revision_annotation "$GW_IMAGE:$TAG" || true)"
+    sc_rev="$(image_revision_annotation "$SC_IMAGE:$TAG" || true)"
+    if [[ -n "$gw_rev" && "$gw_rev" == "$sc_rev" ]]; then
+      SOURCE_SHA="$gw_rev"
+    fi
+  fi
+  [[ -n "$SOURCE_SHA" ]] || die "receipt-only recovery: refuse to stamp current checkout ($SHA) onto already-published digests without verified provenance. Re-run with IRIN_PACK_IMAGES_SOURCE_SHA=<40-char commit that built these images>, or ensure both images were published with matching org.opencontainers.image.revision annotations."
+  if [[ "$SOURCE_SHA" != "$SHA" ]]; then
+    echo "NOTE: receipt SOURCE_SHA=$SOURCE_SHA differs from current HEAD=$SHA (provenance from published images / override; digests not rebuilt)"
+  fi
+else
+  SOURCE_SHA="$SHA"
+fi
+
 mkdir -p "$OUT_DIR"
 RECEIPT="$OUT_DIR/pushed-images-$TAG.env"
 cat >"$RECEIPT" <<EOF
 IRIN_PACK_IMAGES_TAG=$TAG
-IRIN_PACK_IMAGES_SOURCE_SHA=$SHA
+IRIN_PACK_IMAGES_SOURCE_SHA=$SOURCE_SHA
 IRIN_GATEWAY_IMAGE=$GW_IMAGE@$gw_digest
 IRIN_SIDECAR_IMAGE=$SC_IMAGE@$sc_digest
 EOF
