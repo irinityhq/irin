@@ -67,8 +67,12 @@ tag_is_unpublished() {
   if out="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
     return 1
   fi
+  # Match only explicit registry not-found shapes. Do not match bare "unknown"
+  # (e.g. "certificate signed by unknown authority" must fail closed).
   case "$out" in
-    *"not found"*|*"NOT_FOUND"*|*"MANIFEST_UNKNOWN"*|*"unknown"*) return 0 ;;
+    *"not found"*|*"Not Found"*|*"NOT_FOUND"*| \
+    *"MANIFEST_UNKNOWN"*|*"manifest unknown"*| \
+    *"NAME_UNKNOWN"*|*"Name Unknown"*) return 0 ;;
     *) die "cannot prove $ref is unpublished (registry inspection failed): $out" ;;
   esac
 }
