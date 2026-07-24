@@ -71,6 +71,10 @@ jobs:
         working-directory: council-rs/warroom/web
         run: npm ci
 
+      - name: Install Playwright Chromium and hosted dependencies
+        working-directory: council-rs/warroom/web
+        run: npx playwright install --with-deps chromium
+
       - name: Run frontend checks
         working-directory: council-rs/warroom/web
         run: |

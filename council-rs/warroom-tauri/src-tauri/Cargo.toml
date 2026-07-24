@@ -1,6 +1,6 @@
 [package]
 name = "council-warroom-tauri"
-version = "0.1.1"
+version = "0.1.2"
 description = "IRIN desktop shell (Tauri)"
 authors = ["Sovereign Council"]
 edition = "2021"

@@ -9,7 +9,7 @@ source "$ROOT/packaging/env.sh"
 
 TEST_APPS="$ROOT/packaging/test-apps"
 MOUNT="$ROOT/packaging/build/dmg-mount"
-IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-0.1.1}"
+IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-0.1.2}"
 DMG="${IRIN_DMG_PATH:-$ROOT/packaging/artifacts/IRIN_${IRIN_RELEASE_VERSION}_aarch64.dmg}"
 APP_NAME="IRIN.app"
 DEST_APP="$TEST_APPS/$APP_NAME"
