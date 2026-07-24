@@ -51,44 +51,28 @@ pub const DOCKER_DESKTOP_CLI_PLUGINS: &str =
 /// Bounded, non-secret failure categories returned to the UI/logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DockerErrorKind {
-    CliMissing,
-    DaemonDown,
     Timeout,
     PathRejected,
     SubcommandRejected,
     SpawnFailed,
     CommandFailed,
-    ImageMissing,
     ImageDigestMismatch,
-    ComposeFailed,
-    ProbeFailed,
 }
 
 impl DockerErrorKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::CliMissing => "docker_cli_missing",
-            Self::DaemonDown => "docker_daemon_down",
             Self::Timeout => "docker_timeout",
             Self::PathRejected => "docker_path_rejected",
             Self::SubcommandRejected => "docker_subcommand_rejected",
             Self::SpawnFailed => "docker_spawn_failed",
             Self::CommandFailed => "docker_command_failed",
-            Self::ImageMissing => "docker_image_missing",
             Self::ImageDigestMismatch => "docker_image_digest_mismatch",
-            Self::ComposeFailed => "docker_compose_failed",
-            Self::ProbeFailed => "docker_probe_failed",
         }
     }
 
     pub fn operator_message(self) -> &'static str {
         match self {
-            Self::CliMissing => {
-                "Docker CLI not found. Install Docker Desktop, then retry."
-            }
-            Self::DaemonDown => {
-                "Docker Desktop is installed but the daemon is not ready."
-            }
             Self::Timeout => {
                 "Docker command timed out and was terminated. Retry once Docker is responsive."
             }
@@ -96,12 +80,9 @@ impl DockerErrorKind {
             Self::SubcommandRejected => "Compose subcommand rejected by the allow-list.",
             Self::SpawnFailed => "Failed to start the Docker CLI process.",
             Self::CommandFailed => "Docker command failed (details redacted).",
-            Self::ImageMissing => "Required Gateway Pack image is not present locally.",
             Self::ImageDigestMismatch => {
                 "Local image does not match the Gateway Pack manifest digest."
             }
-            Self::ComposeFailed => "Docker Compose operation failed (details redacted).",
-            Self::ProbeFailed => "Docker daemon probe failed (details redacted).",
         }
     }
 }
@@ -114,12 +95,10 @@ pub fn resolve_docker_cli() -> Result<PathBuf, String> {
             return Ok(p.to_path_buf());
         }
     }
-    Err(
-        "Docker CLI not found. Install Docker Desktop, then retry. \
+    Err("Docker CLI not found. Install Docker Desktop, then retry. \
          Expected /usr/local/bin/docker or \
          /Applications/Docker.app/Contents/Resources/bin/docker."
-            .to_string(),
-    )
+        .to_string())
 }
 
 /// Reject any path that is not on the allow-list (defense in depth).
@@ -154,7 +133,8 @@ pub fn path_is_safe_argv(path: &Path) -> bool {
     if !s.starts_with('/') {
         return false;
     }
-    !s.chars().any(|c| matches!(c, '$' | '`' | '\n' | '\r' | ';'))
+    !s.chars()
+        .any(|c| matches!(c, '$' | '`' | '\n' | '\r' | ';'))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -209,7 +189,10 @@ pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output
                 if Instant::now() >= deadline {
                     let _ = child.kill();
                     let reaped = child.wait().map_err(|e| {
-                        format!("{}: wait after kill failed: {e}", DockerErrorKind::SpawnFailed.as_str())
+                        format!(
+                            "{}: wait after kill failed: {e}",
+                            DockerErrorKind::SpawnFailed.as_str()
+                        )
                     })?;
                     let _ = out_handle.join();
                     let _ = err_handle.join();
@@ -309,12 +292,25 @@ pub fn ensure_managed_docker_config_dir() -> Result<PathBuf, String> {
     }
     let body = serde_json::Value::Object(base).to_string();
     let path = dir.join("config.json");
-    // Atomic-ish write without logging contents.
+    // Atomic-ish write without logging contents. Tolerate a concurrent
+    // removal of the app-support tree (parallel tests, external cleaners):
+    // recreate the dir and retry the write+rename once.
     let tmp = dir.join(format!(".config.{}.tmp", std::process::id()));
-    fs::write(&tmp, body.as_bytes()).map_err(|e| format!("write managed docker config: {e}"))?;
-    fs::rename(&tmp, &path).map_err(|e| {
-        let _ = fs::remove_file(&tmp);
-        format!("rename managed docker config: {e}")
+    let attempt = || -> Result<(), String> {
+        fs::create_dir_all(&dir).map_err(|e| format!("create managed docker config dir: {e}"))?;
+        fs::write(&tmp, body.as_bytes())
+            .map_err(|e| format!("write managed docker config: {e}"))?;
+        fs::rename(&tmp, &path).map_err(|e| {
+            let _ = fs::remove_file(&tmp);
+            format!("rename managed docker config: {e}")
+        })
+    };
+    attempt().or_else(|first_err| {
+        if first_err.contains("No such file or directory") {
+            attempt()
+        } else {
+            Err(first_err)
+        }
     })?;
     // The managed config carries no credentials, but never leave it at
     // umask-dependent permissions.
@@ -422,6 +418,7 @@ fn build_docker_command(docker: &Path, args: &[&str]) -> Command {
 /// - project is always `irin-desktop-gateway`
 /// - extra args are an allow-listed subcommand set (up/down/ps/…)
 /// - `extra_env` is a strict allow-list of env keys (never logged)
+#[cfg(test)]
 pub fn compose_command(
     compose_file: &Path,
     env_file: Option<&Path>,
@@ -457,10 +454,7 @@ fn validate_compose_invocation(
         return Err(DockerErrorKind::PathRejected.operator_message().to_string());
     }
     if !compose_file.is_file() {
-        return Err(format!(
-            "compose file missing: {}",
-            compose_file.display()
-        ));
+        return Err(format!("compose file missing: {}", compose_file.display()));
     }
     if let Some(ef) = env_file {
         if !path_is_safe_argv(ef) {
@@ -618,9 +612,7 @@ pub fn redact_process_text(input: &str) -> String {
         // gw_ + 32 hex
         if i + 35 <= bytes.len()
             && &bytes[i..i + 3] == b"gw_"
-            && bytes[i + 3..i + 35]
-                .iter()
-                .all(|c| c.is_ascii_hexdigit())
+            && bytes[i + 3..i + 35].iter().all(|c| c.is_ascii_hexdigit())
         {
             out.push_str("<redacted:gw_key>");
             i += 35;
@@ -629,7 +621,9 @@ pub fn redact_process_text(input: &str) -> String {
         // sk-… openai-ish
         if i + 3 <= bytes.len() && &bytes[i..i + 3] == b"sk-" {
             let mut j = i + 3;
-            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-' || bytes[j] == b'_') {
+            while j < bytes.len()
+                && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'-' || bytes[j] == b'_')
+            {
                 j += 1;
             }
             if j - i >= 12 {
@@ -655,7 +649,10 @@ pub fn redact_process_text(input: &str) -> String {
                 }
             } else {
                 while j < bytes.len()
-                    && !matches!(bytes[j], b' ' | b'\t' | b'\n' | b'\r' | b';' | b',' | b')' | b']')
+                    && !matches!(
+                        bytes[j],
+                        b' ' | b'\t' | b'\n' | b'\r' | b';' | b',' | b')' | b']'
+                    )
                 {
                     j += 1;
                 }
@@ -729,11 +726,6 @@ pub fn format_cmd_failure(action: &str, output: &Output) -> String {
     )
 }
 
-/// Operator-safe error string for timeout/daemon cases.
-pub fn format_docker_error(kind: DockerErrorKind, action: &str) -> String {
-    format!("{action}: {} ({})", kind.operator_message(), kind.as_str())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -780,7 +772,10 @@ mod tests {
         let compose = tmp.join("docker-compose.yml");
         fs::write(&compose, b"name: irin-desktop-gateway\nservices: {}\n").unwrap();
         let err = compose_command(&compose, None, &["exec", "sh"]).unwrap_err();
-        assert!(err.contains("not allow-listed") || err.contains("subcommand"), "{err}");
+        assert!(
+            err.contains("not allow-listed") || err.contains("subcommand"),
+            "{err}"
+        );
         let _ = fs::remove_dir_all(&tmp);
     }
 
@@ -865,14 +860,9 @@ mod tests {
         fs::write(&compose, b"name: irin-desktop-gateway\nservices: {}\n").unwrap();
         let mut env = ComposeEnv::new();
         env.insert("EVIL_KEY".into(), "x".into());
-        let err = compose_command_with_env(
-            &compose,
-            None,
-            &["ps"],
-            Some(&env),
-            Duration::from_secs(5),
-        )
-        .unwrap_err();
+        let err =
+            compose_command_with_env(&compose, None, &["ps"], Some(&env), Duration::from_secs(5))
+                .unwrap_err();
         assert!(err.contains("not allow-listed"), "{err}");
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -931,7 +921,8 @@ mod tests {
     }
 
     fn temp_compose_file(tag: &str) -> PathBuf {
-        let tmp = std::env::temp_dir().join(format!("gw-compose-spawn-{tag}-{}", std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("gw-compose-spawn-{tag}-{}", std::process::id()));
         let _ = fs::create_dir_all(&tmp);
         let compose = tmp.join("docker-compose.yml");
         fs::write(&compose, b"name: irin-desktop-gateway\nservices: {}\n").unwrap();
@@ -947,7 +938,8 @@ mod tests {
     impl SupportRootGuard {
         fn new(tag: &str) -> Self {
             let prev = std::env::var("IRIN_APP_SUPPORT_ROOT").ok();
-            let tmp = std::env::temp_dir().join(format!("gw-spawn-support-{tag}-{}", std::process::id()));
+            let tmp =
+                std::env::temp_dir().join(format!("gw-spawn-support-{tag}-{}", std::process::id()));
             let _ = fs::create_dir_all(&tmp);
             std::env::set_var("IRIN_APP_SUPPORT_ROOT", &tmp);
             Self { prev, tmp }

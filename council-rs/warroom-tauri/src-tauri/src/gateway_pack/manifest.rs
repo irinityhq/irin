@@ -83,10 +83,6 @@ impl ManifestMode {
     pub fn is_production(&self) -> bool {
         matches!(self, ManifestMode::Production)
     }
-
-    pub fn is_local_dev(&self) -> bool {
-        matches!(self, ManifestMode::LocalDev)
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,6 +129,8 @@ pub struct ValidatedManifest {
     #[allow(dead_code)]
     pub third_party: Vec<(String, ImageRef)>,
     pub source_sha: Option<String>,
+    // Carried through validation for provenance display; no reader yet.
+    #[allow(dead_code)]
     pub source_dirty: Option<bool>,
     /// Local-dev only: optional config Ids for dual-check.
     pub local_image_ids: std::collections::BTreeMap<String, String>,
@@ -227,11 +225,6 @@ pub fn image_config_id_matches_ref(image_id: &str, image_ref: &ImageRef) -> bool
     id_hex == image_ref.digest_hex()
 }
 
-/// Back-compat alias used by local-dev path.
-pub fn image_id_matches_ref(image_id: &str, image_ref: &ImageRef) -> bool {
-    image_config_id_matches_ref(image_id, image_ref)
-}
-
 /// True when any entry in `RepoDigests` (newline or comma separated
 /// `name@sha256:hex` lines) matches the expected registry digest reference.
 ///
@@ -242,7 +235,7 @@ pub fn repo_digests_match_ref(repo_digests: &str, image_ref: &ImageRef) -> bool 
     let want_hex = image_ref.digest_hex();
     let want_name = image_ref.name();
     for line in repo_digests
-        .split(|c| c == '\n' || c == '\r' || c == ',')
+        .split(['\n', '\r', ','])
         .map(str::trim)
         .filter(|s| !s.is_empty())
     {
@@ -265,6 +258,7 @@ pub fn repo_digests_match_ref(repo_digests: &str, image_ref: &ImageRef) -> bool 
 
 /// Production must refuse comparing a registry digest to a config Id.
 /// Returns true only when the probe is valid for the given mode.
+#[cfg(test)]
 pub fn digest_probe_allowed_for_mode(mode: &ManifestMode, used_config_id: bool) -> bool {
     match mode {
         ManifestMode::LocalDev => true,
@@ -353,10 +347,7 @@ mod tests {
             &format!("sha256:{}", "b".repeat(64)),
             &r
         ));
-        assert!(digest_probe_allowed_for_mode(
-            &ManifestMode::LocalDev,
-            true
-        ));
+        assert!(digest_probe_allowed_for_mode(&ManifestMode::LocalDev, true));
         assert!(!digest_probe_allowed_for_mode(
             &ManifestMode::Production,
             true
@@ -373,8 +364,7 @@ mod tests {
         // use RepoDigests, not C == D.
         let registry_hex = "d".repeat(64);
         let config_hex = "e".repeat(64);
-        let image_ref =
-            ImageRef::parse(&format!("ghcr.io/org/gw@sha256:{registry_hex}")).unwrap();
+        let image_ref = ImageRef::parse(&format!("ghcr.io/org/gw@sha256:{registry_hex}")).unwrap();
         // Config Id matching registry digest is a false signal for production.
         assert!(image_config_id_matches_ref(
             &format!("sha256:{registry_hex}"),

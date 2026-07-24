@@ -15,7 +15,9 @@
 //! "Keychain Not Found" modal. Use `IRIN_APP_SUPPORT_ROOT` for app-data
 //! isolation and keep the operator login keychain.
 
+#[cfg(test)]
 use std::collections::HashMap;
+#[cfg(test)]
 use std::sync::Mutex;
 
 /// Stable app identity — must match tauri.conf.json `identifier`.
@@ -42,18 +44,23 @@ pub trait SecretStore: Send + Sync {
 }
 
 /// In-memory store for tests. Values are never printed.
+#[cfg(test)]
 #[derive(Default)]
 pub struct MemorySecretStore {
     inner: Mutex<HashMap<(String, String), String>>,
 }
 
+#[cfg(test)]
 impl SecretStore for MemorySecretStore {
     fn set_password(&self, service: &str, account: &str, password: &str) -> Result<(), String> {
         let mut g = self
             .inner
             .lock()
             .map_err(|_| "memory secret store lock poisoned".to_string())?;
-        g.insert((service.to_string(), account.to_string()), password.to_string());
+        g.insert(
+            (service.to_string(), account.to_string()),
+            password.to_string(),
+        );
         Ok(())
     }
 
@@ -92,12 +99,12 @@ mod macos_keychain {
     use security_framework_sys::access_control::kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
     use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound, errSecSuccess};
     use security_framework_sys::item::{
-        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecUseKeychain,
-        kSecUseAuthenticationUI, kSecUseAuthenticationUISkip, kSecValueData,
+        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword,
+        kSecUseAuthenticationUI, kSecUseAuthenticationUISkip, kSecUseKeychain, kSecValueData,
     };
     use security_framework_sys::keychain_item::{SecItemAdd, SecItemUpdate};
     use std::ffi::CStr;
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
     use std::ptr;
 
     use super::KEYCHAIN_UNAVAILABLE;
@@ -131,7 +138,8 @@ mod macos_keychain {
     /// Resolve the existing login keychain for the current uid only.
     /// Never creates, resets, or rewrites the search list. Never logs the path.
     fn open_existing_login_keychain() -> Result<SecKeychain, String> {
-        let path = existing_login_keychain_path().ok_or_else(|| KEYCHAIN_UNAVAILABLE.to_string())?;
+        let path =
+            existing_login_keychain_path().ok_or_else(|| KEYCHAIN_UNAVAILABLE.to_string())?;
         SecKeychain::open(&path).map_err(|_| KEYCHAIN_UNAVAILABLE.to_string())
     }
 
@@ -190,6 +198,7 @@ mod macos_keychain {
 
     /// Fail-fast preflight: usable login keychain must already exist.
     /// Never presents interactive Keychain management UI.
+    #[cfg(test)]
     pub fn preflight_keychain_available() -> Result<(), String> {
         resolved_keychain().map(|_| ())
     }
@@ -259,18 +268,15 @@ mod macos_keychain {
             ),
             (
                 unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
-                unsafe {
-                    CFString::wrap_under_get_rule(kSecUseAuthenticationUIFail).into_CFType()
-                },
+                unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUIFail).into_CFType() },
             ),
         ]);
         let update = CFDictionary::from_CFType_pairs(&[(
             unsafe { CFString::wrap_under_get_rule(kSecValueData) },
             CFData::from_buffer(password).into_CFType(),
         )]);
-        let status = unsafe {
-            SecItemUpdate(query.as_concrete_TypeRef(), update.as_concrete_TypeRef())
-        };
+        let status =
+            unsafe { SecItemUpdate(query.as_concrete_TypeRef(), update.as_concrete_TypeRef()) };
         if status == errSecSuccess {
             Ok(())
         } else {
@@ -311,9 +317,7 @@ mod macos_keychain {
             (
                 unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
                 // Prefer Skip on add (no auth UI); Fail on query/update above.
-                unsafe {
-                    CFString::wrap_under_get_rule(kSecUseAuthenticationUISkip).into_CFType()
-                },
+                unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUISkip).into_CFType() },
             ),
             (
                 unsafe { CFString::wrap_under_get_rule(kSecValueData) },
@@ -372,15 +376,6 @@ mod macos_keychain {
     pub fn login_keychain_file_exists() -> bool {
         existing_login_keychain_path().is_some()
     }
-
-    /// True when `root` contains a nested login.keychain-db (must never happen
-    /// under an isolated app-support root). Path is not logged.
-    pub fn app_support_contains_login_keychain(root: &Path) -> bool {
-        let a = root.join("Library/Keychains/login.keychain-db");
-        let b = root.join("Keychains/login.keychain-db");
-        let c = root.join("login.keychain-db");
-        a.is_file() || b.is_file() || c.is_file()
-    }
 }
 
 #[cfg(target_os = "macos")]
@@ -398,12 +393,16 @@ impl SecretStore for KeychainSecretStore {
     }
 }
 
-/// Public preflight for enable path / diagnostics (non-secret fixed error only).
+/// Preflight probe (non-secret fixed error only). Only the gated live Keychain
+/// integration test calls this today; kept test-only until the enable path
+/// needs it again.
+#[cfg(test)]
 #[cfg(target_os = "macos")]
 pub fn preflight_keychain_available() -> Result<(), String> {
     macos_keychain::preflight_keychain_available()
 }
 
+#[cfg(test)]
 #[cfg(not(target_os = "macos"))]
 pub fn preflight_keychain_available() -> Result<(), String> {
     Err("Keychain is only available on macOS".to_string())
@@ -528,11 +527,13 @@ pub fn gw_api_key_present(store: &dyn SecretStore) -> Result<bool, String> {
 }
 
 /// Presence-only probe for AUTH_PEPPER account.
+#[cfg(test)]
 pub fn auth_pepper_present(store: &dyn SecretStore) -> Result<bool, String> {
     Ok(load_auth_pepper(store)?.is_some())
 }
 
 /// Redact a secret for logs: never include the raw value.
+#[cfg(test)]
 pub fn redact_secret(value: &str) -> String {
     if value.is_empty() {
         return "<empty>".to_string();
@@ -717,10 +718,7 @@ mod keychain_live_tests {
             eprintln!("skip live keychain test (set IRIN_KEYCHAIN_LIVE_TEST=1)");
             return;
         }
-        let service = format!(
-            "com.irinity.irin.test.{}",
-            std::process::id()
-        );
+        let service = format!("com.irinity.irin.test.{}", std::process::id());
         let account = "gateway-client-gw-api-key-test";
         let key1 = format!("gw_{}", "e".repeat(32));
         let key2 = format!("gw_{}", "f".repeat(32));
@@ -745,10 +743,7 @@ mod keychain_live_tests {
             eprintln!("skip live keychain concurrency test");
             return;
         }
-        let service = format!(
-            "com.irinity.irin.test.conc.{}",
-            std::process::id()
-        );
+        let service = format!("com.irinity.irin.test.conc.{}", std::process::id());
         let account = "gateway-client-gw-api-key-test";
         let store = Arc::new(KeychainSecretStore);
         store
@@ -776,10 +771,7 @@ mod keychain_live_tests {
         if std::env::var("IRIN_KEYCHAIN_LIVE_TEST").ok().as_deref() != Some("1") {
             return;
         }
-        let service = format!(
-            "com.irinity.irin.test.missing.{}",
-            std::process::id()
-        );
+        let service = format!("com.irinity.irin.test.missing.{}", std::process::id());
         let store = KeychainSecretStore;
         assert!(store
             .get_password(&service, "no-such-account")
@@ -792,10 +784,7 @@ mod keychain_live_tests {
         if std::env::var("IRIN_KEYCHAIN_LIVE_TEST").ok().as_deref() != Some("1") {
             return;
         }
-        let service = format!(
-            "com.irinity.irin.test.presence.{}",
-            std::process::id()
-        );
+        let service = format!("com.irinity.irin.test.presence.{}", std::process::id());
         let store = KeychainSecretStore;
         let key = format!("gw_{}", "a".repeat(32));
         let pepper = "cd".repeat(32);
@@ -813,9 +802,7 @@ mod keychain_live_tests {
             .get_password(&service, AUTH_PEPPER_ACCOUNT)
             .unwrap()
             .is_some());
-        store
-            .delete_password(&service, GW_API_KEY_ACCOUNT)
-            .unwrap();
+        store.delete_password(&service, GW_API_KEY_ACCOUNT).unwrap();
         store
             .delete_password(&service, AUTH_PEPPER_ACCOUNT)
             .unwrap();

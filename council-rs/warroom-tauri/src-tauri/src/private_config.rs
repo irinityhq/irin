@@ -84,7 +84,11 @@ fn new_install_id() -> String {
     let mut h = DefaultHasher::new();
     std::process::id().hash(&mut h);
     unix_now().hash(&mut h);
-    format!("{:016x}{:016x}", h.finish(), unix_now().wrapping_mul(0x9e37))
+    format!(
+        "{:016x}{:016x}",
+        h.finish(),
+        unix_now().wrapping_mul(0x9e37)
+    )
 }
 
 /// Resolve Application Support directory for this app.
@@ -137,9 +141,7 @@ fn adopt_legacy_app_support_dir(home: &Path) {
         return;
     }
     if let Err(e) = copy_legacy_app_support_dir(&legacy_dir, &new_dir) {
-        eprintln!(
-            "legacy Application Support migration failed: {e}; continuing with fresh state"
-        );
+        eprintln!("legacy Application Support migration failed: {e}; continuing with fresh state");
         // A partial copy must not satisfy the new-dir-exists precondition on
         // the next launch; remove only what this copy attempt just created.
         let _ = fs::remove_dir_all(&new_dir);
@@ -226,7 +228,8 @@ pub fn write_private_config_at(path: &Path, cfg: &PrivateConfig) -> Result<(), S
             return Err("refusing to write raw-looking gateway key into private.json".to_string());
         }
     }
-    let raw = serde_json::to_string_pretty(cfg).map_err(|e| format!("serialize private config: {e}"))?;
+    let raw =
+        serde_json::to_string_pretty(cfg).map_err(|e| format!("serialize private config: {e}"))?;
     if raw.contains("gw_") {
         // key ids are k_…; raw keys are gw_… — refuse any gw_ substring.
         return Err("refusing to write private.json containing gw_ material".to_string());
@@ -236,7 +239,8 @@ pub fn write_private_config_at(path: &Path, cfg: &PrivateConfig) -> Result<(), S
         let mut f = fs::File::create(&tmp).map_err(|e| format!("write private config tmp: {e}"))?;
         f.write_all(raw.as_bytes())
             .map_err(|e| format!("write private config tmp: {e}"))?;
-        f.write_all(b"\n").map_err(|e| format!("write private config tmp: {e}"))?;
+        f.write_all(b"\n")
+            .map_err(|e| format!("write private config tmp: {e}"))?;
     }
     #[cfg(unix)]
     {
@@ -248,6 +252,7 @@ pub fn write_private_config_at(path: &Path, cfg: &PrivateConfig) -> Result<(), S
 }
 
 /// Operator-facing guidance when Gateway/Docker is unavailable.
+#[cfg(test)]
 pub fn gateway_missing_prereq_guidance() -> &'static str {
     "Gateway is optional. Core War Room works without Docker. \
      To enable governed routing on an installed release: install and open Docker Desktop, \
@@ -435,9 +440,7 @@ fn expanded_path_for_gui(login_pairs: &[(String, String)]) -> String {
 fn interactive_login_env_once() -> &'static [(String, String)] {
     use std::sync::OnceLock;
     static CACHE: OnceLock<Vec<(String, String)>> = OnceLock::new();
-    CACHE
-        .get_or_init(capture_interactive_login_env)
-        .as_slice()
+    CACHE.get_or_init(capture_interactive_login_env).as_slice()
 }
 
 /// Capture environment via interactive login shell. Public for unit tests that
@@ -677,7 +680,9 @@ mod tests {
         assert!(is_council_provider_env_key("OPENAI_API_KEY"));
         assert!(is_council_provider_env_key("OPENAI_ADMIN_KEY"));
         assert!(is_council_provider_env_key("VERTEX_PROJECT"));
-        assert!(is_council_provider_env_key("GOOGLE_APPLICATION_CREDENTIALS"));
+        assert!(is_council_provider_env_key(
+            "GOOGLE_APPLICATION_CREDENTIALS"
+        ));
         assert!(is_council_provider_env_key("NVIDIA_API_KEY"));
     }
 

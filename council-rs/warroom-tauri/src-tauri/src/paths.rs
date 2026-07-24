@@ -64,9 +64,7 @@ pub fn bundled_base_dir() -> Option<PathBuf> {
             let path = entry.path();
             if path.is_dir() {
                 if path.join("cabinets").is_dir()
-                    && path
-                        .file_name()
-                        .is_some_and(|n| n == BUNDLED_BASE_DIR_NAME)
+                    && path.file_name().is_some_and(|n| n == BUNDLED_BASE_DIR_NAME)
                 {
                     return Some(path);
                 }
@@ -258,7 +256,10 @@ pub fn resolve_council_binary(explicit: Option<&str>) -> Result<PathBuf, String>
 ///
 /// Packaged: `Resources/council-base`. Dev: council-rs repo root.
 pub fn resolve_spawn_base_dir(council_root_override: Option<&str>) -> Result<PathBuf, String> {
-    if let Some(root) = council_root_override.map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(root) = council_root_override
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
         // Caller validates via validate_council_root when override is set.
         return Ok(PathBuf::from(root));
     }

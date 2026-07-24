@@ -344,10 +344,7 @@ mod tests {
         };
         let on = compose_sidecar_env("o", false, None, Some(true), None, Some(&creds));
         assert_eq!(env_value(&on, "COUNCIL_VIA_GATEWAY"), Some("1"));
-        assert_eq!(
-            env_value(&on, "GW_API_KEY"),
-            Some(fake_key.as_str())
-        );
+        assert_eq!(env_value(&on, "GW_API_KEY"), Some(fake_key.as_str()));
         assert_eq!(
             env_value(&on, "GATEWAY_URL"),
             Some("http://127.0.0.1:18080")

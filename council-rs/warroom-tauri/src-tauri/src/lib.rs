@@ -10,7 +10,7 @@ mod paths;
 mod private_config;
 mod sidecar;
 
-use gateway_pack::{GatewayPackStatus, GatewayPackState};
+use gateway_pack::{GatewayPackState, GatewayPackStatus};
 use keychain::{load_gw_api_key, migrate_legacy_secrets, KeychainSecretStore};
 use paths::{
     build_cors_origins, default_serve_port, is_packaged_install, resolve_council_binary,
@@ -830,7 +830,8 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<GatewayPackStatus, Strin
         };
         if had_child {
             stop_tracked_council_server(&app);
-            let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
+            let _ =
+                wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
                 &app,
                 config.council_path.as_deref(),
@@ -845,13 +846,9 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<GatewayPackStatus, Strin
                 "council-log",
                 "[system] gateway disable: Council restarted in Direct mode",
             );
-            Ok(gateway_pack::status_with_council_route(
-                &store, false, true,
-            ))
+            Ok(gateway_pack::status_with_council_route(&store, false, true))
         } else {
-            Ok(gateway_pack::status_with_council_route(
-                &store, false, true,
-            ))
+            Ok(gateway_pack::status_with_council_route(&store, false, true))
         }
     })
     .await
@@ -878,7 +875,8 @@ async fn gateway_pack_stop(app: AppHandle) -> Result<GatewayPackStatus, String> 
         };
         if had_child {
             stop_tracked_council_server(&app);
-            let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
+            let _ =
+                wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
                 &app,
                 config.council_path.as_deref(),
@@ -923,7 +921,8 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<GatewayPackStatus, Str
         };
         if had_child {
             stop_tracked_council_server(&app);
-            let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
+            let _ =
+                wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
                 &app,
                 config.council_path.as_deref(),

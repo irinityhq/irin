@@ -226,8 +226,8 @@ pub fn bundled_pack_root() -> Option<PathBuf> {
     if dev.join("docker-compose.yml").is_file() {
         return Some(dev);
     }
-    let repo_pack = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../../packaging/gateway-pack");
+    let repo_pack =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../../../packaging/gateway-pack");
     if repo_pack.join("docker-compose.yml").is_file() {
         return Some(repo_pack.canonicalize().unwrap_or(repo_pack));
     }
@@ -324,9 +324,7 @@ fn random_hex(n_bytes: usize) -> Result<String, String> {
 /// Reject CR/LF/NUL and other injection-prone characters in env values.
 pub fn validate_env_value(key: &str, value: &str) -> Result<(), String> {
     if value.bytes().any(|b| b == 0 || b == b'\n' || b == b'\r') {
-        return Err(format!(
-            "env value for {key} contains forbidden CR/LF/NUL"
-        ));
+        return Err(format!("env value for {key} contains forbidden CR/LF/NUL"));
     }
     if value.contains('\0') {
         return Err(format!("env value for {key} contains NUL"));
@@ -342,10 +340,7 @@ pub fn serialize_public_env(pairs: &[(String, String)]) -> Result<String, String
         if !seen.insert(k.clone()) {
             return Err(format!("duplicate env key refused: {k}"));
         }
-        if k.is_empty()
-            || k.bytes()
-                .any(|b| !(b.is_ascii_alphanumeric() || b == b'_'))
-        {
+        if k.is_empty() || k.bytes().any(|b| !(b.is_ascii_alphanumeric() || b == b'_')) {
             return Err(format!("invalid env key: {k}"));
         }
         validate_env_value(k, v)?;
@@ -408,10 +403,7 @@ fn pack_pin_pairs(
         ),
         ("GW_ENABLE_STREAMING".into(), "0".into()),
         ("GW_ENABLE_BATCH".into(), "0".into()),
-        (
-            "GATEWAY_BASE_URL".into(),
-            "http://gateway:8080".into(),
-        ),
+        ("GATEWAY_BASE_URL".into(), "http://gateway:8080".into()),
         ("WATCH_PRODUCER_ENABLED".into(), "false".into()),
         ("WATCH_DISPATCHER_ENABLED".into(), "false".into()),
         ("WATCH_CANARY_TENANT".into(), "canary".into()),
@@ -498,7 +490,12 @@ fn build_compose_secret_env(
     } else {
         gui_login_environment()
     };
-    for key in ["XAI_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "NVIDIA_API_KEY"] {
+    for key in [
+        "XAI_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "NVIDIA_API_KEY",
+    ] {
         let val = std::env::var(key)
             .ok()
             .filter(|v| !v.trim().is_empty())
@@ -587,10 +584,7 @@ pub fn install_pack_files() -> Result<PathBuf, String> {
     })?;
     let gw = ensure_gateway_dir()?;
     let final_dest = gw.join(PACK_DIR_NAME);
-    let stage = gw.join(format!(
-        ".pack-stage-{}.tmp",
-        std::process::id()
-    ));
+    let stage = gw.join(format!(".pack-stage-{}.tmp", std::process::id()));
     let backup = gw.join(format!(".pack-backup-{}.tmp", std::process::id()));
 
     // Clean leftover stage dirs.
@@ -611,13 +605,11 @@ pub fn install_pack_files() -> Result<PathBuf, String> {
         return Err("staged pack missing image-manifest.json".to_string());
     }
     let validated = {
-        let m = load_manifest(&manifest_path).map_err(|e| {
+        let m = load_manifest(&manifest_path).inspect_err(|_| {
             let _ = fs::remove_dir_all(&stage);
-            e
         })?;
-        validate_manifest(&m).map_err(|e| {
+        validate_manifest(&m).inspect_err(|_| {
             let _ = fs::remove_dir_all(&stage);
-            e
         })?
     };
     // Require nginx + conf + lua for a complete pack.
@@ -653,10 +645,7 @@ pub fn install_pack_files() -> Result<PathBuf, String> {
         "project": DESKTOP_COMPOSE_PROJECT,
         "source_sha": validated.source_sha,
     });
-    write_atomic_0600(
-        &installed_marker_path(),
-        format!("{marker}\n").as_bytes(),
-    )?;
+    write_atomic_0600(&installed_marker_path(), format!("{marker}\n").as_bytes())?;
     Ok(final_dest)
 }
 
@@ -878,10 +867,7 @@ fn admin_surface_ready() -> bool {
 
 fn models_authenticated(raw_key: &str) -> bool {
     matches!(
-        http_get_status(
-            &format!("{DESKTOP_GATEWAY_URL}/v1/models"),
-            Some(raw_key)
-        ),
+        http_get_status(&format!("{DESKTOP_GATEWAY_URL}/v1/models"), Some(raw_key)),
         Ok((200, _))
     )
 }
@@ -909,10 +895,7 @@ fn provision_council_client(store: &dyn SecretStore, bootstrap: &str) -> Result<
         .send_json(body)
         .map_err(|e| format!("provision request failed: {e}"))?;
     if resp.status() != 200 {
-        return Err(format!(
-            "provision rejected with HTTP {}",
-            resp.status()
-        ));
+        return Err(format!("provision rejected with HTTP {}", resp.status()));
     }
     let value: serde_json::Value = resp
         .into_json()
@@ -997,7 +980,10 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
     let health = gateway_health_ok();
 
     let key = load_gw_api_key(store).ok().flatten();
-    let authenticated = key.as_ref().map(|k| models_authenticated(k)).unwrap_or(false);
+    let authenticated = key
+        .as_ref()
+        .map(|k| models_authenticated(k))
+        .unwrap_or(false);
     st.authenticated = authenticated;
 
     // Council governed is proven from the owned child's recorded spawn route,
@@ -1005,8 +991,7 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
     // after a failed governed restart or a relaunch that started Council
     // Direct, and must not be able to claim a governed route on their own.
     let proven_governed_child = owned_council_route() == Some(true);
-    st.council_governed =
-        st.enabled && authenticated && health && running && proven_governed_child;
+    st.council_governed = st.enabled && authenticated && health && running && proven_governed_child;
 
     if !running {
         if cfg.as_ref().map(|c| c.via_gateway_default) == Some(true) {
@@ -1048,7 +1033,8 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
         }
     } else if authenticated && !st.enabled {
         st.state = GatewayPackState::Disabled;
-        st.message = "Gateway is up with a stored key, but governed mode is disabled (Direct).".into();
+        st.message =
+            "Gateway is up with a stored key, but governed mode is disabled (Direct).".into();
         st.council_governed = false;
     } else if key.is_some() {
         st.state = GatewayPackState::Degraded;
@@ -1056,7 +1042,9 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
         st.council_governed = false;
     } else {
         st.state = GatewayPackState::Degraded;
-        st.message = "Gateway is up but no client key is in Keychain. Run Enable Gateway to provision.".into();
+        st.message =
+            "Gateway is up but no client key is in Keychain. Run Enable Gateway to provision."
+                .into();
         st.council_governed = false;
     }
     st
@@ -1107,11 +1095,7 @@ fn compose_ls_reports_running(json: &str) -> bool {
     })
 }
 
-fn compose_up(
-    compose: &Path,
-    env_path: &Path,
-    spawn_env: &ComposeEnv,
-) -> Result<(), String> {
+fn compose_up(compose: &Path, env_path: &Path, spawn_env: &ComposeEnv) -> Result<(), String> {
     let up = compose_command_with_env(
         compose,
         Some(env_path),
@@ -1180,24 +1164,20 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     let _ = resolve_docker_cli()?;
     lifecycle_stage("docker_ready", "ok");
 
-    let pack_root = install_pack_files().map_err(|e| {
+    let pack_root = install_pack_files().inspect_err(|_| {
         lifecycle_stage("install_pack", "error");
-        e
     })?;
     lifecycle_stage("install_pack", "ok");
-    let validated = load_validated_manifest(&pack_root).map_err(|e| {
+    let validated = load_validated_manifest(&pack_root).inspect_err(|_| {
         lifecycle_stage("manifest", "error");
-        e
     })?;
-    verify_images_present(&validated).map_err(|e| {
+    verify_images_present(&validated).inspect_err(|_| {
         lifecycle_stage("verify_images", "error");
-        e
     })?;
     lifecycle_stage("verify_images", "ok");
 
-    let ledger = ensure_ledger_key().map_err(|e| {
+    let ledger = ensure_ledger_key().inspect_err(|_| {
         lifecycle_stage("ledger", "error");
-        e
     })?;
     lifecycle_stage("ledger", "ok");
     let existing_key_id = load_or_create_private_config()?.gateway_key_id;
@@ -1208,9 +1188,8 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         &validated.sidecar,
         existing_key_id.as_deref(),
     )
-    .map_err(|e| {
+    .inspect_err(|_| {
         lifecycle_stage("public_env", "error");
-        e
     })?;
     lifecycle_stage("public_env", "ok");
 
@@ -1227,9 +1206,8 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     let compose = compose_file(&pack_root);
 
     // Reuse existing Keychain key if still valid after start; else provision with bootstrap.
-    let existing = load_gw_api_key(store).map_err(|e| {
+    let existing = load_gw_api_key(store).inspect_err(|_| {
         lifecycle_stage("keychain_load", "error");
-        e
     })?;
     lifecycle_stage(
         "keychain_load",
@@ -1250,19 +1228,16 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
                 &validated,
                 existing_key_id.as_deref(),
             )
-            .map_err(|e| {
+            .inspect_err(|_| {
                 lifecycle_stage("secret_env", "error");
-                e
             })?;
             lifecycle_stage("secret_env", "ok");
-            compose_up(&compose, &env_path, &spawn_env).map_err(|e| {
+            compose_up(&compose, &env_path, &spawn_env).inspect_err(|_| {
                 lifecycle_stage("compose_up_existing", "error");
-                e
             })?;
             lifecycle_stage("compose_up_existing", "ok");
-            wait_control_plane().map_err(|e| {
+            wait_control_plane().inspect_err(|_| {
                 lifecycle_stage("wait_control_plane", "error");
-                e
             })?;
             lifecycle_stage("wait_control_plane", "ok");
             !models_authenticated(k)
@@ -1285,7 +1260,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
             &validated,
             existing_key_id.as_deref(),
         )
-        .map_err(|e| {
+        .inspect_err(|e| {
             // Fixed non-secret categories only — never log the error body if it
             // could include env material. Classify known prefixes.
             let cat = if e.contains("keychain") {
@@ -1296,17 +1271,14 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
                 "secret_env_error"
             };
             lifecycle_stage("secret_env_bootstrap", cat);
-            e
         })?;
         lifecycle_stage("secret_env_bootstrap", "ok");
-        compose_up(&compose, &env_path, &spawn_env).map_err(|e| {
+        compose_up(&compose, &env_path, &spawn_env).inspect_err(|_| {
             lifecycle_stage("compose_up_bootstrap", "error");
-            e
         })?;
         lifecycle_stage("compose_up_bootstrap", "ok");
-        wait_control_plane().map_err(|e| {
+        wait_control_plane().inspect_err(|_| {
             lifecycle_stage("wait_control_plane_bootstrap", "error");
-            e
         })?;
         lifecycle_stage("wait_control_plane_bootstrap", "ok");
         if !models_fail_closed_without_key() {
@@ -1314,24 +1286,16 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
             return Err("gateway /v1/models did not fail closed without a client key".to_string());
         }
         lifecycle_stage("models_fail_closed", "ok");
-        let kid = provision_council_client(store, &bootstrap).map_err(|e| {
+        let kid = provision_council_client(store, &bootstrap).inspect_err(|_| {
             lifecycle_stage("provision", "error");
-            e
         })?;
         lifecycle_stage("provision", "ok");
         // Blank bootstrap and recreate sidecar without it.
-        let spawn_env_blank = build_full_compose_env(
-            store,
-            None,
-            &pack_root,
-            &ledger,
-            &validated,
-            Some(&kid),
-        )
-        .map_err(|e| {
-            lifecycle_stage("secret_env_blank", "error");
-            e
-        })?;
+        let spawn_env_blank =
+            build_full_compose_env(store, None, &pack_root, &ledger, &validated, Some(&kid))
+                .inspect_err(|_| {
+                    lifecycle_stage("secret_env_blank", "error");
+                })?;
         write_public_compose_env(
             &pack_root,
             &ledger,
@@ -1339,13 +1303,11 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
             &validated.sidecar,
             Some(&kid),
         )?;
-        compose_up(&compose, &env_path, &spawn_env_blank).map_err(|e| {
+        compose_up(&compose, &env_path, &spawn_env_blank).inspect_err(|_| {
             lifecycle_stage("compose_up_blank", "error");
-            e
         })?;
-        wait_control_plane().map_err(|e| {
+        wait_control_plane().inspect_err(|_| {
             lifecycle_stage("wait_control_plane_blank", "error");
-            e
         })?;
         kid
     } else {
@@ -1377,7 +1339,8 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     // Not fully ready until Council restart succeeds — lib marks council_governed.
     if st.authenticated && st.enabled {
         st.state = GatewayPackState::AuthenticatedReady;
-        st.message = "Gateway Pack authenticated. Council restart required for governed mode.".into();
+        st.message =
+            "Gateway Pack authenticated. Council restart required for governed mode.".into();
     }
     Ok(st)
 }
@@ -1597,13 +1560,15 @@ pub struct GatewayChildEnv {
 }
 
 #[allow(dead_code)]
-pub fn gateway_child_env_if_ready(store: &dyn SecretStore) -> Result<Option<GatewayChildEnv>, String> {
+pub fn gateway_child_env_if_ready(
+    store: &dyn SecretStore,
+) -> Result<Option<GatewayChildEnv>, String> {
     let st = gateway_pack_status(store);
     if !st.enabled || st.state != GatewayPackState::AuthenticatedReady {
         return Ok(None);
     }
-    let key = load_gw_api_key(store)?
-        .ok_or_else(|| "GW_API_KEY missing from Keychain".to_string())?;
+    let key =
+        load_gw_api_key(store)?.ok_or_else(|| "GW_API_KEY missing from Keychain".to_string())?;
     Ok(Some(GatewayChildEnv {
         api_key: key,
         gateway_url: DESKTOP_GATEWAY_URL.to_string(),
@@ -1638,8 +1603,7 @@ pub fn status_with_council_route(
     if council_governed && st.authenticated && st.enabled && gateway_health_ok() {
         st.state = GatewayPackState::AuthenticatedReady;
         st.council_governed = true;
-        st.message =
-            "Gateway Pack is authenticated and Council is governed.".into();
+        st.message = "Gateway Pack is authenticated and Council is governed.".into();
     } else if council_direct && !st.enabled {
         st.council_governed = false;
         if st.state == GatewayPackState::AuthenticatedReady {
@@ -1648,8 +1612,7 @@ pub fn status_with_council_route(
     } else if st.enabled && st.authenticated && !council_governed {
         st.state = GatewayPackState::Degraded;
         st.council_governed = false;
-        st.message =
-            "Gateway is authenticated but Council did not enter governed mode.".into();
+        st.message = "Gateway is authenticated but Council did not enter governed mode.".into();
     }
     let _ = gw_api_key_present(store);
     st
@@ -1680,13 +1643,13 @@ mod tests {
         assert!(validate_env_value("K", "ok").is_ok());
         assert!(validate_env_value("K", "bad\nvalue").is_err());
         assert!(validate_env_value("K", "bad\rvalue").is_err());
-        let dup = serialize_public_env(&[
-            ("A".into(), "1".into()),
-            ("A".into(), "2".into()),
-        ]);
+        let dup = serialize_public_env(&[("A".into(), "1".into()), ("A".into(), "2".into())]);
         assert!(dup.is_err());
         let body = serialize_public_env(&[
-            ("IRIN_GATEWAY_IMAGE".into(), "n@sha256:".to_string() + &"a".repeat(64)),
+            (
+                "IRIN_GATEWAY_IMAGE".into(),
+                "n@sha256:".to_string() + &"a".repeat(64),
+            ),
             ("WATCH_PRODUCER_ENABLED".into(), "false".into()),
         ])
         .unwrap();
@@ -1739,7 +1702,11 @@ mod tests {
         let bundle = tmp.join("bundle");
         fs::create_dir_all(bundle.join("conf")).unwrap();
         fs::create_dir_all(bundle.join("lua")).unwrap();
-        fs::write(bundle.join("docker-compose.yml"), b"name: irin-desktop-gateway\n").unwrap();
+        fs::write(
+            bundle.join("docker-compose.yml"),
+            b"name: irin-desktop-gateway\n",
+        )
+        .unwrap();
         fs::write(bundle.join("nginx.conf"), b"# nginx\n").unwrap();
         let hex = "a".repeat(64);
         let manifest = format!(
@@ -1770,7 +1737,10 @@ mod tests {
         let manifest_b = manifest.replace("0.1.0-a", "0.1.0-b");
         fs::write(bundle.join("image-manifest.json"), manifest_b.as_bytes()).unwrap();
         let dest2 = install_pack_files().unwrap();
-        assert!(!dest2.join("stale.txt").exists(), "stale file survived swap");
+        assert!(
+            !dest2.join("stale.txt").exists(),
+            "stale file survived swap"
+        );
         let marker: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(installed_marker_path()).unwrap()).unwrap();
         assert_eq!(marker["pack_version"], "0.1.0-b");
@@ -1862,10 +1832,7 @@ mod tests {
 
     #[test]
     fn status_docker_missing_is_actionable() {
-        let st = GatewayPackStatus::base(
-            GatewayPackState::DockerMissing,
-            "Docker CLI not found",
-        );
+        let st = GatewayPackStatus::base(GatewayPackState::DockerMissing, "Docker CLI not found");
         assert!(!st.state.allows_governed());
         assert!(!st.allows_governed_spawn());
         assert!(!st.authenticated);
@@ -2014,13 +1981,16 @@ mod tests {
         ));
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(&tmp).unwrap();
-        fs::write(tmp.join("docker-compose.yml"), b"name: irin-desktop-gateway\n").unwrap();
+        fs::write(
+            tmp.join("docker-compose.yml"),
+            b"name: irin-desktop-gateway\n",
+        )
+        .unwrap();
         std::env::set_var("IRIN_GATEWAY_PACK_ROOT", &tmp);
 
         // cargo test builds with debug_assertions: the escape hatch applies.
         // Packaged release builds skip this branch entirely (cfg-gated), so
         // the env var can never redirect a production install.
-        assert!(cfg!(debug_assertions));
         assert_eq!(bundled_pack_root().as_deref(), Some(tmp.as_path()));
 
         match prev_pack {
@@ -2046,7 +2016,9 @@ mod tests {
         // Empty, malformed, or non-array output is not running.
         assert!(!compose_ls_reports_running("[]"));
         assert!(!compose_ls_reports_running("not json"));
-        assert!(!compose_ls_reports_running(r#"{"Name":"irin-desktop-gateway"}"#));
+        assert!(!compose_ls_reports_running(
+            r#"{"Name":"irin-desktop-gateway"}"#
+        ));
         assert!(!compose_ls_reports_running(""));
     }
 
