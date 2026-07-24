@@ -659,6 +659,25 @@ mod tests {
             "name: edited\n"
         );
         assert!(dest2.join("cabinets/newone.yaml").is_file());
+        // A later release may add an executable transport adapter to an
+        // already-seeded install. Missing-file refresh must preserve +x.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            let adapter = tmp.join("bundle/scripts/hermes-seat-adapter.sh");
+            fs::create_dir_all(adapter.parent().unwrap()).unwrap();
+            fs::write(&adapter, b"#!/bin/sh\nexit 0\n").unwrap();
+            fs::set_permissions(&adapter, fs::Permissions::from_mode(0o755)).unwrap();
+
+            let dest3 = ensure_writable_base_overlay(&tmp.join("bundle")).unwrap();
+            let installed = dest3.join("scripts/hermes-seat-adapter.sh");
+            assert!(installed.is_file());
+            assert_ne!(
+                fs::metadata(installed).unwrap().permissions().mode() & 0o111,
+                0
+            );
+        }
 
         match prev {
             Some(v) => std::env::set_var("HOME", v),

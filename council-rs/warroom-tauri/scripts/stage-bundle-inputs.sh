@@ -64,8 +64,19 @@ done
 if [[ -d "$COUNCIL_RS/schemas" ]]; then
   rsync -a "$COUNCIL_RS/schemas/" "$RES_STAGE/schemas/"
 fi
+# Packaged base-dir must ship the Hermes seat adapter at the same relative path
+# as the source tree (grok_routing.yaml → hermes.default_adapter). Without this,
+# source-tree discovery supports grok_hermes but the signed installed app does not.
+ADAPTER_SRC="$COUNCIL_RS/scripts/hermes-seat-adapter.sh"
+ADAPTER_DST="$RES_STAGE/scripts/hermes-seat-adapter.sh"
+[[ -f "$ADAPTER_SRC" ]] || die "hermes seat adapter missing: $ADAPTER_SRC"
+mkdir -p "$RES_STAGE/scripts"
+cp -f "$ADAPTER_SRC" "$ADAPTER_DST"
+chmod +x "$ADAPTER_DST"
+[[ -x "$ADAPTER_DST" ]] || die "staged hermes seat adapter not executable: $ADAPTER_DST"
 [[ -d "$RES_STAGE/cabinets" ]] || die "staged cabinets missing"
 
 echo "staged binary: $BIN_STAGE/council-${TRIPLE}"
 echo "staged base-dir: $RES_STAGE"
+echo "staged hermes adapter: $ADAPTER_DST"
 echo "source council: $COUNCIL_BIN"

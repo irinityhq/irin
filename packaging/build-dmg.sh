@@ -138,6 +138,19 @@ if [[ ! -d "$APP/Contents/Resources/council-base/cabinets" ]]; then
   [[ -n "$FOUND_BASE" ]] || die "bundled council-base/cabinets missing under Resources"
   echo "NOTE: cabinets at $FOUND_BASE"
 fi
+# Fail closed: packaged app must ship executable hermes seat adapter under base-dir.
+HERMES_ADAPTER=""
+if [[ -x "$APP/Contents/Resources/council-base/scripts/hermes-seat-adapter.sh" ]]; then
+  HERMES_ADAPTER="$APP/Contents/Resources/council-base/scripts/hermes-seat-adapter.sh"
+else
+  HERMES_ADAPTER="$(
+    find "$APP/Contents/Resources" -path '*/scripts/hermes-seat-adapter.sh' -type f 2>/dev/null \
+      | head -1 || true
+  )"
+fi
+[[ -n "$HERMES_ADAPTER" && -x "$HERMES_ADAPTER" ]] \
+  || die "bundled hermes seat adapter missing or not executable under Resources"
+echo "bundled hermes adapter: $HERMES_ADAPTER"
 
 mkdir -p "$ROOT/packaging/artifacts"
 DEST_APP="$ROOT/packaging/artifacts/IRIN.app"

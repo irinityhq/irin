@@ -87,6 +87,9 @@ CABINETS="$(find "$DEST_APP/Contents/Resources" -type d -name cabinets | head -1
 [[ -n "$CABINETS" ]] || die "cabinets missing"
 BASE_DIR="$(dirname "$CABINETS")"
 log "base_dir=$BASE_DIR"
+HERMES_ADAPTER="$BASE_DIR/scripts/hermes-seat-adapter.sh"
+[[ -x "$HERMES_ADAPTER" ]] || die "hermes seat adapter missing or not executable: $HERMES_ADAPTER"
+log "hermes_adapter=$HERMES_ADAPTER"
 log "host_sha256=$(shasum -a 256 "$HOST" | awk '{print $1}')"
 log "council_sha256=$(shasum -a 256 "$SIDECAR" | awk '{print $1}')"
 
@@ -417,6 +420,8 @@ assert 'auth_token' in d
 # never print token value
 " | tee -a "$REPORT"
 [[ -d "$OVERLAY/cabinets" ]] || die "writable overlay missing cabinets"
+[[ -x "$OVERLAY/scripts/hermes-seat-adapter.sh" ]] \
+  || die "writable overlay missing executable hermes seat adapter"
 log "overlay_seeded=true"
 
 # Discover via host-owned sidecar (login env merged by host).

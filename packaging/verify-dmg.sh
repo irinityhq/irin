@@ -76,6 +76,9 @@ CABINETS="$(find "$DEST_APP/Contents/Resources" -type d -name cabinets | head -1
 BASE_DIR="$(dirname "$CABINETS")"
 log "base-dir: $BASE_DIR"
 log "cabinets: $(ls "$CABINETS" | wc -l | tr -d ' ') files"
+HERMES_ADAPTER="$BASE_DIR/scripts/hermes-seat-adapter.sh"
+[[ -x "$HERMES_ADAPTER" ]] || die "hermes seat adapter missing or not executable: $HERMES_ADAPTER"
+log "hermes adapter: $HERMES_ADAPTER (executable)"
 
 GUIDANCE_OK=0
 if strings "$HOST" 2>/dev/null | grep -Fq 'Gateway is optional'; then
