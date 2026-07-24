@@ -866,6 +866,12 @@ fn admin_surface_ready() -> bool {
 }
 
 fn models_authenticated(raw_key: &str) -> bool {
+    // The Keychain-held client key is sent only to the app-owned Gateway:
+    // without an owned project holding the listener, a foreign process bound
+    // to the fixed loopback port must never receive it.
+    if !desktop_project_running() {
+        return false;
+    }
     matches!(
         http_get_status(&format!("{DESKTOP_GATEWAY_URL}/v1/models"), Some(raw_key)),
         Ok((200, _))
