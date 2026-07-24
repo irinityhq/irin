@@ -248,13 +248,13 @@ pub fn probe_docker_daemon() -> DockerDaemonState {
 pub type ComposeEnv = HashMap<String, String>;
 
 /// Known Compose plugin directories to inject via `cliPluginsExtraDirs`.
+/// The product is macOS-only: only the Docker Desktop system plugin dir
+/// (root-installed) is trusted. User- or admin-writable dirs
+/// (`/usr/local/lib`, `/usr/lib`, `$HOME/.docker/cli-plugins`) are never
+/// consulted — a substituted plugin binary must not receive pack secrets.
 pub fn docker_cli_plugin_extra_dirs() -> Vec<&'static str> {
     let mut out = Vec::new();
-    for dir in [
-        DOCKER_DESKTOP_CLI_PLUGINS,
-        "/usr/local/lib/docker/cli-plugins",
-        "/usr/lib/docker/cli-plugins",
-    ] {
+    for dir in [DOCKER_DESKTOP_CLI_PLUGINS] {
         if Path::new(dir).is_dir() {
             out.push(dir);
         }
