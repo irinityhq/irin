@@ -59,16 +59,26 @@ fi
 echo "=== immutability check: $TAG ==="
 # Release tags are immutable: once v* images are published they are never
 # replaced (a moved tag must not overwrite digests a manifest may have
-# pinned). rc-* tags are operator iteration and may be rebuilt.
+# pinned). rc-* tags are operator iteration and may be rebuilt. The absence
+# proof is fail-closed: only an explicit not-found passes; any transient
+# registry, network, or auth failure aborts the publish.
+tag_is_unpublished() {
+  local ref="$1" out
+  if out="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
+    return 1
+  fi
+  case "$out" in
+    *"not found"*|*"NOT_FOUND"*|*"MANIFEST_UNKNOWN"*|*"unknown"*) return 0 ;;
+    *) die "cannot prove $ref is unpublished (registry inspection failed): $out" ;;
+  esac
+}
 case "$TAG" in
   rc-*) ;;
   *)
-    if docker buildx imagetools inspect "$GW_IMAGE:$TAG" >/dev/null 2>&1; then
-      die "refusing to replace already-published release images: $GW_IMAGE:$TAG (releases are immutable; cut a new tag)"
-    fi
-    if docker buildx imagetools inspect "$SC_IMAGE:$TAG" >/dev/null 2>&1; then
-      die "refusing to replace already-published release images: $SC_IMAGE:$TAG (releases are immutable; cut a new tag)"
-    fi
+    tag_is_unpublished "$GW_IMAGE:$TAG" \
+      || die "refusing to replace already-published release images: $GW_IMAGE:$TAG (releases are immutable; cut a new tag)"
+    tag_is_unpublished "$SC_IMAGE:$TAG" \
+      || die "refusing to replace already-published release images: $SC_IMAGE:$TAG (releases are immutable; cut a new tag)"
     ;;
 esac
 
