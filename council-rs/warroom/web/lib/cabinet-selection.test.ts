@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Cabinet } from "./types";
+import type { Cabinet, DiscoverProvider, DiscoverResponse } from "./types";
 import {
   DEFAULT_CABINET_NAME,
   isCabinetRunnable,
@@ -7,6 +7,7 @@ import {
   pickRunnableCabinetName,
   resolveUntouchedCabinetSelection,
 } from "./cabinet-selection";
+import { availableProviderIds } from "./use-discover";
 
 function cab(
   name: string,
@@ -155,5 +156,80 @@ describe("noRunnableCabinetExplanation", () => {
 
   it("is silent when at least one cabinet is runnable", () => {
     expect(noRunnableCabinetExplanation([standard, starter], ["nvidia"])).toBeNull();
+  });
+});
+
+function discoverPayload(providers: Array<[string, boolean]>): DiscoverResponse {
+  return {
+    providers: providers.map(
+      ([name, available]): DiscoverProvider => ({
+        name,
+        label: name,
+        family: "test",
+        transport: name,
+        available,
+        gateway_supported: true,
+        source: "test",
+        env_hint: null,
+        models: [],
+      }),
+    ),
+    log: [],
+  };
+}
+
+describe("availableProviderIds", () => {
+  it("is null while the Discover inventory is unknown", () => {
+    expect(availableProviderIds(null)).toBeNull();
+  });
+
+  it("lists only transports discovery proved available", () => {
+    const ids = availableProviderIds(
+      discoverPayload([
+        ["claude_code", true],
+        ["codex_cli", true],
+        ["grok_hermes", false],
+      ]),
+    );
+    expect(ids).toEqual(["claude_code", "codex_cli"]);
+  });
+});
+
+describe("Discover-sourced runnability (CLI-only operator)", () => {
+  // The finding: a host with only claude/codex CLIs installed. /api/health is
+  // a no-CLI liveness probe and reports those transports missing; /api/discover
+  // proves them available. Gating must follow Discover.
+  const cliCabinet = cab("cli-review", ["claude_code", "codex_cli"], {
+    label: "CLI Review",
+  });
+  // standard needs grok_hermes + gemini_agy (unavailable) → blocked.
+  const cabinets = [standard, cliCabinet];
+  const ids = availableProviderIds(
+    discoverPayload([
+      ["claude_code", true],
+      ["codex_cli", true],
+      ["grok_hermes", false],
+      ["gemini_agy", false],
+    ]),
+  );
+
+  it("treats the CLI cabinet as runnable and the API cabinet as blocked", () => {
+    expect(isCabinetRunnable(cliCabinet, ids)).toBe(true);
+    expect(isCabinetRunnable(standard, ids)).toBe(false);
+  });
+
+  it("auto-selects the runnable CLI cabinet off the blocked default", () => {
+    expect(
+      resolveUntouchedCabinetSelection({
+        cabinets,
+        providersAvailable: ids,
+        currentName: DEFAULT_CABINET_NAME,
+        selectionLocked: false,
+      }),
+    ).toBe("cli-review");
+  });
+
+  it("never raises the no-runnable-cabinet explanation", () => {
+    expect(noRunnableCabinetExplanation(cabinets, ids)).toBeNull();
   });
 });

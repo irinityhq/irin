@@ -226,7 +226,6 @@ export default function WarRoom() {
           <DeliberateWorkspace
             state={state}
             cabinets={cabinets}
-            health={health}
             onStart={start}
             onIntervene={intervene}
             onReset={reset}

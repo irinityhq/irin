@@ -4,8 +4,10 @@ import type { Cabinet } from "./types";
 export const DEFAULT_CABINET_NAME = "standard";
 
 /**
- * A cabinet is runnable when every seat + chair transport is present in the
- * health inventory (`GET /api/health` → `providers_available`).
+ * A cabinet is runnable when every seat + chair transport is available in the
+ * normalized Discover inventory (`GET /api/discover` → providers with
+ * `available: true`). `/api/health` is a liveness probe that deliberately
+ * does not probe host CLI transports, so it must not feed runnability.
  */
 export function cabinetRequiredProviders(cabinet: Cabinet): string[] {
   return [
@@ -87,7 +89,7 @@ export function resolveUntouchedCabinetSelection(args: {
   } = args;
 
   if (selectionLocked) return null;
-  // Health not loaded yet — wait; do not thrash on null.
+  // Availability inventory not loaded yet — wait; do not thrash on null.
   if (providersAvailable == null) return null;
   if (cabinets.length === 0) return null;
 

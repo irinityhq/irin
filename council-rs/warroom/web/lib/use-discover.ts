@@ -179,6 +179,20 @@ export function buildProviderModelMap(data: DiscoverResponse | null): Record<str
 // Backward-compatible export used by focused unit tests and non-hook callers.
 export const providerModelMap = buildProviderModelMap;
 
+/**
+ * Transport IDs the Discover inventory reports as available. This is the
+ * single availability source for cabinet runnability and convene gating —
+ * `/api/health` is a liveness probe and deliberately does not probe CLI
+ * transports. Returns null while the inventory is unknown so callers keep
+ * their "wait, do not thrash" semantics.
+ */
+export function availableProviderIds(
+  data: DiscoverResponse | null,
+): string[] | null {
+  if (!data) return null;
+  return data.providers.filter((p) => p.available).map((p) => p.name);
+}
+
 export function getProviderOption(
   providers: DiscoverProvider[],
   provider: string,

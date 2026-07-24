@@ -203,8 +203,9 @@ test.describe("War Room smoke", () => {
     expect(healthResp.ok()).toBe(true);
     const health = (await healthResp.json()) as { ws_smoke_only?: boolean };
     expect(health.ws_smoke_only).toBe(true);
-    // Availability gating is host-dependent; the mock must precede the app's
-    // own mount-time health fetch, so install it before navigation.
+    // Availability gating is host-dependent and reads the Discover mock
+    // (installed in beforeEach); this mock keeps the liveness health probe
+    // deterministic. Both must precede the app's mount-time fetches.
     await installAvailableProviderHealth(page);
     await page.goto("/");
     await expect(page.getByTestId("cabinet-chip").first()).toBeVisible({

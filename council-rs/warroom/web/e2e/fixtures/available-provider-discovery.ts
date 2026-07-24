@@ -73,9 +73,12 @@ async function fulfillHealth(route: Route): Promise<void> {
 }
 
 /**
- * Convene gating reads provider availability from /api/health, not
- * /api/discover. Launch-flow tests must not depend on host CLIs: CI runners
- * have none, so an unmocked health probe disables the Convene button.
+ * Liveness/status companion to installAvailableProviderDiscovery. Convene
+ * gating and cabinet runnability read /api/discover (see IdlePanel); the
+ * health probe stays liveness-only and deliberately reports host CLI
+ * transports as unavailable. Launch-flow specs still install this so header
+ * status and health-driven surfaces see a deterministic payload, and so the
+ * app never depends on a CI runner's real health probe.
  */
 export async function installAvailableProviderHealth(page: Page): Promise<void> {
   await page.route("**/api/health", fulfillHealth);

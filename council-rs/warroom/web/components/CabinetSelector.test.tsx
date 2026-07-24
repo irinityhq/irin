@@ -1,6 +1,6 @@
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it } from "vitest";
-import type { Cabinet, HealthResponse } from "@/lib/types";
+import type { Cabinet } from "@/lib/types";
 import CabinetSelector from "./CabinetSelector";
 
 function cab(name: string, providers: string[]): Cabinet {
@@ -28,15 +28,9 @@ const cabinets: Cabinet[] = [
   cab("freeride", ["nous", "nous"]),
 ];
 
-const health: HealthResponse = {
-  council_version: "test",
-  stream_version: "1",
-  providers_available: ["nvidia"],
-  providers_missing: ["grok_hermes", "gemini_agy", "claude_code", "nous"],
-  sessions_dir: "/tmp",
-  index_path: "/tmp/index",
-  index_exists: false,
-};
+// Discover-inventory availability (the only runnability source): only the
+// nvidia transport is available in this scenario.
+const providersAvailable = ["nvidia"];
 
 describe("CabinetSelector unavailable treatment", () => {
   it("mutes unavailable cards without danger-red requirement prose", () => {
@@ -45,7 +39,7 @@ describe("CabinetSelector unavailable treatment", () => {
         cabinets={cabinets}
         selected="standard"
         onSelect={() => {}}
-        health={health}
+        providersAvailable={providersAvailable}
       />,
     );
 
@@ -69,7 +63,7 @@ describe("CabinetSelector unavailable treatment", () => {
         cabinets={cabinets}
         selected="starter-nvidia"
         onSelect={() => {}}
-        health={health}
+        providersAvailable={providersAvailable}
       />,
     );
 
@@ -78,5 +72,19 @@ describe("CabinetSelector unavailable treatment", () => {
     // No text-danger adjacent to any need span.
     expect(html).not.toContain('text-danger ml-1');
     expect(html).not.toContain('class="text-danger');
+  });
+
+  it("treats every cabinet as unknown while the Discover inventory is loading", () => {
+    const html = renderToStaticMarkup(
+      <CabinetSelector
+        cabinets={cabinets}
+        selected="standard"
+        onSelect={() => {}}
+        providersAvailable={null}
+      />,
+    );
+
+    expect(html).not.toContain('data-cabinet-available="false"');
+    expect(html).not.toContain("cabinet-need");
   });
 });

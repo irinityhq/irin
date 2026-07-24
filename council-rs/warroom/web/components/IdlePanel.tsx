@@ -7,12 +7,13 @@ import { api } from "@/lib/api";
 import { cn, providerColor } from "@/lib/cn";
 import { DEFAULT_SENSITIVITY, SENSITIVITY_LEVELS, gatewayStartFields } from "@/lib/gateway-mode";
 import { canEnableGovernedProceeding } from "@/lib/gateway-pack";
-import type { Cabinet, EmbeddingStats, HealthResponse, MapmakerResult, PrecedentMatch } from "@/lib/types";
+import type { Cabinet, EmbeddingStats, MapmakerResult, PrecedentMatch } from "@/lib/types";
 import type { GatewaySensitivity, StartPayload } from "@/lib/ws";
 import {
   getDesktopRuntimeMode,
   getGatewayPackStatus,
   isTauri,
+  type DesktopRuntimeMode,
   type GatewayPackStatus,
 } from "@/lib/tauri";
 import {
@@ -21,6 +22,7 @@ import {
   resolveUntouchedCabinetSelection,
 } from "@/lib/cabinet-selection";
 import {
+  availableProviderIds,
   getProviderOption,
   providerOptionLabel,
   unsupportedGatewayTransportReason,
@@ -50,7 +52,6 @@ function conveneWireMode(
 export default function IdlePanel({
   cabinets,
   onStart,
-  health,
   onViewDriftReport,
   initialCabinet,
   onConsumeInitialCabinet,
@@ -58,7 +59,6 @@ export default function IdlePanel({
 }: {
   cabinets: Cabinet[];
   onStart: (p: StartPayload) => void;
-  health: HealthResponse | null;
   onViewDriftReport?: (reportFilename: string) => void;
   /** Cabinet selection from the editor, applied once on mount. */
   initialCabinet?: string | null;
@@ -71,7 +71,7 @@ export default function IdlePanel({
     initialCabinet || DEFAULT_CABINET_NAME,
   );
   // Explicit editor handoff or any operator click locks selection permanently
-  // for this idle mount — health flaps must not re-auto-switch.
+  // for this idle mount — inventory flaps must not re-auto-switch.
   const selectionLocked = useRef(!!initialCabinet);
   const autoSelectDone = useRef(false);
   const consumedInitialCabinet = useRef(false);
@@ -114,7 +114,11 @@ export default function IdlePanel({
   const [rebuilding, setRebuilding] = useState(false);
   const [reindexingPrecedent, setReindexingPrecedent] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [desktopMode, setDesktopMode] = useState<string | undefined>(undefined);
+  // Same tri-state as Settings: under Tauri the build mode starts "detecting"
+  // and may end "unavailable"; both must fail the governed gate closed.
+  const [desktopMode, setDesktopMode] = useState<
+    DesktopRuntimeMode | "detecting" | "unavailable"
+  >(isTauri() ? "detecting" : "unavailable");
   const [packStatus, setPackStatus] = useState<GatewayPackStatus | null>(null);
   const topicRef = useRef<HTMLTextAreaElement>(null);
   const { toast } = useToast();
@@ -127,7 +131,7 @@ export default function IdlePanel({
         if (!cancelled) setDesktopMode(m);
       })
       .catch(() => {
-        if (!cancelled) setDesktopMode(undefined);
+        if (!cancelled) setDesktopMode("unavailable");
       });
     return () => {
       cancelled = true;
@@ -154,9 +158,11 @@ export default function IdlePanel({
     };
   }, [desktopMode]);
 
+  // Fail closed under Tauri while the build mode is detecting or unavailable;
+  // the browser (no native mode) keeps the permissive development path.
   const governedAllowed = canEnableGovernedProceeding(packStatus, {
     requireInstalledRelease: true,
-    desktopMode: desktopMode ?? "development",
+    desktopMode: isTauri() ? desktopMode : "development",
   });
 
   useEffect(() => {
@@ -169,16 +175,25 @@ export default function IdlePanel({
   // visible for explanation, but never allow them to be selected or launched.
   const { data: discoverData, loading: discoverLoading, error: discoverError, providerOptions } = useDiscover();
 
-  // Untouched first load: once cabinets AND health inventory are known, prefer
-  // a stable runnable cabinet over a blocked default (see cabinet-selection.ts).
+  // Single availability source for runnability, auto-select, and convene
+  // gating: the normalized Discover inventory. `/api/health` stays liveness
+  // only — it deliberately reports host CLI transports as unavailable.
+  const availableIds = useMemo(
+    () => availableProviderIds(discoverData),
+    [discoverData],
+  );
+
+  // Untouched first load: once cabinets AND the Discover inventory are known,
+  // prefer a stable runnable cabinet over a blocked default (see
+  // cabinet-selection.ts).
   useEffect(() => {
     if (autoSelectDone.current || selectionLocked.current) return;
-    // Wait for both inventories — deciding on an empty list would lock on the
+    // Wait for both inputs — deciding on an empty list would lock on the
     // preferred default and never re-evaluate when cabinets arrive.
-    if (!health || cabinets.length === 0) return;
+    if (availableIds == null || cabinets.length === 0) return;
     const next = resolveUntouchedCabinetSelection({
       cabinets,
-      providersAvailable: health.providers_available,
+      providersAvailable: availableIds,
       currentName: cabinetName,
       selectionLocked: selectionLocked.current,
     });
@@ -186,9 +201,9 @@ export default function IdlePanel({
     if (next && next !== cabinetName) {
       setCabinetName(next);
     }
-    // Lock after the first decision so later health changes never re-pick.
+    // Lock after the first decision so later inventory changes never re-pick.
     selectionLocked.current = true;
-  }, [cabinets, health, cabinetName]);
+  }, [cabinets, availableIds, cabinetName]);
 
   const validatorProviders = useMemo(() => {
     const allowed = [
@@ -276,7 +291,7 @@ export default function IdlePanel({
     : null;
   const noRunnableExplanation = noRunnableCabinetExplanation(
     cabinets,
-    health?.providers_available,
+    availableIds,
   );
   const providerSelectionProblem = discoverError
     ? `Provider discovery failed: ${discoverError}`
@@ -371,7 +386,7 @@ export default function IdlePanel({
               cabinets={cabinets}
               selected={cabinetName}
               onSelect={selectCabinet}
-              health={health}
+              providersAvailable={availableIds}
             />
           </div>
         ) : (
@@ -379,7 +394,7 @@ export default function IdlePanel({
             cabinets={cabinets}
             selected={cabinetName}
             onSelect={selectCabinet}
-            health={health}
+            providersAvailable={availableIds}
           />
         )}
 

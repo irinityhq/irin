@@ -81,6 +81,45 @@ describe("governed proceeding gate", () => {
       canEnableGovernedProceeding(null, { desktopMode: "development" }),
     ).toBe(true);
   });
+
+  it("fails closed while the desktop build mode is still detecting", () => {
+    const ready = status({
+      state: "authenticated_ready",
+      authenticated: true,
+      enabled: true,
+      council_governed: true,
+    });
+    expect(
+      canEnableGovernedProceeding(ready, {
+        requireInstalledRelease: true,
+        desktopMode: "detecting",
+      }),
+    ).toBe(false);
+    expect(
+      canEnableGovernedProceeding(null, {
+        requireInstalledRelease: true,
+        desktopMode: "detecting",
+      }),
+    ).toBe(false);
+  });
+
+  it("fails closed when the desktop build mode is unavailable", () => {
+    expect(
+      canEnableGovernedProceeding(null, {
+        requireInstalledRelease: true,
+        desktopMode: "unavailable",
+      }),
+    ).toBe(false);
+  });
+
+  it("keeps the browser path free while the pack status is unknown", () => {
+    expect(
+      canEnableGovernedProceeding(null, {
+        requireInstalledRelease: true,
+        desktopMode: "development",
+      }),
+    ).toBe(true);
+  });
 });
 
 import { gatewayHeaderTruth } from "./gateway-pack";

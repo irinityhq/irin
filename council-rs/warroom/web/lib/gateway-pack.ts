@@ -58,6 +58,11 @@ export function canEnableGovernedProceeding(
   if (opts?.desktopMode === "development") {
     return true;
   }
+  // Tauri build mode still detecting or unavailable: fail closed — governed
+  // proceeding must not present as available before the mode is known.
+  if (opts?.desktopMode === "detecting" || opts?.desktopMode === "unavailable") {
+    return false;
+  }
   if (!status) {
     // Unknown pack status outside Tauri: leave toggle free (Direct is default).
     return true;

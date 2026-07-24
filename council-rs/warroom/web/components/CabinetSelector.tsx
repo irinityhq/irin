@@ -4,20 +4,21 @@ import { useState } from "react";
 import { Users } from "lucide-react";
 import { cn } from "@/lib/cn";
 import { cabinetMissingProviders } from "@/lib/cabinet-selection";
-import type { Cabinet, HealthResponse } from "@/lib/types";
+import type { Cabinet } from "@/lib/types";
 
 export default function CabinetSelector({
   cabinets,
   selected,
   onSelect,
-  health,
+  providersAvailable,
   variant = "default",
   embedded = false,
 }: {
   cabinets: Cabinet[];
   selected: string;
   onSelect: (n: string) => void;
-  health: HealthResponse | null;
+  /** Available transport IDs from the Discover inventory; null while unknown. */
+  providersAvailable: readonly string[] | null;
   variant?: "default" | "command";
   /** Flat layout inside convene body — card grid, triads collapsed by default. */
   embedded?: boolean;
@@ -64,7 +65,7 @@ export default function CabinetSelector({
                     cabinet={c}
                     active={selected === c.name}
                     onClick={() => onSelect(c.name)}
-                    health={health}
+                    providersAvailable={providersAvailable}
                     compact={embedded}
                   />
                 ))}
@@ -94,7 +95,7 @@ export default function CabinetSelector({
                       cabinet={c}
                       active={selected === c.name}
                       onClick={() => onSelect(c.name)}
-                      health={health}
+                      providersAvailable={providersAvailable}
                       compact={embedded}
                     />
                   ))}
@@ -112,19 +113,19 @@ function CabinetChip({
   cabinet,
   active,
   onClick,
-  health,
+  providersAvailable,
   compact = false,
 }: {
   cabinet: Cabinet;
   active: boolean;
   onClick: () => void;
-  health: HealthResponse | null;
+  providersAvailable: readonly string[] | null;
   compact?: boolean;
 }) {
-  // Health null → treat as unknown (no missing list) so chips are not a
-  // danger-red Christmas tree before inventory arrives.
-  const missing = health
-    ? cabinetMissingProviders(cabinet, health.providers_available)
+  // Inventory null → treat as unknown (no missing list) so chips are not a
+  // danger-red Christmas tree before the Discover inventory arrives.
+  const missing = providersAvailable
+    ? cabinetMissingProviders(cabinet, providersAvailable)
     : [];
   const available = missing.length === 0;
 

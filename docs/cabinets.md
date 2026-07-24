@@ -28,8 +28,8 @@ Run one from the CLI:
 
 War Room's Cabinet selector (`GET /api/cabinets`) lists every registry
 cabinet as a chip, split into embedded cabinets and domain triads. Each chip
-shows seat count, round count, and — when compared against
-`GET /api/health` → `providers_available` — which providers that cabinet needs
+shows seat count, round count, and — when compared against the normalized
+Discover inventory (`GET /api/discover`) — which providers that cabinet needs
 that are not currently available. Unavailable chips stay selectable and show a
 muted `(need …)` note; danger styling is reserved for real action or system
 errors (for example next to Convene when the selected cabinet cannot run).
@@ -37,8 +37,8 @@ errors (for example next to Convene when the selected cabinet cannot run).
 ### Default cabinet on first load
 
 The documented default name is `standard`. On an **untouched** Deliberate
-first load — once cabinets and provider health are known — War Room applies
-this stable rule once:
+first load — once cabinets and the Discover inventory are known — War Room
+applies this stable rule once:
 
 1. Keep `standard` when every seat and chair transport is available.
 2. Otherwise select the first runnable cabinet in API list order, preferring
@@ -46,9 +46,12 @@ this stable rule once:
 3. If no cabinet is runnable, keep the current selection and show one
    actionable explanation near Convene (not a grid of danger-red cards).
 
-An explicit `initialCabinet` from the Cabinets editor, any manual chip click,
-and the result of that one-shot auto decision are all locked for the rest of
-the idle mount. Health flaps must not re-auto-switch the selection.
+Runnability comes from the Discover inventory, which actually probes CLI
+transports; `/api/health` is a cheap liveness probe and deliberately reports
+host CLI transports as unavailable. An explicit `initialCabinet` from the
+Cabinets editor, any manual chip click, and the result of that one-shot auto
+decision are all locked for the rest of the idle mount. Discovery flaps must
+not re-auto-switch the selection.
 
 ## Customization
 
