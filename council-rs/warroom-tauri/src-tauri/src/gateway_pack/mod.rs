@@ -865,11 +865,59 @@ fn admin_surface_ready() -> bool {
     }
 }
 
+/// True only when the running desktop project's containers were created from
+/// the validated manifest's pinned image refs. A lookalike project — even
+/// with our name and compose path — running a different image never counts
+/// as ours, so the Keychain-held client key can only reach our own images.
+fn desktop_project_images_match(validated: &ValidatedManifest) -> bool {
+    let out = docker_command(&[
+        "ps",
+        "--filter",
+        &format!("label=com.docker.compose.project={DESKTOP_COMPOSE_PROJECT}"),
+        "-q",
+    ]);
+    let Ok(out) = out else {
+        return false;
+    };
+    if !out.status.success() {
+        return false;
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    let ids: Vec<&str> = stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if ids.is_empty() {
+        return false;
+    }
+    let expected = [validated.gateway.as_str(), validated.sidecar.as_str()];
+    ids.iter().all(|id| {
+        let img = docker_command(&["inspect", "-f", "{{.Config.Image}}", id]);
+        match img {
+            Ok(o) if o.status.success() => {
+                let got = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                expected.contains(&got.as_str())
+            }
+            _ => false,
+        }
+    })
+}
+
 fn models_authenticated(raw_key: &str) -> bool {
     // The Keychain-held client key is sent only to the app-owned Gateway:
-    // without an owned project holding the listener, a foreign process bound
-    // to the fixed loopback port must never receive it.
+    // owned project (name + our compose file) AND our validated images,
+    // failing closed on any unproven layer.
     if !desktop_project_running() {
+        return false;
+    }
+    let Some(pack_root) = installed_pack_root() else {
+        return false;
+    };
+    let Ok(validated) = load_validated_manifest(&pack_root) else {
+        return false;
+    };
+    if !desktop_project_images_match(&validated) {
         return false;
     }
     matches!(
