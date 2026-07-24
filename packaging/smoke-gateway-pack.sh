@@ -275,9 +275,12 @@ unset DOCKER_CONFIG
 listen_pid() { "$LSOF_BIN" -nP -iTCP:"$1" -sTCP:LISTEN -t 2>/dev/null | head -1 || true; }
 
 wait_health() {
+  # First launch of a freshly ditto'd app (post dmg-build) can cold-start
+  # well past 45s under build load; later relaunches stay tight.
+  local budget_s="${1:-45}"
   local ok=0
   local i
-  for i in $(seq 1 90); do
+  for i in $(seq 1 $((budget_s * 2))); do
     if "$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:8765/api/health" >/dev/null 2>&1; then
       ok=1
       break
@@ -420,7 +423,7 @@ ax_click_button_busy() {
 )
 HOST_PID="$(cat "$PIDFILE")"
 log "host_pid=$HOST_PID"
-wait_health || die "Direct Council health failed"
+wait_health 150 || die "Direct Council health failed"
 PID1="$(listen_pid 8765)"
 [[ -n "$PID1" ]] || die "Direct Council not listening"
 OWNED_COUNCIL_PIDS="$PID1"
