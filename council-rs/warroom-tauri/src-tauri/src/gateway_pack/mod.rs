@@ -546,18 +546,15 @@ fn build_full_compose_env(
     Ok(env)
 }
 
-/// Best-effort spawn env for stop/uninstall: pins from the installed pack's
-/// validated manifest when it still reads cleanly, merged under the secret
-/// env. A corrupt or unreadable manifest must not block teardown — the
-/// docker_cli spawn path still scrubs ambient secrets and forces disarmed
-/// surfaces either way.
-fn teardown_compose_env(
-    store: &dyn SecretStore,
-    pack_root: &Path,
-    key_id: Option<&str>,
-) -> ComposeEnv {
-    let secrets = build_compose_secret_env(store, None).unwrap_or_default();
-    match load_validated_manifest(pack_root).and_then(|v| {
+/// Spawn env for stop/uninstall only: validated non-secret pins when the
+/// installed manifest still reads cleanly, plus **empty** secret placeholders
+/// so Compose can interpolate the file without loading Keychain or login
+/// provider keys. Teardown never starts services; real secrets must not ride
+/// the Compose process env on this path. A corrupt manifest must not block
+/// teardown — empty pins plus empty secret slots still scrub ambient secrets
+/// via the docker_cli spawn path and force disarmed Watch/admin surfaces.
+fn teardown_compose_env(pack_root: &Path, key_id: Option<&str>) -> ComposeEnv {
+    let mut env = match load_validated_manifest(pack_root).and_then(|v| {
         build_pack_pin_env(
             pack_root,
             &ledger_key_path(),
@@ -566,13 +563,22 @@ fn teardown_compose_env(
             key_id,
         )
     }) {
-        Ok(pins) => {
-            let mut merged = pins;
-            merged.extend(secrets);
-            merged
-        }
-        Err(_) => secrets,
+        Ok(pins) => pins,
+        Err(_) => ComposeEnv::new(),
+    };
+    // Empty secret slots win over any pin defaults and replace ambient values
+    // after the spawn scrub — never Keychain or login-shell material.
+    for key in [
+        "AUTH_PEPPER",
+        "BOOTSTRAP_TOKEN",
+        "XAI_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "NVIDIA_API_KEY",
+    ] {
+        env.insert(key.to_string(), String::new());
     }
+    env
 }
 
 /// Stage bundled pack assets to a sibling temp dir, validate, then atomically swap.
@@ -1611,7 +1617,7 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
         if compose.is_file() {
             let env = public_env_path();
             let env_arg = env.is_file().then_some(env.as_path());
-            let spawn_env = teardown_compose_env(store, &pack_root, cfg.gateway_key_id.as_deref());
+            let spawn_env = teardown_compose_env(&pack_root, cfg.gateway_key_id.as_deref());
             lifecycle_stage("stop_compose", "begin");
             let out = match compose_command_with_env(
                 &compose,
@@ -1671,7 +1677,7 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
         if compose.is_file() {
             let env = public_env_path();
             let env_arg = env.is_file().then_some(env.as_path());
-            let spawn_env = teardown_compose_env(store, &pack_root, key_id.as_deref());
+            let spawn_env = teardown_compose_env(&pack_root, key_id.as_deref());
             let out = compose_command_with_env(
                 &compose,
                 env_arg,
@@ -1691,7 +1697,7 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
         let compose = compose_file(&pack_root);
         // No env file here: the pinned spawn env is the only source for the
         // compose-interpolated image refs and pack paths.
-        let spawn_env = teardown_compose_env(store, &pack_root, key_id.as_deref());
+        let spawn_env = teardown_compose_env(&pack_root, key_id.as_deref());
         let _ = compose_command_with_env(
             &compose,
             None,
@@ -1701,7 +1707,10 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
         );
     }
 
-    let _ = delete_all_gateway_pack_secrets(store);
+    // Always attempt Keychain cleanup; never claim success if an item remains.
+    // Compose is already down (best-effort above); continue removing app data
+    // so a Keychain ACL failure does not leave a half-installed pack tree.
+    let keychain_err = delete_all_gateway_pack_secrets(store).err();
     let dir = gateway_data_dir();
     if dir.is_dir() {
         fs::remove_dir_all(&dir).map_err(|e| format!("remove gateway data dir: {e}"))?;
@@ -1711,6 +1720,11 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
     cfg.gateway_key_id = None;
     cfg.gateway_pack_version = None;
     write_private_config_at(&crate::private_config::private_config_path(), &cfg)?;
+    if let Some(e) = keychain_err {
+        return Err(format!(
+            "Gateway Pack files removed, but Keychain cleanup failed ({e}).              GW_API_KEY and/or AUTH_PEPPER may still be present under the IRIN              Keychain service — re-run Uninstall or delete those items manually."
+        ));
+    }
     Ok(gateway_pack_status(store))
 }
 
@@ -2132,6 +2146,92 @@ mod tests {
         assert!(!body.contains("COUNCIL_GATEWAY_TOKEN"));
         // Empty bootstrap is ok in public file (blanked).
         assert!(body.contains("BOOTSTRAP_TOKEN="));
+    }
+
+    #[test]
+    fn teardown_compose_env_never_loads_keychain_or_provider_secrets() {
+        let _g = test_env_lock();
+        let prev_skip = std::env::var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV").ok();
+        let prev_support = std::env::var(crate::private_config::APP_SUPPORT_ROOT_ENV).ok();
+        std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", "1");
+        std::env::set_var("XAI_API_KEY", "should-not-appear-in-teardown");
+
+        let uniq = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let support = std::env::temp_dir().join(format!("gw-teardown-support-{uniq}"));
+        let pack = support.join("gateway").join("pack");
+        let _ = fs::remove_dir_all(&support);
+        fs::create_dir_all(&pack).unwrap();
+        std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, &support);
+
+        fs::write(pack.join("docker-compose.yml"), b"name: irin-desktop-gateway\n").unwrap();
+        let manifest = crate::gateway_pack::manifest::ImageManifest {
+            schema_version: 1,
+            mode: "local-dev".into(),
+            pack_version: "0.1.0-teardown".into(),
+            images: crate::gateway_pack::manifest::PackImages {
+                gateway: format!("irin-desktop/gateway@sha256:{}", "a".repeat(64)),
+                sidecar: format!("irin-desktop/sidecar@sha256:{}", "a".repeat(64)),
+            },
+            third_party_pins: Default::default(),
+            watch_invariants: crate::gateway_pack::manifest::WatchInvariants {
+                watch_producer_enabled: false,
+                watch_dispatcher_enabled: false,
+            },
+            image_ids: Default::default(),
+            local_tags: Default::default(),
+            notes: None,
+            source_sha: None,
+            source_dirty: None,
+        };
+        fs::write(
+            pack.join("image-manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        let store = MemorySecretStore::default();
+        let pepper = "ab".repeat(32);
+        crate::keychain::store_auth_pepper(&store, &pepper).unwrap();
+        let key = format!("gw_{}", "f".repeat(32));
+        crate::keychain::store_gw_api_key(&store, &key).unwrap();
+
+        let env = teardown_compose_env(&pack, None);
+        assert_eq!(
+            env.get("AUTH_PEPPER").map(String::as_str),
+            Some(""),
+            "teardown must not load Keychain AUTH_PEPPER"
+        );
+        assert_eq!(env.get("BOOTSTRAP_TOKEN").map(String::as_str), Some(""));
+        assert_eq!(env.get("XAI_API_KEY").map(String::as_str), Some(""));
+        for secret in [pepper.as_str(), key.as_str(), "should-not-appear-in-teardown"] {
+            for v in env.values() {
+                assert!(!v.contains(secret), "teardown env leaked secret material: {v}");
+            }
+        }
+        assert!(
+            env.get("IRIN_GATEWAY_IMAGE")
+                .map(|s| s.contains("sha256:"))
+                .unwrap_or(false),
+            "pins should still load from installed manifest: {env:?}"
+        );
+
+        match prev_skip {
+            Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", v),
+            None => std::env::remove_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV"),
+        }
+        match prev_support {
+            Some(v) => std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, v),
+            None => std::env::remove_var(crate::private_config::APP_SUPPORT_ROOT_ENV),
+        }
+        std::env::remove_var("XAI_API_KEY");
+        let _ = fs::remove_dir_all(&support);
     }
 
     #[test]

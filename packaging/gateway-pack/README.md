@@ -102,17 +102,24 @@ across identity changes.
 - The Gateway Pack images pinned by digest in the installed manifest.
 - The app-owned state under Application Support (`com.irinity.irin`), with
   pack asset integrity re-verified against the install marker before every
-  secret-bearing Compose spawn (re-staged from the bundle on mismatch).
+  **secret-bearing** Compose spawn — that is Enable/`compose up` only
+  (re-staged from the bundle on mismatch). Stop and uninstall never load
+  Keychain or provider secrets into Compose.
 
 ### How secrets move
 
 - `GW_API_KEY` / `AUTH_PEPPER` live only in the login Keychain (device-local,
   `ThisDeviceOnly`) — never in files, env dumps, receipts, or logs.
-- They leave the process only as (a) Compose spawn env scoped to lifecycle
-  commands, force-scrubbed from every unrelated spawn, and (b) a bearer token
-  to the app-owned Gateway, sent only after ownership is proven in three
-  layers: project name, our installed compose file, and containers created
-  from the validated manifest's pinned image digests.
+- They leave the process only as (a) Compose spawn env on **Enable/`up`**
+  (not stop/uninstall — those use empty secret placeholders so Compose can
+  interpolate without Keychain material), force-scrubbed from every unrelated
+  spawn, and (b) a bearer token to the app-owned Gateway, sent only after
+  ownership is proven in three layers: project name, our installed compose
+  file, and containers created from the validated manifest's pinned image
+  digests.
+- Uninstall must delete both Keychain accounts; if Keychain cleanup fails
+  after files are removed, the operation returns an error rather than
+  reporting a clean uninstall while secrets remain.
 - The app's Docker config is a managed minimal file (plugin hints only,
   0600). No operator registry credentials are read or copied.
 - Watch producer/dispatcher/admin are force-disarmed on every spawn; ambient

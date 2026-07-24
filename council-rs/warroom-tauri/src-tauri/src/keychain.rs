@@ -456,9 +456,23 @@ pub fn delete_auth_pepper(store: &dyn SecretStore) -> Result<(), String> {
 }
 
 pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), String> {
-    delete_gw_api_key(store)?;
-    delete_auth_pepper(store)?;
-    Ok(())
+    // Attempt every account even if one fails so a single ACL error cannot
+    // leave the other secret behind while the caller thinks uninstall finished.
+    let mut errors: Vec<String> = Vec::new();
+    if let Err(e) = delete_gw_api_key(store) {
+        errors.push(format!("GW_API_KEY: {e}"));
+    }
+    if let Err(e) = delete_auth_pepper(store) {
+        errors.push(format!("AUTH_PEPPER: {e}"));
+    }
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Keychain delete incomplete ({})",
+            errors.join("; ")
+        ))
+    }
 }
 
 /// One-time, non-destructive adoption of secrets stored by the legacy
@@ -592,6 +606,50 @@ mod tests {
         assert!(auth_pepper_present(&store).unwrap());
         delete_all_gateway_pack_secrets(&store).unwrap();
         assert!(load_auth_pepper(&store).unwrap().is_none());
+    }
+
+    /// Store that fails delete for one account so we prove both deletes run.
+    struct FailGwDeleteStore {
+        inner: MemorySecretStore,
+    }
+
+    impl SecretStore for FailGwDeleteStore {
+        fn set_password(&self, service: &str, account: &str, password: &str) -> Result<(), String> {
+            self.inner.set_password(service, account, password)
+        }
+        fn get_password(&self, service: &str, account: &str) -> Result<Option<String>, String> {
+            self.inner.get_password(service, account)
+        }
+        fn delete_password(&self, service: &str, account: &str) -> Result<(), String> {
+            if account == GW_API_KEY_ACCOUNT {
+                return Err("simulated ACL deny on GW_API_KEY".into());
+            }
+            self.inner.delete_password(service, account)
+        }
+    }
+
+    #[test]
+    fn delete_all_attempts_both_accounts_when_one_fails() {
+        let store = FailGwDeleteStore {
+            inner: MemorySecretStore::default(),
+        };
+        let key = fake_gateway_key('e');
+        let pepper = "cd".repeat(32);
+        store_gw_api_key(&store, &key).unwrap();
+        store_auth_pepper(&store, &pepper).unwrap();
+
+        let err = delete_all_gateway_pack_secrets(&store).unwrap_err();
+        assert!(
+            err.contains("GW_API_KEY") && err.contains("Keychain delete incomplete"),
+            "err={err}"
+        );
+        // Pepper delete still ran despite GW failure.
+        assert!(
+            load_auth_pepper(&store).unwrap().is_none(),
+            "pepper must still be deleted when GW delete fails"
+        );
+        // GW key remains (delete refused).
+        assert_eq!(load_gw_api_key(&store).unwrap().as_deref(), Some(key.as_str()));
     }
 
     #[test]
