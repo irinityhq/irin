@@ -57,11 +57,13 @@ else
 fi
 
 echo "=== immutability check: $TAG ==="
-# Release tags are immutable: once v* images are published they are never
-# replaced (a moved tag must not overwrite digests a manifest may have
-# pinned). rc-* tags are operator iteration and may be rebuilt. The absence
-# proof is fail-closed: only an explicit not-found passes; any transient
-# registry, network, or auth failure aborts the publish.
+# Release tags are immutable: once a *complete* pair (gateway + sidecar) is
+# published under a v* tag, neither image is replaced. A partial prior push
+# (one image present, the other missing) must not strand retries — the missing
+# half may still be published, but the existing half is never overwritten.
+# rc-* tags are operator iteration and may be rebuilt. Absence proof is
+# fail-closed: only an explicit not-found counts as unpublished; any
+# transient registry, network, or auth failure aborts the publish.
 tag_is_unpublished() {
   local ref="$1" out
   if out="$(docker buildx imagetools inspect "$ref" 2>&1)"; then
@@ -76,13 +78,29 @@ tag_is_unpublished() {
     *) die "cannot prove $ref is unpublished (registry inspection failed): $out" ;;
   esac
 }
+
+# PUSH_GW / PUSH_SC: 1 = build+push this image; 0 = already published, skip.
+PUSH_GW=1
+PUSH_SC=1
 case "$TAG" in
-  rc-*) ;;
+  rc-*)
+    ;;
   *)
-    tag_is_unpublished "$GW_IMAGE:$TAG" \
-      || die "refusing to replace already-published release images: $GW_IMAGE:$TAG (releases are immutable; cut a new tag)"
-    tag_is_unpublished "$SC_IMAGE:$TAG" \
-      || die "refusing to replace already-published release images: $SC_IMAGE:$TAG (releases are immutable; cut a new tag)"
+    gw_unpub=0
+    sc_unpub=0
+    tag_is_unpublished "$GW_IMAGE:$TAG" && gw_unpub=1
+    tag_is_unpublished "$SC_IMAGE:$TAG" && sc_unpub=1
+    if [[ "$gw_unpub" -eq 0 && "$sc_unpub" -eq 0 ]]; then
+      die "refusing to replace already-published release images: $GW_IMAGE:$TAG and $SC_IMAGE:$TAG (releases are immutable; cut a new tag)"
+    fi
+    if [[ "$gw_unpub" -eq 0 ]]; then
+      PUSH_GW=0
+      echo "gateway $GW_IMAGE:$TAG already published — will not overwrite; pushing sidecar only if needed"
+    fi
+    if [[ "$sc_unpub" -eq 0 ]]; then
+      PUSH_SC=0
+      echo "sidecar $SC_IMAGE:$TAG already published — will not overwrite; pushing gateway only if needed"
+    fi
     ;;
 esac
 
@@ -115,15 +133,23 @@ docker buildx inspect irin-pack-builder >/dev/null 2>&1 \
   || docker buildx create --name irin-pack-builder --use >/dev/null
 docker buildx use irin-pack-builder
 
-echo "=== build+push gateway image (linux/arm64) $GW_IMAGE:$TAG ==="
-docker buildx build --platform linux/arm64 \
-  -f "$ROOT/gateway/Dockerfile.gateway" \
-  -t "$GW_IMAGE:$TAG" --push "$ROOT/gateway"
+if [[ "$PUSH_GW" -eq 1 ]]; then
+  echo "=== build+push gateway image (linux/arm64) $GW_IMAGE:$TAG ==="
+  docker buildx build --platform linux/arm64 \
+    -f "$ROOT/gateway/Dockerfile.gateway" \
+    -t "$GW_IMAGE:$TAG" --push "$ROOT/gateway"
+else
+  echo "=== skip gateway push (already published, immutable) $GW_IMAGE:$TAG ==="
+fi
 
-echo "=== build+push sidecar image (linux/arm64) $SC_IMAGE:$TAG ==="
-docker buildx build --platform linux/arm64 \
-  -f "$ROOT/gateway/sidecar-rs/Dockerfile" \
-  -t "$SC_IMAGE:$TAG" --push "$SIDECAR_CONTEXT"
+if [[ "$PUSH_SC" -eq 1 ]]; then
+  echo "=== build+push sidecar image (linux/arm64) $SC_IMAGE:$TAG ==="
+  docker buildx build --platform linux/arm64 \
+    -f "$ROOT/gateway/sidecar-rs/Dockerfile" \
+    -t "$SC_IMAGE:$TAG" --push "$SIDECAR_CONTEXT"
+else
+  echo "=== skip sidecar push (already published, immutable) $SC_IMAGE:$TAG ==="
+fi
 
 cleanup_ctx
 trap - EXIT
