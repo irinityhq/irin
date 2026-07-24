@@ -37,18 +37,18 @@ print("manifest shape ok")
 PY
 
 # Docker allow-list docs in source.
-rg -q '/usr/local/bin/docker' \
+grep -qE '/usr/local/bin/docker' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "allowlist path"
-rg -q 'irin-desktop-gateway' \
+grep -qE 'irin-desktop-gateway' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "fixed project in rust"
-rg -q 'authenticated_ready' \
+grep -qE 'authenticated_ready' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/gateway_pack/mod.rs" || die "ready state"
-rg -q 'GW_API_KEY' \
+grep -qE 'GW_API_KEY' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/private_config.rs" || die "deny import"
 
 # Foreign project must not be passable through validate_compose_project (unit-tested);
 # shell-level: ensure no script targets canonical project name for pack operations.
-if rg -n 'compose -p gateway\b|compose -p "gateway"' \
+if grep -nE 'compose -p gateway$|compose -p "gateway"' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src" \
   "$ROOT/scripts/stage-gateway-pack.sh" \
   "$ROOT/scripts/build-gateway-pack-dev-images.sh" 2>/dev/null; then
@@ -84,35 +84,35 @@ else
 fi
 
 # Source-level: stage script must not silently prefer local-dev in production.
-rg -q 'IRIN_GATEWAY_PACK_MODE' "$ROOT/scripts/stage-gateway-pack.sh" || die "stage mode gate"
-rg -q 'production packaging refuses a local-dev' "$ROOT/scripts/stage-gateway-pack.sh" \
+grep -qE 'IRIN_GATEWAY_PACK_MODE' "$ROOT/scripts/stage-gateway-pack.sh" || die "stage mode gate"
+grep -qE 'production packaging refuses a local-dev' "$ROOT/scripts/stage-gateway-pack.sh" \
   || die "stage refuse local-dev"
-rg -q 'pack_mode' "$ROOT/packaging/build-dmg.sh" || die "dmg pack_mode"
-rg -q 'run_command_timeout|DOCKER_CMD_TIMEOUT' \
+grep -qE 'pack_mode' "$ROOT/packaging/build-dmg.sh" || die "dmg pack_mode"
+grep -qE 'run_command_timeout|DOCKER_CMD_TIMEOUT' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "docker timeout"
-rg -q 'WhenUnlockedThisDeviceOnly|kSecAttrAccessibleWhenUnlockedThisDeviceOnly' \
+grep -qE 'WhenUnlockedThisDeviceOnly|kSecAttrAccessibleWhenUnlockedThisDeviceOnly' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/keychain.rs" || die "keychain accessibility"
-rg -q 'IRIN_APP_SUPPORT_ROOT' \
+grep -qE 'IRIN_APP_SUPPORT_ROOT' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/private_config.rs" || die "app support root override"
-rg -q 'login keychain unavailable' \
+grep -qE 'login keychain unavailable' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/keychain.rs" || die "keychain preflight token"
-rg -q 'OWNED_DESKTOP_TEARDOWN|desktop_preexisting' \
+grep -qE 'OWNED_DESKTOP_TEARDOWN|desktop_preexisting' \
   "$ROOT/packaging/smoke-gateway-pack.sh" \
   "$ROOT/scripts/test-gateway-pack-integration-smoke.sh" || die "desktop ownership flags"
 # Never reclaim via delete-then-readd of operator Keychain items.
-if rg -n 'reclaim re-add|delete then re-add|re-add after reclaim' \
+if grep -nE 'reclaim re-add|delete then re-add|re-add after reclaim' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/keychain.rs" 2>/dev/null; then
   die "keychain must not delete-and-readd operator items"
 fi
-rg -q 'try_wait' \
+grep -qE 'try_wait' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/private_config.rs" || die "cancelable login timeout"
-rg -q 'redact_process_text' \
+grep -qE 'redact_process_text' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "redactor"
-rg -q 'is_pack_installed' \
+grep -qE 'is_pack_installed' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/gateway_pack/mod.rs" || die "install marker"
-rg -q 'repo_digests_match_ref' \
+grep -qE 'repo_digests_match_ref' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/gateway_pack/manifest.rs" || die "prod digests"
-rg -q 'GATEWAY_SCRUB_ENV_KEYS' \
+grep -qE 'GATEWAY_SCRUB_ENV_KEYS' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/sidecar.rs" || die "council env scrub"
 
 pass "gateway pack isolation invariants"
