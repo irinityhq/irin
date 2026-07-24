@@ -122,6 +122,21 @@ reclaim_owned_listeners() {
   done
 }
 
+reclaim_owned_host_apps() {
+  # Stray packaged host instances from earlier failed runs hijack AX clicks
+  # (System Events resolves "process IRIN" arbitrarily) and steal :8765.
+  # Only harness-owned copies under packaging/test-apps are ever matched.
+  local p
+  for p in $(pgrep -f 'packaging/test-apps/.*/Contents/MacOS/council-warroom-tauri' 2>/dev/null || true); do
+    log "reclaim_owned_host_pid=$p"
+    kill -TERM "$p" 2>/dev/null || true
+  done
+  sleep 0.5
+  for p in $(pgrep -f 'packaging/test-apps/.*/Contents/MacOS/council-warroom-tauri' 2>/dev/null || true); do
+    kill -KILL "$p" 2>/dev/null || true
+  done
+}
+
 graceful_quit_app() {
   set +e
   "$OSASCRIPT_BIN" -e 'tell application "IRIN" to quit' >/dev/null 2>&1 || true
@@ -220,9 +235,10 @@ fi
 DESKTOP_PREEXISTING=false
 log "desktop_preexisting=false"
 
-# Reap stale harness-owned Council listeners before launch: an orphaned
-# sidecar on :8765 is adopted by the fresh app (no owned child), which breaks
-# every later owned-lifecycle assertion.
+# Reap stale harness-owned Council listeners and host app instances before
+# launch: orphaned sidecars are adopted by the fresh app, and stray host
+# instances hijack accessibility clicks and the canonical port.
+reclaim_owned_host_apps
 reclaim_owned_listeners
 
 # Port 18080 must not be owned by canonical/foreign project.
