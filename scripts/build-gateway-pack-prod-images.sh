@@ -80,8 +80,11 @@ tag_is_unpublished() {
 }
 
 # PUSH_GW / PUSH_SC: 1 = build+push this image; 0 = already published, skip.
+# RECEIPT_ONLY: both tags already exist — never overwrite; only re-inspect digests
+# and write the receipt (recovers from a post-push inspect/receipt failure).
 PUSH_GW=1
 PUSH_SC=1
+RECEIPT_ONLY=0
 case "$TAG" in
   rc-*)
     ;;
@@ -91,19 +94,30 @@ case "$TAG" in
     tag_is_unpublished "$GW_IMAGE:$TAG" && gw_unpub=1
     tag_is_unpublished "$SC_IMAGE:$TAG" && sc_unpub=1
     if [[ "$gw_unpub" -eq 0 && "$sc_unpub" -eq 0 ]]; then
-      die "refusing to replace already-published release images: $GW_IMAGE:$TAG and $SC_IMAGE:$TAG (releases are immutable; cut a new tag)"
-    fi
-    if [[ "$gw_unpub" -eq 0 ]]; then
+      # Complete pair already published: immutability forbids rebuild, but a
+      # prior run may have failed after push while writing the digest receipt.
+      # Re-inspect and rewrite the receipt only — never strand a complete pair.
       PUSH_GW=0
-      echo "gateway $GW_IMAGE:$TAG already published — will not overwrite; pushing sidecar only if needed"
-    fi
-    if [[ "$sc_unpub" -eq 0 ]]; then
       PUSH_SC=0
-      echo "sidecar $SC_IMAGE:$TAG already published — will not overwrite; pushing gateway only if needed"
+      RECEIPT_ONLY=1
+      echo "both $GW_IMAGE:$TAG and $SC_IMAGE:$TAG already published — receipt-only (no overwrite)"
+    else
+      if [[ "$gw_unpub" -eq 0 ]]; then
+        PUSH_GW=0
+        echo "gateway $GW_IMAGE:$TAG already published — will not overwrite; pushing sidecar only if needed"
+      fi
+      if [[ "$sc_unpub" -eq 0 ]]; then
+        PUSH_SC=0
+        echo "sidecar $SC_IMAGE:$TAG already published — will not overwrite; pushing gateway only if needed"
+      fi
     fi
     ;;
 esac
 
+if [[ "$RECEIPT_ONLY" -eq 1 ]]; then
+  echo "=== skip build/push (receipt-only recovery for complete published pair) ==="
+  CTX=""
+else
 echo "=== prepare sidecar docker context (worktree-safe) ==="
 CTX=""
 cleanup_ctx() { [[ -n "${CTX:-}" && -d "${CTX:-}" ]] && rm -rf "$CTX"; }
@@ -154,6 +168,7 @@ fi
 cleanup_ctx
 trap - EXIT
 CTX=""
+fi
 
 echo "=== resolve published digests ==="
 gw_digest="$(docker buildx imagetools inspect "$GW_IMAGE:$TAG" --format '{{.Manifest.Digest}}')"
@@ -171,7 +186,11 @@ IRIN_SIDECAR_IMAGE=$SC_IMAGE@$sc_digest
 EOF
 chmod 644 "$RECEIPT"
 
-echo "=== production images published ==="
+if [[ "$RECEIPT_ONLY" -eq 1 ]]; then
+  echo "=== production image receipt recovered (no push) ==="
+else
+  echo "=== production images published ==="
+fi
 echo "gateway=$GW_IMAGE@$gw_digest"
 echo "sidecar=$SC_IMAGE@$sc_digest"
 echo "receipt=$RECEIPT"

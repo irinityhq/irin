@@ -332,12 +332,25 @@ pub fn ensure_managed_docker_config_dir() -> Result<PathBuf, String> {
 /// Always select the managed pack config (`DOCKER_CONFIG=<managed dir>`) for
 /// pack spawns. The ambient operator `~/.docker` state and any parent
 /// `DOCKER_CONFIG` (possibly polluted by harness/debug shells and lacking
-/// plugin hints) are never honored. The managed config carries no registry
-/// credentials — only `cliPluginsExtraDirs` — while the plugin binaries
-/// themselves still resolve from the operator's Docker Desktop install. That
-/// is accepted: Docker Desktop already runs as the operator, and the
-/// documented boundary does not defend against a compromised host. Never logs
-/// config contents.
+/// plugin hints) are never honored. Inherited `DOCKER_HOST` /
+/// `DOCKER_CONTEXT` / TLS endpoint selectors are removed so secret-bearing
+/// Compose never targets a remote daemon. The managed config carries no
+/// registry credentials — only `cliPluginsExtraDirs` — while the plugin
+/// binaries themselves still resolve from the operator's Docker Desktop
+/// install. That is accepted: Docker Desktop already runs as the operator,
+/// and the documented boundary does not defend against a compromised host.
+/// Never logs config contents.
+/// Endpoint selectors that would redirect Compose/Docker away from the local
+/// Docker Desktop daemon. Cleared on every pack spawn so Keychain/provider
+/// secrets never leave this host via an inherited remote `DOCKER_HOST` /
+/// `DOCKER_CONTEXT` (or TLS cert path pointing at a remote endpoint).
+pub const AMBIENT_DOCKER_ENDPOINT_ENV_KEYS: &[&str] = &[
+    "DOCKER_HOST",
+    "DOCKER_CONTEXT",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_CERT_PATH",
+];
+
 fn apply_docker_cli_env(cmd: &mut Command) -> Result<(), String> {
     // Fail closed: if the managed config cannot be prepared, the spawn aborts
     // rather than falling back to ambient HOME plugin discovery with pack
@@ -346,6 +359,11 @@ fn apply_docker_cli_env(cmd: &mut Command) -> Result<(), String> {
         format!("managed Docker config unavailable; refusing ambient fallback: {e}")
     })?;
     cmd.env("DOCKER_CONFIG", dir);
+    // Force the local Docker Desktop endpoint: never inherit a remote host
+    // from the launching shell (debug harnesses, LaunchAgents, poisoned parent).
+    for key in AMBIENT_DOCKER_ENDPOINT_ENV_KEYS {
+        cmd.env_remove(key);
+    }
     Ok(())
 }
 
@@ -1134,5 +1152,47 @@ mod tests {
             Some("false")
         );
         assert_eq!(env.get("OPENAI_API_KEY").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn docker_and_compose_spawns_clear_ambient_endpoint_selectors() {
+        let _g = crate::private_config::test_env_lock();
+        let _root = SupportRootGuard::new("endpoint");
+        let _decoys = EnvDecoys::plant(&[
+            ("DOCKER_HOST", "tcp://evil.example:2376"),
+            ("DOCKER_CONTEXT", "remote-evil"),
+            ("DOCKER_TLS_VERIFY", "1"),
+            ("DOCKER_CERT_PATH", "/tmp/evil-certs"),
+        ]);
+        let compose = temp_compose_file("endpoint");
+        let cmd = build_compose_command(
+            Path::new("/usr/local/bin/docker"),
+            &compose,
+            None,
+            &["config"],
+            None,
+        )
+        .expect("compose command builds");
+        for key in AMBIENT_DOCKER_ENDPOINT_ENV_KEYS {
+            let removed = cmd
+                .get_envs()
+                .any(|(k, v)| k == *key && v.is_none());
+            assert!(
+                removed,
+                "{key} must be env_remove'd so ambient remote endpoints cannot receive pack secrets"
+            );
+        }
+        let plain = build_docker_command(
+            Path::new("/usr/local/bin/docker"),
+            &["info", "--format", "{{.ServerVersion}}"],
+        )
+        .expect("docker command builds");
+        for key in AMBIENT_DOCKER_ENDPOINT_ENV_KEYS {
+            let removed = plain
+                .get_envs()
+                .any(|(k, v)| k == *key && v.is_none());
+            assert!(removed, "plain docker spawn must also clear {key}");
+        }
+        let _ = fs::remove_dir_all(compose.parent().unwrap());
     }
 }
