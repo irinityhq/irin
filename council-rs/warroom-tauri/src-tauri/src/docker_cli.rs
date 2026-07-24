@@ -1174,9 +1174,7 @@ mod tests {
         )
         .expect("compose command builds");
         for key in AMBIENT_DOCKER_ENDPOINT_ENV_KEYS {
-            let removed = cmd
-                .get_envs()
-                .any(|(k, v)| k == *key && v.is_none());
+            let removed = cmd.get_envs().any(|(k, v)| k == *key && v.is_none());
             assert!(
                 removed,
                 "{key} must be env_remove'd so ambient remote endpoints cannot receive pack secrets"
@@ -1188,9 +1186,7 @@ mod tests {
         )
         .expect("docker command builds");
         for key in AMBIENT_DOCKER_ENDPOINT_ENV_KEYS {
-            let removed = plain
-                .get_envs()
-                .any(|(k, v)| k == *key && v.is_none());
+            let removed = plain.get_envs().any(|(k, v)| k == *key && v.is_none());
             assert!(removed, "plain docker spawn must also clear {key}");
         }
         let _ = fs::remove_dir_all(compose.parent().unwrap());

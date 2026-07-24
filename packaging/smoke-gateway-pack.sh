@@ -411,6 +411,26 @@ ax_click_button_busy() {
 }
 
 # --- a) Launch Direct ---
+# Prime first: a freshly ditto'd app copy pays a one-time first-exec cost
+# (Gatekeeper assessment + dyld cache) that can exceed any reasonable health
+# budget right after a build. Launch once briefly, reap, then time the real
+# launch against a warm copy.
+: >"$HOST_LOG"
+(
+  export IRIN_APP_SUPPORT_ROOT="$APP_SUPPORT_ROOT"
+  export TMPDIR="$TEST_HOME/tmp"
+  env -u DOCKER_CONFIG "$HOST" >>"$HOST_LOG" 2>&1 &
+  echo $! >"$PIDFILE"
+)
+PRIME_PID="$(cat "$PIDFILE")"
+for i in $(seq 1 240); do
+  lsof -nP -iTCP:8765 -sTCP:LISTEN -t >/dev/null 2>&1 && break
+  kill -0 "$PRIME_PID" 2>/dev/null || break
+  sleep 0.5
+done
+graceful_quit_app
+log "prime_launch_done=true"
+
 : >"$HOST_LOG"
 (
   export IRIN_APP_SUPPORT_ROOT="$APP_SUPPORT_ROOT"

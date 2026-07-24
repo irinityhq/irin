@@ -649,7 +649,10 @@ mod tests {
             "pepper must still be deleted when GW delete fails"
         );
         // GW key remains (delete refused).
-        assert_eq!(load_gw_api_key(&store).unwrap().as_deref(), Some(key.as_str()));
+        assert_eq!(
+            load_gw_api_key(&store).unwrap().as_deref(),
+            Some(key.as_str())
+        );
     }
 
     #[test]

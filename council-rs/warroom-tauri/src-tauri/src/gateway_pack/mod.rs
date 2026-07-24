@@ -2170,7 +2170,11 @@ mod tests {
         fs::create_dir_all(&pack).unwrap();
         std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, &support);
 
-        fs::write(pack.join("docker-compose.yml"), b"name: irin-desktop-gateway\n").unwrap();
+        fs::write(
+            pack.join("docker-compose.yml"),
+            b"name: irin-desktop-gateway\n",
+        )
+        .unwrap();
         let manifest = crate::gateway_pack::manifest::ImageManifest {
             schema_version: 1,
             mode: "local-dev".into(),
@@ -2210,9 +2214,16 @@ mod tests {
         );
         assert_eq!(env.get("BOOTSTRAP_TOKEN").map(String::as_str), Some(""));
         assert_eq!(env.get("XAI_API_KEY").map(String::as_str), Some(""));
-        for secret in [pepper.as_str(), key.as_str(), "should-not-appear-in-teardown"] {
+        for secret in [
+            pepper.as_str(),
+            key.as_str(),
+            "should-not-appear-in-teardown",
+        ] {
             for v in env.values() {
-                assert!(!v.contains(secret), "teardown env leaked secret material: {v}");
+                assert!(
+                    !v.contains(secret),
+                    "teardown env leaked secret material: {v}"
+                );
             }
         }
         assert!(
