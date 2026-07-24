@@ -139,7 +139,9 @@ if [[ "$PACK_MODE" == "production" ]]; then
   codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
     "$DEST_APP"
   codesign --verify --deep --strict "$DEST_APP"
-  codesign -dv --verbose=4 "$DEST_APP" 2>&1 | grep -q 'Authority=Developer ID Application' \
+  # Capture-then-match: a piped grep -q SIGPIPEs codesign under pipefail.
+  AUTH_OUT="$(codesign -dv --verbose=4 "$DEST_APP" 2>&1)"
+  [[ "$AUTH_OUT" == *"Authority=Developer ID Application"* ]] \
     || die "expected Developer ID Application signature"
 else
   codesign --force --deep --sign - "$DEST_APP"
