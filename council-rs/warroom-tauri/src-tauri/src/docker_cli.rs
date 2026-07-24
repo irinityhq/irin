@@ -229,7 +229,9 @@ pub fn probe_docker_daemon() -> DockerDaemonState {
     let Ok(docker) = resolve_docker_cli() else {
         return DockerDaemonState::CliMissing;
     };
-    let cmd = build_docker_command(&docker, &["info", "--format", "{{.ServerVersion}}"]);
+    let Ok(cmd) = build_docker_command(&docker, &["info", "--format", "{{.ServerVersion}}"]) else {
+        return DockerDaemonState::DaemonDown;
+    };
     match run_command_timeout(cmd, Duration::from_secs(12)) {
         Ok(o) if o.status.success() => DockerDaemonState::Ready,
         Ok(_) => DockerDaemonState::DaemonDown,
@@ -336,13 +338,15 @@ pub fn ensure_managed_docker_config_dir() -> Result<PathBuf, String> {
 /// is accepted: Docker Desktop already runs as the operator, and the
 /// documented boundary does not defend against a compromised host. Never logs
 /// config contents.
-fn apply_docker_cli_env(cmd: &mut Command) {
-    if let Ok(dir) = ensure_managed_docker_config_dir() {
-        cmd.env("DOCKER_CONFIG", dir);
-    } else {
-        // Never inherit a polluted ambient DOCKER_CONFIG from the parent env.
-        cmd.env_remove("DOCKER_CONFIG");
-    }
+fn apply_docker_cli_env(cmd: &mut Command) -> Result<(), String> {
+    // Fail closed: if the managed config cannot be prepared, the spawn aborts
+    // rather than falling back to ambient HOME plugin discovery with pack
+    // secrets in the environment.
+    let dir = ensure_managed_docker_config_dir().map_err(|e| {
+        format!("managed Docker config unavailable; refusing ambient fallback: {e}")
+    })?;
+    cmd.env("DOCKER_CONFIG", dir);
+    Ok(())
 }
 
 /// Compose-interpolated secret keys that must never be inherited from the
@@ -397,19 +401,19 @@ pub fn docker_command(args: &[&str]) -> Result<Output, String> {
 pub fn docker_command_timeout(args: &[&str], timeout: Duration) -> Result<Output, String> {
     let docker = resolve_docker_cli()?;
     validate_docker_cli_path(&docker)?;
-    run_command_timeout(build_docker_command(&docker, args), timeout)
+    run_command_timeout(build_docker_command(&docker, args)?, timeout)
 }
 
 /// Build `docker <args…>` with the layered spawn env: managed Docker config,
 /// ambient secret scrub, then the disarmed-surface force. Never routes
 /// through a shell; the plain Docker path has no caller-supplied env channel.
-fn build_docker_command(docker: &Path, args: &[&str]) -> Command {
+fn build_docker_command(docker: &Path, args: &[&str]) -> Result<Command, String> {
     let mut cmd = Command::new(docker);
     cmd.args(args);
-    apply_docker_cli_env(&mut cmd);
+    apply_docker_cli_env(&mut cmd)?;
     apply_ambient_scrub_env(&mut cmd);
     apply_forced_disarm_env(&mut cmd);
-    cmd
+    Ok(cmd)
 }
 
 /// Fixed-shape compose invocation for the desktop project only.
@@ -437,7 +441,7 @@ pub fn compose_command_with_env(
     validate_compose_invocation(compose_file, env_file, extra, extra_env)?;
     let docker = resolve_docker_cli()?;
     validate_docker_cli_path(&docker)?;
-    let cmd = build_compose_command(&docker, compose_file, env_file, extra, extra_env);
+    let cmd = build_compose_command(&docker, compose_file, env_file, extra, extra_env)?;
     run_command_timeout(cmd, timeout)
 }
 
@@ -532,9 +536,9 @@ fn build_compose_command(
     env_file: Option<&Path>,
     extra: &[&str],
     extra_env: Option<&ComposeEnv>,
-) -> Command {
+) -> Result<Command, String> {
     let mut cmd = Command::new(docker);
-    apply_docker_cli_env(&mut cmd);
+    apply_docker_cli_env(&mut cmd)?;
     apply_ambient_scrub_env(&mut cmd);
     cmd.arg("compose")
         .arg("-p")
@@ -551,7 +555,7 @@ fn build_compose_command(
         }
     }
     apply_forced_disarm_env(&mut cmd);
-    cmd
+    Ok(cmd)
 }
 
 /// Env keys allowed on the compose process (secrets + non-secret image/path pins).
@@ -1015,7 +1019,8 @@ mod tests {
             None,
             &["config"],
             Some(&pins),
-        );
+        )
+        .expect("compose command builds with pinned env");
         let env = spawn_env(&cmd);
         assert_eq!(env.get("IRIN_GATEWAY_IMAGE"), Some(&pinned_gateway));
         assert_eq!(env.get("IRIN_SIDECAR_IMAGE"), Some(&pinned_sidecar));
@@ -1059,7 +1064,8 @@ mod tests {
             None,
             &["config"],
             Some(&extra),
-        );
+        )
+        .expect("compose command builds with extra env");
         let env = spawn_env(&cmd);
         assert_eq!(
             env.get("XAI_API_KEY").map(String::as_str),
@@ -1086,7 +1092,8 @@ mod tests {
             None,
             &["config"],
             None,
-        );
+        )
+        .expect("compose command builds without extra env");
         let env2 = spawn_env(&cmd2);
         assert_eq!(env2.get("XAI_API_KEY").map(String::as_str), Some(""));
         assert_eq!(env2.get("AUTH_PEPPER").map(String::as_str), Some(""));
@@ -1110,7 +1117,8 @@ mod tests {
         let cmd = build_docker_command(
             Path::new("/usr/local/bin/docker"),
             &["info", "--format", "{{.ServerVersion}}"],
-        );
+        )
+        .expect("docker command builds in tests");
         let env = spawn_env(&cmd);
         assert_eq!(env.get("WATCH_ADMIN_TOKEN").map(String::as_str), Some(""));
         assert_eq!(
