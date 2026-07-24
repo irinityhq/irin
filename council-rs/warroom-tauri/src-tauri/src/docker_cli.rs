@@ -339,6 +339,16 @@ pub fn ensure_managed_docker_config_dir() -> Result<PathBuf, String> {
         let _ = fs::remove_file(&tmp);
         format!("rename managed docker config: {e}")
     })?;
+    // The merged config can carry operator registry auth: never leave it at
+    // umask-dependent permissions.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("chmod managed docker dir: {e}"))?;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("chmod managed docker config: {e}"))?;
+    }
     Ok(dir)
 }
 

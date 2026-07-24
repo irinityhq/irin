@@ -1,20 +1,15 @@
 name: release-images
 
-# Publishes the production Gateway Pack images to GHCR from exact source.
-# - Tag lane (v*): release images, tag = the version tag.
-# - Dispatch lane: release-candidate images, tag = rc-<sha12> of the selected ref,
-#   used by the pre-merge production dry-run. Never mutates any GitHub Release.
+# Publishes the production Gateway Pack images to GHCR from exact tagged source.
+# Tag lane only (v*): tags are push-gated, and the tag name reaches the shell
+# only through an environment variable. Release-candidate images for the
+# pre-merge dry-run are built locally by scripts/release-transaction.sh
+# --dry-run-rc — no arbitrary-ref dispatch exists by design.
 
 on:
   push:
     tags:
       - "v*"
-  workflow_dispatch:
-    inputs:
-      ref:
-        description: "Branch/SHA to build rc images from"
-        required: true
-        default: "main"
 
 permissions:
   contents: read
@@ -29,36 +24,27 @@ jobs:
     name: Build and push Gateway Pack images (linux/arm64)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
-          ref: ${{ inputs.ref || github.ref_name }}
           fetch-depth: 0
 
-      - name: Compute image tag
-        id: tag
-        run: |
-          if [[ "${{ github.event_name }}" == "push" ]]; then
-            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "tag=rc-$(git rev-parse --short=12 HEAD)" >> "$GITHUB_OUTPUT"
-          fi
-
       - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
 
       - name: Publish images
         env:
-          IRIN_PACK_IMAGES_TAG: ${{ steps.tag.outputs.tag }}
+          # Env-passed, never substituted into the script body.
+          IRIN_PACK_IMAGES_TAG: ${{ github.ref_name }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_ACTOR: ${{ github.actor }}
         run: bash scripts/build-gateway-pack-prod-images.sh
 
       - name: Upload digest receipt
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: pack-images-${{ steps.tag.outputs.tag }}
+          name: pack-images-${{ github.ref_name }}
           path: packaging/build/gateway-pack/pushed-images-*.env
           retention-days: 90

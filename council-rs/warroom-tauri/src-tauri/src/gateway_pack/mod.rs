@@ -150,11 +150,21 @@ pub fn installed_marker_path() -> PathBuf {
 
 /// Bundled pack root under app Resources (or test override).
 /// Bundled assets alone do **not** mean installed — see [`is_pack_installed`].
+///
+/// `IRIN_GATEWAY_PACK_ROOT` is a test escape hatch, never a production input:
+/// it is honored only in debug builds or when the test-isolation root
+/// (`IRIN_APP_SUPPORT_ROOT`) is set. A production install always uses its
+/// bundled Resources, so an environment-selected Compose definition can never
+/// reach the Keychain/provider secret boundary.
 pub fn bundled_pack_root() -> Option<PathBuf> {
-    if let Ok(override_dir) = std::env::var("IRIN_GATEWAY_PACK_ROOT") {
-        let p = PathBuf::from(override_dir.trim());
-        if p.join("docker-compose.yml").is_file() {
-            return Some(p);
+    let test_override_allowed =
+        cfg!(debug_assertions) || std::env::var_os("IRIN_APP_SUPPORT_ROOT").is_some();
+    if test_override_allowed {
+        if let Ok(override_dir) = std::env::var("IRIN_GATEWAY_PACK_ROOT") {
+            let p = PathBuf::from(override_dir.trim());
+            if p.join("docker-compose.yml").is_file() {
+                return Some(p);
+            }
         }
     }
     let mac_os = executable_dir()?;
