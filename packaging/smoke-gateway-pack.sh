@@ -801,8 +801,9 @@ fi
 log "relaunch_continuity=ok"
 
 # h) Uninstall via actual AX only (no compose fallback).
-# Note: packBusy is set only AFTER window.confirm accepts - so we click the
-# button, confirm the dialog, then require a busy transition / removal proof.
+# The control is a two-step inline confirm (no window.confirm): click
+# "Uninstall pack", then click the revealed "Confirm uninstall" button, then
+# require a busy transition / removal proof.
 "$OSASCRIPT_BIN" -e 'tell application "IRIN" to activate' >/dev/null 2>&1 || true
 sleep 0.5
 ax_click_button "Settings" >/dev/null 2>&1 || true
@@ -815,34 +816,10 @@ UNINSTALL_CLICK="$(ax_click_button "Uninstall pack" || true)"
 log "ax_click_Uninstall_pack=$UNINSTALL_CLICK"
 [[ "$UNINSTALL_CLICK" == clicked_button* ]] || die "could not click Uninstall pack AXButton"
 sleep 0.4
-# Confirm dialog (WKWebView confirm sheet)
-CONFIRM_RC="$(
-  "$OSASCRIPT_BIN" 2>/dev/null <<'APPLESCRIPT' || true
-tell application "System Events"
-  tell process "IRIN"
-    -- Prefer explicit confirm buttons
-    try
-      click button "OK" of window 1
-      return "clicked_ok"
-    end try
-    try
-      click button "Uninstall" of window 1
-      return "clicked_uninstall"
-    end try
-    try
-      set sheets to every sheet of window 1
-      repeat with s in sheets
-        try
-          click button "OK" of s
-          return "clicked_sheet_ok"
-        end try
-      end repeat
-    end try
-  end tell
-end tell
-return "no_dialog"
-APPLESCRIPT
-)"
+# Second step: the revealed inline Confirm uninstall button.
+wait_ax_button_enabled "Confirm uninstall" 10 \
+  || die "Confirm uninstall AXButton never appeared after first click"
+CONFIRM_RC="$(ax_click_button "Confirm uninstall" || true)"
 log "ax_uninstall_confirm=$CONFIRM_RC"
 # Require either confirm click or immediate busy (some stacks auto-accept in test).
 busy_seen=0

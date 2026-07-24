@@ -78,6 +78,7 @@ export default function SettingsPanel() {
   const [restarting, setRestarting] = useState(false);
   const [packStatus, setPackStatus] = useState<GatewayPackStatus | null>(null);
   const [packBusy, setPackBusy] = useState(false);
+  const [confirmingUninstall, setConfirmingUninstall] = useState(false);
   const inTauri = isTauri();
   const [desktopRuntimeMode, setDesktopRuntimeMode] = useState<
     DesktopRuntimeMode | "detecting" | "unavailable"
@@ -553,19 +554,20 @@ export default function SettingsPanel() {
             <button
               type="button"
               data-testid="settings-gateway-pack-uninstall"
-              aria-label="Uninstall pack"
+              aria-label={confirmingUninstall ? "Confirm uninstall" : "Uninstall pack"}
               aria-busy={packBusy}
               className="btn text-xs text-red-400"
               disabled={packBusy}
               title="Destructive: removes irin-desktop-gateway volumes, app-owned gateway data, and Keychain client key"
               onClick={async () => {
-                if (
-                  !window.confirm(
-                    "Uninstall the app-owned Gateway Pack? This deletes only irin-desktop-gateway data and the Keychain client key. Canonical Gateway is not touched.",
-                  )
-                ) {
+                // Two-step inline confirm — window.confirm is unreliable in
+                // the packaged WKWebView, and a second labeled button keeps
+                // the destructive action explicit and accessibility-testable.
+                if (!confirmingUninstall) {
+                  setConfirmingUninstall(true);
                   return;
                 }
+                setConfirmingUninstall(false);
                 setPackBusy(true);
                 try {
                   const st = await uninstallGatewayPack();
@@ -585,8 +587,18 @@ export default function SettingsPanel() {
               }}
             >
               <Trash2 className="w-3.5 h-3.5" />
-              Uninstall pack
+              {confirmingUninstall ? "Confirm uninstall" : "Uninstall pack"}
             </button>
+            {confirmingUninstall && (
+              <button
+                type="button"
+                aria-label="Cancel uninstall"
+                className="btn text-xs"
+                onClick={() => setConfirmingUninstall(false)}
+              >
+                Cancel
+              </button>
+            )}
           </div>
         </div>
       )}
