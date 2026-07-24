@@ -2191,6 +2191,13 @@ fn save_session(session: &CouncilSession) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// Serialize tests that mutate process env (cascade pin vars are global;
+    /// a parallel set/remove pair can otherwise cross the assertion window).
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn seat(text: &str) -> SeatResponse {
         SeatResponse {
             text: text.into(),
@@ -2405,6 +2412,7 @@ mod tests {
 
     #[test]
     fn convergence_judge_default_cascade_from_roles_yaml() {
+        let _guard = env_lock();
         let roles = crate::types::RolesConfig::built_in_defaults();
         let models = crate::types::ModelRegistry {
             models: std::collections::HashMap::new(),
@@ -2425,6 +2433,7 @@ mod tests {
 
     #[test]
     fn frame_check_default_cascade_from_roles_yaml() {
+        let _guard = env_lock();
         let roles = crate::types::RolesConfig::built_in_defaults();
         let models = crate::types::ModelRegistry {
             models: std::collections::HashMap::new(),
@@ -2447,6 +2456,7 @@ mod tests {
 
     #[test]
     fn frame_check_env_override_uses_registry_provider() {
+        let _guard = env_lock();
         let roles = crate::types::RolesConfig::built_in_defaults();
         let mut entries = std::collections::HashMap::new();
         entries.insert(
