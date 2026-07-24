@@ -33,7 +33,7 @@ export IRIN_GATEWAY_PACK_MODE="$PACK_MODE"
 if [[ "$PACK_MODE" == "production" && -z "${IRIN_RELEASE_VERSION:-}" ]]; then
   die "production DMG requires IRIN_RELEASE_VERSION set explicitly (the release transaction exports it from the tag)"
 fi
-IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-0.1.0}"
+IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-0.1.1}"
 export IRIN_RELEASE_VERSION
 TAURI_CONF="$TAURI_DIR/src-tauri/tauri.conf.json"
 TAURI_BUNDLE_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$TAURI_CONF")" \
