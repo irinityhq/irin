@@ -1065,6 +1065,13 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
 /// (degraded status), and the port check then misclassified the app's own
 /// Gateway as foreign. `compose ls` needs no compose configuration at all.
 fn desktop_project_running() -> bool {
+    // Ownership must be proven against OUR installed compose file; without an
+    // installed pack root there is nothing to prove against, so fail closed.
+    let expected =
+        installed_pack_root().map(|root| compose_file(&root).to_string_lossy().into_owned());
+    let Some(expected) = expected else {
+        return false;
+    };
     let out = docker_command(&[
         "compose",
         "ls",
@@ -1075,16 +1082,18 @@ fn desktop_project_running() -> bool {
     ]);
     match out {
         Ok(o) if o.status.success() => {
-            compose_ls_reports_running(&String::from_utf8_lossy(&o.stdout))
+            compose_ls_reports_running(&String::from_utf8_lossy(&o.stdout), &expected)
         }
         _ => false,
     }
 }
 
 /// Parse `docker compose ls --format json` output: true only when an entry's
-/// `Name` is exactly the fixed desktop project and its `Status` is running.
-/// Exact match — a prefix/suffix lookalike project never counts as ours.
-fn compose_ls_reports_running(json: &str) -> bool {
+/// `Name` is exactly the fixed desktop project, its `Status` is running, and
+/// its `ConfigFiles` points at OUR installed pack compose file. A lookalike
+/// project — even one with the same name — never counts as ours, so the
+/// Keychain-held client key can only go to the app-owned listener.
+fn compose_ls_reports_running(json: &str, expected_config: &str) -> bool {
     let parsed: serde_json::Value = match serde_json::from_str(json.trim()) {
         Ok(v) => v,
         Err(_) => return false,
@@ -1092,11 +1101,29 @@ fn compose_ls_reports_running(json: &str) -> bool {
     let Some(projects) = parsed.as_array() else {
         return false;
     };
+    // Docker may canonicalize ConfigFiles differently than our path (e.g.
+    // /var vs /private/var); compare canonical forms with a raw fallback.
+    let expected_canon = std::fs::canonicalize(expected_config)
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|_| expected_config.to_string());
     projects.iter().any(|p| {
         p.get("Name").and_then(|n| n.as_str()) == Some(DESKTOP_COMPOSE_PROJECT)
             && p.get("Status")
                 .and_then(|s| s.as_str())
                 .map(|s| s.starts_with("running"))
+                .unwrap_or(false)
+            && p.get("ConfigFiles")
+                .and_then(|s| s.as_str())
+                .map(|s| {
+                    s.split(',').any(|f| {
+                        let f = f.trim();
+                        f == expected_config
+                            || std::fs::canonicalize(f)
+                                .map(|c| c.to_string_lossy().into_owned())
+                                .unwrap_or_else(|_| f.to_string())
+                                == expected_canon
+                    })
+                })
                 .unwrap_or(false)
     })
 }
@@ -2008,24 +2035,31 @@ mod tests {
 
     #[test]
     fn compose_ls_reports_running_requires_exact_project_running() {
+        let ours = "/x/docker-compose.yml";
         let running = r#"[{"Name":"irin-desktop-gateway","Status":"running(2)","ConfigFiles":"/x/docker-compose.yml"}]"#;
-        assert!(compose_ls_reports_running(running));
+        assert!(compose_ls_reports_running(running, ours));
 
         // Stopped project is not running.
         let exited = r#"[{"Name":"irin-desktop-gateway","Status":"exited(1)","ConfigFiles":"/x/docker-compose.yml"}]"#;
-        assert!(!compose_ls_reports_running(exited));
+        assert!(!compose_ls_reports_running(exited, ours));
 
         // Lookalike names never count as ours (exact match only).
-        let lookalike = r#"[{"Name":"irin-desktop-gateway-evil","Status":"running(1)","ConfigFiles":"/y/docker-compose.yml"}]"#;
-        assert!(!compose_ls_reports_running(lookalike));
+        let lookalike = r#"[{"Name":"irin-desktop-gateway-evil","Status":"running(1)","ConfigFiles":"/x/docker-compose.yml"}]"#;
+        assert!(!compose_ls_reports_running(lookalike, ours));
+
+        // A foreign project with OUR exact name but a different config file
+        // is not ours either — the Keychain key must never reach it.
+        let foreign_same_name = r#"[{"Name":"irin-desktop-gateway","Status":"running(2)","ConfigFiles":"/evil/docker-compose.yml"}]"#;
+        assert!(!compose_ls_reports_running(foreign_same_name, ours));
 
         // Empty, malformed, or non-array output is not running.
-        assert!(!compose_ls_reports_running("[]"));
-        assert!(!compose_ls_reports_running("not json"));
+        assert!(!compose_ls_reports_running("[]", ours));
+        assert!(!compose_ls_reports_running("not json", ours));
         assert!(!compose_ls_reports_running(
-            r#"{"Name":"irin-desktop-gateway"}"#
+            r#"{"Name":"irin-desktop-gateway"}"#,
+            ours
         ));
-        assert!(!compose_ls_reports_running(""));
+        assert!(!compose_ls_reports_running("", ours));
     }
 
     #[test]

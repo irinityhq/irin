@@ -56,6 +56,22 @@ else
   echo "${GHCR_TOKEN}" | docker login "$REGISTRY" -u "${GHCR_USERNAME}" --password-stdin
 fi
 
+echo "=== immutability check: $TAG ==="
+# Release tags are immutable: once v* images are published they are never
+# replaced (a moved tag must not overwrite digests a manifest may have
+# pinned). rc-* tags are operator iteration and may be rebuilt.
+case "$TAG" in
+  rc-*) ;;
+  *)
+    if docker buildx imagetools inspect "$GW_IMAGE:$TAG" >/dev/null 2>&1; then
+      die "refusing to replace already-published release images: $GW_IMAGE:$TAG (releases are immutable; cut a new tag)"
+    fi
+    if docker buildx imagetools inspect "$SC_IMAGE:$TAG" >/dev/null 2>&1; then
+      die "refusing to replace already-published release images: $SC_IMAGE:$TAG (releases are immutable; cut a new tag)"
+    fi
+    ;;
+esac
+
 echo "=== prepare sidecar docker context (worktree-safe) ==="
 CTX=""
 cleanup_ctx() { [[ -n "${CTX:-}" && -d "${CTX:-}" ]] && rm -rf "$CTX"; }
