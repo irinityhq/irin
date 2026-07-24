@@ -53,6 +53,11 @@ OWNED_COUNCIL_PIDS=""
 # Only this run may `compose down --volumes` the fixed desktop project.
 DESKTOP_PREEXISTING=false
 OWNED_DESKTOP_TEARDOWN=false
+# Foreign fixtures this run created; cleanup() removes exactly these (never
+# pre-existing operator state, never product Keychain items).
+FOREIGN_PROJECT_CREATED=false
+FOREIGN_VOLUME_CREATED=false
+FOREIGN_KC_CREATED=false
 
 die() {
   FINAL_ERROR="$*"
@@ -170,10 +175,27 @@ cleanup() {
   else
     log "owned_desktop_teardown=false"
   fi
-  "$DOCKER_BIN" compose -p "$FOREIGN_PROJECT" down --volumes --remove-orphans >/dev/null 2>&1 || true
-  "$DOCKER_BIN" volume rm "$FOREIGN_VOLUME" >/dev/null 2>&1 || true
-  # Never delete Keychain items from the harness (including the foreign fixture).
-  # Presence-only checks during the run; operator/manual cleanup only.
+  # Remove only the foreign fixtures this run created (tracked at creation).
+  # The survivor assertions below prove the product left them alone; the
+  # harness still owns their removal on both success and failure paths so a
+  # failed run cannot leak the BusyBox keeper or the volume. The compose down
+  # needs -f: without a configuration file compose refuses `-p NAME down` and
+  # the keeper container would leak.
+  if [[ "$FOREIGN_PROJECT_CREATED" == "true" ]]; then
+    "$DOCKER_BIN" compose -p "$FOREIGN_PROJECT" \
+      -f "$ROOT/packaging/build/foreign-compose.yml" down --volumes --remove-orphans >/dev/null 2>&1 || true
+    rm -f "$ROOT/packaging/build/foreign-compose.yml" || true
+  fi
+  if [[ "$FOREIGN_VOLUME_CREATED" == "true" ]]; then
+    "$DOCKER_BIN" volume rm "$FOREIGN_VOLUME" >/dev/null 2>&1 || true
+  fi
+  # Delete only the test-owned foreign Keychain fixture item (PID-unique
+  # service). Product items (com.irinity.irin service) are never deleted by
+  # the harness: Uninstall must remove them and the assertions below fail
+  # closed if it does not — deleting them here would mask a product bug.
+  if [[ "$FOREIGN_KC_CREATED" == "true" ]]; then
+    "$SECURITY_BIN" delete-generic-password -s "$FOREIGN_KC_SERVICE" -a "$FOREIGN_KC_ACCOUNT" >/dev/null 2>&1 || true
+  fi
   log "cleanup_done=true"
   if [[ -z "${FINAL_ERROR}" && "$ec" -ne 0 && "$FINAL_RESULT" != "PASS" ]]; then
     FINAL_RESULT="FAIL"
@@ -204,8 +226,10 @@ if "$CURL_BIN" -fsS --max-time 2 "http://127.0.0.1:18080/health" >/dev/null 2>&1
   fi
 fi
 
-# Foreign fixtures
+# Foreign fixtures (created before the product action; must survive it).
+# cleanup() removes exactly these tracked fixtures afterwards, on both paths.
 "$DOCKER_BIN" volume create "$FOREIGN_VOLUME" >/dev/null
+FOREIGN_VOLUME_CREATED=true
 cat >"$ROOT/packaging/build/foreign-compose.yml" <<EOF
 name: $FOREIGN_PROJECT
 services:
@@ -219,8 +243,11 @@ volumes:
     name: $FOREIGN_VOLUME
     external: true
 EOF
+# Arm teardown before up so a partially-created project is still removed.
+FOREIGN_PROJECT_CREATED=true
 "$DOCKER_BIN" compose -p "$FOREIGN_PROJECT" -f "$ROOT/packaging/build/foreign-compose.yml" up -d >/dev/null
 "$SECURITY_BIN" add-generic-password -U -s "$FOREIGN_KC_SERVICE" -a "$FOREIGN_KC_ACCOUNT" -w "not-a-secret-marker" >/dev/null
+FOREIGN_KC_CREATED=true
 log "foreign_project=$FOREIGN_PROJECT"
 log "foreign_volume=$FOREIGN_VOLUME"
 log "foreign_keychain_service=$FOREIGN_KC_SERVICE"

@@ -3,7 +3,9 @@
 #
 # Proves compose lifecycle for irin-desktop-gateway against local-dev images
 # with isolated secrets, while preserving a deliberate foreign project/volume
-# and an unrelated Keychain item.
+# and an unrelated Keychain item through the product action. The foreign
+# fixtures are created before the product action, asserted to survive it, and
+# then removed by this test itself on both success and failure paths.
 #
 # Safety:
 #   - Never touches project name "gateway" (canonical).
@@ -11,6 +13,7 @@
 #   - Keychain uses a unique test service only (never production account).
 #   - No provider call; no Watch arming; no production credentials.
 #   - Receipts contain only non-secret status/IDs/hashes.
+#   - Foreign fixtures created by this run are tracked and removed on exit.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -25,6 +28,11 @@ TEST_ACCOUNT="gateway-client-gw-api-key-test"
 WORK="$(mktemp -d "${TMPDIR:-/tmp}/irin-gw-pack-smoke.XXXXXX")"
 DESKTOP_PREEXISTING=false
 OWNED_DESKTOP_TEARDOWN=false
+# Foreign fixtures this run created; the EXIT trap removes exactly these.
+FOREIGN_PROJECT_CREATED=false
+FOREIGN_VOLUME_CREATED=false
+FOREIGN_KC_CREATED=false
+FOREIGN_KC_SERVICE="com.irinity.irin.test.foreign.$$"
 
 die() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 log() { printf '%s\n' "$*" | tee -a "$RECEIPT"; }
@@ -59,11 +67,27 @@ cleanup() {
   else
     log "owned_desktop_teardown=false"
   fi
+  # Remove only the foreign fixtures this run created (tracked at creation).
+  # The main flow asserts they survive the product action; the harness still
+  # owns their removal on both success and failure paths so a failed run
+  # cannot leak the BusyBox keeper, the volume, or the Keychain item. The
+  # compose down needs -f with the staged foreign-compose.yml (compose
+  # refuses `-p NAME down` without a configuration file), so it must run
+  # before $WORK is wiped.
+  if [[ "$FOREIGN_PROJECT_CREATED" == "true" ]]; then
+    docker compose -p "$FOREIGN_PROJECT" -f "$WORK/foreign-compose.yml" \
+      down --volumes --remove-orphans >/dev/null 2>&1 || true
+  fi
+  if [[ "$FOREIGN_VOLUME_CREATED" == "true" ]]; then
+    docker volume rm "$FOREIGN_VOLUME" >/dev/null 2>&1 || true
+  fi
+  if [[ "$FOREIGN_KC_CREATED" == "true" ]]; then
+    security delete-generic-password -s "$FOREIGN_KC_SERVICE" -a "foreign-item" >/dev/null 2>&1 || true
+  fi
   # Delete only our unique Keychain test item.
   security delete-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1 || true
-  # Wipe isolated secrets dir.
+  # Wipe isolated secrets dir (after the foreign compose down; see above).
   rm -rf "$WORK"
-  # Leave foreign project/volume/keychain alone (proved surviving below).
 }
 trap cleanup EXIT
 
@@ -123,8 +147,10 @@ log "source_sha=$SOURCE_SHA"
 log "gateway_ref_digest_len=${#GW_REF}"
 log "sidecar_ref_digest_len=${#SC_REF}"
 
-# --- Foreign isolation fixtures (must survive) ---
+# --- Foreign isolation fixtures (must survive the product action) ---
+# This test removes these tracked fixtures itself afterwards, on both paths.
 docker volume create "$FOREIGN_VOLUME" >/dev/null
+FOREIGN_VOLUME_CREATED=true
 # Minimal foreign compose project (busybox sleep) — distinct name.
 cat >"$WORK/foreign-compose.yml" <<EOF
 name: $FOREIGN_PROJECT
@@ -139,15 +165,17 @@ volumes:
     name: $FOREIGN_VOLUME
     external: true
 EOF
+# Arm teardown before up so a partially-created project is still removed.
+FOREIGN_PROJECT_CREATED=true
 docker compose -p "$FOREIGN_PROJECT" -f "$WORK/foreign-compose.yml" up -d >/dev/null
 log "foreign_project_started=$FOREIGN_PROJECT"
 log "foreign_volume=$FOREIGN_VOLUME"
 
 # Unrelated Keychain item (unique service) — must survive cleanup of desktop item.
-FOREIGN_KC_SERVICE="com.irinity.irin.test.foreign.$$"
 security add-generic-password -U -s "$FOREIGN_KC_SERVICE" -a "foreign-item" -w "not-a-secret-marker" >/dev/null 2>&1 \
   || security delete-generic-password -s "$FOREIGN_KC_SERVICE" -a "foreign-item" >/dev/null 2>&1
 security add-generic-password -U -s "$FOREIGN_KC_SERVICE" -a "foreign-item" -w "not-a-secret-marker" >/dev/null
+FOREIGN_KC_CREATED=true
 log "foreign_keychain_service=$FOREIGN_KC_SERVICE"
 
 # Isolated generated secrets (never printed).
@@ -291,11 +319,23 @@ log "foreign_project_survived=true"
 log "foreign_volume_survived=true"
 log "foreign_keychain_survived=true"
 
-# Cleanup foreign fixtures we created (test-owned).
-docker compose -p "$FOREIGN_PROJECT" -f "$WORK/foreign-compose.yml" down --volumes --remove-orphans >/dev/null || true
-docker volume rm "$FOREIGN_VOLUME" >/dev/null 2>&1 || true
-security delete-generic-password -s "$FOREIGN_KC_SERVICE" -a "foreign-item" >/dev/null 2>&1 || true
+# Cleanup foreign fixtures we created (test-owned). The EXIT trap removes any
+# of these left behind on a failure path; clear each tracking flag here so a
+# successful run removes every fixture exactly once.
+if [[ "$FOREIGN_PROJECT_CREATED" == "true" ]]; then
+  docker compose -p "$FOREIGN_PROJECT" -f "$WORK/foreign-compose.yml" down --volumes --remove-orphans >/dev/null || true
+  FOREIGN_PROJECT_CREATED=false
+fi
+if [[ "$FOREIGN_VOLUME_CREATED" == "true" ]]; then
+  docker volume rm "$FOREIGN_VOLUME" >/dev/null 2>&1 || true
+  FOREIGN_VOLUME_CREATED=false
+fi
+if [[ "$FOREIGN_KC_CREATED" == "true" ]]; then
+  security delete-generic-password -s "$FOREIGN_KC_SERVICE" -a "foreign-item" >/dev/null 2>&1 || true
+  FOREIGN_KC_CREATED=false
+fi
 security delete-generic-password -s "$TEST_SERVICE" -a "$TEST_ACCOUNT" >/dev/null 2>&1 || true
+log "foreign_fixtures_removed=true"
 
 # Scrub env vars from this shell.
 unset AUTH_PEPPER BOOTSTRAP_TOKEN PEPPER BOOTSTRAP
