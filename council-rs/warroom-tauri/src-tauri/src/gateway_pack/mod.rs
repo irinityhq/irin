@@ -36,6 +36,33 @@ use std::time::Duration;
 /// Global lifecycle lock — enable/disable/stop/uninstall must not interleave.
 static LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
+/// Proven route of the Council child owned by this shell, recorded by lib.rs
+/// at every spawn/stop/adopt/terminate transition:
+/// - `Some(true)` — owned child was spawned governed (`COUNCIL_VIA_GATEWAY=1`
+///   with the Keychain-held client key)
+/// - `Some(false)` — owned child was spawned Direct
+/// - `None` — no owned Council child (stopped, died, adopted-external, or
+///   never spawned)
+///
+/// `council_governed` must be proven from this record plus live pack
+/// authentication, never inferred from pack health + the persisted enabled
+/// flag: those stay true after a failed governed restart or a Direct
+/// relaunch while Council is in fact running Direct.
+static OWNED_COUNCIL_ROUTE: Mutex<Option<bool>> = Mutex::new(None);
+
+/// Record the owned Council child route. Called only from the shell's
+/// spawn/stop paths in lib.rs; the renderer never reaches this.
+pub fn record_owned_council_route(route: Option<bool>) {
+    if let Ok(mut guard) = OWNED_COUNCIL_ROUTE.lock() {
+        *guard = route;
+    }
+}
+
+/// The recorded route of the currently owned Council child, if any.
+pub fn owned_council_route() -> Option<bool> {
+    OWNED_COUNCIL_ROUTE.lock().ok().and_then(|g| *g)
+}
+
 /// Truthful operator-facing pack states. Never label a bare URL as ready.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -113,6 +140,23 @@ impl GatewayPackStatus {
             support_matrix_summary: SUPPORT_MATRIX_SUMMARY.to_string(),
         }
     }
+
+    /// Permission for a governed Council spawn: this status sample proves
+    /// pack-side authentication — governed mode is enabled and the stored
+    /// client key authenticated against the live gateway (`authenticated` is
+    /// set only after a live `/v1/models` probe, and only when Docker and the
+    /// installed pack let the sample reach it).
+    ///
+    /// Unlike [`GatewayPackState::allows_governed`], this does not require a
+    /// proven governed Council child: the spawn being gated is what creates
+    /// that proof, so the enable and relaunch-restore flows legitimately
+    /// reach the gate without one (state `Degraded` with pack auth proven).
+    /// `allows_governed()` implies this predicate, so `restart_sidecar`'s
+    /// stricter gate always passes it. A `Disabled` pack or a failed/missing
+    /// key never permits the spawn, however authentic the key looks alone.
+    pub fn allows_governed_spawn(&self) -> bool {
+        self.enabled && self.authenticated
+    }
 }
 
 pub const SUPPORT_MATRIX_SUMMARY: &str = "\
@@ -148,18 +192,16 @@ pub fn installed_marker_path() -> PathBuf {
     gateway_data_dir().join(INSTALLED_MARKER)
 }
 
-/// Bundled pack root under app Resources (or test override).
+/// Bundled pack root under app Resources (or debug-build test override).
 /// Bundled assets alone do **not** mean installed — see [`is_pack_installed`].
 ///
-/// `IRIN_GATEWAY_PACK_ROOT` is a test escape hatch, never a production input:
-/// it is honored only in debug builds or when the test-isolation root
-/// (`IRIN_APP_SUPPORT_ROOT`) is set. A production install always uses its
-/// bundled Resources, so an environment-selected Compose definition can never
-/// reach the Keychain/provider secret boundary.
+/// `IRIN_GATEWAY_PACK_ROOT` is a unit-test escape hatch, never a production
+/// input: it is honored only in debug builds (which covers `cargo test`).
+/// Packaged release builds ignore it unconditionally — a production install
+/// always uses its bundled Resources, so an environment-selected Compose
+/// definition can never reach the Keychain/provider secret boundary.
 pub fn bundled_pack_root() -> Option<PathBuf> {
-    let test_override_allowed =
-        cfg!(debug_assertions) || std::env::var_os("IRIN_APP_SUPPORT_ROOT").is_some();
-    if test_override_allowed {
+    if cfg!(debug_assertions) {
         if let Ok(override_dir) = std::env::var("IRIN_GATEWAY_PACK_ROOT") {
             let p = PathBuf::from(override_dir.trim());
             if p.join("docker-compose.yml").is_file() {
@@ -323,17 +365,21 @@ pub fn serialize_public_env(pairs: &[(String, String)]) -> Result<String, String
     Ok(body)
 }
 
-fn write_public_compose_env(
+/// Non-secret compose pins from validated sources only (manifest image refs,
+/// app-owned paths, fixed pack-contract values). Single source for both the
+/// public env file and the per-spawn forced env: Compose variable precedence
+/// ranks the process environment above `--env-file`, so the env file alone
+/// cannot stop an ambient parent value from swapping an image or pack path.
+fn pack_pin_pairs(
     pack_root: &Path,
     ledger: &Path,
     gateway_image: &ImageRef,
     sidecar_image: &ImageRef,
     key_id: Option<&str>,
-) -> Result<PathBuf, String> {
+) -> Result<Vec<(String, String)>, String> {
     if !path_is_safe_argv(pack_root) || !path_is_safe_argv(ledger) {
         return Err("pack root or ledger path rejected".to_string());
     }
-    ensure_gateway_dir()?;
     let mut pairs = vec![
         (
             "IRIN_GATEWAY_IMAGE".into(),
@@ -360,6 +406,12 @@ fn write_public_compose_env(
             "COUNCIL_BASE_URL".into(),
             "http://host.docker.internal:8765".into(),
         ),
+        ("GW_ENABLE_STREAMING".into(), "0".into()),
+        ("GW_ENABLE_BATCH".into(), "0".into()),
+        (
+            "GATEWAY_BASE_URL".into(),
+            "http://gateway:8080".into(),
+        ),
         ("WATCH_PRODUCER_ENABLED".into(), "false".into()),
         ("WATCH_DISPATCHER_ENABLED".into(), "false".into()),
         ("WATCH_CANARY_TENANT".into(), "canary".into()),
@@ -374,6 +426,18 @@ fn write_public_compose_env(
             pairs.push(("COUNCIL_GATEWAY_KEY_ID".into(), kid.to_string()));
         }
     }
+    Ok(pairs)
+}
+
+fn write_public_compose_env(
+    pack_root: &Path,
+    ledger: &Path,
+    gateway_image: &ImageRef,
+    sidecar_image: &ImageRef,
+    key_id: Option<&str>,
+) -> Result<PathBuf, String> {
+    let pairs = pack_pin_pairs(pack_root, ledger, gateway_image, sidecar_image, key_id)?;
+    ensure_gateway_dir()?;
     let body = serialize_public_env(&pairs)?;
     let path = public_env_path();
     write_atomic_0600(&path, body.as_bytes())?;
@@ -383,6 +447,24 @@ fn write_public_compose_env(
         let _ = fs::remove_file(&legacy);
     }
     Ok(path)
+}
+
+/// Compose process env forcing every non-secret interpolated key from
+/// validated sources. Explicit per-spawn `cmd.env` values beat both the
+/// ambient parent environment and the `--env-file` pins under Compose
+/// variable precedence.
+fn build_pack_pin_env(
+    pack_root: &Path,
+    ledger: &Path,
+    gateway_image: &ImageRef,
+    sidecar_image: &ImageRef,
+    key_id: Option<&str>,
+) -> Result<ComposeEnv, String> {
+    Ok(
+        pack_pin_pairs(pack_root, ledger, gateway_image, sidecar_image, key_id)?
+            .into_iter()
+            .collect(),
+    )
 }
 
 /// Build process env for compose: secrets + providers. Never written to disk.
@@ -441,6 +523,59 @@ fn build_compose_secret_env(
         env.insert(key.to_string(), safe);
     }
     Ok(env)
+}
+
+/// Full per-spawn compose env for `up`: validated non-secret pins merged
+/// under the Keychain/login secret env (secrets win on the BOOTSTRAP_TOKEN
+/// overlap). This is the only legitimate channel for compose-interpolated
+/// values; the docker_cli spawn path scrubs ambient copies first and forces
+/// disarmed Watch/admin surfaces last.
+fn build_full_compose_env(
+    store: &dyn SecretStore,
+    bootstrap: Option<&str>,
+    pack_root: &Path,
+    ledger: &Path,
+    validated: &ValidatedManifest,
+    key_id: Option<&str>,
+) -> Result<ComposeEnv, String> {
+    let mut env = build_pack_pin_env(
+        pack_root,
+        ledger,
+        &validated.gateway,
+        &validated.sidecar,
+        key_id,
+    )?;
+    env.extend(build_compose_secret_env(store, bootstrap)?);
+    Ok(env)
+}
+
+/// Best-effort spawn env for stop/uninstall: pins from the installed pack's
+/// validated manifest when it still reads cleanly, merged under the secret
+/// env. A corrupt or unreadable manifest must not block teardown — the
+/// docker_cli spawn path still scrubs ambient secrets and forces disarmed
+/// surfaces either way.
+fn teardown_compose_env(
+    store: &dyn SecretStore,
+    pack_root: &Path,
+    key_id: Option<&str>,
+) -> ComposeEnv {
+    let secrets = build_compose_secret_env(store, None).unwrap_or_default();
+    match load_validated_manifest(pack_root).and_then(|v| {
+        build_pack_pin_env(
+            pack_root,
+            &ledger_key_path(),
+            &v.gateway,
+            &v.sidecar,
+            key_id,
+        )
+    }) {
+        Ok(pins) => {
+            let mut merged = pins;
+            merged.extend(secrets);
+            merged
+        }
+        Err(_) => secrets,
+    }
 }
 
 /// Stage bundled pack assets to a sibling temp dir, validate, then atomically swap.
@@ -865,9 +1000,13 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
     let authenticated = key.as_ref().map(|k| models_authenticated(k)).unwrap_or(false);
     st.authenticated = authenticated;
 
-    // Council governed: enabled flag + authenticated + pack healthy.
-    // Exact child PID proof is supplied by the enable path; status is best-effort.
-    st.council_governed = st.enabled && authenticated && health && running;
+    // Council governed is proven from the owned child's recorded spawn route,
+    // never inferred: Docker health + stored key + persisted flag stay true
+    // after a failed governed restart or a relaunch that started Council
+    // Direct, and must not be able to claim a governed route on their own.
+    let proven_governed_child = owned_council_route() == Some(true);
+    st.council_governed =
+        st.enabled && authenticated && health && running && proven_governed_child;
 
     if !running {
         if cfg.as_ref().map(|c| c.via_gateway_default) == Some(true) {
@@ -895,9 +1034,18 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
     }
 
     if authenticated && st.enabled {
-        st.state = GatewayPackState::AuthenticatedReady;
-        st.message = "Gateway Pack is authenticated and ready for governed proceedings.".into();
-        st.council_governed = true;
+        if proven_governed_child {
+            st.state = GatewayPackState::AuthenticatedReady;
+            st.message = "Gateway Pack is authenticated and ready for governed proceedings.".into();
+            st.council_governed = true;
+        } else {
+            // Pack-side auth is ready, but the owned Council child is not
+            // proven governed (Direct, dead, or never spawned) — the pack
+            // alone must not unlock governed proceedings.
+            st.state = GatewayPackState::Degraded;
+            st.message = "Gateway Pack is authenticated and enabled, but the owned Council child is not in a proven governed route. Use Enable Gateway to restart Council through the Gateway.".into();
+            st.council_governed = false;
+        }
     } else if authenticated && !st.enabled {
         st.state = GatewayPackState::Disabled;
         st.message = "Gateway is up with a stored key, but governed mode is disabled (Direct).".into();
@@ -914,32 +1062,61 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
     st
 }
 
+/// True only when Docker reports the fixed desktop compose project running.
+///
+/// Uses daemon-global `docker compose ls` with an exact project-name match.
+/// The old `docker compose -p <project> ps` ran without `-f`, so compose
+/// resolved its configuration from the process cwd — a Finder-launched app
+/// has no compose file there, misread its own running project as absent
+/// (degraded status), and the port check then misclassified the app's own
+/// Gateway as foreign. `compose ls` needs no compose configuration at all.
 fn desktop_project_running() -> bool {
     let out = docker_command(&[
         "compose",
-        "-p",
-        DESKTOP_COMPOSE_PROJECT,
-        "ps",
-        "--status",
-        "running",
-        "-q",
+        "ls",
+        "--filter",
+        &format!("name={DESKTOP_COMPOSE_PROJECT}"),
+        "--format",
+        "json",
     ]);
     match out {
-        Ok(o) if o.status.success() => !String::from_utf8_lossy(&o.stdout).trim().is_empty(),
+        Ok(o) if o.status.success() => {
+            compose_ls_reports_running(&String::from_utf8_lossy(&o.stdout))
+        }
         _ => false,
     }
+}
+
+/// Parse `docker compose ls --format json` output: true only when an entry's
+/// `Name` is exactly the fixed desktop project and its `Status` is running.
+/// Exact match — a prefix/suffix lookalike project never counts as ours.
+fn compose_ls_reports_running(json: &str) -> bool {
+    let parsed: serde_json::Value = match serde_json::from_str(json.trim()) {
+        Ok(v) => v,
+        Err(_) => return false,
+    };
+    let Some(projects) = parsed.as_array() else {
+        return false;
+    };
+    projects.iter().any(|p| {
+        p.get("Name").and_then(|n| n.as_str()) == Some(DESKTOP_COMPOSE_PROJECT)
+            && p.get("Status")
+                .and_then(|s| s.as_str())
+                .map(|s| s.starts_with("running"))
+                .unwrap_or(false)
+    })
 }
 
 fn compose_up(
     compose: &Path,
     env_path: &Path,
-    secret_env: &ComposeEnv,
+    spawn_env: &ComposeEnv,
 ) -> Result<(), String> {
     let up = compose_command_with_env(
         compose,
         Some(env_path),
         &["up", "-d", "--remove-orphans", "--wait"],
-        Some(secret_env),
+        Some(spawn_env),
         DOCKER_COMPOSE_UP_TIMEOUT,
     )?;
     if up.status.success() {
@@ -949,7 +1126,7 @@ fn compose_up(
         compose,
         Some(env_path),
         &["up", "-d", "--remove-orphans", "--force-recreate"],
-        Some(secret_env),
+        Some(spawn_env),
         DOCKER_COMPOSE_UP_TIMEOUT,
     )?;
     if !up2.status.success() {
@@ -1065,12 +1242,20 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     let need_provision = match existing.as_ref() {
         Some(k) => {
             // Start without bootstrap first if we might already be provisioned.
-            let secret_env = build_compose_secret_env(store, None).map_err(|e| {
+            let spawn_env = build_full_compose_env(
+                store,
+                None,
+                &pack_root,
+                &ledger,
+                &validated,
+                existing_key_id.as_deref(),
+            )
+            .map_err(|e| {
                 lifecycle_stage("secret_env", "error");
                 e
             })?;
             lifecycle_stage("secret_env", "ok");
-            compose_up(&compose, &env_path, &secret_env).map_err(|e| {
+            compose_up(&compose, &env_path, &spawn_env).map_err(|e| {
                 lifecycle_stage("compose_up_existing", "error");
                 e
             })?;
@@ -1092,7 +1277,15 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     let key_id = if need_provision {
         // Generate bootstrap only for provisioning.
         let bootstrap = random_hex(32)?;
-        let secret_env = build_compose_secret_env(store, Some(&bootstrap)).map_err(|e| {
+        let spawn_env = build_full_compose_env(
+            store,
+            Some(&bootstrap),
+            &pack_root,
+            &ledger,
+            &validated,
+            existing_key_id.as_deref(),
+        )
+        .map_err(|e| {
             // Fixed non-secret categories only — never log the error body if it
             // could include env material. Classify known prefixes.
             let cat = if e.contains("keychain") {
@@ -1106,7 +1299,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
             e
         })?;
         lifecycle_stage("secret_env_bootstrap", "ok");
-        compose_up(&compose, &env_path, &secret_env).map_err(|e| {
+        compose_up(&compose, &env_path, &spawn_env).map_err(|e| {
             lifecycle_stage("compose_up_bootstrap", "error");
             e
         })?;
@@ -1127,7 +1320,15 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         })?;
         lifecycle_stage("provision", "ok");
         // Blank bootstrap and recreate sidecar without it.
-        let secret_env_blank = build_compose_secret_env(store, None).map_err(|e| {
+        let spawn_env_blank = build_full_compose_env(
+            store,
+            None,
+            &pack_root,
+            &ledger,
+            &validated,
+            Some(&kid),
+        )
+        .map_err(|e| {
             lifecycle_stage("secret_env_blank", "error");
             e
         })?;
@@ -1138,7 +1339,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
             &validated.sidecar,
             Some(&kid),
         )?;
-        compose_up(&compose, &env_path, &secret_env_blank).map_err(|e| {
+        compose_up(&compose, &env_path, &spawn_env_blank).map_err(|e| {
             lifecycle_stage("compose_up_blank", "error");
             e
         })?;
@@ -1280,13 +1481,13 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
         if compose.is_file() {
             let env = public_env_path();
             let env_arg = env.is_file().then_some(env.as_path());
-            let secret_env = build_compose_secret_env(store, None).unwrap_or_default();
+            let spawn_env = teardown_compose_env(store, &pack_root, cfg.gateway_key_id.as_deref());
             lifecycle_stage("stop_compose", "begin");
             let out = match compose_command_with_env(
                 &compose,
                 env_arg,
                 &["stop"],
-                Some(&secret_env),
+                Some(&spawn_env),
                 DOCKER_CMD_TIMEOUT,
             ) {
                 Ok(out) => out,
@@ -1302,7 +1503,7 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
                     &compose,
                     env_arg,
                     &["down", "--remove-orphans"],
-                    Some(&secret_env),
+                    Some(&spawn_env),
                     DOCKER_CMD_TIMEOUT,
                 ) {
                     Ok(out) => out,
@@ -1332,17 +1533,20 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
         .lock()
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
 
+    let key_id = load_or_create_private_config()
+        .ok()
+        .and_then(|c| c.gateway_key_id);
     if let Some(pack_root) = installed_pack_root() {
         let compose = compose_file(&pack_root);
         if compose.is_file() {
             let env = public_env_path();
             let env_arg = env.is_file().then_some(env.as_path());
-            let secret_env = build_compose_secret_env(store, None).unwrap_or_default();
+            let spawn_env = teardown_compose_env(store, &pack_root, key_id.as_deref());
             let out = compose_command_with_env(
                 &compose,
                 env_arg,
                 &["down", "--volumes", "--remove-orphans"],
-                Some(&secret_env),
+                Some(&spawn_env),
                 DOCKER_CMD_TIMEOUT,
             )?;
             if !out.status.success() {
@@ -1355,12 +1559,14 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
         p.join("docker-compose.yml").is_file().then_some(p)
     } {
         let compose = compose_file(&pack_root);
-        let secret_env = build_compose_secret_env(store, None).unwrap_or_default();
+        // No env file here: the pinned spawn env is the only source for the
+        // compose-interpolated image refs and pack paths.
+        let spawn_env = teardown_compose_env(store, &pack_root, key_id.as_deref());
         let _ = compose_command_with_env(
             &compose,
             None,
             &["down", "--volumes", "--remove-orphans"],
-            Some(&secret_env),
+            Some(&spawn_env),
             DOCKER_CMD_TIMEOUT,
         );
     }
@@ -1402,6 +1608,24 @@ pub fn gateway_child_env_if_ready(store: &dyn SecretStore) -> Result<Option<Gate
         api_key: key,
         gateway_url: DESKTOP_GATEWAY_URL.to_string(),
     }))
+}
+
+/// Launch-time revalidation of a persisted governed route: Docker daemon up,
+/// the owned pack project running, `/health` OK, and the Keychain-held client
+/// key still passing `/v1/models`. Proves pack authentication only — at launch
+/// no Council child exists yet, so this says nothing about any child route.
+/// Callers spawn the child (governed or Direct) after this decision.
+pub fn pack_auth_revalidated(store: &dyn SecretStore) -> bool {
+    if !matches!(probe_docker_daemon(), DockerDaemonState::Ready) {
+        return false;
+    }
+    if installed_pack_root().is_none() || !desktop_project_running() || !gateway_health_ok() {
+        return false;
+    }
+    match load_gw_api_key(store) {
+        Ok(Some(key)) => models_authenticated(&key),
+        _ => false,
+    }
 }
 
 /// Mark status after Council restart proof (called from lib.rs).
@@ -1643,7 +1867,42 @@ mod tests {
             "Docker CLI not found",
         );
         assert!(!st.state.allows_governed());
+        assert!(!st.allows_governed_spawn());
         assert!(!st.authenticated);
+    }
+
+    #[test]
+    fn governed_spawn_requires_proven_pack_auth() {
+        // Full ready state permits the governed spawn.
+        let mut st = GatewayPackStatus::base(GatewayPackState::AuthenticatedReady, "ready");
+        st.enabled = true;
+        st.authenticated = true;
+        assert!(st.allows_governed_spawn());
+        assert!(st.state.allows_governed());
+
+        // So does the enable / relaunch-restore position: pack auth is proven
+        // but the owned child is not governed yet (state Degraded) — the
+        // gated spawn is what creates that proof.
+        let mut st = GatewayPackStatus::base(GatewayPackState::Degraded, "child not proven");
+        st.enabled = true;
+        st.authenticated = true;
+        assert!(st.allows_governed_spawn());
+        assert!(!st.state.allows_governed());
+
+        // An authenticating key with governed mode disabled must not permit
+        // a governed spawn (the old gate's hole).
+        let mut st = GatewayPackStatus::base(GatewayPackState::Disabled, "disabled");
+        st.authenticated = true;
+        assert!(!st.allows_governed_spawn());
+
+        // Enabled but the key failed / is missing: no proof, no spawn.
+        let mut st = GatewayPackStatus::base(GatewayPackState::Degraded, "key failed");
+        st.enabled = true;
+        assert!(!st.allows_governed_spawn());
+
+        // Neither enabled nor authenticated: base defaults refuse.
+        let st = GatewayPackStatus::base(GatewayPackState::NotInstalled, "absent");
+        assert!(!st.allows_governed_spawn());
     }
 
     #[test]
@@ -1739,5 +1998,279 @@ mod tests {
         assert!(!body.contains("COUNCIL_GATEWAY_TOKEN"));
         // Empty bootstrap is ok in public file (blanked).
         assert!(body.contains("BOOTSTRAP_TOKEN="));
+    }
+
+    #[test]
+    fn pack_root_override_honored_in_debug_builds() {
+        let _g = test_env_lock();
+        let prev_pack = std::env::var("IRIN_GATEWAY_PACK_ROOT").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "gw-pack-override-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        fs::write(tmp.join("docker-compose.yml"), b"name: irin-desktop-gateway\n").unwrap();
+        std::env::set_var("IRIN_GATEWAY_PACK_ROOT", &tmp);
+
+        // cargo test builds with debug_assertions: the escape hatch applies.
+        // Packaged release builds skip this branch entirely (cfg-gated), so
+        // the env var can never redirect a production install.
+        assert!(cfg!(debug_assertions));
+        assert_eq!(bundled_pack_root().as_deref(), Some(tmp.as_path()));
+
+        match prev_pack {
+            Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_ROOT", v),
+            None => std::env::remove_var("IRIN_GATEWAY_PACK_ROOT"),
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn compose_ls_reports_running_requires_exact_project_running() {
+        let running = r#"[{"Name":"irin-desktop-gateway","Status":"running(2)","ConfigFiles":"/x/docker-compose.yml"}]"#;
+        assert!(compose_ls_reports_running(running));
+
+        // Stopped project is not running.
+        let exited = r#"[{"Name":"irin-desktop-gateway","Status":"exited(1)","ConfigFiles":"/x/docker-compose.yml"}]"#;
+        assert!(!compose_ls_reports_running(exited));
+
+        // Lookalike names never count as ours (exact match only).
+        let lookalike = r#"[{"Name":"irin-desktop-gateway-evil","Status":"running(1)","ConfigFiles":"/y/docker-compose.yml"}]"#;
+        assert!(!compose_ls_reports_running(lookalike));
+
+        // Empty, malformed, or non-array output is not running.
+        assert!(!compose_ls_reports_running("[]"));
+        assert!(!compose_ls_reports_running("not json"));
+        assert!(!compose_ls_reports_running(r#"{"Name":"irin-desktop-gateway"}"#));
+        assert!(!compose_ls_reports_running(""));
+    }
+
+    #[test]
+    fn owned_council_route_proof_records_and_clears() {
+        // Default for a fresh process: no owned child proof.
+        record_owned_council_route(None);
+        assert_eq!(owned_council_route(), None);
+        record_owned_council_route(Some(true));
+        assert_eq!(owned_council_route(), Some(true));
+        record_owned_council_route(Some(false));
+        assert_eq!(owned_council_route(), Some(false));
+        // Child stop/death clears the proof again.
+        record_owned_council_route(None);
+        assert_eq!(owned_council_route(), None);
+    }
+
+    fn test_image_ref(name: &str, hex: &str) -> ImageRef {
+        ImageRef::parse(&format!("{name}@sha256:{}", hex.repeat(64))).unwrap()
+    }
+
+    #[test]
+    fn pin_env_forces_manifest_and_app_paths_over_ambient_decoys() {
+        let _g = test_env_lock();
+        let decoys = [
+            ("IRIN_GATEWAY_IMAGE", "evil.example/swapped-gateway:latest"),
+            ("IRIN_SIDECAR_IMAGE", "evil.example/swapped-sidecar:latest"),
+            ("IRIN_DESKTOP_PACK_ROOT", "/tmp/evil-pack"),
+            ("IRIN_DESKTOP_LEDGER_KEY", "/tmp/evil-ledger"),
+            ("GATEWAY_AUTH_FAIL_CLOSED", "false"),
+            ("GW_ENABLE_STREAMING", "1"),
+            ("GW_ENABLE_BATCH", "1"),
+            ("GATEWAY_BASE_URL", "http://evil.example:9999"),
+        ];
+        for (k, v) in &decoys {
+            std::env::set_var(k, v);
+        }
+
+        let gateway = test_image_ref("ghcr.io/irin/gateway", "a");
+        let sidecar = test_image_ref("ghcr.io/irin/sidecar", "b");
+        let pins = build_pack_pin_env(
+            Path::new("/app/pack"),
+            Path::new("/app/ledger"),
+            &gateway,
+            &sidecar,
+            Some("k_abcdef12"),
+        )
+        .unwrap();
+
+        // Pins come from the validated manifest and app-owned paths, never
+        // from the ambient parent environment.
+        assert_eq!(
+            pins.get("IRIN_GATEWAY_IMAGE").map(String::as_str),
+            Some(gateway.as_str())
+        );
+        assert_eq!(
+            pins.get("IRIN_SIDECAR_IMAGE").map(String::as_str),
+            Some(sidecar.as_str())
+        );
+        assert_eq!(
+            pins.get("IRIN_DESKTOP_PACK_ROOT").map(String::as_str),
+            Some("/app/pack")
+        );
+        assert_eq!(
+            pins.get("IRIN_DESKTOP_LEDGER_KEY").map(String::as_str),
+            Some("/app/ledger")
+        );
+        assert_eq!(
+            pins.get("GATEWAY_AUTH_FAIL_CLOSED").map(String::as_str),
+            Some("true")
+        );
+        assert_eq!(
+            pins.get("GW_ENABLE_STREAMING").map(String::as_str),
+            Some("0")
+        );
+        assert_eq!(pins.get("GW_ENABLE_BATCH").map(String::as_str), Some("0"));
+        assert_eq!(
+            pins.get("GATEWAY_BASE_URL").map(String::as_str),
+            Some("http://gateway:8080")
+        );
+        assert_eq!(
+            pins.get("WATCH_PRODUCER_ENABLED").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            pins.get("WATCH_DISPATCHER_ENABLED").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            pins.get("COUNCIL_GATEWAY_KEY_ID").map(String::as_str),
+            Some("k_abcdef12")
+        );
+        // The pin set never carries disarmed-surface or secret material.
+        assert!(!pins.contains_key("WATCH_ADMIN_TOKEN"));
+        assert!(!pins.contains_key("COUNCIL_GATEWAY_TOKEN"));
+        assert!(!pins.contains_key("AUTH_PEPPER"));
+
+        for (k, _) in &decoys {
+            std::env::remove_var(k);
+        }
+    }
+
+    #[test]
+    fn full_compose_env_secrets_win_over_pin_defaults() {
+        let _g = test_env_lock();
+        let prev_skip = std::env::var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV").ok();
+        std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", "1");
+        let store = MemorySecretStore::default();
+        let validated = ValidatedManifest {
+            mode: ManifestMode::LocalDev,
+            pack_version: "0.1.0-test".into(),
+            gateway: test_image_ref("irin-desktop/gateway", "c"),
+            sidecar: test_image_ref("irin-desktop/sidecar", "d"),
+            third_party: vec![],
+            source_sha: None,
+            source_dirty: None,
+            local_image_ids: Default::default(),
+        };
+        let env = build_full_compose_env(
+            &store,
+            Some("bootstrap-hex"),
+            Path::new("/app/pack"),
+            Path::new("/app/ledger"),
+            &validated,
+            None,
+        )
+        .unwrap();
+        // Secret env overrides the blank pin default for bootstrap.
+        assert_eq!(
+            env.get("BOOTSTRAP_TOKEN").map(String::as_str),
+            Some("bootstrap-hex")
+        );
+        assert!(env
+            .get("AUTH_PEPPER")
+            .map(|p| !p.is_empty())
+            .unwrap_or(false));
+        // Pins are still present in the merged spawn env.
+        assert_eq!(
+            env.get("IRIN_GATEWAY_IMAGE").map(String::as_str),
+            Some(validated.gateway.as_str())
+        );
+        assert_eq!(
+            env.get("IRIN_DESKTOP_PACK_ROOT").map(String::as_str),
+            Some("/app/pack")
+        );
+        match prev_skip {
+            Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", v),
+            None => std::env::remove_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV"),
+        }
+    }
+
+    /// Extract `${VAR…}` names from compose YAML (handles `:-`, `:?`, `}` end).
+    fn compose_interpolated_vars(raw: &str) -> std::collections::BTreeSet<String> {
+        let bytes = raw.as_bytes();
+        let mut out = std::collections::BTreeSet::new();
+        let mut i = 0;
+        while i + 2 < bytes.len() {
+            if bytes[i] == b'$' && bytes[i + 1] == b'{' {
+                let start = i + 2;
+                let mut j = start;
+                while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                    j += 1;
+                }
+                if j > start {
+                    out.insert(raw[start..j].to_string());
+                }
+                i = j;
+            } else {
+                i += 1;
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn every_compose_interpolated_var_is_pinned_scrubbed_or_disarmed() {
+        // Every variable the pack compose file interpolates must be forced by
+        // a spawn-env layer — pins (validated manifest/app paths), the secret
+        // env (Keychain/login), or the docker_cli disarm force — because
+        // Compose ranks process env above --env-file and ambient parent
+        // values would otherwise win.
+        let compose = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../../../packaging/gateway-pack/docker-compose.yml");
+        if !compose.is_file() {
+            eprintln!(
+                "skipping compose interpolation audit: {} not present",
+                compose.display()
+            );
+            return;
+        }
+        let raw = fs::read_to_string(&compose).unwrap();
+        let pins = build_pack_pin_env(
+            Path::new("/app/pack"),
+            Path::new("/app/ledger"),
+            &test_image_ref("ghcr.io/irin/gateway", "e"),
+            &test_image_ref("ghcr.io/irin/sidecar", "f"),
+            Some("k_abcdef12"),
+        )
+        .unwrap();
+        // Keys forced by the secret env or the docker_cli scrub/disarm layers.
+        let secret_or_disarm: std::collections::BTreeSet<&str> = [
+            "XAI_API_KEY",
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "NVIDIA_API_KEY",
+            "AUTH_PEPPER",
+            "BOOTSTRAP_TOKEN",
+            "WATCH_ADMIN_TOKEN",
+            "COUNCIL_GATEWAY_TOKEN",
+            "WATCH_PRODUCER_ENABLED",
+            "WATCH_DISPATCHER_ENABLED",
+        ]
+        .into_iter()
+        .collect();
+        let interpolated = compose_interpolated_vars(&raw);
+        assert!(
+            interpolated.contains("IRIN_GATEWAY_IMAGE"),
+            "audit sanity: compose must interpolate the image pins"
+        );
+        for var in interpolated {
+            assert!(
+                pins.contains_key(&var) || secret_or_disarm.contains(var.as_str()),
+                "compose interpolates ${var} but no spawn-env layer forces it"
+            );
+        }
     }
 }

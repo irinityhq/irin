@@ -148,6 +148,9 @@ fn stop_tracked_council_server(app: &AppHandle) {
         }
     };
     if let Some(pid) = tracked_pid {
+        // No owned child anymore: clear the governed-route proof so pack
+        // status cannot claim governed from health + persisted flag alone.
+        gateway_pack::record_owned_council_route(None);
         // Give the child a moment to exit after kill(); then SIGTERM/SIGKILL
         // only if that exact PID is still alive (fail-closed owned reclaim).
         std::thread::sleep(Duration::from_millis(150));
@@ -244,6 +247,9 @@ fn try_start_council_server(
     ) {
         CouncilServerProbe::MatchingBuild => {
             eprintln!("[council-runtime] adopted exact build on :{port}");
+            // Adopted, not owned: we did not spawn this process, so its
+            // route is unproven and status must not claim governed from it.
+            gateway_pack::record_owned_council_route(None);
             return Ok(format!(
                 "adopted Council already running on :{port} (matching build identity)"
             ));
@@ -319,10 +325,16 @@ fn try_start_council_server(
         let store = KeychainSecretStore;
         match load_gw_api_key(&store) {
             Ok(Some(api_key)) => {
-                // Prefer authenticated-ready gate for packaged installs.
+                // Packaged installs spawn governed only on proven pack-side
+                // authentication — the same requirement restart_sidecar
+                // enforces with the full AuthenticatedReady state. The spawn
+                // itself creates the governed-child proof, so this gate uses
+                // the status-level predicate (enabled + live-authenticated),
+                // which the enable and relaunch-restore flows satisfy right
+                // after their own revalidation and a Disabled pack never does.
                 if packaged {
                     let st = gateway_pack::gateway_pack_status(&store);
-                    if st.state != GatewayPackState::AuthenticatedReady && !st.authenticated {
+                    if !st.allows_governed_spawn() {
                         return Err(format!(
                             "Gateway is not authenticated-ready ({}). {}",
                             st.state.as_str(),
@@ -467,6 +479,8 @@ fn try_start_council_server(
                     // Terminated from a killed child must not untrack a respawn.
                     if server_guard.generation == spawn_generation {
                         server_guard.child = None;
+                        // Owned child is gone; its route proof dies with it.
+                        gateway_pack::record_owned_council_route(None);
                     }
                 };
             }
@@ -474,6 +488,11 @@ fn try_start_council_server(
     });
 
     guard.child = Some(child);
+    // Prove the owned child's route for gateway_pack_status: only a spawn
+    // with COUNCIL_VIA_GATEWAY=1 (Keychain creds) counts as governed. Record
+    // while still holding the server guard so the log pump's Terminated
+    // cleanup cannot interleave between the child store and this record.
+    gateway_pack::record_owned_council_route(Some(via_gateway == Some(true)));
     drop(guard);
 
     // Cache the spawn config so restart_sidecar can respawn with the same
@@ -738,9 +757,52 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<GatewayPackStatus, String
                     "council-log",
                     format!("[system] gateway enable: council governed restart failed: {e}"),
                 );
+                // Roll back: via_gateway_default=true was persisted and the
+                // working Direct child was already stopped. Restore the
+                // persisted route to Direct, then try to bring core War Room
+                // back up before returning the enable error — never leave the
+                // app down with state claiming governed.
+                if let Err(disable_err) = gateway_pack::disable_gateway_pack(&store) {
+                    let _ = app.emit(
+                        "council-log",
+                        format!("[system] gateway enable rollback: failed to restore Direct config: {disable_err}"),
+                    );
+                }
+                let _ = wait_for_port_release(
+                    default_serve_port().unwrap_or(8765),
+                    Duration::from_secs(5),
+                );
+                let rollback_note = match try_start_council_server(
+                    &app,
+                    config.council_path.as_deref(),
+                    None,
+                    config.auth_token.as_deref(),
+                    Some(false),
+                    config.council_root.as_deref(),
+                    config.librarian_base.as_deref(),
+                ) {
+                    Ok(msg) => {
+                        let _ = app.emit(
+                            "council-log",
+                            format!("[system] gateway enable rollback: Council restored in Direct mode: {msg}"),
+                        );
+                        "Council was restored in Direct mode.".to_string()
+                    }
+                    Err(re) => {
+                        let _ = app.emit(
+                            "council-log",
+                            format!("[system] gateway enable rollback: Direct restart failed: {re}"),
+                        );
+                        format!(
+                            "Direct-mode rollback restart also failed: {re}. \
+                             Core War Room is down; start Council manually."
+                        )
+                    }
+                };
                 // Propagate failure — do not claim authenticated-ready.
                 Err(format!(
-                    "Gateway pack authenticated but Council governed restart failed: {e}"
+                    "Gateway pack authenticated but Council governed restart failed: {e}. \
+                     Rolled back to Direct (via_gateway_default=false). {rollback_note}"
                 ))
             }
         }
@@ -1025,9 +1087,11 @@ pub fn run() {
                 let auto_start_handle = app.handle().clone();
                 let packaged = is_packaged_install();
                 tauri::async_runtime::spawn(async move {
+                    let mut persisted_via_gateway = false;
                     let auth_token = if packaged {
                         match load_or_create_private_config() {
                             Ok(cfg) => {
+                                persisted_via_gateway = cfg.via_gateway_default;
                                 let _ = auto_start_handle.emit(
                                     "council-log",
                                     format!(
@@ -1057,31 +1121,73 @@ pub fn run() {
                     // Debug always auto-starts; packaged release auto-starts bundled Council.
                     if packaged || cfg!(debug_assertions) {
                         let token_ref = auth_token.as_deref();
-                        match try_start_council_server(
-                            &auto_start_handle,
-                            None,
-                            None,
-                            token_ref,
-                            Some(false), // core War Room: Gateway off by default
-                            None,
-                            None,
-                        ) {
-                            Ok(msg) => {
+                        // Packaged launch restores the persisted governed route
+                        // ONLY after revalidating pack authentication (Docker
+                        // up, owned pack running + healthy, Keychain key passes
+                        // /v1/models). Anything less starts Direct explicitly —
+                        // status must never claim governed while the owned
+                        // child is Direct.
+                        let mut launch_via_gateway = false;
+                        if packaged && persisted_via_gateway {
+                            let store = KeychainSecretStore;
+                            if gateway_pack::pack_auth_revalidated(&store) {
+                                launch_via_gateway = true;
                                 let _ = auto_start_handle.emit(
                                     "council-log",
-                                    format!("[system] auto-start: {msg}"),
+                                    "[system] auto-start: restoring governed route — Gateway Pack revalidated (Docker up, pack authenticated, Keychain key usable)",
+                                );
+                            } else {
+                                let _ = auto_start_handle.emit(
+                                    "council-log",
+                                    "[system] auto-start: persisted governed route not restored — Gateway Pack unavailable or not authenticated; starting Council in Direct mode",
                                 );
                             }
-                            Err(e) => {
-                                let extra = if packaged {
-                                    String::new()
-                                } else {
-                                    " (run `cargo build --release` at council-rs root)".to_string()
-                                };
-                                let _ = auto_start_handle.emit(
-                                    "council-log",
-                                    format!("[system] auto-start skipped: {e}{extra}"),
-                                );
+                        }
+                        let mut first_attempt = true;
+                        let mut route = launch_via_gateway;
+                        loop {
+                            match try_start_council_server(
+                                &auto_start_handle,
+                                None,
+                                None,
+                                token_ref,
+                                Some(route),
+                                None,
+                                None,
+                            ) {
+                                Ok(msg) => {
+                                    let _ = auto_start_handle.emit(
+                                        "council-log",
+                                        format!("[system] auto-start: {msg}"),
+                                    );
+                                    break;
+                                }
+                                Err(e) => {
+                                    if first_attempt && route {
+                                        // Governed spawn failed after a
+                                        // successful revalidation: fall back to
+                                        // Direct so core War Room still comes
+                                        // up. gateway_pack_status reports the
+                                        // pack truth (child recorded Direct).
+                                        first_attempt = false;
+                                        route = false;
+                                        let _ = auto_start_handle.emit(
+                                            "council-log",
+                                            format!("[system] auto-start: governed start failed ({e}); falling back to Direct"),
+                                        );
+                                        continue;
+                                    }
+                                    let extra = if packaged {
+                                        String::new()
+                                    } else {
+                                        " (run `cargo build --release` at council-rs root)".to_string()
+                                    };
+                                    let _ = auto_start_handle.emit(
+                                        "council-log",
+                                        format!("[system] auto-start skipped: {e}{extra}"),
+                                    );
+                                    break;
+                                }
                             }
                         }
                     }
