@@ -1,6 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
 import { BACKEND, WEB_ORIGIN_RE, WS_DELIBERATE_URL } from "./support/ports";
-import { installAvailableProviderDiscovery } from "./fixtures/available-provider-discovery";
+import {
+  installAvailableProviderDiscovery,
+  installAvailableProviderHealth,
+} from "./fixtures/available-provider-discovery";
 
 const failuresByPage = new WeakMap<Page, string[]>();
 
@@ -154,6 +157,7 @@ test.describe("War Room smoke", () => {
   });
 
   test("topic input enables Convene button", async ({ page }) => {
+    await installAvailableProviderHealth(page);
     await page.goto("/");
     await expect(page.getByTestId("cabinet-chip").first()).toBeVisible({
       timeout: 10_000,
@@ -203,6 +207,9 @@ test.describe("War Room smoke", () => {
       return resp.json() as Promise<{ ws_smoke_only?: boolean }>;
     }, BACKEND);
     expect(health.ws_smoke_only).toBe(true);
+    // Availability gating is host-dependent; mock it only after the truthful
+    // smoke-only health assertion above.
+    await installAvailableProviderHealth(page);
 
     const topicInput = page.getByRole("textbox", {
       name: /proceeding statement/i,
