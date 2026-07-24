@@ -489,6 +489,11 @@ jobs:
         working-directory: council-rs
         run: make warroom-tauri-check
 
+      - name: Gateway Pack static assets and isolation invariants
+        run: |
+          bash scripts/test-gateway-pack-assets.sh
+          bash scripts/test-gateway-pack-isolation.sh
+
       - name: Build and launch native Tauri application (process proof)
         env:
           IRIN_NATIVE_VISUAL: "0"

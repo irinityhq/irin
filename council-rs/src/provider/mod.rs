@@ -573,13 +573,80 @@ pub(crate) fn env_nonempty(name: &str) -> bool {
 /// In gateway mode, only transports with real Gateway adapters may inherit
 /// Gateway availability. Host-only OAuth transports still require their local
 /// executable/adapter.
+///
+/// **Warning:** this path may shell out to optional CLIs (`claude`, `codex`,
+/// `gcloud`, `grok`, …). Do **not** call it from liveness (`/api/health`).
+/// Use [`check_providers_liveness`] for cheap probes and
+/// [`check_providers_with_gateway`] / `/api/discover` for full discovery.
 pub fn check_providers() -> Vec<(&'static str, bool)> {
     check_providers_with_gateway(is_via_gateway())
+}
+
+/// Cheap, deterministic provider summary for liveness (`GET /api/health`).
+///
+/// **Never shells out.** Only env-var presence, the explicit gateway flag, and a
+/// bounded local TCP probe for Ollama. Exact CLI readiness belongs on
+/// `GET /api/discover` (and deliberation-time `check_providers_with_gateway`).
+pub fn check_providers_liveness(gw: bool) -> Vec<(&'static str, bool)> {
+    let mut out = vec![
+        ("gateway", env_nonempty("GW_API_KEY")),
+        // Liveness: API-key / gateway inheritance only — no CLI version probes.
+        ("grok", gw || env_nonempty("XAI_API_KEY")),
+        ("grok_api", gw || env_nonempty("XAI_API_KEY")),
+        // Host-only CLI seats are not claimed available from env alone.
+        ("grok_build", false),
+        ("grok_hermes", false),
+        ("claude", gw || env_nonempty("ANTHROPIC_API_KEY")),
+        ("claude_api", gw || env_nonempty("ANTHROPIC_API_KEY")),
+        ("claude_code", false),
+        ("gpt", gw || env_nonempty("OPENAI_API_KEY")),
+        ("openai_api", gw || env_nonempty("OPENAI_API_KEY")),
+        ("codex_cli", false),
+        (
+            "gemini",
+            gw || (std::env::var_os("COUNCIL_GEMINI_VERTEX_FALLBACK").is_some()
+                && (env_nonempty("VERTEX_PROJECT") || env_nonempty("GOOGLE_CLOUD_PROJECT"))),
+        ),
+        ("gemini_agy", false),
+        (
+            "gemini_vertex",
+            gw || env_nonempty("VERTEX_PROJECT") || env_nonempty("GOOGLE_CLOUD_PROJECT"),
+        ),
+        ("grok_cli", gw),
+        ("gemini_cli", gw),
+        ("agy_cli", gw),
+        ("hermes_cli", gw),
+        ("nvidia", gw || env_nonempty("NVIDIA_API_KEY")),
+        ("nous", gw || env_nonempty("NOUS_API_KEY")),
+        ("deepseek", gw || env_nonempty("DEEPSEEK_API_KEY")),
+        ("groq", gw || env_nonempty("GROQ_API_KEY")),
+        ("openrouter", gw || env_nonempty("OPENROUTER_API_KEY")),
+        ("mistral", gw || env_nonempty("MISTRAL_API_KEY")),
+        ("together", gw || env_nonempty("TOGETHER_API_KEY")),
+        ("fireworks", gw || env_nonempty("FIREWORKS_API_KEY")),
+        ("perplexity", gw || env_nonempty("PERPLEXITY_API_KEY")),
+        ("cohere", gw || env_nonempty("COHERE_API_KEY")),
+    ];
+
+    // Cheap local TCP only — no subprocess.
+    if std::net::TcpStream::connect_timeout(
+        &"127.0.0.1:11434".parse().unwrap(),
+        std::time::Duration::from_millis(200),
+    )
+    .is_ok()
+    {
+        out.push(("ollama", true));
+    }
+
+    out
 }
 
 /// `check_providers` with an explicit gateway flag — used by per-session
 /// `via_gateway` (feature contract) so seat filtering matches the session's routing,
 /// not just the process default.
+///
+/// May shell out to optional CLIs. Not for `/api/health` — use
+/// [`check_providers_liveness`] there.
 pub fn check_providers_with_gateway(gw: bool) -> Vec<(&'static str, bool)> {
     let mut out = vec![
         // Gateway (routes through local AI ops layer)
@@ -735,6 +802,45 @@ mod tests {
         for provider in ["grok_build", "grok_hermes", "gemini_agy"] {
             assert_eq!(governed.get(provider), direct.get(provider), "{provider}");
         }
+    }
+
+    #[test]
+    fn liveness_provider_check_is_env_only_and_retains_documented_slugs() {
+        // Must not depend on host CLI install state. `gateway` may be true when
+        // the process env already has GW_API_KEY; host-only CLI seats must stay
+        // false because liveness never shells out.
+        let rows = check_providers_liveness(false);
+        let map: std::collections::HashMap<_, _> = rows.into_iter().collect();
+        for required in [
+            "gateway",
+            "grok",
+            "claude",
+            "gpt",
+            "openai_api",
+            "nvidia",
+            "openrouter",
+        ] {
+            assert!(
+                map.contains_key(required),
+                "missing liveness slug {required}"
+            );
+        }
+        assert_eq!(map.get("gateway"), Some(&env_nonempty("GW_API_KEY")));
+        assert_eq!(map.get("grok_build"), Some(&false));
+        assert_eq!(map.get("claude_code"), Some(&false));
+        assert_eq!(map.get("codex_cli"), Some(&false));
+        assert_eq!(map.get("gemini_agy"), Some(&false));
+
+        let governed = check_providers_liveness(true)
+            .into_iter()
+            .collect::<std::collections::HashMap<_, _>>();
+        // Gateway flag promotes transports that inherit gateway adapters.
+        assert_eq!(governed.get("claude"), Some(&true));
+        assert_eq!(governed.get("gpt"), Some(&true));
+        assert_eq!(governed.get("grok_cli"), Some(&true));
+        // Host-only seats stay false even under gw (no CLI probe on liveness).
+        assert_eq!(governed.get("grok_build"), Some(&false));
+        assert_eq!(governed.get("gemini_agy"), Some(&false));
     }
 
     #[test]

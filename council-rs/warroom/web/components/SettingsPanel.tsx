@@ -24,7 +24,10 @@ import {
 } from "@/lib/runtime-config";
 import {
   clearServerLogs,
+  disableGatewayPack,
+  enableGatewayPack,
   getDesktopRuntimeMode,
+  getGatewayPackStatus,
   getServerLogs,
   isTauri,
   onCouncilLog,
@@ -32,8 +35,12 @@ import {
   restartSidecar,
   startCouncilServer,
   stopCouncilServer,
+  stopGatewayPack,
+  uninstallGatewayPack,
   type DesktopRuntimeMode,
+  type GatewayPackStatus,
 } from "@/lib/tauri";
+import { gatewayPackStateLabel } from "@/lib/gateway-pack";
 import { probeWsUpgrade } from "@/lib/ws-probe";
 import { cn } from "@/lib/cn";
 import { useToast } from "./Toast";
@@ -69,11 +76,23 @@ export default function SettingsPanel() {
   const [serverLogs, setServerLogs] = useState<string[]>([]);
   const [sidecarViaGateway, setSidecarViaGateway] = useState(false);
   const [restarting, setRestarting] = useState(false);
+  const [packStatus, setPackStatus] = useState<GatewayPackStatus | null>(null);
+  const [packBusy, setPackBusy] = useState(false);
   const inTauri = isTauri();
   const [desktopRuntimeMode, setDesktopRuntimeMode] = useState<
     DesktopRuntimeMode | "detecting" | "unavailable"
   >(inTauri ? "detecting" : "unavailable");
   const debugSidecarAvailable = desktopRuntimeMode === "development";
+  const installedRelease = desktopRuntimeMode === "installed-release";
+
+  const refreshPackStatus = useCallback(async () => {
+    if (!inTauri) return;
+    try {
+      setPackStatus(await getGatewayPackStatus());
+    } catch {
+      setPackStatus(null);
+    }
+  }, [inTauri]);
 
   const remoteWarnings = useMemo(() => {
     const urls = [
@@ -111,6 +130,15 @@ export default function SettingsPanel() {
       cancelled = true;
     };
   }, [inTauri]);
+
+  useEffect(() => {
+    if (!inTauri || desktopRuntimeMode !== "installed-release") return;
+    void refreshPackStatus();
+    const t = window.setInterval(() => {
+      void refreshPackStatus();
+    }, 8000);
+    return () => window.clearInterval(t);
+  }, [inTauri, desktopRuntimeMode, refreshPackStatus]);
 
   useEffect(() => {
     if (!showServerLog || !inTauri) return;
@@ -391,11 +419,175 @@ export default function SettingsPanel() {
             {!inTauri
               ? "This browser UI connects to the Council API above. Council startup and backend environment are managed outside this page."
               : desktopRuntimeMode === "installed-release"
-              ? "This installed app connects to the canonical IRIN runtime. Development sidecar controls are intentionally unavailable here; start or restart Council from the IRIN checkout."
+              ? "This installed app owns the bundled Council process for core War Room (no Rust/Node/Docker required). Gateway is optional and off by default. Missing Docker does not block core War Room."
               : desktopRuntimeMode === "detecting"
                 ? "Checking the desktop build mode before enabling development-only sidecar controls…"
                 : "Desktop build mode could not be verified, so development-only sidecar controls remain unavailable. Start or restart Council from the IRIN checkout."}
           </p>
+        </div>
+      )}
+
+      {installedRelease && inTauri && (
+        <div
+          className="border border-border bg-bg-elevated p-5 space-y-3"
+          data-testid="settings-gateway-pack"
+        >
+          <div className="flex items-center gap-2 border-b border-border pb-3">
+            <Network className="w-3.5 h-3.5 text-fg-dim" />
+            <span className="label text-fg">Optional Gateway Pack</span>
+          </div>
+          <p className="text-[10px] font-mono text-fg-dim">
+            App-owned Compose project <code className="text-cyan">irin-desktop-gateway</code> only.
+            Client key is stored in the macOS Keychain (never in private.json). Watch
+            producer/dispatcher stay disarmed. Vertex and Claude/Codex CLI proxies are
+            Direct-only / unsupported in v0.1 pack isolation.
+          </p>
+          <div
+            className="text-xs font-mono space-y-1"
+            data-testid="settings-gateway-pack-status"
+          >
+            <div>
+              State:{" "}
+              <span className="text-cyan">
+                {packStatus
+                  ? gatewayPackStateLabel(packStatus.state)
+                  : "checking…"}
+              </span>
+            </div>
+            {packStatus?.message ? (
+              <p className="text-fg-dim whitespace-pre-wrap">{packStatus.message}</p>
+            ) : null}
+            {packStatus?.key_id ? (
+              <div className="text-fg-dim">Key id: {packStatus.key_id}</div>
+            ) : null}
+            {packStatus?.pack_version ? (
+              <div className="text-fg-dim">Pack: {packStatus.pack_version}</div>
+            ) : null}
+            <div className="text-fg-dim">
+              Watch: producer=
+              {String(packStatus?.watch_producer_enabled ?? false)} dispatcher=
+              {String(packStatus?.watch_dispatcher_enabled ?? false)}
+            </div>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              data-testid="settings-gateway-pack-enable"
+              aria-label="Enable Gateway"
+              aria-busy={packBusy}
+              className="btn btn-cyan text-xs"
+              disabled={packBusy}
+              onClick={async () => {
+                setPackBusy(true);
+                try {
+                  const st = await enableGatewayPack();
+                  setPackStatus(st);
+                  const ok =
+                    st.state === "authenticated_ready" &&
+                    st.authenticated &&
+                    st.council_governed;
+                  toast(ok ? "success" : "error", st.message);
+                } catch (e) {
+                  toast("error", e instanceof Error ? e.message : String(e));
+                  void refreshPackStatus();
+                } finally {
+                  setPackBusy(false);
+                }
+              }}
+            >
+              {packBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
+              Enable Gateway
+            </button>
+            <button
+              type="button"
+              data-testid="settings-gateway-pack-disable"
+              aria-label="Disable"
+              aria-busy={packBusy}
+              className="btn btn-primary text-xs"
+              disabled={packBusy}
+              onClick={async () => {
+                setPackBusy(true);
+                try {
+                  const st = await disableGatewayPack();
+                  setPackStatus(st);
+                  toast(
+                    st.council_governed ? "error" : "success",
+                    st.message || "Gateway disabled — Direct mode restored",
+                  );
+                } catch (e) {
+                  toast("error", e instanceof Error ? e.message : String(e));
+                  void refreshPackStatus();
+                } finally {
+                  setPackBusy(false);
+                }
+              }}
+            >
+              Disable
+            </button>
+            <button
+              type="button"
+              data-testid="settings-gateway-pack-stop"
+              aria-label="Stop pack"
+              aria-busy={packBusy}
+              className="btn text-xs"
+              disabled={packBusy}
+              onClick={async () => {
+                setPackBusy(true);
+                try {
+                  const st = await stopGatewayPack();
+                  setPackStatus(st);
+                  toast(
+                    st.council_governed ? "error" : "success",
+                    st.message || "Gateway pack stopped",
+                  );
+                } catch (e) {
+                  toast("error", e instanceof Error ? e.message : String(e));
+                  void refreshPackStatus();
+                } finally {
+                  setPackBusy(false);
+                }
+              }}
+            >
+              Stop pack
+            </button>
+            <button
+              type="button"
+              data-testid="settings-gateway-pack-uninstall"
+              aria-label="Uninstall pack"
+              aria-busy={packBusy}
+              className="btn text-xs text-red-400"
+              disabled={packBusy}
+              title="Destructive: removes irin-desktop-gateway volumes, app-owned gateway data, and Keychain client key"
+              onClick={async () => {
+                if (
+                  !window.confirm(
+                    "Uninstall the app-owned Gateway Pack? This deletes only irin-desktop-gateway data and the Keychain client key. Canonical Gateway is not touched.",
+                  )
+                ) {
+                  return;
+                }
+                setPackBusy(true);
+                try {
+                  const st = await uninstallGatewayPack();
+                  setPackStatus(st);
+                  toast(
+                    st.state === "not_installed" || !st.enabled
+                      ? "success"
+                      : "error",
+                    st.message || "Gateway pack uninstalled",
+                  );
+                } catch (e) {
+                  toast("error", e instanceof Error ? e.message : String(e));
+                  void refreshPackStatus();
+                } finally {
+                  setPackBusy(false);
+                }
+              }}
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+              Uninstall pack
+            </button>
+          </div>
         </div>
       )}
 

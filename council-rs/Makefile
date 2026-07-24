@@ -64,23 +64,24 @@ warroom-browser:
 	bash scripts/warroom-browser-dev.sh
 
 # --------------------------------------------------------------------------
-# warroom-dev / warroom-build — Council War Room desktop (Tauri, Phase 2 hybrid Next.js)
+# warroom-dev / warroom-build — IRIN desktop (Tauri, Phase 2 hybrid Next.js)
 # --------------------------------------------------------------------------
 warroom-dev:
 	bash scripts/warroom-tauri-dev.sh
 
 warroom-build:
 	cargo build --release -p council-rs --bin council --locked
+	bash warroom-tauri/scripts/stage-bundle-inputs.sh
 	cd warroom/web && npm ci
 	cd warroom-tauri && npm ci && npm run tauri build $(if $(strip $(TAURI_BUILD_CONFIG)),-- --config "$(TAURI_BUILD_CONFIG)",)
 	$(MAKE) warroom-sign
 
 warroom-sign:
 	@if [ "$$(uname -s)" = "Darwin" ]; then \
-	  APP="warroom-tauri/src-tauri/target/release/bundle/macos/Council War Room.app"; \
+	  APP="warroom-tauri/src-tauri/target/release/bundle/macos/IRIN.app"; \
 	  test -d "$$APP" || { echo "Missing app bundle: $$APP" >&2; exit 1; }; \
 	  if ! codesign --verify --deep --strict "$$APP" >/dev/null 2>&1; then \
-	    echo "Ad-hoc signing local Council War Room bundle"; \
+	    echo "Ad-hoc signing local IRIN bundle"; \
 	    codesign --force --deep --sign - "$$APP"; \
 	  fi; \
 	  codesign --verify --deep --strict "$$APP"; \

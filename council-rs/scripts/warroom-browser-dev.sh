@@ -170,7 +170,7 @@ start_council
 
 echo ""
 echo "┌────────────────────────────────────────────────────────┐"
-echo "│  Council War Room (browser)                            │"
+echo "│  IRIN (browser)                                         │"
 echo "│  Open:  http://127.0.0.1:${WEB_PORT}                        │"
 echo "│  API:   http://127.0.0.1:${COUNCIL_PORT}/api/health             │"
 echo "│  History → click a session in the left rail              │"

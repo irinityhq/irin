@@ -50,3 +50,36 @@ async function fulfillDiscovery(route: Route): Promise<void> {
 export async function installAvailableProviderDiscovery(page: Page): Promise<void> {
   await page.route("**/api/discover", fulfillDiscovery);
 }
+
+async function fulfillHealth(route: Route): Promise<void> {
+  if (route.request().method() === "OPTIONS") {
+    await route.fulfill({ status: 204, headers: CORS_HEADERS });
+    return;
+  }
+  await route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    headers: CORS_HEADERS,
+    body: JSON.stringify({
+      council_version: "e2e",
+      stream_version: "1.0.0",
+      providers_available: [...CABINET_PROVIDER_IDS],
+      providers_missing: [],
+      sessions_dir: "/tmp",
+      index_path: "/tmp/index.json",
+      index_exists: false,
+    }),
+  });
+}
+
+/**
+ * Liveness/status companion to installAvailableProviderDiscovery. Convene
+ * gating and cabinet runnability read /api/discover (see IdlePanel); the
+ * health probe stays liveness-only and deliberately reports host CLI
+ * transports as unavailable. Launch-flow specs still install this so header
+ * status and health-driven surfaces see a deterministic payload, and so the
+ * app never depends on a CI runner's real health probe.
+ */
+export async function installAvailableProviderHealth(page: Page): Promise<void> {
+  await page.route("**/api/health", fulfillHealth);
+}

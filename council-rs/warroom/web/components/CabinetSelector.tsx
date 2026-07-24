@@ -3,20 +3,22 @@
 import { useState } from "react";
 import { Users } from "lucide-react";
 import { cn } from "@/lib/cn";
-import type { Cabinet, HealthResponse } from "@/lib/types";
+import { cabinetMissingProviders } from "@/lib/cabinet-selection";
+import type { Cabinet } from "@/lib/types";
 
 export default function CabinetSelector({
   cabinets,
   selected,
   onSelect,
-  health,
+  providersAvailable,
   variant = "default",
   embedded = false,
 }: {
   cabinets: Cabinet[];
   selected: string;
   onSelect: (n: string) => void;
-  health: HealthResponse | null;
+  /** Available transport IDs from the Discover inventory; null while unknown. */
+  providersAvailable: readonly string[] | null;
   variant?: "default" | "command";
   /** Flat layout inside convene body — card grid, triads collapsed by default. */
   embedded?: boolean;
@@ -33,7 +35,7 @@ export default function CabinetSelector({
       : "panel p-5 space-y-4";
 
   return (
-    <div className={rootClass}>
+    <div className={rootClass} data-testid="cabinet-selector">
       {!embedded && (
         <div className="flex items-center gap-2">
           <Users className="w-3.5 h-3.5 text-amber" />
@@ -63,7 +65,7 @@ export default function CabinetSelector({
                     cabinet={c}
                     active={selected === c.name}
                     onClick={() => onSelect(c.name)}
-                    health={health}
+                    providersAvailable={providersAvailable}
                     compact={embedded}
                   />
                 ))}
@@ -93,7 +95,7 @@ export default function CabinetSelector({
                       cabinet={c}
                       active={selected === c.name}
                       onClick={() => onSelect(c.name)}
-                      health={health}
+                      providersAvailable={providersAvailable}
                       compact={embedded}
                     />
                   ))}
@@ -107,32 +109,31 @@ export default function CabinetSelector({
   );
 }
 
-function cabinetMissing(cabinet: Cabinet, health: HealthResponse | null) {
-  const need = new Set(cabinet.seats.map((s) => s.provider));
-  need.add(cabinet.chair.provider);
-  const have = health ? new Set(health.providers_available) : new Set();
-  return [...need].filter((p) => !have.has(p));
-}
-
 function CabinetChip({
   cabinet,
   active,
   onClick,
-  health,
+  providersAvailable,
   compact = false,
 }: {
   cabinet: Cabinet;
   active: boolean;
   onClick: () => void;
-  health: HealthResponse | null;
+  providersAvailable: readonly string[] | null;
   compact?: boolean;
 }) {
-  const missing = cabinetMissing(cabinet, health);
+  // Inventory null → treat as unknown (no missing list) so chips are not a
+  // danger-red Christmas tree before the Discover inventory arrives.
+  const missing = providersAvailable
+    ? cabinetMissingProviders(cabinet, providersAvailable)
+    : [];
+  const available = missing.length === 0;
 
   return (
     <button
       data-testid="cabinet-chip"
       data-cabinet-name={cabinet.name}
+      data-cabinet-available={available ? "true" : "false"}
       onClick={onClick}
       className={cn(
         "text-left rounded-md border transition-all",
@@ -140,14 +141,16 @@ function CabinetChip({
         active
           ? "border-amber/60 bg-amber/10 shadow-[inset_0_1px_0_rgba(229,163,58,0.1)]"
           : "border-border/60 bg-bg-overlay/30 hover:border-amber/30 hover:bg-bg-overlay/60 hover:-translate-y-px",
-        missing.length > 0 && "opacity-60",
+        // Unavailable cabinets stay selectable (requirements stay visible) but
+        // mute the card — danger red is reserved for real action/system errors.
+        !available && "opacity-55",
       )}
     >
       <div
         className={cn(
           "font-mono font-semibold",
           compact ? "text-[10px]" : "text-[11px]",
-          active ? "text-amber" : "text-fg",
+          active ? "text-amber" : available ? "text-fg" : "text-fg-muted",
         )}
       >
         {cabinet.label}
@@ -155,7 +158,7 @@ function CabinetChip({
       <div className="text-[9px] font-mono text-fg-dim mt-0.5 leading-tight">
         {cabinet.seats.length} seats · {cabinet.rounds} rounds
         {missing.length > 0 && (
-          <span className="text-danger ml-1">
+          <span className="text-fg-muted ml-1" data-testid="cabinet-need">
             (need {missing.join(", ")})
           </span>
         )}

@@ -12,6 +12,8 @@ factual claims between rounds when validation is enabled, and a chair files
 the ruling. Direct provider transport is the default; governed routing is
 opt-in per seat.
 
+[irinity.com](https://www.irinity.com/) · [IRINITY STONES — the IRIN field guide](https://irinitystones.com/)
+
 ![A real IRIN War Room proceeding moving from two rounds of model responses to Sheldon evidence validation](assets/readme/warroom-deliberation.gif)
 
 Watch fires form a verifiable hash chain; Outbox directives are signed over
@@ -77,6 +79,13 @@ This builds, atomically installs, and launches the macOS app. It uses the
 same Council and War Room runtime `make setup` already started and never
 starts a competing backend.
 
+**Signed macOS app (Apple silicon):** the notarized `IRIN_<ver>_aarch64.dmg`
+on [GitHub Releases](https://github.com/irinityhq/irin/releases) installs
+**IRIN.app** — the same Council + War Room with the optional Gateway Pack
+bundled and off by default, no source checkout or Docker required for Direct
+mode. Verify the download against `HASHES.txt` attached to the same release.
+macOS on Apple silicon only; Intel Macs are not supported.
+
 ### Ubuntu — browser War Room
 
 Install Rust, Node.js 20+, Git, `make`, `curl`, and `lsof`, then run:
@@ -103,7 +112,7 @@ engineering lane. See
 | War Room Web | `http://127.0.0.1:3010` |
 | Council API/WebSocket | `http://127.0.0.1:8765` |
 | Gateway | `http://127.0.0.1:18080` with macOS `make setup`, or when started separately on Ubuntu |
-| Desktop app | `Council War Room.app` on macOS, same backend as above |
+| Desktop app | `IRIN.app` on macOS, same backend as above |
 | Private phone | macOS `make setup` only: `https://<your-device>.<tailnet>.ts.net` when Tailscale is installed and connected — never a public URL |
 
 ## Discover, then deliberate
@@ -135,15 +144,23 @@ maturity ladder: it never silently substitutes a different provider, and a
 transport with no Gateway adapter simply stays Direct-only. Details:
 [`docs/architecture.md`](docs/architecture.md).
 
+On the **installed macOS DMG**, core War Room needs no Docker and keeps Gateway
+off by default. Optional governed routing uses Settings → **Enable Gateway**,
+which starts an app-owned Compose project (`irin-desktop-gateway`), stores the
+Council client key in the macOS Keychain, and only enables governed proceedings
+after authenticated readiness. See
+[`packaging/gateway-pack/README.md`](packaging/gateway-pack/README.md) for the
+v0.1 support matrix (Vertex and CLI proxies stay Direct-only / unsupported in
+the pack).
+
 ## Evidence and claim validation (Sheldon)
 
-When enabled, Sheldon is the between-round claim validator: after a round of
-model responses, it checks factual claims made in that round and returns a
-verdict per claim — supported, consistent, or no-evidence — before the next
-round or the chair ruling (the screenshots in
-[A real proceeding](#a-real-proceeding) show this live). Sheldon does not gate
-whether a round runs; it gates what gets treated as an established fact inside
-the deliberation.
+Sheldon is the between-round claim validator: after a round of model responses,
+it checks factual claims made in that round and returns a verdict per claim —
+supported, consistent, no-evidence, or contradicted — before the next round
+or the chair ruling (the screenshots in [A real proceeding](#a-real-proceeding)
+show this live). Sheldon does not gate whether a round runs; it gates what gets
+treated as an established fact inside the deliberation.
 
 Before the validator model runs, Council gathers bounded evidence for it:
 

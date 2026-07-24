@@ -19,6 +19,12 @@ runs/
 .irin-receipts/
 .irin-tools/
 
+# DMG packaging artifacts and isolated test state (generated)
+/packaging/artifacts/
+/packaging/build/
+/packaging/test-home/
+/packaging/test-apps/
+/packaging/receipts/
 # Shared or local Tauri target (dir or symlink)
 council-rs/warroom-tauri/src-tauri/target/
 council-rs/warroom-tauri/src-tauri/target

@@ -1,6 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
 import { BACKEND, WEB_ORIGIN_RE, WS_DELIBERATE_URL } from "./support/ports";
-import { installAvailableProviderDiscovery } from "./fixtures/available-provider-discovery";
+import {
+  installAvailableProviderDiscovery,
+  installAvailableProviderHealth,
+} from "./fixtures/available-provider-discovery";
 
 const failuresByPage = new WeakMap<Page, string[]>();
 
@@ -154,6 +157,7 @@ test.describe("War Room smoke", () => {
   });
 
   test("topic input enables Convene button", async ({ page }) => {
+    await installAvailableProviderHealth(page);
     await page.goto("/");
     await expect(page.getByTestId("cabinet-chip").first()).toBeVisible({
       timeout: 10_000,
@@ -191,18 +195,22 @@ test.describe("War Room smoke", () => {
     );
   });
 
-  test("Convene opens WebSocket and receives session_started", async ({ page }) => {
+  test("Convene opens WebSocket and receives session_started", async ({ page, request }) => {
     await installSmokeOnlyWebSocketShim(page);
+    // Truthful smoke-mode assertion from the test process (page.route never
+    // intercepts Node-side requests), before any page mock exists.
+    const healthResp = await request.get(`${BACKEND}/api/health`);
+    expect(healthResp.ok()).toBe(true);
+    const health = (await healthResp.json()) as { ws_smoke_only?: boolean };
+    expect(health.ws_smoke_only).toBe(true);
+    // Availability gating is host-dependent and reads the Discover mock
+    // (installed in beforeEach); this mock keeps the liveness health probe
+    // deterministic. Both must precede the app's mount-time fetches.
+    await installAvailableProviderHealth(page);
     await page.goto("/");
     await expect(page.getByTestId("cabinet-chip").first()).toBeVisible({
       timeout: 10_000,
     });
-    const health = await page.evaluate(async (backend) => {
-      const resp = await fetch(`${backend}/api/health`, { cache: "no-store" });
-      if (!resp.ok) throw new Error(`${resp.status} ${resp.statusText}`);
-      return resp.json() as Promise<{ ws_smoke_only?: boolean }>;
-    }, BACKEND);
-    expect(health.ws_smoke_only).toBe(true);
 
     const topicInput = page.getByRole("textbox", {
       name: /proceeding statement/i,

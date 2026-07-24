@@ -1,5 +1,5 @@
 #!/bin/bash
-# Council War Room — shared env for launchd services.
+# IRIN — shared env for launchd services.
 # Provider credentials are inherited from the login shell. Never hardcode or
 # copy them into this script.
 

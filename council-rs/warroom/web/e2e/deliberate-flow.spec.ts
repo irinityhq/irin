@@ -1,6 +1,9 @@
 import { test, expect, type Page } from "@playwright/test";
 import { FakeDeliberationHarness } from "./fixtures/fake-deliberation";
-import { installAvailableProviderDiscovery } from "./fixtures/available-provider-discovery";
+import {
+  installAvailableProviderDiscovery,
+  installAvailableProviderHealth,
+} from "./fixtures/available-provider-discovery";
 
 const NOTE =
   "Operator note persisted across KISS pause remount — e2e harness.";
@@ -25,6 +28,7 @@ function isOptionalConsoleNoise(text: string): boolean {
 
 test.beforeEach(async ({ page }) => {
   await installAvailableProviderDiscovery(page);
+  await installAvailableProviderHealth(page);
   const failures: string[] = [];
   failuresByPage.set(page, failures);
   page.on("console", (msg) => {

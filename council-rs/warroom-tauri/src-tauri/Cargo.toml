@@ -1,7 +1,7 @@
 [package]
 name = "council-warroom-tauri"
 version = "0.1.0"
-description = "Council War Room desktop shell (Tauri)"
+description = "IRIN desktop shell (Tauri)"
 authors = ["Sovereign Council"]
 edition = "2021"
 license = "Apache-2.0"
@@ -26,6 +26,14 @@ tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+ureq = { version = "2", default-features = false, features = ["json", "tls"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "2"
+security-framework-sys = "2"
+core-foundation = "0.9"
+core-foundation-sys = "0.8"
+libc = "0.2"
 
 
 # Standalone crate: its own workspace root. Under the IRIN mono-repo a parent

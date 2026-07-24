@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "mode": "production",
+  "pack_version": "0.1.0",
+  "notes": "Releasable manifests must use exact name@sha256:digest refs only. Replace placeholders after publishing immutable GHCR images. This example is not loadable.",
+  "images": {
+    "gateway": "ghcr.io/example/irin-gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "sidecar": "ghcr.io/example/irin-sidecar@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "third_party_pins": {
+    "openresty_base": "openresty/openresty:1.31.1.1-alpine-slim@sha256:bde121249048b8c7f73500287e90d32aa65edc9672d4f5ab454c1cf7e029c6ec",
+    "rust_builder": "rust:alpine@sha256:f87aa870663e2b57ec8c69de82c7eedf7383bee987eef7612c0359635eaadb41"
+  },
+  "watch_invariants": {
+    "WATCH_PRODUCER_ENABLED": false,
+    "WATCH_DISPATCHER_ENABLED": false
+  }
+}
