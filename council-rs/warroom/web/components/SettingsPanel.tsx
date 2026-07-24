@@ -554,50 +554,57 @@ export default function SettingsPanel() {
             <button
               type="button"
               data-testid="settings-gateway-pack-uninstall"
-              aria-label={confirmingUninstall ? "Confirm uninstall" : "Uninstall pack"}
+              aria-label="Uninstall pack"
               aria-busy={packBusy}
               className="btn text-xs text-red-400"
-              disabled={packBusy}
+              disabled={packBusy || confirmingUninstall}
               title="Destructive: removes irin-desktop-gateway volumes, app-owned gateway data, and Keychain client key"
-              onClick={async () => {
-                // Two-step inline confirm — window.confirm is unreliable in
-                // the packaged WKWebView, and a second labeled button keeps
-                // the destructive action explicit and accessibility-testable.
-                if (!confirmingUninstall) {
-                  setConfirmingUninstall(true);
-                  return;
-                }
-                setConfirmingUninstall(false);
-                setPackBusy(true);
-                try {
-                  const st = await uninstallGatewayPack();
-                  setPackStatus(st);
-                  toast(
-                    st.state === "not_installed" || !st.enabled
-                      ? "success"
-                      : "error",
-                    st.message || "Gateway pack uninstalled",
-                  );
-                } catch (e) {
-                  toast("error", e instanceof Error ? e.message : String(e));
-                  void refreshPackStatus();
-                } finally {
-                  setPackBusy(false);
-                }
-              }}
+              onClick={() => setConfirmingUninstall(true)}
             >
               <Trash2 className="w-3.5 h-3.5" />
-              {confirmingUninstall ? "Confirm uninstall" : "Uninstall pack"}
+              Uninstall pack
             </button>
             {confirmingUninstall && (
-              <button
-                type="button"
-                aria-label="Cancel uninstall"
-                className="btn text-xs"
-                onClick={() => setConfirmingUninstall(false)}
-              >
-                Cancel
-              </button>
+              <>
+                <button
+                  type="button"
+                  data-testid="settings-gateway-pack-uninstall-confirm"
+                  aria-label="Confirm uninstall"
+                  className="btn text-xs text-red-400"
+                  onClick={async () => {
+                    // Two-step inline confirm — window.confirm is unreliable
+                    // in the packaged WKWebView, and a dedicated button keeps
+                    // the destructive action explicit and accessibility-testable.
+                    setConfirmingUninstall(false);
+                    setPackBusy(true);
+                    try {
+                      const st = await uninstallGatewayPack();
+                      setPackStatus(st);
+                      toast(
+                        st.state === "not_installed" || !st.enabled
+                          ? "success"
+                          : "error",
+                        st.message || "Gateway pack uninstalled",
+                      );
+                    } catch (e) {
+                      toast("error", e instanceof Error ? e.message : String(e));
+                      void refreshPackStatus();
+                    } finally {
+                      setPackBusy(false);
+                    }
+                  }}
+                >
+                  Confirm uninstall
+                </button>
+                <button
+                  type="button"
+                  aria-label="Cancel uninstall"
+                  className="btn text-xs"
+                  onClick={() => setConfirmingUninstall(false)}
+                >
+                  Cancel
+                </button>
+              </>
             )}
           </div>
         </div>
