@@ -644,9 +644,74 @@ pub fn install_pack_files() -> Result<PathBuf, String> {
         "manifest_mode": validated.mode.as_str(),
         "project": DESKTOP_COMPOSE_PROJECT,
         "source_sha": validated.source_sha,
+        "asset_hashes": pack_asset_hashes(&final_dest)?,
     });
     write_atomic_0600(&installed_marker_path(), format!("{marker}\n").as_bytes())?;
     Ok(final_dest)
+}
+
+/// sha256 (hex) of one file, for pack asset integrity records.
+fn sha256_hex_file(path: &Path) -> Result<String, String> {
+    use sha2::Digest;
+    let bytes = fs::read(path).map_err(|e| format!("hash {}: {e}", path.display()))?;
+    Ok(format!("{:x}", sha2::Sha256::digest(&bytes)))
+}
+
+/// Recursive relpath → sha256 map over the installed pack tree (files only,
+/// sorted for determinism). The pack tree is small and app-owned.
+fn pack_asset_hashes(root: &Path) -> Result<serde_json::Value, String> {
+    let mut out = serde_json::Map::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries =
+            fs::read_dir(&dir).map_err(|e| format!("read pack dir {}: {e}", dir.display()))?;
+        for entry in entries {
+            let entry = entry.map_err(|e| format!("read pack dir entry: {e}"))?;
+            let path = entry.path();
+            let rel = path
+                .strip_prefix(root)
+                .map_err(|e| e.to_string())?
+                .to_string_lossy()
+                .into_owned();
+            let meta = entry.metadata().map_err(|e| format!("stat {rel}: {e}"))?;
+            if meta.is_dir() {
+                stack.push(path);
+            } else if meta.is_file() {
+                out.insert(rel, serde_json::Value::String(sha256_hex_file(&path)?));
+            }
+        }
+    }
+    Ok(serde_json::Value::Object(out))
+}
+
+/// Re-verify the installed pack tree against the install marker's recorded
+/// hashes. On any mismatch, re-stage once from the bundled assets (the pack
+/// tree is user-writable; the bundle is the code-signed source of truth) and
+/// re-verify. Persistent mismatch fails closed: no secret-bearing spawn.
+fn verify_pack_asset_integrity(pack_root: &Path) -> Result<(), String> {
+    fn current_matches(root: &Path) -> Result<bool, String> {
+        let raw = fs::read_to_string(installed_marker_path())
+            .map_err(|e| format!("read install marker: {e}"))?;
+        let marker: serde_json::Value =
+            serde_json::from_str(&raw).map_err(|e| format!("parse install marker: {e}"))?;
+        let Some(recorded) = marker.get("asset_hashes").cloned() else {
+            return Ok(false);
+        };
+        Ok(pack_asset_hashes(root)? == recorded)
+    }
+    if current_matches(pack_root)? {
+        return Ok(());
+    }
+    eprintln!("[gateway-pack] asset integrity mismatch; re-staging from bundle");
+    let staged = install_pack_files()?;
+    if staged != pack_root {
+        return Err("re-staged pack root does not match the compose path".to_string());
+    }
+    if current_matches(pack_root)? {
+        Ok(())
+    } else {
+        Err("pack asset integrity still mismatched after re-stage".to_string())
+    }
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
@@ -891,13 +956,28 @@ fn desktop_project_images_match(validated: &ValidatedManifest) -> bool {
     if ids.is_empty() {
         return false;
     }
-    let expected = [validated.gateway.as_str(), validated.sidecar.as_str()];
+    // Compare resolved image IDs, not Config.Image strings: a retagged local
+    // name can string-match while pointing at different bytes. The pinned
+    // refs must resolve locally, or nothing is proven.
+    let mut expected_ids: Vec<String> = Vec::new();
+    for reference in [validated.gateway.as_str(), validated.sidecar.as_str()] {
+        match docker_command(&["image", "inspect", "-f", "{{.Id}}", reference]) {
+            Ok(o) if o.status.success() => {
+                let id = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if id.is_empty() {
+                    return false;
+                }
+                expected_ids.push(id);
+            }
+            _ => return false,
+        }
+    }
     ids.iter().all(|id| {
-        let img = docker_command(&["inspect", "-f", "{{.Config.Image}}", id]);
+        let img = docker_command(&["inspect", "-f", "{{.Image}}", id]);
         match img {
             Ok(o) if o.status.success() => {
                 let got = String::from_utf8_lossy(&o.stdout).trim().to_string();
-                expected.contains(&got.as_str())
+                expected_ids.contains(&got)
             }
             _ => false,
         }
@@ -1177,6 +1257,12 @@ fn compose_ls_reports_running(json: &str, expected_config: &str) -> bool {
 }
 
 fn compose_up(compose: &Path, env_path: &Path, spawn_env: &ComposeEnv) -> Result<(), String> {
+    // The installed pack tree is user-writable; prove it still matches the
+    // code-signed bundle (re-staging once on mismatch) before any spawn that
+    // carries pack secrets.
+    if let Some(pack_root) = compose.parent() {
+        verify_pack_asset_integrity(pack_root)?;
+    }
     let up = compose_command_with_env(
         compose,
         Some(env_path),
@@ -2079,6 +2165,92 @@ mod tests {
             None => std::env::remove_var("IRIN_GATEWAY_PACK_ROOT"),
         }
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn pack_asset_integrity_restages_tampered_tree() {
+        let _g = test_env_lock();
+        let prev_root = std::env::var("IRIN_GATEWAY_PACK_ROOT").ok();
+        let prev_support = std::env::var(crate::private_config::APP_SUPPORT_ROOT_ENV).ok();
+        let uniq = format!(
+            "{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        );
+        let bundle = std::env::temp_dir().join(format!("gw-pack-bundle-{uniq}"));
+        let support = std::env::temp_dir().join(format!("gw-pack-support-{uniq}"));
+        let _ = fs::remove_dir_all(&bundle);
+        let _ = fs::remove_dir_all(&support);
+
+        // Minimal complete bundle fixture.
+        fs::create_dir_all(bundle.join("conf")).unwrap();
+        fs::create_dir_all(bundle.join("lua")).unwrap();
+        fs::write(
+            bundle.join("docker-compose.yml"),
+            b"name: irin-desktop-gateway\n",
+        )
+        .unwrap();
+        fs::write(bundle.join("nginx.conf"), b"events {}\n").unwrap();
+        fs::write(bundle.join("conf").join("gateway.conf"), b"server {}\n").unwrap();
+        fs::write(bundle.join("lua").join("auth.lua"), b"-- auth\n").unwrap();
+        let manifest = crate::gateway_pack::manifest::ImageManifest {
+            schema_version: 1,
+            mode: "local-dev".into(),
+            pack_version: "0.1.0-test".into(),
+            images: crate::gateway_pack::manifest::PackImages {
+                gateway: format!("irin-desktop/gateway@sha256:{}", "c".repeat(64)),
+                sidecar: format!("irin-desktop/sidecar@sha256:{}", "c".repeat(64)),
+            },
+            third_party_pins: Default::default(),
+            watch_invariants: crate::gateway_pack::manifest::WatchInvariants {
+                watch_producer_enabled: false,
+                watch_dispatcher_enabled: false,
+            },
+            image_ids: Default::default(),
+            local_tags: Default::default(),
+            notes: None,
+            source_sha: None,
+            source_dirty: None,
+        };
+        fs::write(
+            bundle.join("image-manifest.json"),
+            serde_json::to_string_pretty(&manifest).unwrap(),
+        )
+        .unwrap();
+
+        std::env::set_var("IRIN_GATEWAY_PACK_ROOT", &bundle);
+        std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, &support);
+
+        let pack_root = install_pack_files().expect("install fixture pack");
+        // Baseline verifies clean.
+        verify_pack_asset_integrity(&pack_root).expect("fresh install verifies");
+
+        // Tamper with the installed (user-writable) tree.
+        fs::write(
+            pack_root.join("nginx.conf"),
+            b"events { worker_rlimit_nofile 1; }\n",
+        )
+        .unwrap();
+        assert!(verify_pack_asset_integrity(&pack_root).is_ok());
+        assert_eq!(
+            fs::read(pack_root.join("nginx.conf")).unwrap(),
+            b"events {}\n".to_vec(),
+            "tampered file must be re-staged from the bundle"
+        );
+
+        match prev_root {
+            Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_ROOT", v),
+            None => std::env::remove_var("IRIN_GATEWAY_PACK_ROOT"),
+        }
+        match prev_support {
+            Some(v) => std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, v),
+            None => std::env::remove_var(crate::private_config::APP_SUPPORT_ROOT_ENV),
+        }
+        let _ = fs::remove_dir_all(&bundle);
+        let _ = fs::remove_dir_all(&support);
     }
 
     #[test]

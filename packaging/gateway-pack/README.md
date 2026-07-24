@@ -92,3 +92,46 @@ across identity changes.
 4. **Disable** reverses to Direct and removes the key from the child env.
 5. **Stop pack** stops containers only. **Uninstall pack** is destructive and
    explicit.
+
+## Trust contract (v0.1)
+
+### Trusted computing base
+
+- The macOS user account, its login Keychain, and the Docker Desktop installation.
+- IRIN.app and its bundled assets (code-signed; notarized in production).
+- The Gateway Pack images pinned by digest in the installed manifest.
+- The app-owned state under Application Support (`com.irinity.irin`), with
+  pack asset integrity re-verified against the install marker before every
+  secret-bearing Compose spawn (re-staged from the bundle on mismatch).
+
+### How secrets move
+
+- `GW_API_KEY` / `AUTH_PEPPER` live only in the login Keychain (device-local,
+  `ThisDeviceOnly`) — never in files, env dumps, receipts, or logs.
+- They leave the process only as (a) Compose spawn env scoped to lifecycle
+  commands, force-scrubbed from every unrelated spawn, and (b) a bearer token
+  to the app-owned Gateway, sent only after ownership is proven in three
+  layers: project name, our installed compose file, and containers created
+  from the validated manifest's pinned image digests.
+- The app's Docker config is a managed minimal file (plugin hints only,
+  0600). No operator registry credentials are read or copied.
+- Watch producer/dispatcher/admin are force-disarmed on every spawn; ambient
+  host tokens can never re-arm them.
+
+### Out of scope (the documented boundary)
+
+- A compromised host or same-user attacker: control of the Docker socket
+  (which can read any container's env), substituted user binaries, or a
+  poisoned GUI launch environment. `docs/security-claims-vs-reality.md` is
+  canonical: local-first, single-operator, no sandbox against a compromised
+  host. Review findings that require defeating this class are doctrine
+  rejects, not defects.
+- Non-macOS platforms (v0.1 is macOS arm64 only).
+
+### Future hardening (recorded, not v0.1.0)
+
+- Challenge-response ownership: the Gateway proves knowledge of `AUTH_PEPPER`
+  before the app sends `GW_API_KEY` (sidecar endpoint).
+- Registry-side tag immutability / environment protection on the GHCR packages.
+- Lifecycle receipt SSOT for the packaged smokes, with accessibility-tree
+  checks demoted to UX proof.
