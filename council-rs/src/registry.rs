@@ -9,6 +9,99 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+const REMOTE_MODEL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
+struct RemoteModelProbe {
+    slug: String,
+    url: String,
+    key: String,
+}
+
+#[derive(Debug)]
+enum RemoteModelProbeOutcome {
+    Models(Vec<String>),
+    Empty,
+    Http(reqwest::StatusCode),
+    Failed(String),
+}
+
+fn run_remote_model_probes(
+    probes: Vec<RemoteModelProbe>,
+) -> Vec<(String, RemoteModelProbeOutcome)> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = probes
+            .into_iter()
+            .map(|probe| {
+                scope.spawn(move || {
+                    let client = match reqwest::blocking::Client::builder()
+                        .timeout(REMOTE_MODEL_PROBE_TIMEOUT)
+                        .build()
+                    {
+                        Ok(client) => client,
+                        Err(error) => {
+                            return (
+                                probe.slug,
+                                RemoteModelProbeOutcome::Failed(error.to_string()),
+                            );
+                        }
+                    };
+                    let outcome = match client
+                        .get(&probe.url)
+                        .header("Authorization", format!("Bearer {}", probe.key))
+                        .send()
+                    {
+                        Ok(resp) if resp.status().is_success() => {
+                            let models = resp
+                                .json::<serde_json::Value>()
+                                .ok()
+                                .and_then(|value| {
+                                    value.get("data").and_then(|data| data.as_array()).map(
+                                        |models| {
+                                            models
+                                                .iter()
+                                                .filter_map(|model| {
+                                                    model
+                                                        .get("id")
+                                                        .and_then(|id| id.as_str())
+                                                        .map(str::to_string)
+                                                })
+                                                .filter(|id| {
+                                                    !id.contains("embed")
+                                                        && !id.contains("whisper")
+                                                        && !id.contains("dall")
+                                                        && !id.contains("tts")
+                                                })
+                                                .take(64)
+                                                .collect::<Vec<_>>()
+                                        },
+                                    )
+                                })
+                                .unwrap_or_default();
+                            if models.is_empty() {
+                                RemoteModelProbeOutcome::Empty
+                            } else {
+                                RemoteModelProbeOutcome::Models(models)
+                            }
+                        }
+                        Ok(resp) => RemoteModelProbeOutcome::Http(resp.status()),
+                        Err(error) => RemoteModelProbeOutcome::Failed(error.to_string()),
+                    };
+                    (probe.slug, outcome)
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("remote model probe worker must not panic")
+            })
+            .collect()
+    })
+}
+
 /// Known API key environment variables → provider mapping.
 /// Order matters: first match wins for default seat assignment.
 const KNOWN_KEYS: &[(&str, &str, &str, &str)] = &[
@@ -672,9 +765,10 @@ impl ProviderRegistry {
         // filter embedding-only etc, cap 64, set available_models + default_model.
         // On failure: log ⚠️ warning, keep prior default_model (no regression).
         // Called after load_user_toml so user-provided model lists win.
-        let client = reqwest::blocking::Client::new();
-        // Collect to avoid borrow issues while mutating
-        let to_probe: Vec<_> = self
+        // Independent providers are probed concurrently. The 5-second request
+        // timeout is therefore an overall catalog-discovery bound rather than
+        // a cumulative 5 seconds for every configured provider.
+        let probes: Vec<_> = self
             .providers
             .iter()
             .filter(|(_slug, p)| {
@@ -682,81 +776,56 @@ impl ProviderRegistry {
                     && matches!(&p.auth_type, AuthType::BearerToken { .. })
                     && p.available_models.is_empty() // only if not already populated (e.g. from toml)
             })
-            .map(|(slug, p)| {
+            .filter_map(|(slug, p)| {
                 let env_var = if let AuthType::BearerToken { env_var } = &p.auth_type {
                     env_var.clone()
                 } else {
                     String::new()
                 };
-                (slug.clone(), p.base_url.clone(), env_var)
+                let key = match std::env::var(&env_var) {
+                    Ok(k) if usable_credential_value(&k) => k,
+                    Err(_) | Ok(_) => return None,
+                };
+                let url = if p.base_url.ends_with("/v1") {
+                    format!("{}/models", p.base_url)
+                } else if p.base_url.ends_with('/') {
+                    format!("{}models", p.base_url)
+                } else {
+                    format!("{}/models", p.base_url)
+                };
+                Some(RemoteModelProbe {
+                    slug: slug.clone(),
+                    url,
+                    key,
+                })
             })
             .collect();
 
-        for (slug, base_url, env_var) in to_probe {
-            if env_var.is_empty() {
-                continue;
-            }
-            let key = match std::env::var(&env_var) {
-                Ok(k) if usable_credential_value(&k) => k,
-                Err(_) => continue,
-                Ok(_) => continue,
-            };
-            let url = if base_url.ends_with("/v1") {
-                format!("{}/models", base_url)
-            } else if base_url.ends_with('/') {
-                format!("{}models", base_url)
-            } else {
-                format!("{}/models", base_url)
-            };
-            match client
-                .get(&url)
-                .header("Authorization", format!("Bearer {}", key))
-                .timeout(std::time::Duration::from_secs(5))
-                .send()
-            {
-                Ok(resp) if resp.status().is_success() => {
-                    if let Ok(v) = resp.json::<serde_json::Value>()
-                        && let Some(arr) = v.get("data").and_then(|d| d.as_array())
-                    {
-                        let mut models: Vec<String> = arr
-                            .iter()
-                            .filter_map(|m| {
-                                m.get("id").and_then(|i| i.as_str()).map(|s| s.to_string())
-                            })
-                            .filter(|id| {
-                                // filter obvious non-chat models
-                                !id.contains("embed")
-                                    && !id.contains("whisper")
-                                    && !id.contains("dall")
-                                    && !id.contains("tts")
-                            })
-                            .collect();
-                        models.truncate(64);
-                        if !models.is_empty() {
-                            if let Some(p) = self.providers.get_mut(&slug) {
-                                p.available_models = models.clone();
-                                if p.default_model.is_empty() || p.default_model == "auto" {
-                                    p.default_model = models[0].clone();
-                                }
-                            }
-                            self.discovery_log.push(format!(
-                                "✅ {} — fetched {} models via /models",
-                                slug,
-                                models.len()
-                            ));
+        for (slug, outcome) in run_remote_model_probes(probes) {
+            match outcome {
+                RemoteModelProbeOutcome::Models(models) => {
+                    if let Some(provider) = self.providers.get_mut(&slug) {
+                        provider.available_models = models.clone();
+                        if provider.default_model.is_empty() || provider.default_model == "auto" {
+                            provider.default_model = models[0].clone();
                         }
                     }
-                }
-                Ok(resp) => {
                     self.discovery_log.push(format!(
-                        "⚠️ {} — /models probe returned HTTP {}",
+                        "✅ {} — fetched {} models via /models",
                         slug,
-                        resp.status()
+                        models.len()
                     ));
                 }
-                Err(e) => {
+                RemoteModelProbeOutcome::Empty => {}
+                RemoteModelProbeOutcome::Http(status) => {
+                    self.discovery_log.push(format!(
+                        "⚠️ {} — /models probe returned HTTP {}",
+                        slug, status
+                    ));
+                }
+                RemoteModelProbeOutcome::Failed(error) => {
                     self.discovery_log
-                        .push(format!("⚠️ {} — /models probe failed: {}", slug, e));
+                        .push(format!("⚠️ {} — /models probe failed: {}", slug, error));
                 }
             }
         }
@@ -1490,6 +1559,57 @@ base_url = "https://example.invalid/v1"
         assert!(!usable_credential_value(""));
         assert!(!usable_credential_value("   \t\n"));
         assert!(usable_credential_value("synthetic-nonempty-value"));
+    }
+
+    #[test]
+    fn remote_model_catalog_probes_do_not_serialize_provider_latency() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        use std::sync::{Arc, Barrier};
+        use std::time::{Duration, Instant};
+
+        let barrier = Arc::new(Barrier::new(2));
+        let mut probes = Vec::new();
+        let mut servers = Vec::new();
+        for index in 0..2 {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+            let address = listener.local_addr().expect("address");
+            let barrier = Arc::clone(&barrier);
+            servers.push(std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().expect("accept");
+                barrier.wait();
+                let body = format!(r#"{{"data":[{{"id":"model-{index}"}}]}}"#);
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                )
+                .expect("response");
+            }));
+            probes.push(RemoteModelProbe {
+                slug: format!("provider-{index}"),
+                url: format!("http://{address}/models"),
+                key: "synthetic-test-key".into(),
+            });
+        }
+
+        let started = Instant::now();
+        let outcomes = run_remote_model_probes(probes);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "independent provider probes ran serially"
+        );
+        assert_eq!(outcomes.len(), 2);
+        assert!(
+            outcomes.iter().all(|(_, outcome)| {
+                matches!(outcome, RemoteModelProbeOutcome::Models(models) if models.len() == 1)
+            }),
+            "unexpected outcomes: {outcomes:?}"
+        );
+        for server in servers {
+            server.join().expect("server");
+        }
     }
 
     #[test]
