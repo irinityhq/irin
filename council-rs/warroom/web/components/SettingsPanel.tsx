@@ -56,6 +56,7 @@ import {
   endGatewayPackAction,
   gatewayPackStateLabel,
   runGatewayPackStatusWriterIfCurrent,
+  shouldApplyBackgroundStatusPoll,
 } from "@/lib/gateway-pack";
 import {
   beginTouchIdDisarm,
@@ -105,13 +106,21 @@ export default function SettingsPanel() {
   const [packStatus, setPackStatus] = useState<GatewayPackStatus | null>(null);
   const [packBusy, setPackBusy] = useState(false);
   const packOperationFence = useRef(createGatewayPackOperationFence());
+  /** Monotonic epoch so a slow pack poll cannot overwrite a newer one. */
+  const packPollEpoch = useRef(0);
   const [phoneStatus, setPhoneStatus] = useState<PhoneAccessStatus | null>(null);
   const [phoneBusy, setPhoneBusy] = useState(false);
+  /** True while Enable/Disable is in flight — blocks background poll writes. */
+  const phoneActionBusy = useRef(false);
+  /** Monotonic epoch so a slow phone poll cannot overwrite a newer one. */
+  const phonePollEpoch = useRef(0);
   const [touchIdStatus, setTouchIdStatus] = useState<TouchIdStatus | null>(null);
   const [touchIdBusy, setTouchIdBusy] = useState(false);
   const [touchIdDisarmBusy, setTouchIdDisarmBusy] = useState(false);
   const touchIdOperationFence = useRef(createTouchIdOperationFence());
   const touchIdActionBusy = useRef(false);
+  /** Monotonic epoch so a slow status poll cannot overwrite a newer one. */
+  const touchIdPollEpoch = useRef(0);
   const [confirmingUninstall, setConfirmingUninstall] = useState(false);
   const inTauri = isTauri();
   const [desktopRuntimeMode, setDesktopRuntimeMode] = useState<
@@ -122,11 +131,27 @@ export default function SettingsPanel() {
 
   const refreshPackStatus = useCallback(async () => {
     if (!inTauri) return;
+    const epoch = ++packPollEpoch.current;
     await runGatewayPackStatusWriterIfCurrent(
       packOperationFence.current,
       getGatewayPackStatus,
-      setPackStatus,
-      () => setPackStatus(null),
+      (next) => {
+        // Fence already blocks/stales across lifecycle actions; epoch stops
+        // out-of-order background polls from overwriting a newer sample.
+        if (
+          !shouldApplyBackgroundStatusPoll(
+            epoch,
+            packPollEpoch.current,
+            false,
+          )
+        ) {
+          return;
+        }
+        setPackStatus(next);
+      },
+      () => {
+        // Keep the last known pack projection on a background poll failure.
+      },
     );
   }, [inTauri]);
 
@@ -155,21 +180,51 @@ export default function SettingsPanel() {
   );
 
   const refreshPhoneStatus = useCallback(async () => {
-    if (!inTauri) return;
+    if (!inTauri || phoneActionBusy.current) return;
+    const epoch = ++phonePollEpoch.current;
     try {
-      setPhoneStatus(await getPhoneAccessStatus());
+      const next = await getPhoneAccessStatus();
+      if (
+        !shouldApplyBackgroundStatusPoll(
+          epoch,
+          phonePollEpoch.current,
+          phoneActionBusy.current,
+        )
+      ) {
+        return;
+      }
+      setPhoneStatus(next);
     } catch {
-      setPhoneStatus(null);
+      // Keep the last known phone projection on a background poll failure.
     }
   }, [inTauri]);
 
   const refreshTouchIdStatus = useCallback(async () => {
     if (!inTauri || touchIdActionBusy.current) return;
+    // Supersede any in-flight background poll. Slow Docker/HTTP probes inside
+    // touch_id_status can exceed the 8s interval; applying an older sample
+    // greys Re-enroll after a newer success already painted.
+    const epoch = ++touchIdPollEpoch.current;
     await runTouchIdStatusWriterIfCurrent(
       touchIdOperationFence.current,
       getTouchIdStatus,
-      setTouchIdStatus,
-      () => setTouchIdStatus(null),
+      (next) => {
+        if (
+          !shouldApplyBackgroundStatusPoll(
+            epoch,
+            touchIdPollEpoch.current,
+            touchIdActionBusy.current,
+          )
+        ) {
+          return;
+        }
+        setTouchIdStatus(next);
+      },
+      () => {
+        // Keep the last known projection on a background poll failure. Nulling
+        // status disables/hides the control until the next success and is what
+        // made the Re-enroll button flicker with a prohibited cursor.
+      },
     );
   }, [inTauri]);
 
@@ -632,10 +687,9 @@ export default function SettingsPanel() {
               disabled={packBusy}
               onClick={() =>
                 void runGatewayPackAction(enableGatewayPack, (status) => {
-                  const ok =
-                    status.state === "authenticated_ready" &&
-                    status.authenticated &&
-                    status.council_governed;
+                  // Enable proves pack auth (spawn_capable); governed_ready
+                  // lands only after Council restart.
+                  const ok = status.spawn_capable === true;
                   toast(ok ? "success" : "error", status.message);
                 })
               }
@@ -751,7 +805,11 @@ export default function SettingsPanel() {
           busy={phoneBusy}
           notify={toast}
           onEnable={async () => {
+            // Invalidate in-flight polls and block background writes for the action.
+            phoneActionBusy.current = true;
+            phonePollEpoch.current += 1;
             setPhoneBusy(true);
+            let refreshAfterError = false;
             try {
               const status = await enablePhoneAccess();
               setPhoneStatus(status);
@@ -761,13 +819,18 @@ export default function SettingsPanel() {
               );
             } catch (e) {
               toast("error", e instanceof Error ? e.message : String(e));
-              void refreshPhoneStatus();
+              refreshAfterError = true;
             } finally {
+              phoneActionBusy.current = false;
               setPhoneBusy(false);
             }
+            if (refreshAfterError) void refreshPhoneStatus();
           }}
           onDisable={async () => {
+            phoneActionBusy.current = true;
+            phonePollEpoch.current += 1;
             setPhoneBusy(true);
+            let refreshAfterError = false;
             try {
               const status = await disablePhoneAccess();
               setPhoneStatus(status);
@@ -777,10 +840,12 @@ export default function SettingsPanel() {
               );
             } catch (e) {
               toast("error", e instanceof Error ? e.message : String(e));
-              void refreshPhoneStatus();
+              refreshAfterError = true;
             } finally {
+              phoneActionBusy.current = false;
               setPhoneBusy(false);
             }
+            if (refreshAfterError) void refreshPhoneStatus();
           }}
         />
       )}

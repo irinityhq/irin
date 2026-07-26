@@ -347,8 +347,9 @@ fn try_start_council_server(
                 // which the enable and relaunch-restore flows satisfy right
                 // after their own revalidation and a Disabled pack never does.
                 if packaged {
-                    let st = gateway_pack::gateway_pack_status(&store);
-                    if !st.allows_governed_spawn() {
+                    // Authority path: never act on a presentation cache sample.
+                    let st = gateway_pack::gateway_pack_status_fresh(&store);
+                    if !st.spawn_capable {
                         return Err(format!(
                             "Gateway is not authenticated-ready ({}). {}",
                             st.state.as_str(),
@@ -602,8 +603,11 @@ async fn stop_council_server(
 /// spawn config so the pairing token survives the restart; if no sidecar is
 /// tracked this simply starts one. Returns the same shape as start_council_server.
 ///
-/// Packaged installs refuse `via_gateway=true` unless the Gateway Pack reports
-/// authenticated readiness (Keychain key + live `/v1/models`).
+/// Packaged installs refuse `via_gateway=true` unless the Gateway Pack is
+/// spawn-capable (enabled + live-authenticated). Restart is the transition
+/// that creates the governed-child proof, so it must not demand
+/// `governed_ready` (chicken-and-egg). Enroll/arm still require fresh
+/// `governed_ready` after the restart completes.
 /// `council_root`: optional fresh `--base-dir` override — unlike the pairing
 /// token it can change mid-session, so the restart accepts the form value
 /// instead of trusting the cache; `None` falls back to the cached spawn value.
@@ -618,8 +622,9 @@ async fn restart_sidecar(
     tauri::async_runtime::spawn_blocking(move || {
         if via_gateway && is_packaged_install() {
             let store = KeychainSecretStore;
-            let st = gateway_pack::gateway_pack_status(&store);
-            if !st.state.allows_governed() {
+            // Authority path: fresh sample; gate is spawn_capable not governed_ready.
+            let st = gateway_pack::gateway_pack_status_fresh(&store);
+            if !st.spawn_capable {
                 return Err(format!(
                     "Cannot enable governed mode: Gateway Pack is {} — {}. \
                      Use Settings → Enable Gateway first.",
@@ -980,17 +985,76 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<GatewayPackStatus, Str
 // launch.
 // ---------------------------------------------------------------------------
 
+/// Presentation-only sticky boundary for Gateway readiness on status polls.
+///
+/// Law:
+/// - **Status path** ([`gateway_ready_for_status`]): may hold the last true
+///   `governed_ready` sample across soft probe flakes (auth/health), using a
+///   monotonic clock. `hard_down` (disabled, Docker gap, stopped/not-running)
+///   demotes immediately.
+/// - **Action path** ([`gateway_ready_for_arm`]): always a fresh uncached
+///   sample; never consults this sticky or the presentation cache.
+static GATEWAY_READY_STATUS_STICKY: std::sync::Mutex<touch_id::GatewayReadySticky> =
+    std::sync::Mutex::new(touch_id::GatewayReadySticky::new());
+
+/// Monotonic milliseconds since process start. Sticky expiry must not use wall
+/// time: an NTP step backward would otherwise extend the 20s hold indefinitely.
+fn monotonic_ms() -> i64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+/// Fresh pack readiness sample. Used by enroll/arm action paths so a ceremony
+/// never proceeds on sticky or cached presentation state.
 fn gateway_ready_for_arm() -> bool {
+    gateway_ready_sample_fresh().0
+}
+
+/// `(governed_ready, hard_down)` from one uncached pack-status sample.
+fn gateway_ready_sample_fresh() -> (bool, bool) {
+    let store = KeychainSecretStore;
+    let st = gateway_pack::gateway_pack_status_fresh(&store);
+    (st.governed_ready, st.hard_down)
+}
+
+/// `(governed_ready, hard_down)` from the presentation cache path.
+fn gateway_ready_sample_cached() -> (bool, bool) {
     let store = KeychainSecretStore;
     let st = gateway_pack::gateway_pack_status(&store);
-    st.enabled && st.authenticated && st.state.allows_governed()
+    (st.governed_ready, st.hard_down)
+}
+
+/// Status-path readiness: soft probe failures hold the last true sample so the
+/// Re-enroll / Set up button does not grey on an 8s background poll flake.
+/// Action paths must call [`gateway_ready_for_arm`] instead.
+fn gateway_ready_for_status() -> bool {
+    let (sample, hard_down) = gateway_ready_sample_cached();
+    let now_ms = monotonic_ms();
+    match GATEWAY_READY_STATUS_STICKY.lock() {
+        Ok(mut guard) => guard.project(
+            sample,
+            hard_down,
+            now_ms,
+            touch_id::GatewayReadySticky::DEFAULT_HOLD_MS,
+        ),
+        Err(_) => sample,
+    }
 }
 
 #[tauri::command]
 async fn touch_id_status() -> Result<touch_id::TouchIdStatus, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let store = KeychainSecretStore;
-        Ok(touch_id::touch_id_status(&store, gateway_ready_for_arm()))
+        Ok(touch_id::touch_id_status(
+            &store,
+            gateway_ready_for_status(),
+        ))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1007,7 +1071,9 @@ async fn touch_id_enroll() -> Result<touch_id::TouchIdStatus, String> {
         // its boot-time allowlists match; setup is explicit, but no producer is
         // armed by this action.
         let pack = gateway_pack::enable_gateway_pack(&store)?;
-        if !pack.enabled || !pack.authenticated || !pack.state.allows_governed() {
+        // Post-lifecycle check: enable returns a fresh sample; require pack auth
+        // presentation (enable sets AuthenticatedReady before Council restart).
+        if !pack.enabled || !pack.authenticated || !pack.spawn_capable {
             return Err(
                 "Touch ID enrolled, but Gateway could not reload its arm registry".to_string(),
             );
@@ -1022,6 +1088,12 @@ async fn touch_id_enroll() -> Result<touch_id::TouchIdStatus, String> {
 async fn touch_id_arm() -> Result<touch_id::TouchIdStatus, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let store = KeychainSecretStore;
+        // Fail closed on a fresh sample — never arm from sticky/cached presentation.
+        if !gateway_ready_for_arm() {
+            return Err(
+                "Gateway must be enabled and authenticated before Touch ID arm".to_string(),
+            );
+        }
         touch_id::arm(&store)
     })
     .await
@@ -1032,6 +1104,12 @@ async fn touch_id_arm() -> Result<touch_id::TouchIdStatus, String> {
 async fn touch_id_renew() -> Result<touch_id::TouchIdStatus, String> {
     tauri::async_runtime::spawn_blocking(|| {
         let store = KeychainSecretStore;
+        // Fail closed on a fresh sample — renew is the same ceremony as arm.
+        if !gateway_ready_for_arm() {
+            return Err(
+                "Gateway must be enabled and authenticated before Touch ID renew".to_string(),
+            );
+        }
         touch_id::renew(&store)
     })
     .await
@@ -1110,10 +1188,16 @@ async fn save_pdf(app: AppHandle, data: Vec<u8>, filename: String) -> Result<Str
     }
 }
 
-/// Whether Gateway Pack is currently enabled (non-secret status sample).
+/// Whether Gateway Pack is currently enabled (presentation/status sample).
 fn gateway_pack_enabled_flag() -> bool {
     let store = KeychainSecretStore;
     gateway_pack::gateway_pack_status(&store).enabled
+}
+
+/// Fresh enabled flag for authority-bearing phone publication changes.
+fn gateway_pack_enabled_flag_fresh() -> bool {
+    let store = KeychainSecretStore;
+    gateway_pack::gateway_pack_status_fresh(&store).enabled
 }
 
 /// Authenticated, build-matched Council readiness owned entirely by native
@@ -1162,7 +1246,8 @@ async fn phone_access_status(app: AppHandle) -> Result<PhoneAccessStatus, String
 #[tauri::command]
 async fn phone_access_enable(app: AppHandle) -> Result<PhoneAccessStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let gw = gateway_pack_enabled_flag();
+        // Authority path: publication changes the Tailscale route table.
+        let gw = gateway_pack_enabled_flag_fresh();
         let council_ready = council_backend_ready(&app);
         if !council_ready {
             return Err(
@@ -1180,7 +1265,8 @@ async fn phone_access_enable(app: AppHandle) -> Result<PhoneAccessStatus, String
 #[tauri::command]
 async fn phone_access_disable(app: AppHandle) -> Result<PhoneAccessStatus, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        let gw = gateway_pack_enabled_flag();
+        // Authority path: restores Serve; use a fresh enabled flag.
+        let gw = gateway_pack_enabled_flag_fresh();
         let council_ready = council_backend_ready(&app);
         phone_access::phone_access_disable(&LiveTailscaleRunner, gw, council_ready)
     })

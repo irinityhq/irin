@@ -321,6 +321,56 @@ fn pending_stage_is_safe_for_host(host_rehearsal: bool, stage_rehearsal: bool) -
     !host_rehearsal || stage_rehearsal
 }
 
+/// Presentation hysteresis for Gateway readiness on the status path only.
+///
+/// Background Touch ID polls re-run a multi-step Docker + HTTP pack probe. A
+/// single soft failure (Degraded / auth timeout) must not grey the Re-enroll
+/// button until the next sample. Hard-down states (disabled, Docker missing,
+/// stopped) demote immediately so a deliberate Disable is not sticky.
+///
+/// Action paths (enroll/arm) must never use this — they fail closed on a
+/// fresh sample.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct GatewayReadySticky {
+    last_true_at_ms: Option<i64>,
+}
+
+impl GatewayReadySticky {
+    /// Default hold covers two 8s Settings polls so a transient soft failure
+    /// cannot flip the primary control between ticks.
+    pub const DEFAULT_HOLD_MS: i64 = 20_000;
+
+    pub const fn new() -> Self {
+        Self {
+            last_true_at_ms: None,
+        }
+    }
+
+    pub fn project(
+        &mut self,
+        sample_ready: bool,
+        hard_down: bool,
+        now_ms: i64,
+        hold_ms: i64,
+    ) -> bool {
+        if sample_ready {
+            self.last_true_at_ms = Some(now_ms);
+            return true;
+        }
+        if hard_down {
+            self.last_true_at_ms = None;
+            return false;
+        }
+        match self.last_true_at_ms {
+            Some(t) if now_ms.saturating_sub(t) <= hold_ms => true,
+            _ => {
+                self.last_true_at_ms = None;
+                false
+            }
+        }
+    }
+}
+
 /// The product state machine.
 ///
 /// Order matters and is deliberately fail-closed: capability first (no helper →
@@ -411,7 +461,8 @@ pub fn derive_status(inp: &TouchIdInputs) -> TouchIdStatus {
             TouchIdState::ReenrollRequired,
             Some(TouchIdReason::RegistryUnloaded),
         );
-        st.can_enroll = true;
+        // Uniform can_enroll law: every re-enroll arm uses gateway_ready.
+        st.can_enroll = inp.gateway_ready;
         return st;
     }
     if !inp.registry_matches_enrollment {
@@ -419,7 +470,7 @@ pub fn derive_status(inp: &TouchIdInputs) -> TouchIdStatus {
             TouchIdState::ReenrollRequired,
             Some(TouchIdReason::RegistryMismatch),
         );
-        st.can_enroll = true;
+        st.can_enroll = inp.gateway_ready;
         return st;
     }
 
@@ -1301,6 +1352,93 @@ mod tests {
             candidates[1],
             PathBuf::from("/Applications/IRIN.app/Contents/Resources/arm-attest")
         );
+    }
+
+    #[test]
+    fn sticky_readiness_holds_soft_failures_but_demotes_hard_down() {
+        let mut sticky = GatewayReadySticky::default();
+        let hold = GatewayReadySticky::DEFAULT_HOLD_MS;
+        // First true sample arms the hold.
+        assert!(sticky.project(true, false, 1_000, hold));
+        // Soft failure (Degraded / auth flake) within the hold stays true.
+        assert!(sticky.project(false, false, 1_000 + 8_000, hold));
+        assert!(sticky.project(false, false, 1_000 + 19_999, hold));
+        // After the hold expires, soft failure demotes.
+        assert!(!sticky.project(false, false, 1_000 + hold + 1, hold));
+        // A later true re-arms.
+        assert!(sticky.project(true, false, 50_000, hold));
+        // Hard-down (Disable / Docker missing) demotes immediately.
+        assert!(!sticky.project(false, true, 50_100, hold));
+        // And does not resurrect from the cleared sticky.
+        assert!(!sticky.project(false, false, 50_200, hold));
+    }
+
+    #[test]
+    fn can_enroll_is_uniformly_gateway_ready_on_all_reenroll_arms() {
+        // Every re-enroll / setup arm that offers can_enroll must follow one law:
+        // can_enroll == gateway_ready. Cover all reasons that set the flag.
+        let reenroll_cases: &[(&str, fn(&mut TouchIdInputs))] = &[
+            ("enrollment_missing_setup", |i| {
+                i.enrollment_record_present = false;
+                i.enclave_key_present = false;
+            }),
+            ("enrollment_missing_reenroll", |i| {
+                i.enrollment_record_present = false;
+                i.enclave_key_present = true;
+            }),
+            ("helper_identity_changed", |i| {
+                i.helper_identity_matches = false;
+            }),
+            ("enclave_key_missing", |i| {
+                i.enclave_key_present = false;
+            }),
+            ("registry_unloaded", |i| {
+                i.registry_loaded = false;
+            }),
+            ("registry_mismatch", |i| {
+                i.registry_matches_enrollment = false;
+            }),
+        ];
+
+        for (label, mutate) in reenroll_cases {
+            let mut base = TouchIdInputs {
+                helper_present: true,
+                enrollment_record_present: true,
+                helper_identity_matches: true,
+                enclave_key_present: true,
+                gateway_ready: false,
+                watch_reachable: true,
+                arm_principal_present: true,
+                arm_capable: true,
+                registry_loaded: true,
+                registry_matches_enrollment: true,
+                ..Default::default()
+            };
+            mutate(&mut base);
+            assert!(
+                !derive_status(&base).can_enroll,
+                "{label} without gateway_ready"
+            );
+            base.gateway_ready = true;
+            assert!(
+                derive_status(&base).can_enroll,
+                "{label} with gateway_ready"
+            );
+        }
+    }
+
+    #[test]
+    fn sticky_uses_monotonic_deltas_not_wall_clock_regression() {
+        let mut sticky = GatewayReadySticky::default();
+        let hold = GatewayReadySticky::DEFAULT_HOLD_MS;
+        assert!(sticky.project(true, false, 10_000, hold));
+        // Forward monotonic progress within hold.
+        assert!(sticky.project(false, false, 10_000 + 5_000, hold));
+        // saturating_sub: if a caller ever fed a smaller now_ms (wall-clock
+        // step), elapsed collapses to 0 and would hold — production uses
+        // monotonic Instant origin so now_ms only increases.
+        assert!(sticky.project(false, false, 10_000 + hold, hold));
+        assert!(!sticky.project(false, false, 10_000 + hold + 1, hold));
     }
 
     #[test]

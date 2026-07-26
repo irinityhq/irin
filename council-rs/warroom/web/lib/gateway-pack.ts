@@ -58,6 +58,19 @@ export async function runGatewayPackStatusWriterIfCurrent(
   }
 }
 
+/**
+ * Whether a background pack/phone status poll may repaint.
+ * Only the latest poll epoch may write; an in-flight lifecycle action owns
+ * the projection until it settles (pass actionBusy=true to hold).
+ */
+export function shouldApplyBackgroundStatusPoll(
+  pollEpoch: number,
+  currentEpoch: number,
+  actionBusy: boolean,
+): boolean {
+  return pollEpoch === currentEpoch && !actionBusy;
+}
+
 /** Operator-facing label for a pack state (never "ready" for a bare URL). */
 export function gatewayPackStateLabel(state: GatewayPackState): string {
   switch (state) {
@@ -130,7 +143,7 @@ export function gatewayHeaderTruth(
   pack: GatewayPackStatus | null | undefined,
   healthGatewayConfigured: boolean,
 ): GatewayHeaderTruth {
-  if (pack?.state === "authenticated_ready" && pack.authenticated && pack.council_governed) {
+  if (pack?.governed_ready === true) {
     return {
       label: "governed",
       tone: "ok",

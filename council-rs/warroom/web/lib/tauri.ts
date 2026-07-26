@@ -136,16 +136,22 @@ export interface GatewayPackStatus {
   /** Fixed pack URL is configured (distinct from authenticated-ready). */
   gateway_url_configured: boolean;
   support_matrix_summary: string;
+  /** Pack enabled + live-authenticated — enough to spawn a governed child. */
+  spawn_capable: boolean;
+  /** Full governed readiness; Deliberate toggle and enroll/arm gates. */
+  governed_ready: boolean;
+  /** Structural hard-down for presentation demotion. */
+  hard_down: boolean;
 }
 
+/**
+ * Whether governed proceedings may start. Reads the native-serialized field
+ * only — do not re-derive from state + authenticated + council_governed.
+ */
 export function gatewayPackAllowsGoverned(
   status: GatewayPackStatus | null | undefined,
 ): boolean {
-  return (
-    status?.state === "authenticated_ready" &&
-    status.authenticated === true &&
-    status.council_governed === true
-  );
+  return status?.governed_ready === true;
 }
 
 export async function getGatewayPackStatus(): Promise<GatewayPackStatus> {

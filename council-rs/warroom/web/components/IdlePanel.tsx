@@ -6,7 +6,10 @@ import { motion } from "framer-motion";
 import { api } from "@/lib/api";
 import { cn, providerColor } from "@/lib/cn";
 import { DEFAULT_SENSITIVITY, SENSITIVITY_LEVELS, gatewayStartFields } from "@/lib/gateway-mode";
-import { canEnableGovernedProceeding } from "@/lib/gateway-pack";
+import {
+  canEnableGovernedProceeding,
+  shouldApplyBackgroundStatusPoll,
+} from "@/lib/gateway-pack";
 import type { Cabinet, EmbeddingStats, MapmakerResult, PrecedentMatch } from "@/lib/types";
 import type { GatewaySensitivity, StartPayload } from "@/lib/ws";
 import {
@@ -119,6 +122,7 @@ export default function IdlePanel({
     DesktopRuntimeMode | "detecting" | "unavailable"
   >(isTauri() ? "detecting" : "unavailable");
   const [packStatus, setPackStatus] = useState<GatewayPackStatus | null>(null);
+  const packPollEpoch = useRef(0);
   const topicRef = useRef<HTMLTextAreaElement>(null);
   const { toast } = useToast();
 
@@ -141,12 +145,23 @@ export default function IdlePanel({
     if (!isTauri() || desktopMode !== "installed-release") return;
     let cancelled = false;
     const tick = () => {
+      const epoch = ++packPollEpoch.current;
       void getGatewayPackStatus()
         .then((s) => {
-          if (!cancelled) setPackStatus(s);
+          if (cancelled) return;
+          if (
+            !shouldApplyBackgroundStatusPoll(
+              epoch,
+              packPollEpoch.current,
+              false,
+            )
+          ) {
+            return;
+          }
+          setPackStatus(s);
         })
         .catch(() => {
-          if (!cancelled) setPackStatus(null);
+          // Keep the last known pack projection on a background poll failure.
         });
     };
     tick();

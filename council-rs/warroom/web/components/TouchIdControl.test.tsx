@@ -178,4 +178,42 @@ describe("Touch ID control adjacency", () => {
       "invalidateTouchIdStatusOperations(touchIdOperationFence.current);",
     );
   });
+
+  it("supersedes overlapping background polls and never nulls status on poll error", () => {
+    const source = readFileSync(
+      path.join(__dirname, "SettingsPanel.tsx"),
+      "utf8",
+    );
+    expect(source).toContain("const epoch = ++touchIdPollEpoch.current;");
+    expect(source).toContain("shouldApplyBackgroundStatusPoll(");
+    // Background poll failure must not wipe the last projection (that greys
+    // Re-enroll until the next success).
+    expect(source).not.toMatch(
+      /runTouchIdStatusWriterIfCurrent\(\s*[\s\S]*?getTouchIdStatus[\s\S]*?setTouchIdStatus\(null\)/,
+    );
+  });
+
+  it("keeps last pack and phone projection on background poll error", () => {
+    const settings = readFileSync(
+      path.join(__dirname, "SettingsPanel.tsx"),
+      "utf8",
+    );
+    expect(settings).toContain("const epoch = ++packPollEpoch.current;");
+    expect(settings).toContain("const epoch = ++phonePollEpoch.current;");
+    expect(settings).toContain("shouldApplyBackgroundStatusPoll(");
+    // Must not null pack/phone on poll error (keep-last).
+    expect(settings).not.toMatch(
+      /runGatewayPackStatusWriterIfCurrent\(\s*[\s\S]*?getGatewayPackStatus[\s\S]*?setPackStatus\(null\)/,
+    );
+    expect(settings).not.toMatch(
+      /getPhoneAccessStatus\(\)[\s\S]{0,400}setPhoneStatus\(null\)/,
+    );
+
+    const idle = readFileSync(path.join(__dirname, "IdlePanel.tsx"), "utf8");
+    expect(idle).toContain("const epoch = ++packPollEpoch.current;");
+    expect(idle).toContain("shouldApplyBackgroundStatusPoll(");
+    expect(idle).not.toMatch(
+      /getGatewayPackStatus\(\)[\s\S]{0,500}setPackStatus\(null\)/,
+    );
+  });
 });

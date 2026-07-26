@@ -72,6 +72,13 @@ export async function runTouchIdStatusWriterIfCurrent(
 }
 
 /**
+ * Whether a background Touch ID status poll may repaint the control.
+ *
+ * Settings fires status on an 8s interval. A slow native probe can outlive
+ * the next tick; only the latest poll epoch may write, and an in-flight
+ * enroll/arm/renew action owns the projection until it settles.
+ */
+/**
  * Field names that must NEVER appear on a status object reaching the renderer.
  * `assertNoSecretFields` is called on every status the control renders, so a
  * future native change that widens the projection fails loudly in tests and in
