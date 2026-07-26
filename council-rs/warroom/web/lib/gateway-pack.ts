@@ -9,6 +9,55 @@ import { gatewayPackAllowsGoverned } from "./tauri";
 export type { GatewayPackState, GatewayPackStatus };
 export { gatewayPackAllowsGoverned };
 
+export interface GatewayPackOperationFence {
+  generation: number;
+  actionInProgress: boolean;
+}
+
+export type GatewayPackStatusWriteOutcome = "applied" | "stale" | "blocked";
+
+export function createGatewayPackOperationFence(): GatewayPackOperationFence {
+  return { generation: 0, actionInProgress: false };
+}
+
+/** Invalidate pending status reads and reject new polls for the action boundary. */
+export function beginGatewayPackAction(
+  fence: GatewayPackOperationFence,
+): void {
+  fence.generation += 1;
+  fence.actionInProgress = true;
+}
+
+/** Invalidate every read attempted during the action before reopening polls. */
+export function endGatewayPackAction(fence: GatewayPackOperationFence): void {
+  fence.generation += 1;
+  fence.actionInProgress = false;
+}
+
+export async function runGatewayPackStatusWriterIfCurrent(
+  fence: GatewayPackOperationFence,
+  read: () => Promise<GatewayPackStatus>,
+  apply: (status: GatewayPackStatus) => void,
+  onError: () => void,
+): Promise<GatewayPackStatusWriteOutcome> {
+  if (fence.actionInProgress) return "blocked";
+  const generation = fence.generation;
+  try {
+    const status = await read();
+    if (fence.actionInProgress || fence.generation !== generation) {
+      return "stale";
+    }
+    apply(status);
+    return "applied";
+  } catch {
+    if (fence.actionInProgress || fence.generation !== generation) {
+      return "stale";
+    }
+    onError();
+    return "applied";
+  }
+}
+
 /** Operator-facing label for a pack state (never "ready" for a bare URL). */
 export function gatewayPackStateLabel(state: GatewayPackState): string {
   switch (state) {

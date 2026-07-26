@@ -427,7 +427,7 @@ impl RolesConfig {
                     },
                     RoleCascadeStep {
                         provider: "nvidia".into(),
-                        model: "mistralai/mistral-large-3-675b-instruct-2512".into(),
+                        model: "mistralai/mistral-small-4-119b-2603".into(),
                         max_tokens: 512,
                     },
                 ],
@@ -447,7 +447,7 @@ impl RolesConfig {
                     },
                     RoleCascadeStep {
                         provider: "nvidia".into(),
-                        model: "mistralai/mistral-large-3-675b-instruct-2512".into(),
+                        model: "mistralai/mistral-small-4-119b-2603".into(),
                         max_tokens: 512,
                     },
                     RoleCascadeStep {
@@ -497,7 +497,7 @@ impl RolesConfig {
                     },
                     RoleCascadeStep {
                         provider: "nvidia".into(),
-                        model: "mistralai/mistral-large-3-675b-instruct-2512".into(),
+                        model: "mistralai/mistral-small-4-119b-2603".into(),
                         max_tokens: 1024,
                     },
                 ],

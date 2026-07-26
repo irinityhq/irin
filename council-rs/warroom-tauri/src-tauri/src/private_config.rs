@@ -15,6 +15,8 @@
 //! secrets outside this app's tree.
 
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -265,11 +267,41 @@ pub fn writable_council_base_dir() -> PathBuf {
     app_support_dir().join("council-base")
 }
 
+const OVERLAY_MANIFEST_FILE: &str = ".overlay-shipped.json";
+const OVERLAY_MANIFEST_VERSION: u32 = 1;
+const RETIRED_NVIDIA_MODEL: &str = "mistralai/mistral-large-3-675b-instruct-2512";
+const REPLACEMENT_NVIDIA_MODEL: &str = "mistralai/mistral-small-4-119b-2603";
+const LEGACY_OVERLAY_REPLACEMENTS: [(&str, &str); 5] = [
+    (RETIRED_NVIDIA_MODEL, REPLACEMENT_NVIDIA_MODEL),
+    ("mistral_large_nim", "mistral_small4_nim"),
+    (
+        "EXPERIMENTAL — Formal adversarial COA wargaming (MDMP-style).",
+        "Formal adversarial COA wargaming (MDMP-style).",
+    ),
+    (
+        "Mistral Large via NIM — invokable, but repeated Gate 4 live timeouts; not a starter/freeride default",
+        "Mistral Small 4 via NIM — live-proven for architect output and strict judge.v2 JSON (2026-07-25)",
+    ),
+    (
+        "operator probe 2026-07-11: 45/121 invokable",
+        "operator probe 2026-07-25: 42/118 invokable",
+    ),
+];
+
+#[derive(Debug, Serialize, Deserialize)]
+struct OverlayManifest {
+    version: u32,
+    files: BTreeMap<String, String>,
+}
+
 /// Ensure Application Support has a writable copy of the bundled base-dir.
 ///
-/// - First launch: full recursive copy of shipped assets.
-/// - Later launches: seed any **missing** shipped files without clobbering
-///   operator-edited YAMLs; never delete user cabinets.
+/// - First launch: full recursive copy of shipped assets plus a hash manifest.
+/// - Later launches: refresh an unchanged shipped file when its bundled version
+///   changes, seed missing files, and preserve operator-edited or custom files.
+/// - The pre-manifest 0.1.1 overlay receives exact compatibility migrations
+///   for the retired NVIDIA route and removed Wargame experimental label.
+/// - Files removed from a later bundle are never deleted from operator state.
 pub fn ensure_writable_base_overlay(bundled_base: &Path) -> Result<PathBuf, String> {
     let dest = writable_council_base_dir();
     fs::create_dir_all(&dest).map_err(|e| format!("create writable base-dir: {e}"))?;
@@ -280,14 +312,27 @@ pub fn ensure_writable_base_overlay(bundled_base: &Path) -> Result<PathBuf, Stri
     }
 
     let marker = dest.join(".overlay-seeded");
+    let manifest_path = dest.join(OVERLAY_MANIFEST_FILE);
     if !marker.is_file() {
         copy_dir_recursive(bundled_base, &dest)
             .map_err(|e| format!("seed council-base overlay from bundle: {e}"))?;
+        let hashes = bundled_file_hashes(bundled_base)
+            .map_err(|e| format!("hash seeded council-base overlay: {e}"))?;
+        write_overlay_manifest(&manifest_path, &hashes)?;
         fs::write(&marker, b"1\n").map_err(|e| format!("write overlay marker: {e}"))?;
         return Ok(dest);
     }
 
-    seed_missing(bundled_base, &dest).map_err(|e| format!("refresh overlay missing files: {e}"))?;
+    let previous = load_overlay_manifest(&manifest_path)?;
+    if previous.is_none() {
+        migrate_legacy_overlay_tree(&dest)
+            .map_err(|e| format!("migrate legacy council-base overlay: {e}"))?;
+    }
+    let current = bundled_file_hashes(bundled_base)
+        .map_err(|e| format!("hash bundled council-base overlay: {e}"))?;
+    refresh_overlay_files(bundled_base, &dest, previous.as_ref(), &current)
+        .map_err(|e| format!("refresh council-base overlay: {e}"))?;
+    write_overlay_manifest(&manifest_path, &current)?;
     Ok(dest)
 }
 
@@ -307,24 +352,129 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
-fn seed_missing(src: &Path, dst: &Path) -> std::io::Result<()> {
-    if !src.is_dir() {
-        return Ok(());
+fn bundled_file_hashes(base: &Path) -> std::io::Result<BTreeMap<String, String>> {
+    fn walk(base: &Path, dir: &Path, out: &mut BTreeMap<String, String>) -> std::io::Result<()> {
+        for entry in fs::read_dir(dir)? {
+            let entry = entry?;
+            let ty = entry.file_type()?;
+            let path = entry.path();
+            if ty.is_dir() {
+                walk(base, &path, out)?;
+            } else if ty.is_file() {
+                let relative = path
+                    .strip_prefix(base)
+                    .map_err(std::io::Error::other)?
+                    .to_string_lossy()
+                    .into_owned();
+                out.insert(relative, file_sha256(&path)?);
+            }
+        }
+        Ok(())
     }
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if ty.is_dir() {
-            seed_missing(&from, &to)?;
-        } else if ty.is_file() && !to.exists() {
+
+    let mut out = BTreeMap::new();
+    if base.is_dir() {
+        walk(base, base, &mut out)?;
+    }
+    Ok(out)
+}
+
+fn file_sha256(path: &Path) -> std::io::Result<String> {
+    let bytes = fs::read(path)?;
+    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+}
+
+fn load_overlay_manifest(path: &Path) -> Result<Option<OverlayManifest>, String> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(path).map_err(|e| format!("read overlay manifest: {e}"))?;
+    let manifest: OverlayManifest =
+        serde_json::from_slice(&bytes).map_err(|e| format!("parse overlay manifest: {e}"))?;
+    if manifest.version != OVERLAY_MANIFEST_VERSION {
+        return Err(format!(
+            "unsupported overlay manifest version {}",
+            manifest.version
+        ));
+    }
+    Ok(Some(manifest))
+}
+
+fn write_overlay_manifest(path: &Path, files: &BTreeMap<String, String>) -> Result<(), String> {
+    let manifest = OverlayManifest {
+        version: OVERLAY_MANIFEST_VERSION,
+        files: files.clone(),
+    };
+    let bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|e| format!("serialize overlay manifest: {e}"))?;
+    let tmp = path.with_extension("json.tmp");
+    fs::write(&tmp, bytes).map_err(|e| format!("write overlay manifest temp: {e}"))?;
+    fs::rename(&tmp, path).map_err(|e| format!("finalize overlay manifest: {e}"))
+}
+
+fn refresh_overlay_files(
+    bundled_base: &Path,
+    dest: &Path,
+    previous: Option<&OverlayManifest>,
+    current: &BTreeMap<String, String>,
+) -> std::io::Result<()> {
+    for (relative, current_hash) in current {
+        let from = bundled_base.join(relative);
+        let to = dest.join(relative);
+        if !to.exists() {
             if let Some(parent) = to.parent() {
                 fs::create_dir_all(parent)?;
             }
             fs::copy(&from, &to)?;
+            continue;
         }
+
+        let Some(previous_hash) = previous.and_then(|m| m.files.get(relative)) else {
+            // Legacy overlays have no trustworthy baseline. Exact compatibility
+            // migrations ran over the complete destination tree before this
+            // refresh; preserve all remaining content and establish the current
+            // bundle manifest for future upgrade comparisons.
+            continue;
+        };
+        let dest_hash = file_sha256(&to)?;
+        if dest_hash == *previous_hash && dest_hash != *current_hash {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
+}
+
+fn migrate_legacy_overlay_tree(dir: &Path) -> std::io::Result<()> {
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let ty = entry.file_type()?;
+        let path = entry.path();
+        if ty.is_dir() {
+            migrate_legacy_overlay_tree(&path)?;
+        } else if ty.is_file() {
+            migrate_legacy_overlay_yaml(&path)?;
+        }
+    }
+    Ok(())
+}
+
+fn migrate_legacy_overlay_yaml(path: &Path) -> std::io::Result<()> {
+    let is_yaml = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("yaml") || ext.eq_ignore_ascii_case("yml"));
+    if !is_yaml {
+        return Ok(());
+    }
+    let Ok(mut content) = fs::read_to_string(path) else {
+        return Ok(());
+    };
+    let original = content.clone();
+    for (old, new) in LEGACY_OVERLAY_REPLACEMENTS {
+        content = content.replace(old, new);
+    }
+    if content != original {
+        fs::write(path, content)?;
     }
     Ok(())
 }
@@ -448,6 +598,9 @@ fn interactive_login_env_once() -> &'static [(String, String)] {
 ///
 /// Hard-bounded: a wedged interactive shell (slow gcloud hooks, hanging plugins)
 /// must not block Council auto-start forever.
+const LOGIN_CAPTURE_FAILURE_DIAGNOSTIC: &str =
+    "IRIN could not capture the interactive login environment after two bounded attempts; command discovery may be incomplete.";
+
 pub fn capture_interactive_login_env() -> Vec<(String, String)> {
     // Same shape as `scripts/irin-runtime.sh` launchd serve: /bin/zsh -lic …
     // macOS printenv has no -0; emit NUL-delimited KEY=VALUE via python3 (always
@@ -469,7 +622,10 @@ for k,v in os.environ.items():
     fallback.args(["-lic", "/usr/bin/env"]);
     match run_login_capture_timeout(fallback, std::time::Duration::from_secs(5)) {
         Ok(fb) if fb.status.success() => parse_env_lines(&fb.stdout),
-        _ => Vec::new(),
+        _ => {
+            eprintln!("{LOGIN_CAPTURE_FAILURE_DIAGNOSTIC}");
+            Vec::new()
+        }
     }
 }
 
@@ -633,7 +789,7 @@ mod tests {
     }
 
     #[test]
-    fn writable_overlay_seeds_and_preserves_user_files() {
+    fn writable_overlay_refreshes_shipped_and_preserves_user_files() {
         let _g = test_env_lock();
         let prev = std::env::var("HOME").ok();
         let tmp = std::env::temp_dir().join(format!(
@@ -644,19 +800,25 @@ mod tests {
         let _ = fs::remove_dir_all(&tmp);
         fs::create_dir_all(tmp.join("bundle/cabinets")).unwrap();
         fs::write(tmp.join("bundle/cabinets/shipped.yaml"), b"name: shipped\n").unwrap();
-        fs::write(tmp.join("bundle/models.yaml"), b"models: {}\n").unwrap();
+        fs::write(tmp.join("bundle/models.yaml"), b"models: old\n").unwrap();
         std::env::set_var("HOME", tmp.join("home"));
 
         let dest = ensure_writable_base_overlay(&tmp.join("bundle")).unwrap();
         assert!(dest.join("cabinets/shipped.yaml").is_file());
-        // Operator edit
+        assert!(dest.join(OVERLAY_MANIFEST_FILE).is_file());
+        // An operator edit must survive, while an unchanged shipped file must
+        // advance to the new bundled version.
         fs::write(dest.join("cabinets/shipped.yaml"), b"name: edited\n").unwrap();
-        // New shipped file should seed; edited must stay
+        fs::write(tmp.join("bundle/models.yaml"), b"models: new\n").unwrap();
         fs::write(tmp.join("bundle/cabinets/newone.yaml"), b"name: new\n").unwrap();
         let dest2 = ensure_writable_base_overlay(&tmp.join("bundle")).unwrap();
         assert_eq!(
             fs::read_to_string(dest2.join("cabinets/shipped.yaml")).unwrap(),
             "name: edited\n"
+        );
+        assert_eq!(
+            fs::read_to_string(dest2.join("models.yaml")).unwrap(),
+            "models: new\n"
         );
         assert!(dest2.join("cabinets/newone.yaml").is_file());
         // A later release may add an executable transport adapter to an
@@ -678,6 +840,62 @@ mod tests {
                 0
             );
         }
+
+        match prev {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn legacy_overlay_migrates_retired_builtins_and_preserves_operator_edits() {
+        let _g = test_env_lock();
+        let prev = std::env::var("HOME").ok();
+        let tmp = std::env::temp_dir().join(format!(
+            "irin-overlay-legacy-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        std::env::set_var("HOME", tmp.join("home"));
+
+        let bundle = tmp.join("bundle");
+        fs::create_dir_all(bundle.join("cabinets")).unwrap();
+        fs::write(
+            bundle.join("cabinets/trinity.yaml"),
+            format!("name: Trinity\nmodel: {REPLACEMENT_NVIDIA_MODEL}\n"),
+        )
+        .unwrap();
+
+        let dest = writable_council_base_dir();
+        fs::create_dir_all(dest.join("cabinets")).unwrap();
+        fs::write(dest.join(".overlay-seeded"), b"1\n").unwrap();
+        fs::write(
+            dest.join("cabinets/trinity.yaml"),
+            format!("name: Operator Trinity\nmodel: {RETIRED_NVIDIA_MODEL}\n"),
+        )
+        .unwrap();
+        // Custom files are not in the new bundle, but exact retired built-in
+        // language must still migrate without clobbering their other content.
+        fs::write(
+            dest.join("cabinets/operator-wargame.yaml"),
+            "name: Operator Wargame\ndescription: EXPERIMENTAL — Formal adversarial COA wargaming (MDMP-style).\nmodel_key: mistral_large_nim\n",
+        )
+        .unwrap();
+
+        let refreshed = ensure_writable_base_overlay(&bundle).unwrap();
+        let migrated = fs::read_to_string(refreshed.join("cabinets/trinity.yaml")).unwrap();
+        assert!(migrated.contains("name: Operator Trinity"));
+        assert!(migrated.contains(REPLACEMENT_NVIDIA_MODEL));
+        assert!(!migrated.contains(RETIRED_NVIDIA_MODEL));
+        let custom = fs::read_to_string(refreshed.join("cabinets/operator-wargame.yaml")).unwrap();
+        assert!(custom.contains("name: Operator Wargame"));
+        assert!(custom.contains("Formal adversarial COA wargaming (MDMP-style)."));
+        assert!(!custom.contains("EXPERIMENTAL"));
+        assert!(custom.contains("mistral_small4_nim"));
+        assert!(!custom.contains("mistral_large_nim"));
+        assert!(refreshed.join(OVERLAY_MANIFEST_FILE).is_file());
 
         match prev {
             Some(v) => std::env::set_var("HOME", v),
@@ -806,6 +1024,18 @@ mod tests {
         );
 
         let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn login_capture_failure_diagnostic_is_generic_and_secret_free() {
+        let diagnostic = LOGIN_CAPTURE_FAILURE_DIAGNOSTIC;
+        assert!(diagnostic.contains("two bounded attempts"));
+        for forbidden in ["API_KEY", "TOKEN", "HOME", "/.", ".zsh", "provider"] {
+            assert!(
+                !diagnostic.contains(forbidden),
+                "diagnostic must not expose names or paths"
+            );
+        }
     }
 
     #[test]

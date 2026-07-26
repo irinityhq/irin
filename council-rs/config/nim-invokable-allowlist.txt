@@ -1,11 +1,11 @@
-# NVIDIA NIM models that returned successful chat/completions on the operator
-# key (2026-07-11 probe). Catalog /v1/models listed 121; only these 45 answered.
+# NVIDIA NIM models with successful chat/completions receipts on the operator key.
+# Baseline: 2026-07-11 probe (45/121). Refresh: 2026-07-25 probe (42/118).
+# The set is cumulative across successful receipts; transient timeouts do not erase
+# a prior success. Definitive retirement responses (for example HTTP 410) do.
 #
 # Re-probe:
 #   NVIDIA_API_KEY=… python3 scripts/probe-nim-catalog.py
 # Do NOT put freeride/starter seats on models outside this list without a re-probe.
-#
-# Source receipt: maxaccel/reviews/receipts/IRIN-NVIDIA-CATALOG-PROBE-2026-07-11.md
 
 abacusai/dracarys-llama-3.1-70b-instruct
 bytedance/seed-oss-36b-instruct
@@ -22,7 +22,6 @@ microsoft/phi-4-multimodal-instruct
 minimaxai/minimax-m2.7
 minimaxai/minimax-m3
 mistralai/ministral-14b-instruct-2512
-mistralai/mistral-large-3-675b-instruct-2512
 mistralai/mistral-nemotron
 mistralai/mistral-small-4-119b-2603
 nvidia/gliner-pii

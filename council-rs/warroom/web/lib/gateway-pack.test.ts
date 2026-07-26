@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
+  beginGatewayPackAction,
   canEnableGovernedProceeding,
+  createGatewayPackOperationFence,
+  endGatewayPackAction,
   gatewayPackIsCoreNeutral,
   gatewayPackStateLabel,
+  runGatewayPackStatusWriterIfCurrent,
   type GatewayPackStatus,
 } from "./gateway-pack";
 
@@ -119,6 +123,88 @@ describe("governed proceeding gate", () => {
         desktopMode: "development",
       }),
     ).toBe(true);
+  });
+});
+
+describe("gateway pack operation fence", () => {
+  it("rejects a status read that started before a lifecycle action", async () => {
+    const fence = createGatewayPackOperationFence();
+    const degraded = status({ state: "degraded", message: "stale" });
+    let resolveRead!: (value: GatewayPackStatus) => void;
+    const read = new Promise<GatewayPackStatus>((resolve) => {
+      resolveRead = resolve;
+    });
+    const applied: GatewayPackStatus[] = [];
+    const completion = runGatewayPackStatusWriterIfCurrent(
+      fence,
+      () => read,
+      (value) => applied.push(value),
+      () => {},
+    );
+
+    beginGatewayPackAction(fence);
+    resolveRead(degraded);
+
+    expect(await completion).toBe("stale");
+    expect(applied).toEqual([]);
+  });
+
+  it("does not start a new poll while a lifecycle action is running", async () => {
+    const fence = createGatewayPackOperationFence();
+    let readCalled = false;
+    beginGatewayPackAction(fence);
+
+    const outcome = await runGatewayPackStatusWriterIfCurrent(
+      fence,
+      async () => {
+        readCalled = true;
+        return status({ state: "degraded" });
+      },
+      () => {},
+      () => {},
+    );
+
+    expect(outcome).toBe("blocked");
+    expect(readCalled).toBe(false);
+  });
+
+  it("applies only a current post-action success or error", async () => {
+    const fence = createGatewayPackOperationFence();
+    beginGatewayPackAction(fence);
+    endGatewayPackAction(fence);
+    const ready = status({
+      state: "authenticated_ready",
+      authenticated: true,
+      enabled: true,
+      council_governed: true,
+    });
+    let applied: GatewayPackStatus | null = null;
+    expect(
+      await runGatewayPackStatusWriterIfCurrent(
+        fence,
+        async () => ready,
+        (value) => {
+          applied = value;
+        },
+        () => {},
+      ),
+    ).toBe("applied");
+    expect(applied).toBe(ready);
+
+    let errored = false;
+    expect(
+      await runGatewayPackStatusWriterIfCurrent(
+        fence,
+        async () => {
+          throw new Error("status failed");
+        },
+        () => {},
+        () => {
+          errored = true;
+        },
+      ),
+    ).toBe("applied");
+    expect(errored).toBe(true);
   });
 });
 

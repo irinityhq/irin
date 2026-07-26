@@ -7,6 +7,7 @@
 //! council --warroom --harden --validate --map . "Topic"  # shortcut: 5-seat war room cabinet
 //! council --smoke-provider claude "ACK ping"   # single provider, no session
 //! council --serve                               # start WebSocket server
+//! council --serve --web-dist warroom/web/out    # ...plus the War Room UI, same origin
 //! council --contrarian "Topic"                  # direct-fire contrarian
 //! council --munger "Topic"                      # direct-fire Munger
 //! council --kiss-review "Topic"                 # direct-fire KISS
@@ -30,6 +31,7 @@ use council_rs::precedent;
 use council_rs::provider;
 use council_rs::registry::ProviderRegistry;
 use council_rs::server;
+use council_rs::static_web::WebDist;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -260,6 +262,11 @@ struct Cli {
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
 
+    /// Serve the built War Room static export from DIR on the same loopback
+    /// origin as /api and /ws. Omit it to keep the API-only server.
+    #[arg(long, value_name = "DIR")]
+    web_dist: Option<PathBuf>,
+
     /// Base directory for config (cabinets/, prompts/, models.yaml)
     #[arg(long, default_value = ".")]
     base_dir: PathBuf,
@@ -281,7 +288,7 @@ fn smoke_default_model(provider: &str) -> Option<&'static str> {
         "grok" => Some("grok-4.3"),
         "grok_cli" => Some("grok-build"),
         "hermes_cli" => Some("grok-4.3"),
-        "nvidia" | "nim" => Some("mistralai/mistral-large-3-675b-instruct-2512"),
+        "nvidia" | "nim" => Some("mistralai/mistral-small-4-119b-2603"),
         "nous" => Some("Hermes-4-70B"),
         _ => None,
     }
@@ -475,13 +482,30 @@ async fn main() -> Result<()> {
                 std::process::exit(1);
             }
         };
+        // Resolve --web-dist before binding so a bad path is a startup error,
+        // not a server that answers every route with 404.
+        let web_dist = match cli.web_dist.as_deref() {
+            Some(dir) => match WebDist::new(dir) {
+                Ok(dist) => Some(dist),
+                Err(err) => {
+                    eprintln!("ERROR: --web-dist {}: {}", dir.display(), err);
+                    std::process::exit(1);
+                }
+            },
+            None => None,
+        };
+
         eprintln!("\n┌─────────────────────────────────────────┐");
         eprintln!("│  🏛️  Council Server starting...          │");
         eprintln!("│  WS:   ws://{}/ws/deliberate  │", addr);
         eprintln!("│  REST: http://{}/api/health    │", addr);
         eprintln!("└─────────────────────────────────────────┘\n");
+        if let Some(ref dist) = web_dist {
+            eprintln!("🌐 War Room static export: {}", dist.root().display());
+            eprintln!("   UI:   http://{}/", addr);
+        }
 
-        let app = server::router(config);
+        let app = server::router_with_web_dist(config, web_dist);
         let listener = tokio::net::TcpListener::bind(&addr).await?;
         axum::serve(listener, app).await?;
         return Ok(());

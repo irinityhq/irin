@@ -28,6 +28,10 @@ pub const BUNDLED_COUNCIL_BIN_NAME: &str = "council";
 /// Bundled base-dir folder name under `Contents/Resources/`.
 pub const BUNDLED_BASE_DIR_NAME: &str = "council-base";
 
+/// Bundled War Room static export for Council `--web-dist` (phone surface).
+/// Distinct from Tauri `frontendDist` (desktop webview assets).
+pub const BUNDLED_WEB_DIST_NAME: &str = "warroom-web";
+
 /// Resolve the directory that contains the running app executable (`Contents/MacOS` on macOS).
 pub fn executable_dir() -> Option<PathBuf> {
     std::env::current_exe()
@@ -84,6 +88,56 @@ pub fn bundled_base_dir() -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Packaged app: `Contents/Resources/.../warroom-web` (bundled static export).
+///
+/// Same candidate layout as [`bundled_base_dir`]. Present only when packaging
+/// stages the War Room export; absence means the sidecar omits `--web-dist`.
+pub fn bundled_web_dist() -> Option<PathBuf> {
+    let mac_os = executable_dir()?;
+    let resources_root = mac_os.parent()?.join("Resources");
+    let candidates = [
+        resources_root.join(BUNDLED_WEB_DIST_NAME),
+        resources_root.join("resources").join(BUNDLED_WEB_DIST_NAME),
+        resources_root.join("_up_").join(BUNDLED_WEB_DIST_NAME),
+    ];
+    for candidate in candidates {
+        if web_dist_looks_valid(&candidate) {
+            return Some(candidate);
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(&resources_root) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir()
+                && path.file_name().is_some_and(|n| n == BUNDLED_WEB_DIST_NAME)
+                && web_dist_looks_valid(&path)
+            {
+                return Some(path);
+            }
+            if path.is_dir() {
+                if let Ok(nested) = std::fs::read_dir(&path) {
+                    for nested_entry in nested.flatten() {
+                        let nested_path = nested_entry.path();
+                        if nested_path
+                            .file_name()
+                            .is_some_and(|n| n == BUNDLED_WEB_DIST_NAME)
+                            && web_dist_looks_valid(&nested_path)
+                        {
+                            return Some(nested_path);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn web_dist_looks_valid(path: &Path) -> bool {
+    // Static export root: either index.html at top level or an obvious export dir.
+    path.is_dir() && (path.join("index.html").is_file() || path.join("404.html").is_file())
 }
 
 /// True when this process looks like a self-contained DMG/app install.
@@ -488,7 +542,19 @@ mod tests {
         // We only assert the helpers do not panic; presence depends on layout.
         let _ = bundled_council_binary();
         let _ = bundled_base_dir();
+        let _ = bundled_web_dist();
         let _ = is_packaged_install();
+    }
+
+    #[test]
+    fn web_dist_validation_requires_index_or_404() {
+        let tmp = std::env::temp_dir().join(format!("web-dist-val-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        assert!(!web_dist_looks_valid(&tmp));
+        fs::write(tmp.join("index.html"), b"<html></html>").unwrap();
+        assert!(web_dist_looks_valid(&tmp));
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]

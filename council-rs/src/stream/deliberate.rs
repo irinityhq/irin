@@ -2228,7 +2228,7 @@ mod tests {
             transport_alternatives
                 .iter()
                 .flatten()
-                .any(|pair| { pair.model == "mistralai/mistral-large-3-675b-instruct-2512" })
+                .any(|pair| { pair.model == "mistralai/mistral-small-4-119b-2603" })
         );
         assert!(
             transport_models

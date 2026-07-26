@@ -18,7 +18,7 @@ rounds: 2
 seats:
   - name: Architect
     provider: nvidia
-    model: mistralai/mistral-large-3-675b-instruct-2512
+    model: mistralai/mistral-small-4-119b-2603
     system: |
       You are the Architect — zero-refusal, implementation-focused, sovereignty-first.
       Build with code. Pair every concern with the fix. Your strength is concrete

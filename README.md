@@ -113,7 +113,7 @@ engineering lane. See
 | Council API/WebSocket | `http://127.0.0.1:8765` |
 | Gateway | `http://127.0.0.1:18080` with macOS `make setup`, or when started separately on Ubuntu |
 | Desktop app | `IRIN.app` on macOS, same backend as above |
-| Private phone | macOS `make setup` only: `https://<your-device>.<tailnet>.ts.net` when Tailscale is installed and connected — never a public URL |
+| Private phone | Installed IRIN.app Settings only: `https://<your-device>.<tailnet>.ts.net:8443` via Tailscale Serve — never a public URL, never configured by `make setup` |
 
 ## Discover, then deliberate
 

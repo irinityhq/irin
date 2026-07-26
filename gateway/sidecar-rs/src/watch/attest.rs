@@ -163,6 +163,19 @@ pub fn build_is_dirty() -> bool {
         .unwrap_or(true)
 }
 
+/// A clean tree is necessary but not sufficient for real arming. Only images
+/// produced by the explicit production publisher carry this compile-time bit;
+/// local/source images fail closed to rehearsal even when their Git tree is clean.
+pub fn build_is_release_eligible() -> bool {
+    option_env!("GW_RELEASE_ELIGIBLE") == Some("true")
+}
+
+/// Pure policy seam used by startup and the full clean/dirty x local/production
+/// matrix test. Neither input is read from runtime environment.
+pub fn build_may_arm_for_real(is_dirty: bool, release_eligible: bool) -> bool {
+    !is_dirty && release_eligible
+}
+
 /// T1 MF-1 (B5) — the 4 content-binding values, derived ONCE and identically
 /// by BOTH stage and confirm. The whole point of a single derivation site is
 /// that confirm re-derives the SAME values from the SAME inputs; any drift in
@@ -783,6 +796,20 @@ pub fn boot_registry() -> Option<std::sync::Arc<AttestKeyRegistry>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn real_arm_requires_both_clean_tree_and_production_eligibility() {
+        assert!(!build_may_arm_for_real(false, false), "clean local image");
+        assert!(!build_may_arm_for_real(true, false), "dirty local image");
+        assert!(
+            !build_may_arm_for_real(true, true),
+            "dirty production image"
+        );
+        assert!(
+            build_may_arm_for_real(false, true),
+            "clean production image"
+        );
+    }
 
     /// Test helper: build a v2 challenge with fixed content-binding fields so
     /// existing crypto tests only have to vary stage_id/timestamps.

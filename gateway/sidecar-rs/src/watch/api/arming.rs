@@ -1430,6 +1430,121 @@ async fn admin_arm_confirm_attest(
     }
 }
 
+/// Renderer-safe arm status projection — `GET /watch/admin/producer/arm/status`.
+///
+/// Touch ID product ceremony: the desktop shell needs to render "Touch ID
+/// ready" / "Arm with Touch ID" / "Armed until <time>" / "Re-enroll Touch ID"
+/// without ever touching the ceremony's secret material. This struct is the
+/// ONLY thing that leaves the sidecar for that purpose and it is deliberately
+/// a projection of booleans, counts, and wall-clock deadlines:
+///
+/// * NEVER the stage challenge bytes (signing those is the whole ceremony),
+/// * NEVER a signature, attestation, or `client_data_json`,
+/// * NEVER a principal name or token, an admin token, or registry contents.
+///
+/// `keyset_hash` is the same non-secret digest the boot audit row and the
+/// out-of-band alert already publish (SHA-256 over the JCS of the sorted
+/// PUBLIC credential records). It is the only value that lets a caller decide
+/// "the enrolled keyset changed under me → re-enroll", so it is carried here
+/// and consumed by the native host; it reveals nothing a boot log did not.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct ArmStatusView {
+    /// A producer is armed right now (in-memory kill state present).
+    pub armed: bool,
+    /// Wall-clock deadline of the attested spend lease, when one is persisted.
+    pub armed_exp_at_ms: Option<i64>,
+    /// Remaining lease milliseconds, clamped at 0. `None` when not armed.
+    pub armed_expires_in_ms: Option<u64>,
+    /// An unexpired stage is open (a ceremony is mid-flight).
+    pub staged: bool,
+    /// Remaining stage-window milliseconds, clamped at 0.
+    pub stage_expires_in_ms: Option<u64>,
+    /// The open stage was staged as a rehearsal (producer never starts).
+    pub stage_rehearsal: bool,
+    /// The boot-loaded enrollment registry is usable. False = fail-closed.
+    pub registry_loaded: bool,
+    /// How many credentials the registry holds (0 when unloaded).
+    pub credential_count: u64,
+    /// Non-secret keyset digest; `None` when the registry is unloaded.
+    pub keyset_hash: Option<String>,
+    /// At least one principal is configured, so arming is even attemptable.
+    pub arm_capable: bool,
+    /// This build may arm the real producer (a dirty build is rehearsal-only).
+    pub allow_real_arm: bool,
+    /// Sidecar wall clock, so a caller can render a deadline without trusting
+    /// its own clock skew against ours.
+    pub now_ms: i64,
+}
+
+/// `GET /watch/admin/producer/arm/status` — principal-authenticated,
+/// status-struct-only projection (see [`ArmStatusView`]).
+///
+/// Same 401 posture as stage/pending: an unauthenticated read is counted in
+/// `arm_rejected_unauth_total` and never appends to the unprunable audit
+/// chain. Reading status is not a ceremony step, so an authenticated read
+/// writes no audit row at all — the desktop shell polls this.
+pub async fn admin_arm_status_json(
+    quarantine: Arc<QuarantineState>,
+    principals: Arc<ArmPrincipals>,
+    attest_keys: Arc<crate::watch::attest::AttestKeyRegistry>,
+    allow_real_arm: bool,
+    bearer: Option<String>,
+) -> Response {
+    let Some(_principal) = principals.authenticate(bearer.as_deref()) else {
+        quarantine.bump_arm_rejected_unauth();
+        tracing::warn!(
+            claimed_principal = %ArmPrincipals::claimed_name(bearer.as_deref()),
+            "arm status read rejected (401: invalid or missing principal bearer) — counted in arm_rejected_unauth_total, not audited"
+        );
+        return problem(
+            StatusCode::UNAUTHORIZED,
+            "unauthorized",
+            "invalid or missing arm-principal bearer",
+        );
+    };
+
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0);
+
+    let armed = quarantine.producer_kill_state.lock().is_some();
+
+    let mut view = ArmStatusView {
+        armed,
+        armed_exp_at_ms: None,
+        armed_expires_in_ms: None,
+        staged: false,
+        stage_expires_in_ms: None,
+        stage_rehearsal: false,
+        registry_loaded: attest_keys.is_loaded(),
+        credential_count: attest_keys.len() as u64,
+        keyset_hash: attest_keys.keyset_hash().map(str::to_string),
+        arm_capable: principals.is_arm_capable(),
+        allow_real_arm,
+        now_ms,
+    };
+
+    if let Some(db) = quarantine.db_for_arm_audit() {
+        // Lease: the persisted attested ceiling. An expired row is reported as
+        // expired (0 remaining), never silently as "still armed" — the caller
+        // renders a fail-closed state and the reserve gate refuses anyway.
+        if let Ok(Some(row)) = db.get_active_arm().await {
+            view.armed_exp_at_ms = Some(row.exp_at_ms);
+            view.armed_expires_in_ms = Some((row.exp_at_ms - now_ms).max(0) as u64);
+        }
+        // Open ceremony: only the deadline and the rehearsal flag cross the
+        // boundary — never `challenge_bytes`.
+        if let Ok(Some(pending)) = db.get_arm_pending(now_ms).await {
+            view.staged = true;
+            view.stage_expires_in_ms = Some((pending.exp_at_ms - now_ms).max(0) as u64);
+            view.stage_rehearsal = pending.rehearsal;
+        }
+    }
+
+    json_response(StatusCode::OK, serde_json::json!(view))
+}
+
 /// LEGACY — `POST /watch/admin/producer/arm` (single-shot, single-bearer).
 /// Removed by p0a-four-eyes (the dual-custody invariant): always 410 Gone pointing
 /// at the stage/confirm ceremony so there is no four-eyes bypass.
@@ -1531,6 +1646,20 @@ async fn arm_confirm_route(
     .await
 }
 
+async fn arm_status_route(
+    axum::extract::State(st): axum::extract::State<ArmAdminRouterState>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    admin_arm_status_json(
+        st.quarantine,
+        st.principals,
+        st.attest_keys,
+        st.allow_real_arm,
+        bearer_from_headers(&headers),
+    )
+    .await
+}
+
 async fn disarm_route(
     axum::extract::State(st): axum::extract::State<ArmAdminRouterState>,
     headers: axum::http::HeaderMap,
@@ -1561,6 +1690,10 @@ where
         // B1 (spec §4.3): crash-resume read of the open stage (bin/arm
         // resumes instead of re-firing within the TTL).
         .route("/watch/admin/producer/arm/pending", get(arm_pending_route))
+        // Touch ID product ceremony: renderer-safe status projection. Read
+        // only, principal-authenticated, no challenge/signature/registry
+        // contents (see `ArmStatusView`).
+        .route("/watch/admin/producer/arm/status", get(arm_status_route))
         .route("/watch/admin/producer/arm/confirm", post(arm_confirm_route))
         .route("/watch/admin/producer/disarm", post(disarm_route))
         .with_state(state)

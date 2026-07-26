@@ -109,6 +109,24 @@ async fn test_router_stage_confirm_disarm_roundtrip() {
 
     let (stage_id, challenge) = stage_as(&router, "alice:tok_alpha_0001").await;
 
+    // A valid bearer with a truly empty confirm body must fail closed and
+    // leave the producer disarmed. This pins the edge's zero-length-body
+    // normalization to the router contract: empty never means approved.
+    let resp = router
+        .clone()
+        .oneshot(post(
+            "/watch/admin/producer/arm/confirm",
+            Some("bob:tok_bravo_0002"),
+            None,
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert!(
+        quarantine.producer_kill_state.lock().is_none(),
+        "empty confirm body must never arm the producer"
+    );
+
     // Bearer-only body (no credential fields): 400, not armed.
     let resp = router
         .clone()
@@ -839,9 +857,238 @@ async fn last_reject_detail(db: &WatchDb) -> String {
         .expect("a confirm_rejected row must exist")
 }
 
-/// Happy path, se-p256: alice stages AND alice confirms — the same-principal
-/// 403 is RETIRED for the attest path (spec §2: the second custody domain is
-/// the SE key, not a second bearer). The §6 confirm row binds the ceremony.
+// Happy path, se-p256: alice stages AND alice confirms — the same-principal
+// 403 is retired for the attest path (the second custody domain is the Secure
+// Enclave key, not a second bearer). The confirm row binds the ceremony.
+// ---------------------------------------------------------------------------
+// Touch ID product control — `GET /watch/admin/producer/arm/status`.
+//
+// The desktop shell renders "Set up Touch ID" / "Touch ID ready" /
+// "Arm with Touch ID" / "Armed until <time>" / "Re-enroll Touch ID" from this
+// one projection. These tests pin BOTH halves of the contract: it must carry
+// enough to render those states, and it must never carry ceremony material.
+// ---------------------------------------------------------------------------
+
+/// Every field the status route may ever return. A projection that grows a new
+/// field fails this test on purpose — widening the renderer's view of the
+/// ceremony is a security decision, not a refactor.
+const ARM_STATUS_ALLOWED_FIELDS: &[&str] = &[
+    "armed",
+    "armed_exp_at_ms",
+    "armed_expires_in_ms",
+    "staged",
+    "stage_expires_in_ms",
+    "stage_rehearsal",
+    "registry_loaded",
+    "credential_count",
+    "keyset_hash",
+    "arm_capable",
+    "allow_real_arm",
+    "now_ms",
+];
+
+/// Unauthenticated status reads are refused with the same posture as
+/// stage/pending: 401, and no permanent row in the unprunable audit chain.
+#[tokio::test]
+async fn test_arm_status_requires_a_principal_bearer() {
+    let (_tmp, db, _q, router) = fixture_attest("alice:tok_alpha_0001").await;
+
+    for bearer in [None, Some("nope"), Some("alice:wrong_token")] {
+        let resp = router
+            .clone()
+            .oneshot(get("/watch/admin/producer/arm/status", bearer))
+            .await
+            .unwrap();
+        assert_eq!(
+            resp.status(),
+            StatusCode::UNAUTHORIZED,
+            "status must not answer bearer {bearer:?}"
+        );
+    }
+    assert!(
+        db.list_arm_audit().await.unwrap().is_empty(),
+        "unauthenticated status reads must never append to the arm_audit chain"
+    );
+}
+
+/// A successful read is a projection only — no challenge, signature, principal,
+/// or token, and no audit row for a plain read either.
+#[tokio::test]
+async fn test_arm_status_is_a_projection_with_no_ceremony_material() {
+    let (_tmp, db, _q, router) = fixture_attest("alice:tok_alpha_0001").await;
+
+    let resp = router
+        .clone()
+        .oneshot(get(
+            "/watch/admin/producer/arm/status",
+            Some("alice:tok_alpha_0001"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+
+    let obj = v.as_object().expect("status is a JSON object");
+    for key in obj.keys() {
+        assert!(
+            ARM_STATUS_ALLOWED_FIELDS.contains(&key.as_str()),
+            "status must not expose field {key}"
+        );
+    }
+    for forbidden in [
+        "challenge",
+        "challenge_bytes",
+        "signature",
+        "signature_der",
+        "authenticator_data",
+        "client_data_json",
+        "credential_id",
+        "public_key",
+        "staged_by",
+        "principal",
+        "principals",
+        "token",
+        "admin_token",
+    ] {
+        assert!(
+            obj.get(forbidden).is_none(),
+            "status must not carry {forbidden}"
+        );
+    }
+
+    // Not-yet-armed, registry loaded, principal configured.
+    assert_eq!(v["armed"], serde_json::json!(false));
+    assert_eq!(v["staged"], serde_json::json!(false));
+    assert_eq!(v["registry_loaded"], serde_json::json!(true));
+    assert_eq!(v["credential_count"], serde_json::json!(2));
+    assert_eq!(v["arm_capable"], serde_json::json!(true));
+    assert_eq!(v["allow_real_arm"], serde_json::json!(true));
+    assert!(v["keyset_hash"].as_str().unwrap().len() == 64);
+    assert!(v["armed_exp_at_ms"].is_null());
+
+    assert!(
+        db.list_arm_audit().await.unwrap().is_empty(),
+        "an authenticated status READ is not a ceremony step and writes no row"
+    );
+}
+
+/// An open stage is visible as a deadline only — never as its challenge.
+#[tokio::test]
+async fn test_arm_status_reports_an_open_stage_without_the_challenge() {
+    let (_tmp, _db, _q, router) = fixture_attest("alice:tok_alpha_0001").await;
+    let (_stage_id, challenge) = stage_as(&router, "alice:tok_alpha_0001").await;
+
+    let resp = router
+        .clone()
+        .oneshot(get(
+            "/watch/admin/producer/arm/status",
+            Some("alice:tok_alpha_0001"),
+        ))
+        .await
+        .unwrap();
+    let v = body_json(resp).await;
+    assert_eq!(v["staged"], serde_json::json!(true));
+    assert_eq!(v["stage_rehearsal"], serde_json::json!(false));
+    assert!(v["stage_expires_in_ms"].as_u64().unwrap() > 0);
+
+    let body = v.to_string();
+    assert!(
+        !body.contains(&b64(&challenge)),
+        "the staged challenge must never appear in the status projection"
+    );
+}
+
+/// After a real ceremony, status reports the armed lease deadline — the source
+/// of the product's "Armed until <time>" — and disarm returns it to false.
+#[tokio::test]
+async fn test_arm_status_reports_the_lease_deadline_and_clears_on_disarm() {
+    let (_tmp, _db, quarantine, router) = fixture_attest("alice:tok_alpha_0001").await;
+    let (stage_id, challenge) = stage_as(&router, "alice:tok_alpha_0001").await;
+    let resp = confirm_with(
+        &router,
+        "alice:tok_alpha_0001",
+        se_confirm_body(&stage_id, &challenge),
+    )
+    .await;
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert!(quarantine.producer_kill_state.lock().is_some());
+
+    let v = body_json(
+        router
+            .clone()
+            .oneshot(get(
+                "/watch/admin/producer/arm/status",
+                Some("alice:tok_alpha_0001"),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(v["armed"], serde_json::json!(true));
+    let exp = v["armed_exp_at_ms"].as_i64().expect("lease deadline");
+    let now = v["now_ms"].as_i64().expect("sidecar clock");
+    assert!(exp > now, "an armed lease must carry a future deadline");
+    assert!(v["armed_expires_in_ms"].as_u64().unwrap() > 0);
+    assert_eq!(
+        v["staged"],
+        serde_json::json!(false),
+        "confirm consumes the stage"
+    );
+
+    disarm_ok(&router).await;
+    let v = body_json(
+        router
+            .clone()
+            .oneshot(get(
+                "/watch/admin/producer/arm/status",
+                Some("alice:tok_alpha_0001"),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        v["armed"],
+        serde_json::json!(false),
+        "disarm is immediate in the status projection"
+    );
+}
+
+/// An unloaded registry (no enrollment, or a pack that failed to load ours) is
+/// reported as such: the product maps it to "Re-enroll Touch ID", never to a
+/// usable arm action.
+#[tokio::test]
+async fn test_arm_status_reports_an_unloaded_registry_fail_closed() {
+    let (_tmp, _db, _q, router) = fixture_with_principals("alice:tok_alpha_0001").await;
+    let v = body_json(
+        router
+            .clone()
+            .oneshot(get(
+                "/watch/admin/producer/arm/status",
+                Some("alice:tok_alpha_0001"),
+            ))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(v["registry_loaded"], serde_json::json!(false));
+    assert_eq!(v["credential_count"], serde_json::json!(0));
+    assert!(v["keyset_hash"].is_null());
+}
+
+/// With no principal configured the registry is not arm-capable, and the route
+/// is unreachable at all — there is no bearer that can satisfy it.
+#[tokio::test]
+async fn test_arm_status_without_principals_is_unauthorized() {
+    let (_tmp, _db, _q, router) = fixture_with_principals("").await;
+    let resp = router
+        .clone()
+        .oneshot(get("/watch/admin/producer/arm/status", Some("anything")))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+}
+
 #[tokio::test]
 async fn test_attest_se_p256_ceremony_same_principal_arms() {
     use sha2::{Digest, Sha256};

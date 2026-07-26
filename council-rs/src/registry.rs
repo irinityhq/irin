@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 const REMOTE_MODEL_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const REMOTE_MODEL_PROBE_CONCURRENCY: usize = 8;
 
 struct RemoteModelProbe {
     slug: String,
@@ -25,81 +26,106 @@ enum RemoteModelProbeOutcome {
     Failed(String),
 }
 
+fn run_remote_model_probe(probe: RemoteModelProbe) -> RemoteModelProbeOutcome {
+    let client = match reqwest::blocking::Client::builder()
+        .timeout(REMOTE_MODEL_PROBE_TIMEOUT)
+        .build()
+    {
+        Ok(client) => client,
+        Err(error) => return RemoteModelProbeOutcome::Failed(error.to_string()),
+    };
+    match client
+        .get(&probe.url)
+        .header("Authorization", format!("Bearer {}", probe.key))
+        .send()
+    {
+        Ok(resp) if resp.status().is_success() => {
+            let models = resp
+                .json::<serde_json::Value>()
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("data")
+                        .and_then(|data| data.as_array())
+                        .map(|models| {
+                            models
+                                .iter()
+                                .filter_map(|model| {
+                                    model
+                                        .get("id")
+                                        .and_then(|id| id.as_str())
+                                        .map(str::to_string)
+                                })
+                                .filter(|id| {
+                                    !id.contains("embed")
+                                        && !id.contains("whisper")
+                                        && !id.contains("dall")
+                                        && !id.contains("tts")
+                                })
+                                .take(64)
+                                .collect::<Vec<_>>()
+                        })
+                })
+                .unwrap_or_default();
+            if models.is_empty() {
+                RemoteModelProbeOutcome::Empty
+            } else {
+                RemoteModelProbeOutcome::Models(models)
+            }
+        }
+        Ok(resp) => RemoteModelProbeOutcome::Http(resp.status()),
+        Err(error) => RemoteModelProbeOutcome::Failed(error.to_string()),
+    }
+}
+
 fn run_remote_model_probes(
     probes: Vec<RemoteModelProbe>,
 ) -> Vec<(String, RemoteModelProbeOutcome)> {
-    std::thread::scope(|scope| {
-        let handles: Vec<_> = probes
-            .into_iter()
-            .map(|probe| {
-                scope.spawn(move || {
-                    let client = match reqwest::blocking::Client::builder()
-                        .timeout(REMOTE_MODEL_PROBE_TIMEOUT)
-                        .build()
-                    {
-                        Ok(client) => client,
-                        Err(error) => {
-                            return (
-                                probe.slug,
-                                RemoteModelProbeOutcome::Failed(error.to_string()),
-                            );
-                        }
-                    };
-                    let outcome = match client
-                        .get(&probe.url)
-                        .header("Authorization", format!("Bearer {}", probe.key))
-                        .send()
-                    {
-                        Ok(resp) if resp.status().is_success() => {
-                            let models = resp
-                                .json::<serde_json::Value>()
-                                .ok()
-                                .and_then(|value| {
-                                    value.get("data").and_then(|data| data.as_array()).map(
-                                        |models| {
-                                            models
-                                                .iter()
-                                                .filter_map(|model| {
-                                                    model
-                                                        .get("id")
-                                                        .and_then(|id| id.as_str())
-                                                        .map(str::to_string)
-                                                })
-                                                .filter(|id| {
-                                                    !id.contains("embed")
-                                                        && !id.contains("whisper")
-                                                        && !id.contains("dall")
-                                                        && !id.contains("tts")
-                                                })
-                                                .take(64)
-                                                .collect::<Vec<_>>()
-                                        },
-                                    )
-                                })
-                                .unwrap_or_default();
-                            if models.is_empty() {
-                                RemoteModelProbeOutcome::Empty
-                            } else {
-                                RemoteModelProbeOutcome::Models(models)
-                            }
-                        }
-                        Ok(resp) => RemoteModelProbeOutcome::Http(resp.status()),
-                        Err(error) => RemoteModelProbeOutcome::Failed(error.to_string()),
-                    };
-                    (probe.slug, outcome)
+    let mut pending = probes.into_iter();
+    let mut outcomes = Vec::new();
+    loop {
+        let batch = pending
+            .by_ref()
+            .take(REMOTE_MODEL_PROBE_CONCURRENCY)
+            .collect::<Vec<_>>();
+        if batch.is_empty() {
+            break;
+        }
+        outcomes.extend(std::thread::scope(|scope| {
+            let workers = batch
+                .into_iter()
+                .map(|probe| {
+                    let slug = probe.slug.clone();
+                    let worker = std::thread::Builder::new()
+                        .name(format!("remote-model-probe-{slug}"))
+                        .spawn_scoped(scope, move || run_remote_model_probe(probe));
+                    (slug, worker)
                 })
-            })
-            .collect();
+                .collect::<Vec<_>>();
 
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .expect("remote model probe worker must not panic")
-            })
-            .collect()
-    })
+            workers
+                .into_iter()
+                .map(|(slug, worker)| match worker {
+                    Ok(worker) => match worker.join() {
+                        Ok(outcome) => (slug, outcome),
+                        Err(_) => (
+                            slug,
+                            RemoteModelProbeOutcome::Failed(
+                                "remote model probe worker panicked".into(),
+                            ),
+                        ),
+                    },
+                    Err(error) => (
+                        slug,
+                        RemoteModelProbeOutcome::Failed(format!(
+                            "could not start remote model probe worker: {error}"
+                        )),
+                    ),
+                })
+                .collect::<Vec<_>>()
+        }));
+    }
+    outcomes
 }
 
 /// Known API key environment variables → provider mapping.
@@ -765,9 +791,10 @@ impl ProviderRegistry {
         // filter embedding-only etc, cap 64, set available_models + default_model.
         // On failure: log ⚠️ warning, keep prior default_model (no regression).
         // Called after load_user_toml so user-provided model lists win.
-        // Independent providers are probed concurrently. The 5-second request
-        // timeout is therefore an overall catalog-discovery bound rather than
-        // a cumulative 5 seconds for every configured provider.
+        // Independent providers are probed in bounded concurrent batches. The
+        // 5-second request timeout does not accumulate across the normal
+        // provider set, while an unusually large custom set cannot create an
+        // unbounded number of native threads.
         let probes: Vec<_> = self
             .providers
             .iter()
@@ -1563,10 +1590,9 @@ base_url = "https://example.invalid/v1"
 
     #[test]
     fn remote_model_catalog_probes_do_not_serialize_provider_latency() {
-        use std::io::Write;
+        use std::io::{BufRead, BufReader, Write};
         use std::net::TcpListener;
         use std::sync::{Arc, Barrier};
-        use std::time::{Duration, Instant};
 
         let barrier = Arc::new(Barrier::new(2));
         let mut probes = Vec::new();
@@ -1577,6 +1603,23 @@ base_url = "https://example.invalid/v1"
             let barrier = Arc::clone(&barrier);
             servers.push(std::thread::spawn(move || {
                 let (mut stream, _) = listener.accept().expect("accept");
+                // Drain the GET headers before the concurrency barrier. Closing
+                // a socket with unread request bytes can reset a still-sending
+                // reqwest client and make this fixture flake under suite load.
+                {
+                    let mut reader = BufReader::new(&mut stream);
+                    loop {
+                        let mut line = Vec::new();
+                        let read = reader.read_until(b'\n', &mut line).expect("request");
+                        assert!(read > 0, "request ended before its headers");
+                        if line == b"\r\n" || line == b"\n" {
+                            break;
+                        }
+                    }
+                }
+                // Both clients must have sent a complete request before either
+                // receives a response, so a serialized probe implementation
+                // still fails this test without relying on elapsed-time bounds.
                 barrier.wait();
                 let body = format!(r#"{{"data":[{{"id":"model-{index}"}}]}}"#);
                 write!(
@@ -1586,6 +1629,7 @@ base_url = "https://example.invalid/v1"
                     body
                 )
                 .expect("response");
+                stream.flush().expect("flush response");
             }));
             probes.push(RemoteModelProbe {
                 slug: format!("provider-{index}"),
@@ -1594,12 +1638,7 @@ base_url = "https://example.invalid/v1"
             });
         }
 
-        let started = Instant::now();
         let outcomes = run_remote_model_probes(probes);
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "independent provider probes ran serially"
-        );
         assert_eq!(outcomes.len(), 2);
         assert!(
             outcomes.iter().all(|(_, outcome)| {

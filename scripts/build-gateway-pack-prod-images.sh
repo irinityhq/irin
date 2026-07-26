@@ -79,11 +79,43 @@ tag_is_unpublished() {
   esac
 }
 
+REVISION_ANNOTATION="org.opencontainers.image.revision"
+SIDECAR_ELIGIBILITY_ANNOTATION="io.irinity.irin.sidecar.release-eligible"
+
+resolve_digest() {
+  local ref="$1" digest
+  digest="$(docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>/dev/null)" \
+    || die "cannot resolve published digest for $ref"
+  [[ "$digest" == sha256:* && "${#digest}" -eq 71 ]] || die "bad digest for $ref: $digest"
+  printf '%s' "$digest"
+}
+
+image_annotation() {
+  local digest_ref="$1" key="$2" value
+  [[ "$digest_ref" == *@sha256:* ]] || die "annotation inspection requires a digest-bound ref (got $digest_ref)"
+  value="$(docker buildx imagetools inspect "$digest_ref" --format "{{index .Manifest.Annotations \"$key\"}}" 2>/dev/null || true)"
+  printf '%s' "$value" | tr -d '[:space:]'
+}
+
+require_revision() {
+  local digest_ref="$1" intended_sha="$2" label="$3" actual
+  actual="$(image_annotation "$digest_ref" "$REVISION_ANNOTATION")"
+  [[ "$actual" == "$intended_sha" ]] \
+    || die "$label provenance mismatch: $digest_ref has ${REVISION_ANNOTATION}=${actual:-<missing>}, expected $intended_sha"
+}
+
+require_sidecar_eligibility() {
+  local digest_ref="$1" actual
+  actual="$(image_annotation "$digest_ref" "$SIDECAR_ELIGIBILITY_ANNOTATION")"
+  [[ "$actual" == "true" ]] \
+    || die "sidecar is not release-eligible: $digest_ref has ${SIDECAR_ELIGIBILITY_ANNOTATION}=${actual:-<missing>} (expected true)"
+}
+
 # PUSH_GW / PUSH_SC: 1 = build+push this image; 0 = already published, skip.
 # RECEIPT_ONLY: both tags already exist — never overwrite; only re-inspect digests
 # and write the receipt (recovers from a post-push inspect/receipt failure).
-# Provenance SHA comes from image annotations / IRIN_PACK_IMAGES_SOURCE_SHA —
-# never from a possibly different current HEAD (moved-tag safety).
+# Provenance is accepted only when digest-bound annotations match this exact
+# checkout; a moved tag cannot rewrite or recover a receipt for another commit.
 PUSH_GW=1
 PUSH_SC=1
 RECEIPT_ONLY=0
@@ -116,13 +148,31 @@ case "$TAG" in
     ;;
 esac
 
+# A release retry may publish only the missing half of an immutable pair. Before
+# any build or push, prove every existing half is the intended release commit.
+# The sidecar additionally needs the immutable release-eligibility annotation;
+# the compile-time build arg alone is not registry evidence.
+if [[ "$PUSH_GW" -eq 0 ]]; then
+  existing_gw_digest="$(resolve_digest "$GW_IMAGE:$TAG")"
+  require_revision "$GW_IMAGE@$existing_gw_digest" "$SHA" "existing gateway"
+fi
+if [[ "$PUSH_SC" -eq 0 ]]; then
+  existing_sc_digest="$(resolve_digest "$SC_IMAGE:$TAG")"
+  require_revision "$SC_IMAGE@$existing_sc_digest" "$SHA" "existing sidecar"
+  require_sidecar_eligibility "$SC_IMAGE@$existing_sc_digest"
+fi
+
 if [[ "$RECEIPT_ONLY" -eq 1 ]]; then
   echo "=== skip build/push (receipt-only recovery for complete published pair) ==="
   CTX=""
 else
 echo "=== prepare sidecar docker context (worktree-safe) ==="
 CTX=""
-cleanup_ctx() { [[ -n "${CTX:-}" && -d "${CTX:-}" ]] && rm -rf "$CTX"; }
+cleanup_ctx() {
+  if [[ -n "${CTX:-}" && -d "$CTX" ]]; then
+    rm -rf "$CTX"
+  fi
+}
 trap cleanup_ctx EXIT
 if [[ -f "$ROOT/.git" ]]; then
   CTX="$(mktemp -d "${TMPDIR:-/tmp}/irin-gw-pack-ctx.XXXXXX")"
@@ -152,9 +202,13 @@ docker buildx use irin-pack-builder
 # Provenance on every publish: index annotations + image labels so receipt-only
 # recovery can re-read the commit that actually built these digests.
 OCI_REV_ANNOT=(
-  --annotation "index:org.opencontainers.image.revision=${SHA}"
-  --annotation "manifest:org.opencontainers.image.revision=${SHA}"
-  --label "org.opencontainers.image.revision=${SHA}"
+  --annotation "index:${REVISION_ANNOTATION}=${SHA}"
+  --annotation "manifest:${REVISION_ANNOTATION}=${SHA}"
+  --label "${REVISION_ANNOTATION}=${SHA}"
+)
+SIDECAR_ELIGIBILITY_ANNOT=(
+  --annotation "index:${SIDECAR_ELIGIBILITY_ANNOTATION}=true"
+  --annotation "manifest:${SIDECAR_ELIGIBILITY_ANNOTATION}=true"
 )
 
 if [[ "$PUSH_GW" -eq 1 ]]; then
@@ -171,7 +225,9 @@ if [[ "$PUSH_SC" -eq 1 ]]; then
   echo "=== build+push sidecar image (linux/arm64) $SC_IMAGE:$TAG ==="
   docker buildx build --platform linux/arm64 \
     -f "$ROOT/gateway/sidecar-rs/Dockerfile" \
+    --build-arg GW_RELEASE_ELIGIBLE=true \
     "${OCI_REV_ANNOT[@]}" \
+    "${SIDECAR_ELIGIBILITY_ANNOT[@]}" \
     -t "$SC_IMAGE:$TAG" --push "$SIDECAR_CONTEXT"
 else
   echo "=== skip sidecar push (already published, immutable) $SC_IMAGE:$TAG ==="
@@ -182,44 +238,19 @@ trap - EXIT
 CTX=""
 fi
 
-echo "=== resolve published digests ==="
-gw_digest="$(docker buildx imagetools inspect "$GW_IMAGE:$TAG" --format '{{.Manifest.Digest}}')"
-sc_digest="$(docker buildx imagetools inspect "$SC_IMAGE:$TAG" --format '{{.Manifest.Digest}}')"
-[[ "$gw_digest" == sha256:* && "${#gw_digest}" -eq 71 ]] || die "bad gateway digest: $gw_digest"
-[[ "$sc_digest" == sha256:* && "${#sc_digest}" -eq 71 ]] || die "bad sidecar digest: $sc_digest"
+echo "=== resolve and verify published digests ==="
+gw_digest="$(resolve_digest "$GW_IMAGE:$TAG")"
+sc_digest="$(resolve_digest "$SC_IMAGE:$TAG")"
+GW_DIGEST_REF="$GW_IMAGE@$gw_digest"
+SC_DIGEST_REF="$SC_IMAGE@$sc_digest"
 
-# Provenance for the receipt must name the commit that *built* these digests.
-# On a normal publish that is HEAD. On receipt-only recovery we never stamp
-# the current checkout onto foreign digests (e.g. a moved v* tag pointing at
-# a newer main commit while the registry still holds the earlier build).
-image_revision_annotation() {
-  local ref="$1" rev
-  rev="$(docker buildx imagetools inspect "$ref" --format '{{index .Manifest.Annotations "org.opencontainers.image.revision"}}' 2>/dev/null || true)"
-  rev="$(printf '%s' "$rev" | tr -d '[:space:]')"
-  [[ "$rev" =~ ^[0-9a-f]{40}$ ]] || return 1
-  printf '%s' "$rev"
-}
-
-if [[ "$RECEIPT_ONLY" -eq 1 ]]; then
-  SOURCE_SHA=""
-  # Explicit operator override wins (documented recovery path).
-  if [[ -n "${IRIN_PACK_IMAGES_SOURCE_SHA:-}" ]]; then
-    SOURCE_SHA="$(printf '%s' "$IRIN_PACK_IMAGES_SOURCE_SHA" | tr -d '[:space:]')"
-    [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]       || die "IRIN_PACK_IMAGES_SOURCE_SHA must be a 40-char lowercase git SHA (got ${IRIN_PACK_IMAGES_SOURCE_SHA})"
-  else
-    gw_rev="$(image_revision_annotation "$GW_IMAGE:$TAG" || true)"
-    sc_rev="$(image_revision_annotation "$SC_IMAGE:$TAG" || true)"
-    if [[ -n "$gw_rev" && "$gw_rev" == "$sc_rev" ]]; then
-      SOURCE_SHA="$gw_rev"
-    fi
-  fi
-  [[ -n "$SOURCE_SHA" ]] || die "receipt-only recovery: refuse to stamp current checkout ($SHA) onto already-published digests without verified provenance. Re-run with IRIN_PACK_IMAGES_SOURCE_SHA=<40-char commit that built these images>, or ensure both images were published with matching org.opencontainers.image.revision annotations."
-  if [[ "$SOURCE_SHA" != "$SHA" ]]; then
-    echo "NOTE: receipt SOURCE_SHA=$SOURCE_SHA differs from current HEAD=$SHA (provenance from published images / override; digests not rebuilt)"
-  fi
-else
-  SOURCE_SHA="$SHA"
-fi
+# Receipt generation is a release gate, not a place to infer provenance. Both
+# digest-bound images must attest to this exact checkout, and the sidecar must
+# carry the publisher-only eligibility annotation. Ordinary/dev images lack it.
+require_revision "$GW_DIGEST_REF" "$SHA" "gateway"
+require_revision "$SC_DIGEST_REF" "$SHA" "sidecar"
+require_sidecar_eligibility "$SC_DIGEST_REF"
+SOURCE_SHA="$SHA"
 
 mkdir -p "$OUT_DIR"
 RECEIPT="$OUT_DIR/pushed-images-$TAG.env"

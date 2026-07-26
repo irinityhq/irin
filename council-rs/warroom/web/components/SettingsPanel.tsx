@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -23,11 +23,18 @@ import {
   type RuntimeConfig,
 } from "@/lib/runtime-config";
 import {
+  armWithTouchId,
   clearServerLogs,
+  disablePhoneAccess,
   disableGatewayPack,
+  disarmTouchId,
+  enablePhoneAccess,
   enableGatewayPack,
+  enrollTouchId,
   getDesktopRuntimeMode,
   getGatewayPackStatus,
+  getPhoneAccessStatus,
+  getTouchIdStatus,
   getServerLogs,
   isTauri,
   onCouncilLog,
@@ -37,10 +44,29 @@ import {
   stopCouncilServer,
   stopGatewayPack,
   uninstallGatewayPack,
+  renewTouchIdArm,
   type DesktopRuntimeMode,
   type GatewayPackStatus,
+  type PhoneAccessStatus,
+  type TouchIdStatus,
 } from "@/lib/tauri";
-import { gatewayPackStateLabel } from "@/lib/gateway-pack";
+import {
+  beginGatewayPackAction,
+  createGatewayPackOperationFence,
+  endGatewayPackAction,
+  gatewayPackStateLabel,
+  runGatewayPackStatusWriterIfCurrent,
+} from "@/lib/gateway-pack";
+import {
+  beginTouchIdDisarm,
+  createTouchIdOperationFence,
+  endTouchIdDisarm,
+  invalidateTouchIdStatusOperations,
+  runTouchIdStatusWriterIfCurrent,
+  touchIdArmSuccessMessage,
+} from "@/lib/touch-id";
+import TouchIdControl from "./TouchIdControl";
+import PhoneAccessControl from "./PhoneAccessControl";
 import { probeWsUpgrade } from "@/lib/ws-probe";
 import { cn } from "@/lib/cn";
 import { useToast } from "./Toast";
@@ -78,6 +104,14 @@ export default function SettingsPanel() {
   const [restarting, setRestarting] = useState(false);
   const [packStatus, setPackStatus] = useState<GatewayPackStatus | null>(null);
   const [packBusy, setPackBusy] = useState(false);
+  const packOperationFence = useRef(createGatewayPackOperationFence());
+  const [phoneStatus, setPhoneStatus] = useState<PhoneAccessStatus | null>(null);
+  const [phoneBusy, setPhoneBusy] = useState(false);
+  const [touchIdStatus, setTouchIdStatus] = useState<TouchIdStatus | null>(null);
+  const [touchIdBusy, setTouchIdBusy] = useState(false);
+  const [touchIdDisarmBusy, setTouchIdDisarmBusy] = useState(false);
+  const touchIdOperationFence = useRef(createTouchIdOperationFence());
+  const touchIdActionBusy = useRef(false);
   const [confirmingUninstall, setConfirmingUninstall] = useState(false);
   const inTauri = isTauri();
   const [desktopRuntimeMode, setDesktopRuntimeMode] = useState<
@@ -88,12 +122,120 @@ export default function SettingsPanel() {
 
   const refreshPackStatus = useCallback(async () => {
     if (!inTauri) return;
+    await runGatewayPackStatusWriterIfCurrent(
+      packOperationFence.current,
+      getGatewayPackStatus,
+      setPackStatus,
+      () => setPackStatus(null),
+    );
+  }, [inTauri]);
+
+  const runGatewayPackAction = useCallback(
+    async (
+      action: () => Promise<GatewayPackStatus>,
+      onSuccess: (status: GatewayPackStatus) => void,
+    ) => {
+      beginGatewayPackAction(packOperationFence.current);
+      setPackBusy(true);
+      let refreshAfterError = false;
+      try {
+        const status = await action();
+        setPackStatus(status);
+        onSuccess(status);
+      } catch (error) {
+        toast("error", error instanceof Error ? error.message : String(error));
+        refreshAfterError = true;
+      } finally {
+        endGatewayPackAction(packOperationFence.current);
+        setPackBusy(false);
+      }
+      if (refreshAfterError) void refreshPackStatus();
+    },
+    [refreshPackStatus, toast],
+  );
+
+  const refreshPhoneStatus = useCallback(async () => {
+    if (!inTauri) return;
     try {
-      setPackStatus(await getGatewayPackStatus());
+      setPhoneStatus(await getPhoneAccessStatus());
     } catch {
-      setPackStatus(null);
+      setPhoneStatus(null);
     }
   }, [inTauri]);
+
+  const refreshTouchIdStatus = useCallback(async () => {
+    if (!inTauri || touchIdActionBusy.current) return;
+    await runTouchIdStatusWriterIfCurrent(
+      touchIdOperationFence.current,
+      getTouchIdStatus,
+      setTouchIdStatus,
+      () => setTouchIdStatus(null),
+    );
+  }, [inTauri]);
+
+  const runTouchIdAction = useCallback(
+    async (
+      action: () => Promise<TouchIdStatus>,
+      successMessage: string | ((status: TouchIdStatus) => string),
+    ) => {
+      // Enrollment, Arm, and Renew own the visible Touch ID projection until
+      // their native boundary settles. Invalidate a poll already in flight and
+      // refuse new background polls so neither can repaint a pre-action state.
+      touchIdActionBusy.current = true;
+      invalidateTouchIdStatusOperations(touchIdOperationFence.current);
+      setTouchIdBusy(true);
+      let refreshAfterError = false;
+      try {
+        await runTouchIdStatusWriterIfCurrent(
+          touchIdOperationFence.current,
+          action,
+          (next) => {
+            setTouchIdStatus(next);
+            const message =
+              typeof successMessage === "function"
+                ? successMessage(next)
+                : successMessage;
+            toast("success", message);
+          },
+          (error) => {
+            toast(
+              "error",
+              error instanceof Error ? error.message : String(error),
+            );
+            refreshAfterError = true;
+          },
+        );
+      } finally {
+        invalidateTouchIdStatusOperations(touchIdOperationFence.current);
+        touchIdActionBusy.current = false;
+        setTouchIdBusy(false);
+      }
+      if (refreshAfterError) void refreshTouchIdStatus();
+    },
+    [refreshTouchIdStatus, toast],
+  );
+
+  const runTouchIdDisarm = useCallback(async () => {
+    // Disarm owns the entire renderer boundary at click time. Status writers
+    // that were already pending become stale, and new polls are rejected until
+    // the native kill-switch has settled.
+    beginTouchIdDisarm(touchIdOperationFence.current);
+    setTouchIdDisarmBusy(true);
+    try {
+      const next = await disarmTouchId();
+      endTouchIdDisarm(touchIdOperationFence.current);
+      setTouchIdStatus(next);
+      toast("success", "Disarmed");
+    } catch (e) {
+      // Reopen writers only after invalidating every read attempted during the
+      // failed boundary, then fetch one fresh authoritative projection.
+      endTouchIdDisarm(touchIdOperationFence.current);
+      toast("error", e instanceof Error ? e.message : String(e));
+      void refreshTouchIdStatus();
+    } finally {
+      setTouchIdDisarmBusy(false);
+    }
+  }, [refreshTouchIdStatus, toast]);
 
   const remoteWarnings = useMemo(() => {
     const urls = [
@@ -135,11 +277,21 @@ export default function SettingsPanel() {
   useEffect(() => {
     if (!inTauri || desktopRuntimeMode !== "installed-release") return;
     void refreshPackStatus();
+    void refreshPhoneStatus();
+    void refreshTouchIdStatus();
     const t = window.setInterval(() => {
       void refreshPackStatus();
+      void refreshPhoneStatus();
+      void refreshTouchIdStatus();
     }, 8000);
     return () => window.clearInterval(t);
-  }, [inTauri, desktopRuntimeMode, refreshPackStatus]);
+  }, [
+    inTauri,
+    desktopRuntimeMode,
+    refreshPackStatus,
+    refreshPhoneStatus,
+    refreshTouchIdStatus,
+  ]);
 
   useEffect(() => {
     if (!showServerLog || !inTauri) return;
@@ -478,23 +630,15 @@ export default function SettingsPanel() {
               aria-busy={packBusy}
               className="btn btn-cyan text-xs"
               disabled={packBusy}
-              onClick={async () => {
-                setPackBusy(true);
-                try {
-                  const st = await enableGatewayPack();
-                  setPackStatus(st);
+              onClick={() =>
+                void runGatewayPackAction(enableGatewayPack, (status) => {
                   const ok =
-                    st.state === "authenticated_ready" &&
-                    st.authenticated &&
-                    st.council_governed;
-                  toast(ok ? "success" : "error", st.message);
-                } catch (e) {
-                  toast("error", e instanceof Error ? e.message : String(e));
-                  void refreshPackStatus();
-                } finally {
-                  setPackBusy(false);
-                }
-              }}
+                    status.state === "authenticated_ready" &&
+                    status.authenticated &&
+                    status.council_governed;
+                  toast(ok ? "success" : "error", status.message);
+                })
+              }
             >
               {packBusy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
               Enable Gateway
@@ -506,22 +650,14 @@ export default function SettingsPanel() {
               aria-busy={packBusy}
               className="btn btn-primary text-xs"
               disabled={packBusy}
-              onClick={async () => {
-                setPackBusy(true);
-                try {
-                  const st = await disableGatewayPack();
-                  setPackStatus(st);
+              onClick={() =>
+                void runGatewayPackAction(disableGatewayPack, (status) => {
                   toast(
-                    st.council_governed ? "error" : "success",
-                    st.message || "Gateway disabled — Direct mode restored",
+                    status.council_governed ? "error" : "success",
+                    status.message || "Gateway disabled — Direct mode restored",
                   );
-                } catch (e) {
-                  toast("error", e instanceof Error ? e.message : String(e));
-                  void refreshPackStatus();
-                } finally {
-                  setPackBusy(false);
-                }
-              }}
+                })
+              }
             >
               Disable
             </button>
@@ -532,22 +668,14 @@ export default function SettingsPanel() {
               aria-busy={packBusy}
               className="btn text-xs"
               disabled={packBusy}
-              onClick={async () => {
-                setPackBusy(true);
-                try {
-                  const st = await stopGatewayPack();
-                  setPackStatus(st);
+              onClick={() =>
+                void runGatewayPackAction(stopGatewayPack, (status) => {
                   toast(
-                    st.council_governed ? "error" : "success",
-                    st.message || "Gateway pack stopped",
+                    status.council_governed ? "error" : "success",
+                    status.message || "Gateway pack stopped",
                   );
-                } catch (e) {
-                  toast("error", e instanceof Error ? e.message : String(e));
-                  void refreshPackStatus();
-                } finally {
-                  setPackBusy(false);
-                }
-              }}
+                })
+              }
             >
               Stop pack
             </button>
@@ -571,27 +699,19 @@ export default function SettingsPanel() {
                   data-testid="settings-gateway-pack-uninstall-confirm"
                   aria-label="Confirm uninstall"
                   className="btn text-xs text-red-400"
-                  onClick={async () => {
+                  onClick={() => {
                     // Two-step inline confirm — window.confirm is unreliable
                     // in the packaged WKWebView, and a dedicated button keeps
                     // the destructive action explicit and accessibility-testable.
                     setConfirmingUninstall(false);
-                    setPackBusy(true);
-                    try {
-                      const st = await uninstallGatewayPack();
-                      setPackStatus(st);
+                    void runGatewayPackAction(uninstallGatewayPack, (status) => {
                       toast(
-                        st.state === "not_installed" || !st.enabled
+                        status.state === "not_installed" || !status.enabled
                           ? "success"
                           : "error",
-                        st.message || "Gateway pack uninstalled",
+                        status.message || "Gateway pack uninstalled",
                       );
-                    } catch (e) {
-                      toast("error", e instanceof Error ? e.message : String(e));
-                      void refreshPackStatus();
-                    } finally {
-                      setPackBusy(false);
-                    }
+                    });
                   }}
                 >
                   Confirm uninstall
@@ -607,7 +727,62 @@ export default function SettingsPanel() {
               </>
             )}
           </div>
+          <TouchIdControl
+            status={touchIdStatus}
+            primaryBusy={touchIdBusy}
+            disarmBusy={touchIdDisarmBusy}
+            onEnroll={() =>
+              void runTouchIdAction(enrollTouchId, "Touch ID ready")
+            }
+            onArm={() =>
+              void runTouchIdAction(armWithTouchId, touchIdArmSuccessMessage)
+            }
+            onRenew={() =>
+              void runTouchIdAction(renewTouchIdArm, "Lease renewed")
+            }
+            onDisarm={() => void runTouchIdDisarm()}
+          />
         </div>
+      )}
+
+      {installedRelease && inTauri && (
+        <PhoneAccessControl
+          status={phoneStatus}
+          busy={phoneBusy}
+          notify={toast}
+          onEnable={async () => {
+            setPhoneBusy(true);
+            try {
+              const status = await enablePhoneAccess();
+              setPhoneStatus(status);
+              toast(
+                status.state === "ready" ? "success" : "error",
+                status.message,
+              );
+            } catch (e) {
+              toast("error", e instanceof Error ? e.message : String(e));
+              void refreshPhoneStatus();
+            } finally {
+              setPhoneBusy(false);
+            }
+          }}
+          onDisable={async () => {
+            setPhoneBusy(true);
+            try {
+              const status = await disablePhoneAccess();
+              setPhoneStatus(status);
+              toast(
+                status.state === "off" ? "success" : "error",
+                status.message,
+              );
+            } catch (e) {
+              toast("error", e instanceof Error ? e.message : String(e));
+              void refreshPhoneStatus();
+            } finally {
+              setPhoneBusy(false);
+            }
+          }}
+        />
       )}
 
       {debugSidecarAvailable && <div className="border border-border bg-bg-elevated p-5 space-y-3" data-testid="settings-gateway-mode">

@@ -23,7 +23,7 @@ if [[ -n "${IRIN_TAURI_BUILD_GIT_SHA:-}" ]]; then
   export COUNCIL_BUILD_GIT_SHA="${COUNCIL_BUILD_GIT_SHA:-$IRIN_TAURI_BUILD_GIT_SHA}"
 fi
 if [[ -z "${IRIN_TAURI_BUILD_DIRTY:-}" ]]; then
-  if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no 2>/dev/null || true)" ]]; then
+  if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal 2>/dev/null || true)" ]]; then
     export IRIN_TAURI_BUILD_DIRTY=true
   else
     export IRIN_TAURI_BUILD_DIRTY=false

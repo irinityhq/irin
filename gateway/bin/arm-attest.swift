@@ -27,8 +27,22 @@ import CryptoKit
 import Foundation
 import LocalAuthentication
 
-let CONFIG_DIR = FileManager.default.homeDirectoryForCurrentUser
-    .appendingPathComponent(".config/gateway", isDirectory: true)
+let CONFIG_DIR: URL = {
+    if let configured = ProcessInfo.processInfo.environment["IRIN_ARM_ATTEST_DIR"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines),
+       !configured.isEmpty {
+        guard configured.hasPrefix("/") else {
+            FileHandle.standardError.write(
+                "arm-attest: IRIN_ARM_ATTEST_DIR must be absolute\n".data(using: .utf8)!)
+            exit(64)
+        }
+        return URL(fileURLWithPath: configured, isDirectory: true)
+    }
+    // Legacy CLI default. The installed IRIN app always supplies its own
+    // Application Support directory and never adopts this ad-hoc key blob.
+    return FileManager.default.homeDirectoryForCurrentUser
+        .appendingPathComponent(".config/gateway", isDirectory: true)
+}()
 let KEY_PATH = CONFIG_DIR.appendingPathComponent("arm-attest.key")
 let RATELIMIT_PATH = CONFIG_DIR.appendingPathComponent("arm-attest.ratelimit")
 let RATE_WINDOW_S: TimeInterval = 300

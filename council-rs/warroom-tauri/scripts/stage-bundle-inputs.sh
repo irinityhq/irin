@@ -76,6 +76,24 @@ chmod +x "$ADAPTER_DST"
 [[ -x "$ADAPTER_DST" ]] || die "staged hermes seat adapter not executable: $ADAPTER_DST"
 [[ -d "$RES_STAGE/cabinets" ]] || die "staged cabinets missing"
 
+# Touch ID signing helper. Built from canonical source into the Tauri staging
+# tree; tauri.conf.json places the Mach-O under Contents/Helpers, Apple's
+# standard nested-code location. Production signs it inside-out with Developer
+# ID, Hardened Runtime, and a secure timestamp. The native host pins its SHA-256
+# at enrollment, so a changed helper forces explicit re-enrollment.
+# macOS-only: the helper needs Secure Enclave + LocalAuthentication.
+HELPER_SRC="$REPO_ROOT/gateway/bin/arm-attest.swift"
+HELPER_DST="$SRC_TAURI/resources/arm-attest"
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  [[ -f "$HELPER_SRC" ]] || die "Touch ID helper source missing: $HELPER_SRC"
+  command -v swiftc >/dev/null 2>&1 || die "swiftc is required to stage the Touch ID helper"
+  mkdir -p "$(dirname "$HELPER_DST")"
+  swiftc -O -o "$HELPER_DST" "$HELPER_SRC"
+  chmod +x "$HELPER_DST"
+  [[ -x "$HELPER_DST" ]] || die "staged Touch ID helper not executable: $HELPER_DST"
+  echo "staged touch-id helper: $HELPER_DST"
+fi
+
 echo "staged binary: $BIN_STAGE/council-${TRIPLE}"
 echo "staged base-dir: $RES_STAGE"
 echo "staged hermes adapter: $ADAPTER_DST"

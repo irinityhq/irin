@@ -59,6 +59,7 @@ pub use writer_claim::{writer_claim_heartbeat_loop, writer_claim_heartbeat_step}
 
 pub use arming::{
     admin_arm_confirm_json, admin_arm_pending_json, admin_arm_producer_json, admin_arm_stage_json,
-    admin_disarm_producer_json, arm_admin_router, arm_stage_ttl, auto_disarm_producer,
-    ArmAdminRouterState, ArmDeviationTags, ArmNotifier, ArmPrincipals, ARM_STAGE_TTL_MS_DEFAULT,
+    admin_arm_status_json, admin_disarm_producer_json, arm_admin_router, arm_stage_ttl,
+    auto_disarm_producer, ArmAdminRouterState, ArmDeviationTags, ArmNotifier, ArmPrincipals,
+    ArmStatusView, ARM_STAGE_TTL_MS_DEFAULT,
 };

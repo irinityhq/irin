@@ -6,16 +6,25 @@ mod build_support;
 mod docker_cli;
 mod gateway_pack;
 mod keychain;
+mod lifecycle;
 mod paths;
+mod phone_access;
 mod private_config;
 mod sidecar;
+mod tailscale_cli;
+mod touch_id;
 
 use gateway_pack::{GatewayPackState, GatewayPackStatus};
 use keychain::{load_gw_api_key, migrate_legacy_secrets, KeychainSecretStore};
+use lifecycle::{
+    classify_council_lifecycle, classify_gateway_lifecycle, classify_phone_lifecycle,
+    compose_app_lifecycle, AppLifecycleStatus, CouncilLifecycleInput,
+};
 use paths::{
     build_cors_origins, default_serve_port, is_packaged_install, resolve_council_binary,
     resolve_council_rs_dir, resolve_spawn_base_dir, validate_serve_port,
 };
+use phone_access::{LiveTailscaleRunner, PhoneAccessStatus};
 use private_config::{
     ensure_writable_base_overlay, gui_login_environment, load_or_create_private_config,
 };
@@ -28,6 +37,7 @@ use std::time::Duration;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
+    webview::PageLoadEvent,
     AppHandle, Emitter, Manager, RunEvent, State,
 };
 use tauri_plugin_dialog::DialogExt;
@@ -131,6 +141,10 @@ fn show_main_window(app: &AppHandle) {
     if let Err(error) = window.set_focus() {
         eprintln!("[tray] failed to focus War Room window: {error}");
     }
+}
+
+fn should_reveal_main_window(webview_label: &str, event: PageLoadEvent) -> bool {
+    webview_label == "main" && event == PageLoadEvent::Finished
 }
 
 /// Best-effort kill of the tracked council sidecar (shared by stop command, tray, and app exit).
@@ -361,8 +375,20 @@ fn try_start_council_server(
     };
 
     let cors_origins = build_cors_origins(port);
+    // Packaged: pass bundled War Room export via --web-dist when present so the
+    // phone surface shares Council :8765 (no permanent :3010). Dev omits it.
+    let web_dist = if packaged {
+        paths::bundled_web_dist().map(|p| p.to_string_lossy().into_owned())
+    } else {
+        None
+    };
     // compose_sidecar_args: first arg is default base-dir; third overrides --base-dir.
-    let args = compose_sidecar_args(&spawn_base_str, port, Some(spawn_base_str.as_str()));
+    let args = compose_sidecar_args(
+        &spawn_base_str,
+        port,
+        Some(spawn_base_str.as_str()),
+        web_dist.as_deref(),
+    );
 
     let mut command = app
         .shell()
@@ -945,6 +971,83 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<GatewayPackStatus, Str
     .map_err(|e| e.to_string())?
 }
 
+// ---------------------------------------------------------------------------
+// Touch ID product control
+//
+// The renderer can only trigger these fixed workflows and read the non-secret
+// status projection. Helper invocation, the Secure Enclave signature, the
+// arm-principal bearer, and stage/confirm/disarm stay native. Nothing runs at
+// launch.
+// ---------------------------------------------------------------------------
+
+fn gateway_ready_for_arm() -> bool {
+    let store = KeychainSecretStore;
+    let st = gateway_pack::gateway_pack_status(&store);
+    st.enabled && st.authenticated && st.state.allows_governed()
+}
+
+#[tauri::command]
+async fn touch_id_status() -> Result<touch_id::TouchIdStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let store = KeychainSecretStore;
+        Ok(touch_id::touch_id_status(&store, gateway_ready_for_arm()))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn touch_id_enroll() -> Result<touch_id::TouchIdStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let store = KeychainSecretStore;
+        touch_id::enroll(&store, gateway_ready_for_arm())?;
+
+        // Enrollment changes both the public credential registry and the
+        // Keychain-held arm principal. Refresh the operator-owned pack now so
+        // its boot-time allowlists match; setup is explicit, but no producer is
+        // armed by this action.
+        let pack = gateway_pack::enable_gateway_pack(&store)?;
+        if !pack.enabled || !pack.authenticated || !pack.state.allows_governed() {
+            return Err(
+                "Touch ID enrolled, but Gateway could not reload its arm registry".to_string(),
+            );
+        }
+        Ok(touch_id::touch_id_status(&store, true))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn touch_id_arm() -> Result<touch_id::TouchIdStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let store = KeychainSecretStore;
+        touch_id::arm(&store)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn touch_id_renew() -> Result<touch_id::TouchIdStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let store = KeychainSecretStore;
+        touch_id::renew(&store)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn touch_id_disarm() -> Result<touch_id::TouchIdStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let store = KeychainSecretStore;
+        touch_id::disarm(&store)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Native file picker (cabinet yamls, session json, map dirs, etc.).
 #[tauri::command]
 async fn pick_file(app: AppHandle) -> Result<Option<String>, String> {
@@ -1007,6 +1110,117 @@ async fn save_pdf(app: AppHandle, data: Vec<u8>, filename: String) -> Result<Str
     }
 }
 
+/// Whether Gateway Pack is currently enabled (non-secret status sample).
+fn gateway_pack_enabled_flag() -> bool {
+    let store = KeychainSecretStore;
+    gateway_pack::gateway_pack_status(&store).enabled
+}
+
+/// Authenticated, build-matched Council readiness owned entirely by native
+/// code. This is the only readiness proof accepted before publishing Council
+/// to the operator's tailnet.
+fn council_backend_ready(app: &AppHandle) -> bool {
+    let auth_token = {
+        let state = app.state::<SpawnConfigCache>();
+        state
+            .0
+            .lock()
+            .ok()
+            .and_then(|config| config.auth_token.clone())
+    };
+    let port = default_serve_port().unwrap_or(8765);
+    let (expected_sha, expected_dirty) = bundled_build_identity();
+    matches!(
+        probe_council_server(
+            port,
+            Duration::from_millis(400),
+            expected_sha,
+            expected_dirty,
+            auth_token.as_deref(),
+        ),
+        CouncilServerProbe::MatchingBuild
+    )
+}
+
+/// Non-secret phone access status (no bearer token, no pairing secret).
+#[tauri::command]
+async fn phone_access_status(app: AppHandle) -> Result<PhoneAccessStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let gw = gateway_pack_enabled_flag();
+        let council_ready = council_backend_ready(&app);
+        Ok(phone_access::phone_access_status(
+            &LiveTailscaleRunner,
+            gw,
+            council_ready,
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Enable private phone publication via Tailscale Serve (never Funnel).
+#[tauri::command]
+async fn phone_access_enable(app: AppHandle) -> Result<PhoneAccessStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let gw = gateway_pack_enabled_flag();
+        let council_ready = council_backend_ready(&app);
+        if !council_ready {
+            return Err(
+                "Council is not authenticated-ready on the bundled build; phone access was not changed"
+                    .to_string(),
+            );
+        }
+        phone_access::phone_access_enable(&LiveTailscaleRunner, gw, council_ready)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Disable phone publication by restoring the prior Serve snapshot.
+#[tauri::command]
+async fn phone_access_disable(app: AppHandle) -> Result<PhoneAccessStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let gw = gateway_pack_enabled_flag();
+        let council_ready = council_backend_ready(&app);
+        phone_access::phone_access_disable(&LiveTailscaleRunner, gw, council_ready)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Aggregate product lifecycle: Council, optional Gateway, phone access.
+///
+/// Pure composition over existing subsystem owners — does not spawn a second
+/// Council or Gateway launcher. Quit leaves app-owned Serve configured.
+#[tauri::command]
+async fn app_lifecycle_status(app: AppHandle) -> Result<AppLifecycleStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let owned_child = {
+            let state = app.state::<CouncilServer>();
+            state.0.lock().map(|g| g.child.is_some()).unwrap_or(false)
+        };
+        let health_ready = council_backend_ready(&app);
+        let council = classify_council_lifecycle(CouncilLifecycleInput {
+            owned_child,
+            stopping: false,
+            health_ready,
+            last_error: false,
+        });
+
+        let store = KeychainSecretStore;
+        let pack = gateway_pack::gateway_pack_status(&store);
+        let gateway = classify_gateway_lifecycle(pack.state);
+
+        let phone =
+            phone_access::phone_access_status(&LiveTailscaleRunner, pack.enabled, health_ready);
+        let phone_life = classify_phone_lifecycle(phone.state);
+
+        Ok(compose_app_lifecycle(council, gateway, phone_life))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -1026,6 +1240,15 @@ pub fn run() {
             gateway_pack_disable,
             gateway_pack_stop,
             gateway_pack_uninstall,
+            touch_id_status,
+            touch_id_enroll,
+            touch_id_arm,
+            touch_id_renew,
+            touch_id_disarm,
+            phone_access_status,
+            phone_access_enable,
+            phone_access_disable,
+            app_lifecycle_status,
             pick_file,
             ping_council,
             get_server_logs,
@@ -1036,6 +1259,28 @@ pub fn run() {
             desktop_runtime_config,
             report_council_runtime_ready
         ])
+        .on_page_load(|webview, payload| {
+            if !should_reveal_main_window(webview.label(), payload.event()) {
+                return;
+            }
+            let window = webview.window();
+            match window.is_visible() {
+                Ok(false) => {
+                    if let Err(error) = window.show() {
+                        eprintln!("[webview] failed to reveal loaded War Room window: {error}");
+                    } else {
+                        eprintln!("[webview] loaded War Room window revealed");
+                        if let Err(error) = window.set_focus() {
+                            eprintln!("[webview] failed to focus loaded War Room window: {error}");
+                        }
+                    }
+                }
+                Ok(true) => {}
+                Err(error) => {
+                    eprintln!("[webview] failed to inspect War Room window visibility: {error}")
+                }
+            }
+        })
         .setup(|app| {
             // One-time, non-destructive adoption of Keychain secrets stored by
             // the legacy "Council War Room" build (never deletes legacy items).
@@ -1208,8 +1453,10 @@ pub fn run() {
 #[cfg(test)]
 mod runtime_mode_tests {
     use super::{
-        desktop_runtime_config_value, desktop_runtime_mode_value, validate_runtime_ready_port,
+        desktop_runtime_config_value, desktop_runtime_mode_value, should_reveal_main_window,
+        validate_runtime_ready_port,
     };
+    use tauri::webview::PageLoadEvent;
 
     #[test]
     fn runtime_mode_matches_the_native_build_profile() {
@@ -1236,5 +1483,15 @@ mod runtime_mode_tests {
     fn runtime_ready_receipt_accepts_only_the_selected_port() {
         assert!(validate_runtime_ready_port(20_321, 20_321).is_ok());
         assert!(validate_runtime_ready_port(8_765, 20_321).is_err());
+    }
+
+    #[test]
+    fn initial_main_window_reveals_only_after_page_load_finishes() {
+        assert!(!should_reveal_main_window("main", PageLoadEvent::Started));
+        assert!(should_reveal_main_window("main", PageLoadEvent::Finished));
+        assert!(!should_reveal_main_window(
+            "secondary",
+            PageLoadEvent::Finished
+        ));
     }
 }

@@ -50,6 +50,19 @@ fi
 if ! grep -q 'irin-desktop-gateway' "$SRC_PACK/docker-compose.yml"; then
   die "gateway pack compose must declare fixed project name irin-desktop-gateway"
 fi
+# Touch ID bridge: WATCH_ADMIN_TOKEN stays an empty literal that accepts no env
+# input, and only the two admitted arm keys may be interpolated.
+if ! grep -q '^[[:space:]]*-[[:space:]]*WATCH_ADMIN_TOKEN=$' "$SRC_PACK/docker-compose.yml"; then
+  die "gateway pack compose must keep WATCH_ADMIN_TOKEN as an empty literal"
+fi
+if grep -E '^[[:space:]]*-[[:space:]]*(WATCH_ADMIN_TOKEN|COUNCIL_GATEWAY_TOKEN|WATCH_DISPATCHER_GATEWAY_KEY)=.*\$\{' \
+    "$SRC_PACK/docker-compose.yml" >/dev/null; then
+  die "gateway pack compose must not interpolate admin/watch token surfaces"
+fi
+if grep -E '^[[:space:]]*-[[:space:]]*(GW_ARM_DEVIATION_FLAG|GW_ARM_PRINCIPAL_DOMAINS|ARM_NOTIFY_URL|ARM_STAGE_TTL_MS)=.*\$\{' \
+    "$SRC_PACK/docker-compose.yml" >/dev/null; then
+  die "gateway pack admits only GW_ARM_PRINCIPALS and GW_ARM_ATTEST_KEYS_PATH on the arm surface"
+fi
 
 pick_manifest() {
   if [[ "$MODE" == "production" ]]; then
@@ -69,6 +82,11 @@ pick_manifest() {
     if grep -qE 'sha256:0{64}' "$PROD_MANIFEST_SRC"; then
       die "production manifest has placeholder zero digests"
     fi
+    intended_sha="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)"
+    intended_sha="$(printf '%s' "$intended_sha" | tr -d '[:space:]')"
+    bash "$ROOT/scripts/verify-production-image-provenance.sh" \
+      "$PROD_MANIFEST_SRC" "$intended_sha" "${IRIN_RELEASE_VERSION:-}" >&2 \
+      || die "production manifest failed immutable registry provenance verification"
     printf '%s\n' "$PROD_MANIFEST_SRC"
     return
   fi
@@ -94,6 +112,10 @@ MANIFEST_SRC="$(pick_manifest)"
 
 rm -rf "$DEST"
 mkdir -p "$DEST"
+# Non-secret desktop feature marker. OpenResty workers can read this without
+# weakening the root-owned 0600 attestation registry mounted only to sidecar.
+printf '' >"$DEST/arm-bridge-enabled"
+chmod 0644 "$DEST/arm-bridge-enabled"
 cp -f "$SRC_PACK/docker-compose.yml" "$DEST/docker-compose.yml"
 cp -f "$SRC_PACK/README.md" "$DEST/README.md"
 cp -f "$GATEWAY/nginx.conf" "$DEST/nginx.conf"

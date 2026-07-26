@@ -109,22 +109,34 @@ fn upsert_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
 /// the repo root (`--base-dir` is authoritative for cabinets/prompts/models.yaml
 /// per the council CLI; `COUNCIL_RS_DIR` is the knob for relocating the whole
 /// checkout including the binary).
+///
+/// `web_dist` is the packaged War Room static export (`--web-dist`). Development
+/// builds pass `None` so behavior stays unchanged (no permanent :3010 server).
+/// When set (non-blank), Council serves the export on the same loopback origin
+/// for private phone access; the Tauri webview still uses its embedded
+/// `frontendDist`.
 pub fn compose_sidecar_args(
     council_rs_dir: &str,
     port: u16,
     council_root: Option<&str>,
+    web_dist: Option<&str>,
 ) -> Vec<String> {
     let base_dir = council_root
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(council_rs_dir);
-    vec![
+    let mut args = vec![
         "--base-dir".to_string(),
         base_dir.to_string(),
         "--serve".to_string(),
         "--port".to_string(),
         port.to_string(),
-    ]
+    ];
+    if let Some(dist) = web_dist.map(str::trim).filter(|s| !s.is_empty()) {
+        args.push("--web-dist".to_string());
+        args.push(dist.to_string());
+    }
+    args
 }
 
 /// Validate a user-supplied council root before it becomes `--base-dir`.
@@ -373,7 +385,7 @@ mod tests {
 
     #[test]
     fn compose_args_default_base_dir_pins_full_arg_order() {
-        let args = compose_sidecar_args("/repo/council-rs", 8765, None);
+        let args = compose_sidecar_args("/repo/council-rs", 8765, None, None);
         assert_eq!(
             args,
             vec![
@@ -388,7 +400,7 @@ mod tests {
 
     #[test]
     fn compose_args_council_root_overrides_base_dir_only() {
-        let args = compose_sidecar_args("/repo/council-rs", 8765, Some("/elsewhere/base"));
+        let args = compose_sidecar_args("/repo/council-rs", 8765, Some("/elsewhere/base"), None);
         assert_eq!(
             args,
             vec!["--base-dir", "/elsewhere/base", "--serve", "--port", "8765"]
@@ -398,7 +410,7 @@ mod tests {
     #[test]
     fn compose_args_blank_council_root_falls_back_to_repo_root() {
         for root in [Some(""), Some("   "), None] {
-            let args = compose_sidecar_args("/repo/council-rs", 8765, root);
+            let args = compose_sidecar_args("/repo/council-rs", 8765, root, None);
             assert_eq!(args[1], "/repo/council-rs", "{root:?}");
         }
     }
@@ -407,13 +419,49 @@ mod tests {
     fn compose_args_council_root_combines_with_via_gateway_env() {
         // councilRoot travels in ARGS, via_gateway/auth in ENV — both optional,
         // both set here; neither channel leaks into the other.
-        let args = compose_sidecar_args("/repo", 8765, Some("/custom"));
+        let args = compose_sidecar_args("/repo", 8765, Some("/custom"), None);
         let env = compose_sidecar_env("o", false, Some("tok"), Some(true), None, None);
         assert_eq!(args[1], "/custom");
         assert_eq!(env_value(&env, "COUNCIL_VIA_GATEWAY"), Some("1"));
         assert_eq!(env_value(&env, "COUNCIL_AUTH_TOKEN"), Some("tok"));
         assert!(!args.iter().any(|a| a.contains("gateway")));
         assert!(!env.iter().any(|(k, _)| k.contains("BASE_DIR")));
+    }
+
+    #[test]
+    fn compose_args_packaged_web_dist_appends_flag() {
+        let args = compose_sidecar_args(
+            "/app/support/council-base",
+            8765,
+            Some("/app/support/council-base"),
+            Some("/App/Contents/Resources/warroom-web"),
+        );
+        assert_eq!(
+            args,
+            vec![
+                "--base-dir",
+                "/app/support/council-base",
+                "--serve",
+                "--port",
+                "8765",
+                "--web-dist",
+                "/App/Contents/Resources/warroom-web",
+            ]
+        );
+    }
+
+    #[test]
+    fn compose_args_development_omits_web_dist() {
+        let args = compose_sidecar_args("/repo/council-rs", 8765, None, None);
+        assert!(!args.iter().any(|a| a == "--web-dist"));
+        // Blank/whitespace web_dist is treated as absent (dev unchanged).
+        for dist in [Some(""), Some("   ")] {
+            let args = compose_sidecar_args("/repo/council-rs", 8765, None, dist);
+            assert!(
+                !args.iter().any(|a| a == "--web-dist"),
+                "blank web_dist should not append: {dist:?}"
+            );
+        }
     }
 
     #[test]

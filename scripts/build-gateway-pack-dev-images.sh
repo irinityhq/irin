@@ -85,6 +85,24 @@ EOF
       git -C "$CTX" update-index --force-remove -- "$rel" 2>/dev/null || true
     fi
   done < <(git -C "$CTX" ls-files)
+
+  # Dirty local-dev builds must compile the actual candidate, not silently
+  # fall back to archived HEAD. Overlay tracked changes as a binary-safe patch
+  # and copy only Git-visible untracked source. The temporary repository then
+  # truthfully reports dirty provenance to build.rs inside Docker.
+  if [[ "$DIRTY_COUNT" != "0" ]]; then
+    if ! git -C "$ROOT" diff --quiet HEAD --; then
+      git -C "$ROOT" diff --binary HEAD -- |
+        git -C "$CTX" apply --whitespace=nowarn -
+    fi
+    while IFS= read -r -d '' rel; do
+      mkdir -p "$CTX/$(dirname "$rel")"
+      cp -p "$ROOT/$rel" "$CTX/$rel"
+    done < <(git -C "$ROOT" ls-files --others --exclude-standard -z)
+    [[ -n "$(git -C "$CTX" status --porcelain)" ]] ||
+      die "dirty worktree overlay produced a clean sidecar context"
+  fi
+
   git -C "$CTX" rev-parse HEAD >/dev/null \
     || die "materialized context is not a git repository"
   SIDECAR_CONTEXT="$CTX"

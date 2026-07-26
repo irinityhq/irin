@@ -15,6 +15,7 @@ pub mod provider;
 pub mod registry;
 pub mod scrub;
 pub mod server;
+pub mod static_web;
 pub mod stream;
 pub mod types;
 pub mod warroom;

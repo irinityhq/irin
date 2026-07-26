@@ -31,7 +31,6 @@ import {
 } from "@/lib/use-discover";
 import CabinetSelector from "./CabinetSelector";
 import ContextUploader from "./ContextUploader";
-import ExperimentalBanner from "./ExperimentalBanner";
 import MapScanner from "./MapScanner";
 import PrecedentAmbient from "./PrecedentAmbient";
 import WeeklyDriftCard from "./WeeklyDriftCard";
@@ -399,14 +398,17 @@ export default function IdlePanel({
         )}
 
         {isWargameCabinet && (
-          <ExperimentalBanner
-            title="Experimental wargame cabinet"
-            icon={<Swords className="w-4 h-4" />}
-            testId="wargame-idle-help"
+          <div
+            data-testid="wargame-idle-help"
+            className="panel p-4 text-xs text-fg-muted space-y-2"
           >
+            <div className="font-display font-bold text-fg flex items-center gap-2">
+              <Swords className="w-4 h-4" />
+              Wargame cabinet
+            </div>
             <p className={variant === "shell" ? "text-[11px]" : undefined}>
               {variant === "shell" ? (
-                "MDMP-style adversarial COA analysis — convene as usual."
+                "MDMP-style adversarial analysis: Blue plans, Red attacks, White arbitrates, and Green audits feasibility."
               ) : (
                 <>
                   MDMP-style adversarial course-of-action analysis: Red attacks the
@@ -420,7 +422,7 @@ export default function IdlePanel({
             </p>
             {variant !== "shell" && cabinet && cabinet.seats.length > 0 && (
               <div className="font-mono text-[10px] text-fg-dim space-y-0.5">
-                <div className="text-fg-muted">Expected seat roles:</div>
+                <div className="text-fg-muted">Seat roles:</div>
                 {cabinet.seats.map((s) => (
                   <div key={s.name}>
                     <span className="text-fg">{s.name}</span> · {s.provider}
@@ -428,7 +430,7 @@ export default function IdlePanel({
                 ))}
               </div>
             )}
-          </ExperimentalBanner>
+          </div>
         )}
 
         <div

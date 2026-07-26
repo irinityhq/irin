@@ -168,6 +168,100 @@ export async function uninstallGatewayPack(): Promise<GatewayPackStatus> {
   return invoke<GatewayPackStatus>("gateway_pack_uninstall");
 }
 
+/** Renderer-safe projection of the native Touch ID ceremony. */
+export type TouchIdState =
+  | "unavailable"
+  | "blocked"
+  | "setup_required"
+  | "reenroll_required"
+  | "ready"
+  | "ceremony_open"
+  | "armed";
+
+export type TouchIdReason =
+  | "helper_missing"
+  | "gateway_not_ready"
+  | "watch_surface_unreachable"
+  | "arm_principal_missing"
+  | "registry_unloaded"
+  | "registry_mismatch"
+  | "helper_identity_changed"
+  | "enclave_key_missing"
+  | "enrollment_missing"
+  | "rehearsal_only_build"
+  | "lease_expired";
+
+export interface TouchIdStatus {
+  state: TouchIdState;
+  reason: TouchIdReason | null;
+  armed_exp_at_ms: number | null;
+  armed_expires_in_ms: number | null;
+  stage_expires_in_ms: number | null;
+  enrolled: boolean;
+  allow_real_arm: boolean;
+  can_enroll: boolean;
+  can_arm: boolean;
+  can_renew: boolean;
+  can_disarm: boolean;
+}
+
+export async function getTouchIdStatus(): Promise<TouchIdStatus> {
+  return invoke<TouchIdStatus>("touch_id_status");
+}
+
+export async function enrollTouchId(): Promise<TouchIdStatus> {
+  return invoke<TouchIdStatus>("touch_id_enroll");
+}
+
+export async function armWithTouchId(): Promise<TouchIdStatus> {
+  return invoke<TouchIdStatus>("touch_id_arm");
+}
+
+export async function renewTouchIdArm(): Promise<TouchIdStatus> {
+  return invoke<TouchIdStatus>("touch_id_renew");
+}
+
+export async function disarmTouchId(): Promise<TouchIdStatus> {
+  return invoke<TouchIdStatus>("touch_id_disarm");
+}
+
+/** Non-secret private phone publication state owned by the installed app. */
+export type PhoneAccessState =
+  | "off"
+  | "starting"
+  | "ready"
+  | "published_but_backend_down"
+  | "tailscale_unavailable"
+  | "not_logged_in"
+  | "foreign_unowned"
+  | "funnel_present"
+  | "interrupted_change"
+  | "stopping"
+  | "command_error";
+
+export interface PhoneAccessStatus {
+  state: PhoneAccessState;
+  message: string;
+  tailnet_url: string | null;
+  enabled: boolean;
+  ownership: string;
+  interrupted: boolean;
+  gateway_routes: boolean;
+  funnel_present: boolean;
+}
+
+export async function getPhoneAccessStatus(): Promise<PhoneAccessStatus> {
+  return invoke<PhoneAccessStatus>("phone_access_status");
+}
+
+export async function enablePhoneAccess(): Promise<PhoneAccessStatus> {
+  return invoke<PhoneAccessStatus>("phone_access_enable");
+}
+
+export async function disablePhoneAccess(): Promise<PhoneAccessStatus> {
+  return invoke<PhoneAccessStatus>("phone_access_disable");
+}
+
 export async function getServerLogs(): Promise<string[]> {
   return invoke<string[]>("get_server_logs");
 }

@@ -114,18 +114,20 @@ If a key still does not show up, confirm it is exported in the same shell
 IRIN's launchd services actually run under (`echo $SHELL`, and check that
 the variable is not only set in an interactive-only block of your profile).
 
-## Private phone access (macOS setup)
+## Private phone access (installed IRIN.app)
 
-Tailscale is optional. If it is not installed or not connected, `make setup`
-reports local access only and continues normally — this is not an error
-state. If Tailscale is connected but no private phone URL is printed, rerun
-`make setup`; the runtime configures Serve routes after the local stack is
-healthy. Every member or device permitted by the operator's tailnet policy
-may reach the served UI; Serve is private, not device-exclusive. To disable
-Tailscale integration entirely, set
-`IRIN_TAILSCALE_SERVE=0` before running setup or runtime commands. IRIN never
-configures Tailscale Funnel or any other public-internet exposure — Serve
-publishes only to devices on your own tailnet.
+Private iPhone access is controlled in the installed IRIN.app under Settings
+→ Private iPhone access. Source `make setup` / `scripts/irin-runtime.sh` only
+start local loopback services and do not configure Tailscale Serve. Enable
+phone access after Council is ready: IRIN publishes on dedicated HTTPS port
+`8443` by default (`IRIN_TAILSCALE_HTTPS_PORT` overrides it) and does not claim
+port 443, so another Serve root on 443 can remain. The ready URL is
+`https://<MagicDNS>:8443` (include the port when pasting into the iPhone
+app). Every member or device permitted by the operator's tailnet policy may
+reach the served UI; Serve is private, not device-exclusive. Disable from the
+same Settings control — product code uses port-scoped `off` and never global
+`tailscale serve reset`. IRIN never configures Tailscale Funnel or any other
+public-internet exposure.
 
 ## Reboot and login recovery (macOS)
 
@@ -159,14 +161,15 @@ runtime-status`, a quiet Watch tab is not itself a fault.
 
 ## Tauri desktop app (macOS)
 
-The installed release app never starts its own Council backend — it probes
-the configured Council URL and adopts the canonical runtime if the build
-identity matches. If the app reports it cannot reach Council, the fix is to
-make sure the canonical runtime is up (`make runtime-status`, `make
-runtime-up`), not to restart the app repeatedly. `make app-install` rebuilds,
-atomically replaces `/Applications/IRIN.app`, and relaunches it;
-if automatic launch fails after install, the script tells you the exact
-`open '...'` command to run by hand. See
+The installed release app owns and starts its bundled Council backend. When a
+matching healthy Council is already present it may adopt that process; a
+mismatched or unavailable backend is recovered through the desktop lifecycle.
+Source operators can still inspect the separate managed runtime with `make
+runtime-status`, but an installed DMG does not require `make setup` or `make
+warroom`. `make app-install` is the source-build alternative: it rebuilds,
+atomically replaces `/Applications/IRIN.app`, and relaunches it. If automatic
+launch fails after install, the script tells you the exact `open '...'` command
+to run by hand. See
 [`council-rs/warroom/docs/TAURI-AUTH.md`](../council-rs/warroom/docs/TAURI-AUTH.md)
 for auth-token behavior across release and debug builds.
 

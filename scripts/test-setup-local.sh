@@ -78,12 +78,10 @@ case "${1:-}" in
     printf 'OK: login recovery installed\n'
     ;;
   status)
+    # Source runtime status is local-only; phone publication is never claimed.
     printf 'UP    Council http://127.0.0.1:8765\n'
     printf 'UP    War Room Web http://127.0.0.1:3010\n'
     printf 'UP    Gateway http://127.0.0.1:18080\n'
-    if [[ -n "${FAKE_PRIVATE_PHONE_URL:-}" ]]; then
-      printf 'PRIVATE_PHONE %s\n' "$FAKE_PRIVATE_PHONE_URL"
-    fi
     ;;
   *)
     printf 'unexpected runtime action: %s\n' "${1:-}" >&2
@@ -206,7 +204,7 @@ PROVIDER_AFTER="$(shasum -a 256 "$HOME_DIR/.irin/.env" | awk '{print $1}')"
 grep -Fq 'UP    Council http://127.0.0.1:8765' <<<"$SETUP_OUTPUT"
 grep -Fq 'UP    Gateway http://127.0.0.1:18080' <<<"$SETUP_OUTPUT"
 grep -Fq 'War Room: http://127.0.0.1:3010' <<<"$SETUP_OUTPUT"
-grep -Fq 'Private phone access: optional' <<<"$SETUP_OUTPUT"
+grep -Fq 'Private iPhone access: controlled in installed IRIN.app Settings' <<<"$SETUP_OUTPUT"
 grep -Fq 'Login recovery: enabled (opt out: ./scripts/irin-runtime.sh uninstall-login)' <<<"$SETUP_OUTPUT"
 grep -Fq 'Next action: Open Discover' <<<"$SETUP_OUTPUT"
 grep -Fq 'Provider discovery uses your login shell; IRIN does not copy provider credentials.' \
@@ -215,70 +213,29 @@ if grep -Fq 'feedface' <<<"$SETUP_OUTPUT"; then
   printf 'setup printed generated private values\n%s\n' "$SETUP_OUTPUT" >&2
   exit 1
 fi
+if grep -Eqi 'PRIVATE_PHONE|Private phone: https://' <<<"$SETUP_OUTPUT"; then
+  printf 'setup claimed private phone publication\n%s\n' "$SETUP_OUTPUT" >&2
+  exit 1
+fi
 grep -Fxq 'COUNCIL_GATEWAY_KEY_ID=k_a1b2c3d4' \
   "$HOME_DIR/.config/irin/gateway.env"
 grep -Fq 'service_role:"council"' "$ROOT/scripts/setup-local.sh"
-printf 'setup start, recovery, no-Tailscale, and completion output: PASS\n'
+printf 'setup start, recovery, and completion output: PASS\n'
 
-# Connectivity without the expected Serve routes must not claim phone access.
-write_fake tailscale \
-  'case " $* " in' \
-  '  *" status --json "*) printf '\''{"Self":{"DNSName":"phone.example.ts.net."}}\n'\'' ;;' \
-  '  *" status "*) exit 0 ;;' \
-  '  *) exit 0 ;;' \
-  'esac'
+# Second setup pass must keep phone ownership in installed IRIN.app Settings.
 : >"$ACTION_LOG"
-TAILSCALE_OUTPUT="$(
+NO_PHONE_CLAIM="$(
   HOME="$HOME_DIR" \
   XDG_CONFIG_HOME="$HOME_DIR/.config" \
   IRIN_HOME="$HOME_DIR/.irin" \
   PATH="$FAKE_BIN:/usr/bin:/bin" \
   IRIN_RUNTIME_SCRIPT="$FAKE_RUNTIME" \
   FAKE_ACTION_LOG="$ACTION_LOG" \
-  FAKE_TAILSCALE_DNS='phone.example.ts.net.' \
   /usr/bin/make -s -C "$ROOT" setup 2>&1
 )"
-grep -Fq 'Private phone access: Tailscale is connected, but IRIN Serve routes are not ready; local access is ready. Rerun make setup.' \
-  <<<"$TAILSCALE_OUTPUT"
-if grep -Fq 'Private phone: https://' <<<"$TAILSCALE_OUTPUT"; then
-  printf 'setup claimed private phone access without verified Serve routes\n%s\n' \
-    "$TAILSCALE_OUTPUT" >&2
+grep -Fq 'Private iPhone access: controlled in installed IRIN.app Settings' <<<"$NO_PHONE_CLAIM"
+if grep -Eqi 'PRIVATE_PHONE|Private phone: https://|tailscale serve' <<<"$NO_PHONE_CLAIM"; then
+  printf 'setup claimed or mutated private phone publication\n%s\n' "$NO_PHONE_CLAIM" >&2
   exit 1
 fi
-printf 'setup connected-Tailscale without Serve routes remains local-only: PASS\n'
-
-# The runtime's verified route report is the only source of the private URL.
-: >"$ACTION_LOG"
-TAILSCALE_OUTPUT="$(
-  HOME="$HOME_DIR" \
-  XDG_CONFIG_HOME="$HOME_DIR/.config" \
-  IRIN_HOME="$HOME_DIR/.irin" \
-  PATH="$FAKE_BIN:/usr/bin:/bin" \
-  IRIN_RUNTIME_SCRIPT="$FAKE_RUNTIME" \
-  FAKE_ACTION_LOG="$ACTION_LOG" \
-  FAKE_PRIVATE_PHONE_URL='https://phone.example.ts.net' \
-  /usr/bin/make -s -C "$ROOT" setup 2>&1
-)"
-grep -Fq 'Private phone: https://phone.example.ts.net' <<<"$TAILSCALE_OUTPUT"
-printf 'setup verified Tailscale Serve private URL: PASS\n'
-
-: >"$ACTION_LOG"
-TAILSCALE_DISABLED_OUTPUT="$(
-  HOME="$HOME_DIR" \
-  XDG_CONFIG_HOME="$HOME_DIR/.config" \
-  IRIN_HOME="$HOME_DIR/.irin" \
-  PATH="$FAKE_BIN:/usr/bin:/bin" \
-  IRIN_RUNTIME_SCRIPT="$FAKE_RUNTIME" \
-  IRIN_TAILSCALE_SERVE=0 \
-  FAKE_ACTION_LOG="$ACTION_LOG" \
-  FAKE_TAILSCALE_DNS='phone.example.ts.net.' \
-  /usr/bin/make -s -C "$ROOT" setup 2>&1
-)"
-grep -Fq 'Private phone access: disabled by IRIN_TAILSCALE_SERVE=0; local access is ready.' \
-  <<<"$TAILSCALE_DISABLED_OUTPUT"
-if grep -Fq 'Private phone: https://' <<<"$TAILSCALE_DISABLED_OUTPUT"; then
-  printf 'setup claimed private phone access while Tailscale Serve was disabled\n%s\n' \
-    "$TAILSCALE_DISABLED_OUTPUT" >&2
-  exit 1
-fi
-printf 'setup disabled-Tailscale remains local-only: PASS\n'
+printf 'setup never claims private phone publication: PASS\n'

@@ -1,7 +1,7 @@
 name: Wargame
 rounds: 3
 description: >
-  EXPERIMENTAL — Formal adversarial COA wargaming (MDMP-style).
+  Formal adversarial COA wargaming (MDMP-style).
   Blue develops courses of action, Red attacks them, White maintains
   ground truth and injects nature events, Green scores sustainment.
   Kill criterion: if output collapses to themed contrarianism on at least
@@ -44,7 +44,7 @@ seats:
 
   - name: Green (Sustainment)
     provider: nvidia
-    model: mistralai/mistral-large-3-675b-instruct-2512
+    model: mistralai/mistral-small-4-119b-2603
     system: |
       You are the sustainment skeptic (Green Cell). Every COA must
       survive resource reality:

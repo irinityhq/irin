@@ -997,6 +997,183 @@ function _M.watch_ui_snapshot_proxy()
     end
 end
 
+-- Touch ID local-attest arm ceremony bridge.
+--
+-- The arm routes were historically NOT reachable from the edge at all; the
+-- ceremony ran over the sidecar's management UDS from an operator shell. The
+-- installed desktop product needs the SAME protocol (stage / pending / status /
+-- confirm / disarm) from the native host, which only has the loopback Gateway
+-- port. This proxy is therefore deliberately narrower than a /watch/admin
+-- tunnel:
+--
+--   * OFF unless the desktop pack's read-only public enrollment registry is
+--     mounted at the fixed bridge path -> 404, so no existing Gateway gains an
+--     arm surface;
+--   * an exact method+path allow-list, no prefixes, no query strings;
+--   * forwards only Authorization + request identity; no CORS, so a browser
+--     origin cannot drive it;
+--   * authorization is unchanged and still enforced by the sidecar: the
+--     GW_ARM_PRINCIPALS bearer plus the stage/confirm attestation. This proxy
+--     grants no authority of its own.
+local ARM_BRIDGE_ROUTES = {
+    ["POST /watch/admin/producer/arm/stage"] = true,
+    ["GET /watch/admin/producer/arm/pending"] = true,
+    ["GET /watch/admin/producer/arm/status"] = true,
+    ["POST /watch/admin/producer/arm/confirm"] = true,
+    ["POST /watch/admin/producer/disarm"] = true,
+}
+
+local ARM_BRIDGE_MARKER_PATH = "/run/irin-features/arm-bridge-enabled"
+local ARM_BRIDGE_MAX_BODY_BYTES = 65536
+
+local function arm_bridge_enabled()
+    -- The desktop pack mounts an empty, non-secret, read-only marker that its
+    -- unprivileged OpenResty workers can inspect. The root-owned 0600 registry
+    -- is never mounted into the edge; parsing and attestation stay in sidecar.
+    local marker = io.open(ARM_BRIDGE_MARKER_PATH, "rb")
+    if not marker then
+        return false
+    end
+    marker:close()
+    return true
+end
+
+local function arm_bridge_post_body()
+    ngx.req.read_body()
+    local body = ngx.req.get_body_data()
+    if body ~= nil then
+        return body
+    end
+
+    -- Nginx may spool a request body to a temporary file when it exceeds the
+    -- in-memory buffer. Preserve that body for arm/confirm instead of silently
+    -- converting it to an empty request. The filename is Nginx-owned and is
+    -- never returned or logged.
+    local body_file = ngx.req.get_body_file()
+    if body_file == nil then
+        return ""
+    end
+    local file = io.open(body_file, "rb")
+    if not file then
+        return nil, "request_body_unavailable", 400
+    end
+    local size = file:seek("end")
+    if size == nil then
+        file:close()
+        return nil, "request_body_unavailable", 400
+    end
+    if size > ARM_BRIDGE_MAX_BODY_BYTES then
+        file:close()
+        return nil, "request_body_too_large", 413
+    end
+    if file:seek("set", 0) == nil then
+        file:close()
+        return nil, "request_body_unavailable", 400
+    end
+    body = file:read("*a")
+    file:close()
+    if body == nil then
+        return nil, "request_body_unavailable", 400
+    end
+    return body
+end
+
+function _M.watch_arm_proxy()
+    if not arm_bridge_enabled() then
+        ngx.status = 404
+        ngx.header["Content-Type"] = "application/json"
+        ngx.say(cjson.encode({error = "not_found"}))
+        return
+    end
+
+    local method = ngx.req.get_method()
+    -- ngx.var.uri is the decoded, normalized path; the query string is never
+    -- forwarded (no arm route takes one).
+    if not ARM_BRIDGE_ROUTES[method .. " " .. ngx.var.uri] then
+        ngx.status = 405
+        ngx.header["Content-Type"] = "application/json"
+        ngx.say(cjson.encode({error = "method_not_allowed"}))
+        return
+    end
+
+    local body
+    if method == "POST" then
+        local body_error, body_status
+        body, body_error, body_status = arm_bridge_post_body()
+        if body == nil then
+            ngx.status = body_status
+            ngx.header["Content-Type"] = "application/json"
+            ngx.say(cjson.encode({error = body_error}))
+            return
+        end
+        -- lua-resty-http rejects a nil body for POST before it reaches the
+        -- sidecar. Stage and disarm intentionally send no payload, so the
+        -- reader returns an explicit zero-length body when Nginx has neither
+        -- in-memory nor file-buffered request bytes.
+    end
+
+    local httpc = http.new()
+    httpc:set_timeout(10000)
+
+    local host_field, connect_target = parse_sidecar_addr(SIDECAR_ADDR)
+    local pool_name = "sidecar:watch_arm:" .. SIDECAR_ADDR
+    local ok, conn_err
+    if type(connect_target) == "table" then
+        ok, conn_err = httpc:connect{
+            scheme = "http",
+            host = connect_target.host,
+            port = connect_target.port,
+            pool = pool_name,
+        }
+    else
+        ok, conn_err = httpc:connect{
+            scheme = "http",
+            host = connect_target,
+            pool = pool_name,
+        }
+    end
+    if not ok then
+        ngx.status = 502
+        ngx.header["Content-Type"] = "application/json"
+        ngx.say(cjson.encode({error = "sidecar unreachable", detail = conn_err or "connect failed"}))
+        return
+    end
+
+    local req_headers = ngx.req.get_headers()
+    local headers = {
+        ["Host"] = host_field,
+        ["X-Request-ID"] = ngx.var.request_id,
+    }
+    if req_headers["Authorization"] then
+        headers["Authorization"] = req_headers["Authorization"]
+    end
+    if body and #body > 0 then
+        headers["Content-Type"] = "application/json"
+    end
+
+    local res, req_err = httpc:request{
+        method = method,
+        path = ngx.var.uri,
+        headers = headers,
+        body = body,
+    }
+    if not res then
+        httpc:close()
+        ngx.status = 502
+        ngx.header["Content-Type"] = "application/json"
+        ngx.say(cjson.encode({error = "sidecar request failed", detail = req_err or "unknown"}))
+        return
+    end
+
+    local resp_body = res:read_body()
+    httpc:set_keepalive(10000, 4)
+    ngx.status = res.status
+    ngx.header["Content-Type"] = res.headers["Content-Type"] or "application/json"
+    if resp_body and #resp_body > 0 then
+        ngx.print(resp_body)
+    end
+end
+
 -- ---------------------------------------------------------------------------
 -- Librarian — identity/memory proxy and commits
 -- ---------------------------------------------------------------------------

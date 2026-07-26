@@ -132,6 +132,22 @@ fn ensure_bundle_input_placeholders(manifest_dir: &Path) {
         );
     }
     println!("cargo:rerun-if-changed={}", gw_compose.display());
+
+    // Tauri validates resource paths even for `cargo test`. This inert,
+    // gitignored placeholder is never a release payload:
+    // stage-bundle-inputs.sh overwrites it with the compiled Swift helper, and
+    // build-dmg.sh rejects a missing or empty bundled helper.
+    let arm_attest = manifest_dir.join("resources").join("arm-attest");
+    if !arm_attest.is_file() {
+        let _ = std::fs::create_dir_all(arm_attest.parent().unwrap_or(manifest_dir));
+        let _ = std::fs::write(&arm_attest, b"");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&arm_attest, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+    println!("cargo:rerun-if-changed={}", arm_attest.display());
 }
 
 fn read_source_sha_file() -> Option<String> {
@@ -156,7 +172,7 @@ fn git_is_dirty(dir: &Path) -> Option<bool> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["status", "--porcelain", "--untracked-files=no"])
+        .args(["status", "--porcelain", "--untracked-files=normal"])
         .output()
         .ok()?;
     output

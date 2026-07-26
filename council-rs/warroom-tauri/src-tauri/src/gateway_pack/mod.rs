@@ -15,8 +15,9 @@ use crate::docker_cli::{
     DESKTOP_COMPOSE_PROJECT, DESKTOP_GATEWAY_URL, DOCKER_CMD_TIMEOUT, DOCKER_COMPOSE_UP_TIMEOUT,
 };
 use crate::keychain::{
-    delete_all_gateway_pack_secrets, gw_api_key_present, is_valid_gw_raw_key, load_auth_pepper,
-    load_gw_api_key, store_auth_pepper, store_gw_api_key, KeychainSecretStore, SecretStore,
+    delete_all_gateway_pack_secrets, gw_api_key_present, is_valid_gw_raw_key,
+    load_arm_principal_token, load_auth_pepper, load_gw_api_key, store_auth_pepper,
+    store_gw_api_key, KeychainSecretStore, SecretStore, ARM_PRINCIPAL_NAME,
 };
 use crate::paths::{bundled_base_dir, executable_dir};
 use crate::private_config::{
@@ -168,7 +169,9 @@ const GATEWAY_DIR_NAME: &str = "gateway";
 const PUBLIC_ENV_NAME: &str = "compose.public.env";
 const LEDGER_KEY_NAME: &str = "ledger_key";
 const INSTALLED_MARKER: &str = "pack-installed.json";
+const ARM_KEYS_NAME: &str = "arm_attest_keys.json";
 const PACK_DIR_NAME: &str = "pack";
+const COMPOSE_UP_ARGS: &[&str] = &["up", "-d", "--remove-orphans", "--force-recreate", "--wait"];
 
 /// Fixed Application Support gateway directory (0700).
 pub fn gateway_data_dir() -> PathBuf {
@@ -187,6 +190,24 @@ pub fn runtime_env_path() -> PathBuf {
 pub fn ledger_key_path() -> PathBuf {
     gateway_data_dir().join(LEDGER_KEY_NAME)
 }
+
+/// Host path of the app-owned Touch ID enrollment registry (public credential
+/// records only — credential ids, SEC1 public keys, labels, timestamps). It
+/// lives beside the ledger key in the 0700 app gateway dir and is bind-mounted
+/// read-only into both desktop-pack containers at [`ARM_KEYS_CONTAINER_PATH`].
+/// The edge uses mount existence only as its desktop-only bridge signal; the
+/// sidecar alone parses the registry and enforces attestation.
+///
+/// It is deliberately NOT inside the pack tree: that tree is hash-verified
+/// against the install marker on every spawn, so an enrollment written there
+/// would be treated as tampering and re-staged away.
+pub fn arm_keys_path() -> PathBuf {
+    gateway_data_dir().join(ARM_KEYS_NAME)
+}
+
+/// Where the registry is mounted inside both desktop-pack containers. Also the
+/// sidecar value of the admitted `GW_ARM_ATTEST_KEYS_PATH` pin.
+pub const ARM_KEYS_CONTAINER_PATH: &str = "/run/secrets/arm_attest_keys.json";
 
 pub fn installed_marker_path() -> PathBuf {
     gateway_data_dir().join(INSTALLED_MARKER)
@@ -308,6 +329,29 @@ fn ensure_ledger_key() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Ensure the Touch ID enrollment registry file exists so Compose can
+/// bind-mount it as a FILE (a missing bind source becomes a directory, which
+/// would make the sidecar's registry load fail in a confusing way).
+///
+/// The default contents are the empty array `[]`, which the sidecar's
+/// `AttestKeyRegistry::parse` treats as a **fail-closed unloaded registry** —
+/// the correct not-yet-enrolled state. Enabling the pack therefore never
+/// creates arming capability; only a completed enrollment ceremony does.
+pub fn ensure_arm_keys_file() -> Result<PathBuf, String> {
+    ensure_gateway_dir()?;
+    let path = arm_keys_path();
+    if path.is_file() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+        return Ok(path);
+    }
+    write_atomic_0600(&path, b"[]\n")?;
+    Ok(path)
+}
+
 fn getrandom_fill(buf: &mut [u8]) -> Result<(), String> {
     use std::fs::File;
     use std::io::Read;
@@ -375,7 +419,21 @@ fn pack_pin_pairs(
     if !path_is_safe_argv(pack_root) || !path_is_safe_argv(ledger) {
         return Err("pack root or ledger path rejected".to_string());
     }
+    // Touch ID bridge: the app-owned enrollment registry, mounted read-only.
+    // Same validation class as the ledger key path.
+    let arm_keys = arm_keys_path();
+    if !path_is_safe_argv(&arm_keys) {
+        return Err("arm attest keys path rejected".to_string());
+    }
     let mut pairs = vec![
+        (
+            "IRIN_DESKTOP_ARM_KEYS".into(),
+            arm_keys.display().to_string(),
+        ),
+        (
+            "GW_ARM_ATTEST_KEYS_PATH".into(),
+            ARM_KEYS_CONTAINER_PATH.to_string(),
+        ),
         (
             "IRIN_GATEWAY_IMAGE".into(),
             gateway_image.as_str().to_string(),
@@ -483,6 +541,21 @@ fn build_compose_secret_env(
         env.insert("BOOTSTRAP_TOKEN".into(), String::new());
     }
 
+    // Touch ID bridge — custody domain 1. The arm-principal registry string is
+    // built ONLY from the Keychain-held token, never from the ambient
+    // environment (`GW_ARM_PRINCIPALS` is in AMBIENT_SCRUB_ENV_KEYS) and never
+    // written to the public env file. Absent/invalid token => empty registry =>
+    // the sidecar parses zero principals and every arm route 401s: enabling the
+    // pack cannot create arming capability on its own.
+    let principals = match load_arm_principal_token(store)
+        .map_err(|e| format!("keychain load arm principal: {e}"))?
+    {
+        Some(tok) => format!("{ARM_PRINCIPAL_NAME}:{tok}"),
+        None => String::new(),
+    };
+    validate_env_value("GW_ARM_PRINCIPALS", &principals)?;
+    env.insert("GW_ARM_PRINCIPALS".into(), principals);
+
     // Provider keys from login/process only — never persisted to app env file.
     // Skip gui_login_environment when IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV=1 (tests).
     let login = if std::env::var_os("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV").is_some() {
@@ -554,18 +627,17 @@ fn build_full_compose_env(
 /// teardown — empty pins plus empty secret slots still scrub ambient secrets
 /// via the docker_cli spawn path and force disarmed Watch/admin surfaces.
 fn teardown_compose_env(pack_root: &Path, key_id: Option<&str>) -> ComposeEnv {
-    let mut env = match load_validated_manifest(pack_root).and_then(|v| {
-        build_pack_pin_env(
-            pack_root,
-            &ledger_key_path(),
-            &v.gateway,
-            &v.sidecar,
-            key_id,
-        )
-    }) {
-        Ok(pins) => pins,
-        Err(_) => ComposeEnv::new(),
-    };
+    let mut env = load_validated_manifest(pack_root)
+        .and_then(|v| {
+            build_pack_pin_env(
+                pack_root,
+                &ledger_key_path(),
+                &v.gateway,
+                &v.sidecar,
+                key_id,
+            )
+        })
+        .unwrap_or_default();
     // Empty secret slots win over any pin defaults and replace ambient values
     // after the spawn scrub — never Keychain or login-shell material.
     for key in [
@@ -575,9 +647,18 @@ fn teardown_compose_env(pack_root: &Path, key_id: Option<&str>) -> ComposeEnv {
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "NVIDIA_API_KEY",
+        // Touch ID bridge: teardown never carries the arm-principal registry.
+        "GW_ARM_PRINCIPALS",
     ] {
         env.insert(key.to_string(), String::new());
     }
+    // The bind-mount source and the in-container registry path are non-secret
+    // pins Compose must still interpolate for `down`; fall back to the fixed
+    // app-owned values when the manifest was unreadable.
+    env.entry("IRIN_DESKTOP_ARM_KEYS".to_string())
+        .or_insert_with(|| arm_keys_path().display().to_string());
+    env.entry("GW_ARM_ATTEST_KEYS_PATH".to_string())
+        .or_insert_with(|| ARM_KEYS_CONTAINER_PATH.to_string());
     env
 }
 
@@ -1269,25 +1350,19 @@ fn compose_up(compose: &Path, env_path: &Path, spawn_env: &ComposeEnv) -> Result
     if let Some(pack_root) = compose.parent() {
         verify_pack_asset_integrity(pack_root)?;
     }
+    // Every explicit Enable is a boot-time configuration reload: Keychain arm
+    // principals, the attestation registry, provider env, and atomically staged
+    // bind mounts must all reach fresh containers. A successful no-op `up`
+    // leaves old allowlists and stale macOS file-share mounts in place.
     let up = compose_command_with_env(
         compose,
         Some(env_path),
-        &["up", "-d", "--remove-orphans", "--wait"],
+        COMPOSE_UP_ARGS,
         Some(spawn_env),
         DOCKER_COMPOSE_UP_TIMEOUT,
     )?;
-    if up.status.success() {
-        return Ok(());
-    }
-    let up2 = compose_command_with_env(
-        compose,
-        Some(env_path),
-        &["up", "-d", "--remove-orphans", "--force-recreate"],
-        Some(spawn_env),
-        DOCKER_COMPOSE_UP_TIMEOUT,
-    )?;
-    if !up2.status.success() {
-        return Err(format_cmd_failure("gateway pack up", &up2));
+    if !up.status.success() {
+        return Err(format_cmd_failure("gateway pack up", &up));
     }
     Ok(())
 }
@@ -1353,6 +1428,13 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         lifecycle_stage("ledger", "error");
     })?;
     lifecycle_stage("ledger", "ok");
+    // Touch ID bridge: the registry bind source must exist as a FILE before
+    // compose up. Default `[]` = fail-closed unloaded registry, so enabling
+    // Gateway never arms anything.
+    ensure_arm_keys_file().inspect_err(|_| {
+        lifecycle_stage("arm_keys", "error");
+    })?;
+    lifecycle_stage("arm_keys", "ok");
     let existing_key_id = load_or_create_private_config()?.gateway_key_id;
     let env_path = write_public_compose_env(
         &pack_root,
@@ -1817,6 +1899,14 @@ mod tests {
     fn project_constant() {
         assert_eq!(DESKTOP_COMPOSE_PROJECT, "irin-desktop-gateway");
         assert_eq!(crate::keychain::KEYCHAIN_SERVICE, "com.irinity.irin");
+    }
+
+    #[test]
+    fn explicit_enable_force_recreates_boot_time_configuration() {
+        assert_eq!(
+            COMPOSE_UP_ARGS,
+            &["up", "-d", "--remove-orphans", "--force-recreate", "--wait"]
+        );
     }
 
     #[test]
@@ -2564,6 +2654,81 @@ mod tests {
         out
     }
 
+    /// Touch ID bridge: the arm-principal registry exists ONLY when the
+    /// Keychain holds a token, and it never reaches the public env file.
+    #[test]
+    fn arm_principals_come_from_the_keychain_and_never_the_env_file() {
+        let _g = test_env_lock();
+        let prev_skip = std::env::var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV").ok();
+        std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", "1");
+        let store = MemorySecretStore::default();
+
+        // No token stored: the registry string is empty, so the sidecar boots
+        // with zero principals and every arm route 401s.
+        let env = build_compose_secret_env(&store, None).unwrap();
+        assert_eq!(env.get("GW_ARM_PRINCIPALS").map(String::as_str), Some(""));
+
+        // With a token: `<name>:<token>`, and the name is the audit label.
+        let token = format!("tok_{:032x}", std::process::id());
+        crate::keychain::store_arm_principal_token(&store, &token).unwrap();
+        let env = build_compose_secret_env(&store, None).unwrap();
+        let registry = env.get("GW_ARM_PRINCIPALS").cloned().unwrap_or_default();
+        assert_eq!(registry, format!("irin-desktop:{token}"));
+        // No separator or injection byte can appear inside the value.
+        assert_eq!(registry.matches(':').count(), 1);
+        assert!(!registry.contains(',') && !registry.contains('\n'));
+
+        // The PUBLIC env file carries the non-secret path pins and nothing else.
+        let pins = build_pack_pin_env(
+            Path::new("/app/pack"),
+            Path::new("/app/ledger"),
+            &test_image_ref("ghcr.io/irin/gateway", "e"),
+            &test_image_ref("ghcr.io/irin/sidecar", "f"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !pins.contains_key("GW_ARM_PRINCIPALS"),
+            "the arm-principal registry is never a public pin"
+        );
+        assert_eq!(
+            pins.get("GW_ARM_ATTEST_KEYS_PATH").map(String::as_str),
+            Some(ARM_KEYS_CONTAINER_PATH)
+        );
+        assert_eq!(
+            pins.get("IRIN_DESKTOP_ARM_KEYS").map(String::as_str),
+            Some(arm_keys_path().display().to_string().as_str())
+        );
+
+        let body = serialize_public_env(
+            &pins
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(!body.contains("GW_ARM_PRINCIPALS"));
+        assert!(!body.contains("tok_"));
+
+        match prev_skip {
+            Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", v),
+            None => std::env::remove_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV"),
+        }
+    }
+
+    /// Teardown never carries the arm-principal registry, and still pins the
+    /// paths Compose must interpolate for `down`.
+    #[test]
+    fn teardown_env_drops_arm_principals_but_keeps_path_pins() {
+        let env = teardown_compose_env(Path::new("/app/pack"), None);
+        assert_eq!(env.get("GW_ARM_PRINCIPALS").map(String::as_str), Some(""));
+        assert_eq!(
+            env.get("GW_ARM_ATTEST_KEYS_PATH").map(String::as_str),
+            Some(ARM_KEYS_CONTAINER_PATH)
+        );
+        assert!(env.contains_key("IRIN_DESKTOP_ARM_KEYS"));
+    }
+
     #[test]
     fn every_compose_interpolated_var_is_pinned_scrubbed_or_disarmed() {
         // Every variable the pack compose file interpolates must be forced by
@@ -2601,6 +2766,9 @@ mod tests {
             "COUNCIL_GATEWAY_TOKEN",
             "WATCH_PRODUCER_ENABLED",
             "WATCH_DISPATCHER_ENABLED",
+            // Touch ID bridge: Keychain-held, supplied by the secret env layer
+            // and scrubbed from the ambient environment before it.
+            "GW_ARM_PRINCIPALS",
         ]
         .into_iter()
         .collect();

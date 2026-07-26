@@ -87,6 +87,16 @@ fi
 grep -qE 'IRIN_GATEWAY_PACK_MODE' "$ROOT/scripts/stage-gateway-pack.sh" || die "stage mode gate"
 grep -qE 'production packaging refuses a local-dev' "$ROOT/scripts/stage-gateway-pack.sh" \
   || die "stage refuse local-dev"
+grep -q 'diff --binary HEAD' "$ROOT/scripts/build-gateway-pack-dev-images.sh" ||
+  die "dirty worktree image build must overlay tracked changes"
+grep -q 'ls-files --others --exclude-standard' "$ROOT/scripts/build-gateway-pack-dev-images.sh" ||
+  die "dirty worktree image build must overlay untracked source"
+SIDECAR_DOCKERFILE="$ROOT/gateway/sidecar-rs/Dockerfile"
+grep -q 'find /build -mindepth 1 -maxdepth 1 ! -name target' "$SIDECAR_DOCKERFILE" ||
+  die "cargo-chef dummy tree must be removed before the real source copy"
+if grep -Eq '^[[:space:]]*&&?[[:space:]]*git clean|^[[:space:]]*RUN[[:space:]]+git clean' "$SIDECAR_DOCKERFILE"; then
+  die "sidecar image build must not delete overlaid untracked source after COPY"
+fi
 grep -qE 'pack_mode' "$ROOT/packaging/build-dmg.sh" || die "dmg pack_mode"
 grep -qE 'run_command_timeout|DOCKER_CMD_TIMEOUT' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "docker timeout"

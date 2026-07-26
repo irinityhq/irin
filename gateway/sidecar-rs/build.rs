@@ -42,8 +42,17 @@ fn main() {
     // Fail-closed: if we cannot determine cleanliness, treat as dirty.
     let dirty = git_is_dirty().unwrap_or(true);
 
+    // Release eligibility is a separate compile-time claim from Git cleanliness.
+    // Local/source images default false; only the production image lane passes
+    // true. Unknown or malformed input fails closed.
+    println!("cargo:rerun-if-env-changed=GW_RELEASE_ELIGIBLE");
+    let release_eligible = std::env::var("GW_RELEASE_ELIGIBLE")
+        .ok()
+        .is_some_and(|value| value == "true");
+
     println!("cargo:rustc-env=GW_BUILD_GIT_SHA={sha}");
     println!("cargo:rustc-env=GW_BUILD_DIRTY={dirty}");
+    println!("cargo:rustc-env=GW_RELEASE_ELIGIBLE={release_eligible}");
 }
 
 fn emit_tracked_file_rerun_paths() {
@@ -102,12 +111,12 @@ fn git_sha() -> Option<String> {
 
 fn git_is_dirty() -> Option<bool> {
     let out = Command::new("git")
-        .args(["status", "--porcelain", "--untracked-files=no"])
+        .args(["status", "--porcelain", "--untracked-files=normal"])
         .output()
         .ok()?;
     if !out.status.success() {
         return None;
     }
-    // Any non-empty porcelain output ⇒ tracked working tree / index changes.
+    // Any non-empty porcelain output ⇒ tracked, indexed, or untracked source drift.
     Some(!out.stdout.iter().all(u8::is_ascii_whitespace))
 }
