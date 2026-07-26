@@ -6,17 +6,16 @@ import { motion } from "framer-motion";
 import { api } from "@/lib/api";
 import { cn, providerColor } from "@/lib/cn";
 import { DEFAULT_SENSITIVITY, SENSITIVITY_LEVELS, gatewayStartFields } from "@/lib/gateway-mode";
-import {
-  canEnableGovernedProceeding,
-  shouldApplyBackgroundStatusPoll,
-} from "@/lib/gateway-pack";
+import { canEnableGovernedProceeding } from "@/lib/gateway-pack";
+import { mergeIfNewer } from "@/lib/desktop-status";
 import type { Cabinet, EmbeddingStats, MapmakerResult, PrecedentMatch } from "@/lib/types";
 import type { GatewaySensitivity, StartPayload } from "@/lib/ws";
 import {
   getDesktopRuntimeMode,
-  getGatewayPackStatus,
+  getDesktopStatusSnapshot,
   isTauri,
   type DesktopRuntimeMode,
+  type DesktopStatusSnapshot,
   type GatewayPackStatus,
 } from "@/lib/tauri";
 import {
@@ -121,8 +120,9 @@ export default function IdlePanel({
   const [desktopMode, setDesktopMode] = useState<
     DesktopRuntimeMode | "detecting" | "unavailable"
   >(isTauri() ? "detecting" : "unavailable");
-  const [packStatus, setPackStatus] = useState<GatewayPackStatus | null>(null);
-  const packPollEpoch = useRef(0);
+  const [desktopStatus, setDesktopStatus] =
+    useState<DesktopStatusSnapshot | null>(null);
+  const packStatus: GatewayPackStatus | null = desktopStatus?.pack ?? null;
   const topicRef = useRef<HTMLTextAreaElement>(null);
   const { toast } = useToast();
 
@@ -141,34 +141,34 @@ export default function IdlePanel({
     };
   }, []);
 
+  // Same host-authoritative snapshot subscription as Settings (no poll epochs).
   useEffect(() => {
     if (!isTauri() || desktopMode !== "installed-release") return;
     let cancelled = false;
-    const tick = () => {
-      const epoch = ++packPollEpoch.current;
-      void getGatewayPackStatus()
-        .then((s) => {
-          if (cancelled) return;
-          if (
-            !shouldApplyBackgroundStatusPoll(
-              epoch,
-              packPollEpoch.current,
-              false,
-            )
-          ) {
-            return;
+    let unlisten: (() => void) | undefined;
+    void getDesktopStatusSnapshot()
+      .then((snap) => {
+        if (!cancelled) setDesktopStatus((prev) => mergeIfNewer(prev, snap));
+      })
+      .catch(() => {
+        // Keep last known projection on failure.
+      });
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<DesktopStatusSnapshot>("desktop-status", (event) => {
+          if (!cancelled) {
+            setDesktopStatus((prev) => mergeIfNewer(prev, event.payload));
           }
-          setPackStatus(s);
-        })
-        .catch(() => {
-          // Keep the last known pack projection on a background poll failure.
-        });
-    };
-    tick();
-    const id = window.setInterval(tick, 8000);
+        }),
+      )
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      unlisten?.();
     };
   }, [desktopMode]);
 

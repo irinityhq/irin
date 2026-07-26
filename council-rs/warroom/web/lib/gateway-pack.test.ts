@@ -2,14 +2,10 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
-  beginGatewayPackAction,
   canEnableGovernedProceeding,
-  createGatewayPackOperationFence,
-  endGatewayPackAction,
+  gatewayHeaderTruth,
   gatewayPackIsCoreNeutral,
   gatewayPackStateLabel,
-  runGatewayPackStatusWriterIfCurrent,
-  shouldApplyBackgroundStatusPoll,
   type GatewayPackStatus,
 } from "./gateway-pack";
 import { gatewayPackAllowsGoverned } from "./tauri";
@@ -157,230 +153,6 @@ describe("governed proceeding gate", () => {
   });
 });
 
-describe("gateway pack operation fence", () => {
-  it("rejects a status read that started before a lifecycle action", async () => {
-    const fence = createGatewayPackOperationFence();
-    const degraded = status({ state: "degraded", message: "stale" });
-    let resolveRead!: (value: GatewayPackStatus) => void;
-    const read = new Promise<GatewayPackStatus>((resolve) => {
-      resolveRead = resolve;
-    });
-    const applied: GatewayPackStatus[] = [];
-    const completion = runGatewayPackStatusWriterIfCurrent(
-      fence,
-      () => read,
-      (value) => applied.push(value),
-      () => {},
-    );
-
-    beginGatewayPackAction(fence);
-    resolveRead(degraded);
-
-    expect(await completion).toBe("stale");
-    expect(applied).toEqual([]);
-  });
-
-  it("does not start a new poll while a lifecycle action is running", async () => {
-    const fence = createGatewayPackOperationFence();
-    let readCalled = false;
-    beginGatewayPackAction(fence);
-
-    const outcome = await runGatewayPackStatusWriterIfCurrent(
-      fence,
-      async () => {
-        readCalled = true;
-        return status({ state: "degraded" });
-      },
-      () => {},
-      () => {},
-    );
-
-    expect(outcome).toBe("blocked");
-    expect(readCalled).toBe(false);
-  });
-
-  it("applies only a current post-action success or error", async () => {
-    const fence = createGatewayPackOperationFence();
-    beginGatewayPackAction(fence);
-    endGatewayPackAction(fence);
-    const ready = status({
-      state: "authenticated_ready",
-      authenticated: true,
-      enabled: true,
-      council_governed: true,
-    });
-    let applied: GatewayPackStatus | null = null;
-    expect(
-      await runGatewayPackStatusWriterIfCurrent(
-        fence,
-        async () => ready,
-        (value) => {
-          applied = value;
-        },
-        () => {},
-      ),
-    ).toBe("applied");
-    expect(applied).toBe(ready);
-
-    let errored = false;
-    expect(
-      await runGatewayPackStatusWriterIfCurrent(
-        fence,
-        async () => {
-          throw new Error("status failed");
-        },
-        () => {},
-        () => {
-          errored = true;
-        },
-      ),
-    ).toBe("applied");
-    expect(errored).toBe(true);
-  });
-
-  it("keeps last projection when a poll errors (caller no-ops onError)", async () => {
-    const fence = createGatewayPackOperationFence();
-    const prior = status({
-      state: "authenticated_ready",
-      authenticated: true,
-      enabled: true,
-      council_governed: true,
-      governed_ready: true,
-    });
-    let visible: GatewayPackStatus | null = prior;
-    const outcome = await runGatewayPackStatusWriterIfCurrent(
-      fence,
-      async () => {
-        throw new Error("transient");
-      },
-      (next) => {
-        visible = next;
-      },
-      () => {
-        // keep-last: do not null
-      },
-    );
-    expect(outcome).toBe("applied");
-    expect(visible).toEqual(prior);
-  });
-
-  it("defers overlapping polls: only the latest epoch may write", async () => {
-    expect(shouldApplyBackgroundStatusPoll(3, 3, false)).toBe(true);
-    expect(shouldApplyBackgroundStatusPoll(2, 3, false)).toBe(false);
-    expect(shouldApplyBackgroundStatusPoll(3, 3, true)).toBe(false);
-
-    const fence = createGatewayPackOperationFence();
-    let resolveSlow!: (value: GatewayPackStatus) => void;
-    const slow = new Promise<GatewayPackStatus>((resolve) => {
-      resolveSlow = resolve;
-    });
-    const applied: GatewayPackStatus[] = [];
-    let epoch = 0;
-
-    const firstEpoch = ++epoch;
-    const first = runGatewayPackStatusWriterIfCurrent(
-      fence,
-      () => slow,
-      (next) => {
-        if (!shouldApplyBackgroundStatusPoll(firstEpoch, epoch, false)) return;
-        applied.push(next);
-      },
-      () => {},
-    );
-
-    const secondEpoch = ++epoch;
-    const secondStatus = status({
-      state: "degraded",
-      enabled: true,
-      authenticated: true,
-    });
-    const second = runGatewayPackStatusWriterIfCurrent(
-      fence,
-      async () => secondStatus,
-      (next) => {
-        if (!shouldApplyBackgroundStatusPoll(secondEpoch, epoch, false)) return;
-        applied.push(next);
-      },
-      () => {},
-    );
-
-    expect(await second).toBe("applied");
-    resolveSlow(
-      status({
-        state: "authenticated_ready",
-        authenticated: true,
-        enabled: true,
-        council_governed: true,
-        governed_ready: true,
-      }),
-    );
-    expect(await first).toBe("applied");
-    // Slow older epoch must not write after the newer poll settled.
-    expect(applied).toEqual([secondStatus]);
-  });
-
-  it("action fence stales a poll begun before disarm/action", async () => {
-    const fence = createGatewayPackOperationFence();
-    let resolveRead!: (value: GatewayPackStatus) => void;
-    const read = new Promise<GatewayPackStatus>((resolve) => {
-      resolveRead = resolve;
-    });
-    let visible: GatewayPackStatus | null = status({
-      state: "authenticated_ready",
-      authenticated: true,
-      enabled: true,
-      council_governed: true,
-      governed_ready: true,
-    });
-    const completion = runGatewayPackStatusWriterIfCurrent(
-      fence,
-      () => read,
-      (next) => {
-        visible = next;
-      },
-      () => {
-        visible = null;
-      },
-    );
-    beginGatewayPackAction(fence);
-    resolveRead(status({ state: "degraded", message: "stale" }));
-    expect(await completion).toBe("stale");
-    expect(visible?.state).toBe("authenticated_ready");
-  });
-
-  it("phone-style deferred poll is blocked by epoch invalidation and actionBusy", async () => {
-    // Mirrors SettingsPanel phone Enable/Disable fencing: bump epoch + set
-    // actionBusy at the action boundary so a slow background poll cannot write.
-    type PhoneLike = { state: string; message: string };
-    let resolvePoll!: (value: PhoneLike) => void;
-    const poll = new Promise<PhoneLike>((resolve) => {
-      resolvePoll = resolve;
-    });
-    let epoch = 0;
-    let actionBusy = false;
-    const prior: PhoneLike = { state: "ready", message: "published" };
-    let visible: PhoneLike = prior;
-
-    const pollEpoch = ++epoch;
-    const completion = (async () => {
-      const next = await poll;
-      if (!shouldApplyBackgroundStatusPoll(pollEpoch, epoch, actionBusy)) {
-        return "blocked" as const;
-      }
-      visible = next;
-      return "applied" as const;
-    })();
-
-    // Enable/Disable starts while the poll is still deferred.
-    actionBusy = true;
-    epoch += 1;
-    resolvePoll({ state: "off", message: "stale background sample" });
-
-    expect(await completion).toBe("blocked");
-    expect(visible).toEqual(prior);
-  });
-});
-
 describe("gatewayPackAllowsGoverned vocabulary", () => {
   it("is a single-field read of governed_ready", () => {
     expect(
@@ -408,8 +180,6 @@ describe("gatewayPackAllowsGoverned vocabulary", () => {
     );
   });
 });
-
-import { gatewayHeaderTruth } from "./gateway-pack";
 
 describe("gateway header truth", () => {
   it("distinguishes url-set from pack-authenticated and governed", () => {
@@ -440,5 +210,14 @@ describe("gateway header truth", () => {
     expect(
       gatewayHeaderTruth(status({ state: "docker_missing" }), false).tone,
     ).toBe("neutral");
+  });
+});
+
+describe("status authority migration", () => {
+  it("no longer exports renderer operation fences", () => {
+    const source = readFileSync(path.join(__dirname, "gateway-pack.ts"), "utf8");
+    expect(source).not.toContain("GatewayPackOperationFence");
+    expect(source).not.toContain("shouldApplyBackgroundStatusPoll");
+    expect(source).not.toContain("runGatewayPackStatusWriterIfCurrent");
   });
 });

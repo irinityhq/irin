@@ -18,6 +18,7 @@ function status(over: Partial<TouchIdStatus> = {}): TouchIdStatus {
     can_arm: true,
     can_renew: false,
     can_disarm: false,
+    rehearsal_passed: false,
     ...over,
   };
 }
@@ -55,6 +56,19 @@ describe("Touch ID control rendering", () => {
     expect(html).toContain("Touch ID ready");
     expect(html).toContain("Arm with Touch ID");
     expect(html).not.toContain("disabled=");
+  });
+
+  it("shows Rehearsal passed — not armed after a rehearsal-ok result", () => {
+    const html = render(
+      status({
+        rehearsal_passed: true,
+        reason: "rehearsal_only_build",
+        allow_real_arm: false,
+      }),
+    );
+    expect(html).toContain("Rehearsal passed — not armed");
+    expect(html).not.toContain("Touch ID ready");
+    expect(html).toContain("Arm with Touch ID");
   });
 
   it("shows Armed until <time> with Renew and Disarm", () => {
@@ -140,6 +154,12 @@ describe("Touch ID control rendering", () => {
       render({ ...status(), challenge: "Zm9v" } as TouchIdStatus),
     ).toThrow(/must not carry/);
   });
+
+  it("safe placeholder when no snapshot has arrived", () => {
+    const html = render(null);
+    expect(html).toContain("Checking Touch ID availability");
+    expect(html).not.toContain("Arm with Touch ID");
+  });
 });
 
 describe("Touch ID control adjacency", () => {
@@ -164,56 +184,28 @@ describe("Touch ID control adjacency", () => {
     expect(source).toContain('import TouchIdControl from "./TouchIdControl"');
   });
 
-  it("fences periodic status writers while a native Touch ID action runs", () => {
+  it("uses host-authoritative snapshot subscription (no renderer fences)", () => {
     const source = readFileSync(
       path.join(__dirname, "SettingsPanel.tsx"),
       "utf8",
     );
-    expect(source).toContain(
-      "if (!inTauri || touchIdActionBusy.current) return;",
-    );
-    expect(source).toContain("touchIdActionBusy.current = true;");
-    expect(source).toContain("touchIdActionBusy.current = false;");
-    expect(source).toContain(
-      "invalidateTouchIdStatusOperations(touchIdOperationFence.current);",
-    );
+    expect(source).toContain("desktop-status");
+    expect(source).toContain("getDesktopStatusSnapshot");
+    expect(source).toContain("mergeIfNewer");
+    expect(source).not.toContain("touchIdOperationFence");
+    expect(source).not.toContain("touchIdPollEpoch");
+    expect(source).not.toContain("shouldApplyBackgroundStatusPoll");
+    expect(source).not.toContain("packOperationFence");
+    expect(source).not.toContain("setInterval");
   });
 
-  it("supersedes overlapping background polls and never nulls status on poll error", () => {
-    const source = readFileSync(
-      path.join(__dirname, "SettingsPanel.tsx"),
-      "utf8",
-    );
-    expect(source).toContain("const epoch = ++touchIdPollEpoch.current;");
-    expect(source).toContain("shouldApplyBackgroundStatusPoll(");
-    // Background poll failure must not wipe the last projection (that greys
-    // Re-enroll until the next success).
-    expect(source).not.toMatch(
-      /runTouchIdStatusWriterIfCurrent\(\s*[\s\S]*?getTouchIdStatus[\s\S]*?setTouchIdStatus\(null\)/,
-    );
-  });
-
-  it("keeps last pack and phone projection on background poll error", () => {
-    const settings = readFileSync(
-      path.join(__dirname, "SettingsPanel.tsx"),
-      "utf8",
-    );
-    expect(settings).toContain("const epoch = ++packPollEpoch.current;");
-    expect(settings).toContain("const epoch = ++phonePollEpoch.current;");
-    expect(settings).toContain("shouldApplyBackgroundStatusPoll(");
-    // Must not null pack/phone on poll error (keep-last).
-    expect(settings).not.toMatch(
-      /runGatewayPackStatusWriterIfCurrent\(\s*[\s\S]*?getGatewayPackStatus[\s\S]*?setPackStatus\(null\)/,
-    );
-    expect(settings).not.toMatch(
-      /getPhoneAccessStatus\(\)[\s\S]{0,400}setPhoneStatus\(null\)/,
-    );
-
+  it("IdlePanel shares the same snapshot subscription", () => {
     const idle = readFileSync(path.join(__dirname, "IdlePanel.tsx"), "utf8");
-    expect(idle).toContain("const epoch = ++packPollEpoch.current;");
-    expect(idle).toContain("shouldApplyBackgroundStatusPoll(");
-    expect(idle).not.toMatch(
-      /getGatewayPackStatus\(\)[\s\S]{0,500}setPackStatus\(null\)/,
-    );
+    expect(idle).toContain("desktop-status");
+    expect(idle).toContain("getDesktopStatusSnapshot");
+    expect(idle).toContain("mergeIfNewer");
+    expect(idle).not.toContain("shouldApplyBackgroundStatusPoll");
+    expect(idle).not.toContain("packPollEpoch");
+    expect(idle).not.toContain("setInterval");
   });
 });

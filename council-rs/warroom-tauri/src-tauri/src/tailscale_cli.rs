@@ -567,12 +567,32 @@ fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, St
 }
 
 /// Convenience: run and return stdout (UTF-8 lossy) on success.
+///
+/// Empty stdout is a truthful host-boundary error (never handed to serde as
+/// raw JSON). Logs selected CLI path, exit status, and stdout byte count.
 pub fn run_tailscale_stdout(args: &[String], timeout: Duration) -> Result<String, String> {
+    let bin = resolve_tailscale_cli().unwrap_or_else(|_| PathBuf::from("tailscale"));
     let out = run_tailscale(args, timeout)?;
+    let exit = out.status.code().unwrap_or(-1);
+    let stdout_len = out.stdout.len();
+    eprintln!(
+        "[tailscale-cli] path={} exit={} stdout_bytes={} args={:?}",
+        bin.display(),
+        exit,
+        stdout_len,
+        args
+    );
     if !out.status.success() {
         let stderr = String::from_utf8_lossy(&out.stderr);
         let brief = stderr.lines().next().unwrap_or("command failed");
-        return Err(format!("tailscale failed: {brief}"));
+        return Err(format!("tailscale failed (exit {exit}): {brief}"));
+    }
+    if out.stdout.iter().all(|b| b.is_ascii_whitespace()) {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let brief = stderr.lines().next().unwrap_or("(no stderr)");
+        return Err(format!(
+            "tailscale returned empty output (exit {exit}): {brief}"
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }

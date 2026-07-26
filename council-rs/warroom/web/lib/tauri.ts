@@ -158,20 +158,20 @@ export async function getGatewayPackStatus(): Promise<GatewayPackStatus> {
   return invoke<GatewayPackStatus>("gateway_pack_status");
 }
 
-export async function enableGatewayPack(): Promise<GatewayPackStatus> {
-  return invoke<GatewayPackStatus>("gateway_pack_enable");
+export async function enableGatewayPack(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("gateway_pack_enable");
 }
 
-export async function disableGatewayPack(): Promise<GatewayPackStatus> {
-  return invoke<GatewayPackStatus>("gateway_pack_disable");
+export async function disableGatewayPack(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("gateway_pack_disable");
 }
 
-export async function stopGatewayPack(): Promise<GatewayPackStatus> {
-  return invoke<GatewayPackStatus>("gateway_pack_stop");
+export async function stopGatewayPack(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("gateway_pack_stop");
 }
 
-export async function uninstallGatewayPack(): Promise<GatewayPackStatus> {
-  return invoke<GatewayPackStatus>("gateway_pack_uninstall");
+export async function uninstallGatewayPack(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("gateway_pack_uninstall");
 }
 
 /** Renderer-safe projection of the native Touch ID ceremony. */
@@ -209,26 +209,41 @@ export interface TouchIdStatus {
   can_arm: boolean;
   can_renew: boolean;
   can_disarm: boolean;
+  /** Last successful ceremony was rehearsal-ok (producer did not start). */
+  rehearsal_passed: boolean;
+}
+
+/** Host-authoritative combined status snapshot (ordered by seq). */
+export interface DesktopStatusSnapshot {
+  authority_epoch: string;
+  seq: number;
+  pack: GatewayPackStatus;
+  touch_id: TouchIdStatus;
+  phone: PhoneAccessStatus;
 }
 
 export async function getTouchIdStatus(): Promise<TouchIdStatus> {
   return invoke<TouchIdStatus>("touch_id_status");
 }
 
-export async function enrollTouchId(): Promise<TouchIdStatus> {
-  return invoke<TouchIdStatus>("touch_id_enroll");
+export async function getDesktopStatusSnapshot(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("desktop_status_snapshot");
 }
 
-export async function armWithTouchId(): Promise<TouchIdStatus> {
-  return invoke<TouchIdStatus>("touch_id_arm");
+export async function enrollTouchId(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("touch_id_enroll");
 }
 
-export async function renewTouchIdArm(): Promise<TouchIdStatus> {
-  return invoke<TouchIdStatus>("touch_id_renew");
+export async function armWithTouchId(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("touch_id_arm");
 }
 
-export async function disarmTouchId(): Promise<TouchIdStatus> {
-  return invoke<TouchIdStatus>("touch_id_disarm");
+export async function renewTouchIdArm(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("touch_id_renew");
+}
+
+export async function disarmTouchId(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("touch_id_disarm");
 }
 
 /** Non-secret private phone publication state owned by the installed app. */
@@ -260,12 +275,12 @@ export async function getPhoneAccessStatus(): Promise<PhoneAccessStatus> {
   return invoke<PhoneAccessStatus>("phone_access_status");
 }
 
-export async function enablePhoneAccess(): Promise<PhoneAccessStatus> {
-  return invoke<PhoneAccessStatus>("phone_access_enable");
+export async function enablePhoneAccess(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("phone_access_enable");
 }
 
-export async function disablePhoneAccess(): Promise<PhoneAccessStatus> {
-  return invoke<PhoneAccessStatus>("phone_access_disable");
+export async function disablePhoneAccess(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("phone_access_disable");
 }
 
 export async function getServerLogs(): Promise<string[]> {

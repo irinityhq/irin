@@ -1,6 +1,9 @@
 /**
  * Client helpers for the installed-release Gateway Pack.
  * Status is non-secret; raw GW_API_KEY never crosses this boundary.
+ *
+ * Ordering is owned by the host status authority + `applyIfNewer` in
+ * `desktop-status.ts`. This file has no operation fences.
  */
 
 import type { GatewayPackState, GatewayPackStatus } from "./tauri";
@@ -8,68 +11,6 @@ import { gatewayPackAllowsGoverned } from "./tauri";
 
 export type { GatewayPackState, GatewayPackStatus };
 export { gatewayPackAllowsGoverned };
-
-export interface GatewayPackOperationFence {
-  generation: number;
-  actionInProgress: boolean;
-}
-
-export type GatewayPackStatusWriteOutcome = "applied" | "stale" | "blocked";
-
-export function createGatewayPackOperationFence(): GatewayPackOperationFence {
-  return { generation: 0, actionInProgress: false };
-}
-
-/** Invalidate pending status reads and reject new polls for the action boundary. */
-export function beginGatewayPackAction(
-  fence: GatewayPackOperationFence,
-): void {
-  fence.generation += 1;
-  fence.actionInProgress = true;
-}
-
-/** Invalidate every read attempted during the action before reopening polls. */
-export function endGatewayPackAction(fence: GatewayPackOperationFence): void {
-  fence.generation += 1;
-  fence.actionInProgress = false;
-}
-
-export async function runGatewayPackStatusWriterIfCurrent(
-  fence: GatewayPackOperationFence,
-  read: () => Promise<GatewayPackStatus>,
-  apply: (status: GatewayPackStatus) => void,
-  onError: () => void,
-): Promise<GatewayPackStatusWriteOutcome> {
-  if (fence.actionInProgress) return "blocked";
-  const generation = fence.generation;
-  try {
-    const status = await read();
-    if (fence.actionInProgress || fence.generation !== generation) {
-      return "stale";
-    }
-    apply(status);
-    return "applied";
-  } catch {
-    if (fence.actionInProgress || fence.generation !== generation) {
-      return "stale";
-    }
-    onError();
-    return "applied";
-  }
-}
-
-/**
- * Whether a background pack/phone status poll may repaint.
- * Only the latest poll epoch may write; an in-flight lifecycle action owns
- * the projection until it settles (pass actionBusy=true to hold).
- */
-export function shouldApplyBackgroundStatusPoll(
-  pollEpoch: number,
-  currentEpoch: number,
-  actionBusy: boolean,
-): boolean {
-  return pollEpoch === currentEpoch && !actionBusy;
-}
 
 /** Operator-facing label for a pack state (never "ready" for a bare URL). */
 export function gatewayPackStateLabel(state: GatewayPackState): string {

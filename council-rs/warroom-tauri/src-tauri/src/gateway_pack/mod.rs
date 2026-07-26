@@ -31,8 +31,26 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
+
+/// Pack lifecycle generation: advances on enable/disable/stop/uninstall so an
+/// in-flight Touch ID ceremony can fail closed if the pack identity changes
+/// between stage and confirm. Independent of the presentation STATUS_CACHE
+/// generation (which also bumps on route/spawn transitions).
+static PACK_LIFECYCLE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Current pack lifecycle generation (non-secret, process-local).
+pub fn pack_lifecycle_generation() -> u64 {
+    PACK_LIFECYCLE_GENERATION.load(Ordering::SeqCst)
+}
+
+/// Advance the pack lifecycle generation. Called at the start of every pack
+/// lifecycle mutation under the lifecycle lock.
+pub fn bump_pack_lifecycle_generation() {
+    PACK_LIFECYCLE_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
 
 /// Global lifecycle lock — enable/disable/stop/uninstall must not interleave.
 static LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
@@ -86,6 +104,13 @@ pub fn invalidate_status_cache() {
         guard.generation = guard.generation.wrapping_add(1);
         guard.cached = None;
     }
+}
+
+/// Test-only: presentation cache generation counter (for Action vs Background
+/// freshness proofs). Not a pack lifecycle generation.
+#[cfg(test)]
+pub fn status_cache_generation_for_test() -> u64 {
+    STATUS_CACHE.lock().map(|g| g.generation).unwrap_or(0)
 }
 
 fn commit_status_cache(generation: u64, st: &GatewayPackStatus) {
@@ -163,7 +188,7 @@ impl GatewayPackState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GatewayPackStatus {
     pub state: GatewayPackState,
     pub message: String,
@@ -1666,7 +1691,10 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     let _guard = LIFECYCLE_LOCK
         .lock()
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
+    bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    // A pack identity change invalidates any prior rehearsal presentation.
+    crate::touch_id::clear_rehearsal_passed();
     lifecycle_stage("enable_begin", "ok");
 
     match probe_docker_daemon() {
@@ -1926,7 +1954,9 @@ pub fn disable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus
     let _guard = LIFECYCLE_LOCK
         .lock()
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
+    bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    crate::touch_id::clear_rehearsal_passed();
     let mut cfg = load_or_create_private_config()?;
     cfg.via_gateway_default = false;
     write_private_config_at(&crate::private_config::private_config_path(), &cfg)?;
@@ -1946,7 +1976,9 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
             return Err("gateway pack lifecycle lock poisoned".to_string());
         }
     };
+    bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    crate::touch_id::clear_rehearsal_passed();
     lifecycle_stage("stop_lock", "ok");
 
     let mut cfg = match load_or_create_private_config() {
@@ -2026,7 +2058,9 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
     let _guard = LIFECYCLE_LOCK
         .lock()
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
+    bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    crate::touch_id::clear_rehearsal_passed();
 
     let key_id = load_or_create_private_config()
         .ok()

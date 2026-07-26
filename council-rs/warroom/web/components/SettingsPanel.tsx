@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   CheckCircle2,
@@ -32,9 +32,7 @@ import {
   enableGatewayPack,
   enrollTouchId,
   getDesktopRuntimeMode,
-  getGatewayPackStatus,
-  getPhoneAccessStatus,
-  getTouchIdStatus,
+  getDesktopStatusSnapshot,
   getServerLogs,
   isTauri,
   onCouncilLog,
@@ -46,26 +44,14 @@ import {
   uninstallGatewayPack,
   renewTouchIdArm,
   type DesktopRuntimeMode,
+  type DesktopStatusSnapshot,
   type GatewayPackStatus,
   type PhoneAccessStatus,
   type TouchIdStatus,
 } from "@/lib/tauri";
-import {
-  beginGatewayPackAction,
-  createGatewayPackOperationFence,
-  endGatewayPackAction,
-  gatewayPackStateLabel,
-  runGatewayPackStatusWriterIfCurrent,
-  shouldApplyBackgroundStatusPoll,
-} from "@/lib/gateway-pack";
-import {
-  beginTouchIdDisarm,
-  createTouchIdOperationFence,
-  endTouchIdDisarm,
-  invalidateTouchIdStatusOperations,
-  runTouchIdStatusWriterIfCurrent,
-  touchIdArmSuccessMessage,
-} from "@/lib/touch-id";
+import { gatewayPackStateLabel } from "@/lib/gateway-pack";
+import { touchIdArmSuccessMessage } from "@/lib/touch-id";
+import { mergeIfNewer } from "@/lib/desktop-status";
 import TouchIdControl from "./TouchIdControl";
 import PhoneAccessControl from "./PhoneAccessControl";
 import { probeWsUpgrade } from "@/lib/ws-probe";
@@ -103,24 +89,16 @@ export default function SettingsPanel() {
   const [serverLogs, setServerLogs] = useState<string[]>([]);
   const [sidecarViaGateway, setSidecarViaGateway] = useState(false);
   const [restarting, setRestarting] = useState(false);
-  const [packStatus, setPackStatus] = useState<GatewayPackStatus | null>(null);
+  /** Single host-authoritative snapshot for pack / Touch ID / phone. */
+  const [desktopStatus, setDesktopStatus] =
+    useState<DesktopStatusSnapshot | null>(null);
+  const packStatus: GatewayPackStatus | null = desktopStatus?.pack ?? null;
+  const phoneStatus: PhoneAccessStatus | null = desktopStatus?.phone ?? null;
+  const touchIdStatus: TouchIdStatus | null = desktopStatus?.touch_id ?? null;
   const [packBusy, setPackBusy] = useState(false);
-  const packOperationFence = useRef(createGatewayPackOperationFence());
-  /** Monotonic epoch so a slow pack poll cannot overwrite a newer one. */
-  const packPollEpoch = useRef(0);
-  const [phoneStatus, setPhoneStatus] = useState<PhoneAccessStatus | null>(null);
   const [phoneBusy, setPhoneBusy] = useState(false);
-  /** True while Enable/Disable is in flight — blocks background poll writes. */
-  const phoneActionBusy = useRef(false);
-  /** Monotonic epoch so a slow phone poll cannot overwrite a newer one. */
-  const phonePollEpoch = useRef(0);
-  const [touchIdStatus, setTouchIdStatus] = useState<TouchIdStatus | null>(null);
   const [touchIdBusy, setTouchIdBusy] = useState(false);
   const [touchIdDisarmBusy, setTouchIdDisarmBusy] = useState(false);
-  const touchIdOperationFence = useRef(createTouchIdOperationFence());
-  const touchIdActionBusy = useRef(false);
-  /** Monotonic epoch so a slow status poll cannot overwrite a newer one. */
-  const touchIdPollEpoch = useRef(0);
   const [confirmingUninstall, setConfirmingUninstall] = useState(false);
   const inTauri = isTauri();
   const [desktopRuntimeMode, setDesktopRuntimeMode] = useState<
@@ -129,168 +107,64 @@ export default function SettingsPanel() {
   const debugSidecarAvailable = desktopRuntimeMode === "development";
   const installedRelease = desktopRuntimeMode === "installed-release";
 
-  const refreshPackStatus = useCallback(async () => {
-    if (!inTauri) return;
-    const epoch = ++packPollEpoch.current;
-    await runGatewayPackStatusWriterIfCurrent(
-      packOperationFence.current,
-      getGatewayPackStatus,
-      (next) => {
-        // Fence already blocks/stales across lifecycle actions; epoch stops
-        // out-of-order background polls from overwriting a newer sample.
-        if (
-          !shouldApplyBackgroundStatusPoll(
-            epoch,
-            packPollEpoch.current,
-            false,
-          )
-        ) {
-          return;
-        }
-        setPackStatus(next);
-      },
-      () => {
-        // Keep the last known pack projection on a background poll failure.
-      },
-    );
-  }, [inTauri]);
+  const applySnapshot = useCallback((next: DesktopStatusSnapshot) => {
+    setDesktopStatus((prev) => mergeIfNewer(prev, next));
+  }, []);
 
   const runGatewayPackAction = useCallback(
     async (
-      action: () => Promise<GatewayPackStatus>,
+      action: () => Promise<DesktopStatusSnapshot>,
       onSuccess: (status: GatewayPackStatus) => void,
     ) => {
-      beginGatewayPackAction(packOperationFence.current);
       setPackBusy(true);
-      let refreshAfterError = false;
       try {
-        const status = await action();
-        setPackStatus(status);
-        onSuccess(status);
+        const snap = await action();
+        applySnapshot(snap);
+        onSuccess(snap.pack);
       } catch (error) {
         toast("error", error instanceof Error ? error.message : String(error));
-        refreshAfterError = true;
       } finally {
-        endGatewayPackAction(packOperationFence.current);
         setPackBusy(false);
       }
-      if (refreshAfterError) void refreshPackStatus();
     },
-    [refreshPackStatus, toast],
+    [applySnapshot, toast],
   );
-
-  const refreshPhoneStatus = useCallback(async () => {
-    if (!inTauri || phoneActionBusy.current) return;
-    const epoch = ++phonePollEpoch.current;
-    try {
-      const next = await getPhoneAccessStatus();
-      if (
-        !shouldApplyBackgroundStatusPoll(
-          epoch,
-          phonePollEpoch.current,
-          phoneActionBusy.current,
-        )
-      ) {
-        return;
-      }
-      setPhoneStatus(next);
-    } catch {
-      // Keep the last known phone projection on a background poll failure.
-    }
-  }, [inTauri]);
-
-  const refreshTouchIdStatus = useCallback(async () => {
-    if (!inTauri || touchIdActionBusy.current) return;
-    // Supersede any in-flight background poll. Slow Docker/HTTP probes inside
-    // touch_id_status can exceed the 8s interval; applying an older sample
-    // greys Re-enroll after a newer success already painted.
-    const epoch = ++touchIdPollEpoch.current;
-    await runTouchIdStatusWriterIfCurrent(
-      touchIdOperationFence.current,
-      getTouchIdStatus,
-      (next) => {
-        if (
-          !shouldApplyBackgroundStatusPoll(
-            epoch,
-            touchIdPollEpoch.current,
-            touchIdActionBusy.current,
-          )
-        ) {
-          return;
-        }
-        setTouchIdStatus(next);
-      },
-      () => {
-        // Keep the last known projection on a background poll failure. Nulling
-        // status disables/hides the control until the next success and is what
-        // made the Re-enroll button flicker with a prohibited cursor.
-      },
-    );
-  }, [inTauri]);
 
   const runTouchIdAction = useCallback(
     async (
-      action: () => Promise<TouchIdStatus>,
+      action: () => Promise<DesktopStatusSnapshot>,
       successMessage: string | ((status: TouchIdStatus) => string),
     ) => {
-      // Enrollment, Arm, and Renew own the visible Touch ID projection until
-      // their native boundary settles. Invalidate a poll already in flight and
-      // refuse new background polls so neither can repaint a pre-action state.
-      touchIdActionBusy.current = true;
-      invalidateTouchIdStatusOperations(touchIdOperationFence.current);
       setTouchIdBusy(true);
-      let refreshAfterError = false;
       try {
-        await runTouchIdStatusWriterIfCurrent(
-          touchIdOperationFence.current,
-          action,
-          (next) => {
-            setTouchIdStatus(next);
-            const message =
-              typeof successMessage === "function"
-                ? successMessage(next)
-                : successMessage;
-            toast("success", message);
-          },
-          (error) => {
-            toast(
-              "error",
-              error instanceof Error ? error.message : String(error),
-            );
-            refreshAfterError = true;
-          },
-        );
+        const snap = await action();
+        applySnapshot(snap);
+        const message =
+          typeof successMessage === "function"
+            ? successMessage(snap.touch_id)
+            : successMessage;
+        toast("success", message);
+      } catch (error) {
+        toast("error", error instanceof Error ? error.message : String(error));
       } finally {
-        invalidateTouchIdStatusOperations(touchIdOperationFence.current);
-        touchIdActionBusy.current = false;
         setTouchIdBusy(false);
       }
-      if (refreshAfterError) void refreshTouchIdStatus();
     },
-    [refreshTouchIdStatus, toast],
+    [applySnapshot, toast],
   );
 
   const runTouchIdDisarm = useCallback(async () => {
-    // Disarm owns the entire renderer boundary at click time. Status writers
-    // that were already pending become stale, and new polls are rejected until
-    // the native kill-switch has settled.
-    beginTouchIdDisarm(touchIdOperationFence.current);
     setTouchIdDisarmBusy(true);
     try {
-      const next = await disarmTouchId();
-      endTouchIdDisarm(touchIdOperationFence.current);
-      setTouchIdStatus(next);
+      const snap = await disarmTouchId();
+      applySnapshot(snap);
       toast("success", "Disarmed");
     } catch (e) {
-      // Reopen writers only after invalidating every read attempted during the
-      // failed boundary, then fetch one fresh authoritative projection.
-      endTouchIdDisarm(touchIdOperationFence.current);
       toast("error", e instanceof Error ? e.message : String(e));
-      void refreshTouchIdStatus();
     } finally {
       setTouchIdDisarmBusy(false);
     }
-  }, [refreshTouchIdStatus, toast]);
+  }, [applySnapshot, toast]);
 
   const remoteWarnings = useMemo(() => {
     const urls = [
@@ -329,24 +203,37 @@ export default function SettingsPanel() {
     };
   }, [inTauri]);
 
+  // One snapshot subscription: initial invoke + host `desktop-status` events.
+  // No renderer intervals, fences, or poll epochs — the host owns ordering.
   useEffect(() => {
     if (!inTauri || desktopRuntimeMode !== "installed-release") return;
-    void refreshPackStatus();
-    void refreshPhoneStatus();
-    void refreshTouchIdStatus();
-    const t = window.setInterval(() => {
-      void refreshPackStatus();
-      void refreshPhoneStatus();
-      void refreshTouchIdStatus();
-    }, 8000);
-    return () => window.clearInterval(t);
-  }, [
-    inTauri,
-    desktopRuntimeMode,
-    refreshPackStatus,
-    refreshPhoneStatus,
-    refreshTouchIdStatus,
-  ]);
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    void getDesktopStatusSnapshot()
+      .then((snap) => {
+        if (!cancelled) applySnapshot(snap);
+      })
+      .catch(() => {
+        // Keep the last known projection (or null placeholder) on failure.
+      });
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<DesktopStatusSnapshot>("desktop-status", (event) => {
+          if (!cancelled) applySnapshot(event.payload);
+        }),
+      )
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {
+        // Event bridge unavailable — initial snapshot still applies.
+      });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [inTauri, desktopRuntimeMode, applySnapshot]);
 
   useEffect(() => {
     if (!showServerLog || !inTauri) return;
@@ -805,47 +692,34 @@ export default function SettingsPanel() {
           busy={phoneBusy}
           notify={toast}
           onEnable={async () => {
-            // Invalidate in-flight polls and block background writes for the action.
-            phoneActionBusy.current = true;
-            phonePollEpoch.current += 1;
             setPhoneBusy(true);
-            let refreshAfterError = false;
             try {
-              const status = await enablePhoneAccess();
-              setPhoneStatus(status);
+              const snap = await enablePhoneAccess();
+              applySnapshot(snap);
               toast(
-                status.state === "ready" ? "success" : "error",
-                status.message,
+                snap.phone.state === "ready" ? "success" : "error",
+                snap.phone.message,
               );
             } catch (e) {
               toast("error", e instanceof Error ? e.message : String(e));
-              refreshAfterError = true;
             } finally {
-              phoneActionBusy.current = false;
               setPhoneBusy(false);
             }
-            if (refreshAfterError) void refreshPhoneStatus();
           }}
           onDisable={async () => {
-            phoneActionBusy.current = true;
-            phonePollEpoch.current += 1;
             setPhoneBusy(true);
-            let refreshAfterError = false;
             try {
-              const status = await disablePhoneAccess();
-              setPhoneStatus(status);
+              const snap = await disablePhoneAccess();
+              applySnapshot(snap);
               toast(
-                status.state === "off" ? "success" : "error",
-                status.message,
+                snap.phone.state === "off" ? "success" : "error",
+                snap.phone.message,
               );
             } catch (e) {
               toast("error", e instanceof Error ? e.message : String(e));
-              refreshAfterError = true;
             } finally {
-              phoneActionBusy.current = false;
               setPhoneBusy(false);
             }
-            if (refreshAfterError) void refreshPhoneStatus();
           }}
         />
       )}

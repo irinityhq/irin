@@ -5,79 +5,15 @@
  * talks to the native host and never holds ceremony material: the renderer's
  * whole job is to turn a state + reason into a label, an action, and (when a
  * lease is live) a wall-clock deadline.
+ *
+ * Ordering is owned by the host status authority + `applyIfNewer` in
+ * `desktop-status.ts`. This file has no operation fences.
  */
 
 import type { TouchIdReason, TouchIdState, TouchIdStatus } from "./tauri";
 
 export type { TouchIdReason, TouchIdState, TouchIdStatus };
 
-/**
- * Renderer-side ordering fence for asynchronous Touch ID status writers.
- *
- * The native host owns the security boundary. This small renderer fence owns
- * presentation ordering: once Disarm is clicked, no older Arm/Renew completion
- * or status refresh can repaint the UI or emit a stale toast.
- */
-export interface TouchIdOperationFence {
-  generation: number;
-  disarmInProgress: boolean;
-}
-
-export function createTouchIdOperationFence(): TouchIdOperationFence {
-  return { generation: 0, disarmInProgress: false };
-}
-
-/** Invalidate every status result already awaiting native work. */
-export function invalidateTouchIdStatusOperations(
-  fence: TouchIdOperationFence,
-): void {
-  fence.generation += 1;
-}
-
-/** Block all status writers for the entire native Disarm boundary. */
-export function beginTouchIdDisarm(fence: TouchIdOperationFence): void {
-  fence.disarmInProgress = true;
-  invalidateTouchIdStatusOperations(fence);
-}
-
-/** Reopen status writers only after invalidating reads begun during Disarm. */
-export function endTouchIdDisarm(fence: TouchIdOperationFence): void {
-  invalidateTouchIdStatusOperations(fence);
-  fence.disarmInProgress = false;
-}
-
-/**
- * Apply an asynchronous status result only when no newer Disarm invalidated it.
- *
- * Errors from an invalidated operation are ignored too: the newer Disarm
- * result and its toast are the renderer's authoritative visible outcome.
- */
-export async function runTouchIdStatusWriterIfCurrent(
-  fence: TouchIdOperationFence,
-  action: () => Promise<TouchIdStatus>,
-  onSuccess: (status: TouchIdStatus) => void,
-  onError: (error: unknown) => void,
-): Promise<"applied" | "stale"> {
-  if (fence.disarmInProgress) return "stale";
-  const generation = fence.generation;
-  try {
-    const status = await action();
-    if (fence.disarmInProgress || generation !== fence.generation) return "stale";
-    onSuccess(status);
-  } catch (error) {
-    if (fence.disarmInProgress || generation !== fence.generation) return "stale";
-    onError(error);
-  }
-  return "applied";
-}
-
-/**
- * Whether a background Touch ID status poll may repaint the control.
- *
- * Settings fires status on an 8s interval. A slow native probe can outlive
- * the next tick; only the latest poll epoch may write, and an in-flight
- * enroll/arm/renew action owns the projection until it settles.
- */
 /**
  * Field names that must NEVER appear on a status object reaching the renderer.
  * `assertNoSecretFields` is called on every status the control renders, so a
@@ -270,7 +206,22 @@ export function deriveTouchIdView(
         armedUntilMs: null,
       };
     case "ready":
-    default:
+    default: {
+      // A successful rehearsal-ok must never paint the same as never-armed.
+      if (status.rehearsal_passed) {
+        return {
+          state: "ready",
+          label: "Rehearsal passed — not armed",
+          primaryLabel: "Arm with Touch ID",
+          primaryAction: "arm",
+          primaryEnabled: status.can_arm,
+          showDisarm: status.can_disarm,
+          detail:
+            detail ??
+            "Rehearsal completed; the producer did not start. Arm again for a real lease when this build allows it.",
+          armedUntilMs: null,
+        };
+      }
       return {
         state: "ready",
         label: "Touch ID ready",
@@ -281,6 +232,7 @@ export function deriveTouchIdView(
         detail,
         armedUntilMs: null,
       };
+    }
   }
 }
 
@@ -310,7 +262,8 @@ export function touchIdArmSuccessMessage(status: TouchIdStatus): string {
   // inherited lease state when we describe the action that just completed.
   if (
     status.reason === "rehearsal_only_build" ||
-    status.allow_real_arm === false
+    status.allow_real_arm === false ||
+    status.rehearsal_passed
   ) {
     return "Rehearsal passed";
   }

@@ -23,6 +23,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -182,6 +183,26 @@ impl CeremonyFence {
 
 static TOUCH_ID_CEREMONY_FENCE: CeremonyFence = CeremonyFence::new();
 
+/// Sticky presentation flag: the most recent successful ceremony returned
+/// `rehearsal-ok` (producer did not start). Cleared on real arm, disarm,
+/// enroll, or pack lifecycle change. The panel must render a distinct state
+/// ("Rehearsal passed — not armed") rather than never-armed "Touch ID ready".
+static REHEARSAL_PASSED_STICKY: AtomicBool = AtomicBool::new(false);
+
+/// Record that the last ceremony completed as rehearsal-only.
+pub fn note_rehearsal_ok() {
+    REHEARSAL_PASSED_STICKY.store(true, Ordering::SeqCst);
+}
+
+/// Clear the post-rehearsal presentation sticky.
+pub fn clear_rehearsal_passed() {
+    REHEARSAL_PASSED_STICKY.store(false, Ordering::SeqCst);
+}
+
+fn rehearsal_passed_sticky() -> bool {
+    REHEARSAL_PASSED_STICKY.load(Ordering::SeqCst)
+}
+
 // ---------------------------------------------------------------------------
 // Renderer-facing projection
 // ---------------------------------------------------------------------------
@@ -246,6 +267,9 @@ pub struct TouchIdStatus {
     pub can_arm: bool,
     pub can_renew: bool,
     pub can_disarm: bool,
+    /// Last successful ceremony was `rehearsal-ok` — panel must not look
+    /// identical to never-armed "Touch ID ready".
+    pub rehearsal_passed: bool,
 }
 
 impl TouchIdStatus {
@@ -262,6 +286,7 @@ impl TouchIdStatus {
             can_arm: false,
             can_renew: false,
             can_disarm: false,
+            rehearsal_passed: false,
         }
     }
 }
@@ -313,12 +338,31 @@ fn host_requires_rehearsal() -> bool {
     crate::bundled_build_identity().1
 }
 
+/// Sidecar stage body uses the wire key `rehearse` (not `rehearsal`).
+/// See `gateway/sidecar-rs/src/watch/api/arming.rs` admin_arm_stage_json.
 fn stage_request_body(host_rehearsal: bool) -> Option<serde_json::Value> {
-    host_rehearsal.then(|| serde_json::json!({ "rehearsal": true }))
+    host_rehearsal.then(|| serde_json::json!({ "rehearse": true }))
 }
 
-fn pending_stage_is_safe_for_host(host_rehearsal: bool, stage_rehearsal: bool) -> bool {
-    !host_rehearsal || stage_rehearsal
+/// How a clean/dirty host treats a pending stage found at GET arm/pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingStageDisposition {
+    /// Resume the open stage (same challenge/nonce).
+    Resume,
+    /// Dirty host must not resume a real-arm stage — refuse loudly.
+    RefuseRealStageOnDirtyHost,
+    /// Clean real-capable host must not resume a rehearsal stage — POST fresh.
+    StageFresh,
+}
+
+fn classify_pending_stage(host_rehearsal: bool, stage_rehearsal: bool) -> PendingStageDisposition {
+    if host_rehearsal && !stage_rehearsal {
+        PendingStageDisposition::RefuseRealStageOnDirtyHost
+    } else if !host_rehearsal && stage_rehearsal {
+        PendingStageDisposition::StageFresh
+    } else {
+        PendingStageDisposition::Resume
+    }
 }
 
 /// Presentation hysteresis for Gateway readiness on the status path only.
@@ -984,7 +1028,19 @@ pub fn gather_inputs(store: &dyn SecretStore, gateway_ready: bool) -> TouchIdInp
 
 /// Full status for the renderer.
 pub fn touch_id_status(store: &dyn SecretStore, gateway_ready: bool) -> TouchIdStatus {
-    derive_status(&gather_inputs(store, gateway_ready))
+    let mut st = derive_status(&gather_inputs(store, gateway_ready));
+    // Real armed leases always clear the rehearsal sticky; otherwise surface it
+    // only while the control is in a ready/blocked post-ceremony state.
+    if st.state == TouchIdState::Armed {
+        clear_rehearsal_passed();
+        st.rehearsal_passed = false;
+    } else if matches!(
+        st.state,
+        TouchIdState::Ready | TouchIdState::CeremonyOpen | TouchIdState::Blocked
+    ) {
+        st.rehearsal_passed = rehearsal_passed_sticky();
+    }
+    st
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,6 +1059,7 @@ pub fn enroll(store: &dyn SecretStore, gateway_ready: bool) -> Result<TouchIdSta
     if !gateway_ready {
         return Err("Gateway must be enabled and authenticated before Touch ID setup".to_string());
     }
+    clear_rehearsal_passed();
     let helper = helper_path().ok_or("Touch ID helper is not bundled in this app")?;
     let digest = helper_sha256(&helper)?;
 
@@ -1044,12 +1101,47 @@ pub fn enroll(store: &dyn SecretStore, gateway_ready: bool) -> Result<TouchIdSta
     Ok(touch_id_status(store, gateway_ready))
 }
 
+/// Parse stage_id + challenge from a stage or pending JSON body.
+fn stage_id_and_challenge(body: &str, what: &str) -> Result<(String, String), String> {
+    let v: serde_json::Value =
+        serde_json::from_str(body).map_err(|_| format!("malformed {what} response"))?;
+    let sid = v
+        .get("stage_id")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| format!("{what} response is missing stage_id"))?
+        .to_string();
+    let ch = v
+        .get("challenge")
+        .and_then(|s| s.as_str())
+        .ok_or_else(|| format!("{what} response is missing challenge"))?
+        .to_string();
+    Ok((sid, ch))
+}
+
+fn post_fresh_stage(token: &str, host_rehearsal: bool) -> Result<(String, String), String> {
+    let (code, body) = http_json(
+        "POST",
+        &arm_url("arm/stage"),
+        token,
+        stage_request_body(host_rehearsal),
+    )?;
+    if code != 200 {
+        return Err(format!("stage refused ({code})"));
+    }
+    stage_id_and_challenge(&body, "stage")
+}
+
 /// Arm (or renew) through the existing stage → sign → confirm ceremony.
 ///
-/// Resume-first, exactly like `gateway/bin/arm`: an open unexpired stage is
-/// RESUMED with its stored challenge bytes rather than re-staged, so a retry
-/// never fires a second Touch ID prompt against a fresh nonce. Renew is the
-/// same ceremony — a lease is never extended without a new tap.
+/// Resume-first for compatible stages: an open unexpired stage is RESUMED with
+/// its stored challenge bytes rather than re-staged, so a retry never fires a
+/// second Touch ID prompt against a fresh nonce. Exceptions:
+/// - dirty host + real pending stage → refuse (operator Disarms first)
+/// - clean host + rehearsal pending stage → POST a fresh real stage (sidecar
+///   atomically replaces the pending row)
+///
+/// The ceremony is also bound to the current pack lifecycle generation: if the
+/// pack identity changes between stage and confirm, the arm fails closed.
 pub fn arm(store: &dyn SecretStore) -> Result<TouchIdStatus, String> {
     let ceremony = TOUCH_ID_CEREMONY_FENCE.begin_ceremony()?;
     let helper = helper_path().ok_or("Touch ID helper is not bundled in this app")?;
@@ -1060,10 +1152,14 @@ pub fn arm(store: &dyn SecretStore) -> Result<TouchIdStatus, String> {
     let token =
         load_arm_principal_token(store)?.ok_or("Touch ID arm principal is missing; re-enroll")?;
 
+    // Bind ceremony to the pack generation observed at stage time.
+    let pack_gen = crate::gateway_pack::pack_lifecycle_generation();
+
     // 1. Resume or stage. A dirty host must never resume a real-arm stage
     // created by a clean host; the operator clears it with the always-available
-    // Disarm kill switch. Fresh stages from a dirty host explicitly request
-    // rehearsal even when paired with a production sidecar.
+    // Disarm kill switch. A clean host must never resume a rehearsal stage —
+    // it posts a fresh real stage instead. Fresh stages from a dirty host
+    // explicitly request rehearsal even when paired with a production sidecar.
     let host_rehearsal = host_requires_rehearsal();
     let (stage_id, challenge) = TOUCH_ID_CEREMONY_FENCE.run_if_current(ceremony, || {
         match http_json("GET", &arm_url("arm/pending"), &token, None)? {
@@ -1074,47 +1170,33 @@ pub fn arm(store: &dyn SecretStore) -> Result<TouchIdStatus, String> {
                     .get("rehearsal")
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false);
-                if !pending_stage_is_safe_for_host(host_rehearsal, stage_rehearsal) {
-                    return Err(
-                        "A real-arm stage is already open. Use Disarm to clear it before running this rehearsal build."
-                            .to_string(),
-                    );
+                match classify_pending_stage(host_rehearsal, stage_rehearsal) {
+                    PendingStageDisposition::RefuseRealStageOnDirtyHost => {
+                        return Err(
+                            "A real-arm stage is already open. Use Disarm to clear it before running this rehearsal build."
+                                .to_string(),
+                        );
+                    }
+                    PendingStageDisposition::StageFresh => {
+                        // Clean host refuses to resume a rehearsal stage; the
+                        // sidecar stage op atomically replaces the pending row.
+                        post_fresh_stage(&token, host_rehearsal)
+                    }
+                    PendingStageDisposition::Resume => stage_id_and_challenge(&body, "pending"),
                 }
-                let sid = v
-                    .get("stage_id")
-                    .and_then(|s| s.as_str())
-                    .ok_or("pending stage is missing stage_id")?;
-                let ch = v
-                    .get("challenge")
-                    .and_then(|s| s.as_str())
-                    .ok_or("pending stage is missing challenge")?;
-                Ok((sid.to_string(), ch.to_string()))
             }
-            (404, _) => {
-                let (code, body) = http_json(
-                    "POST",
-                    &arm_url("arm/stage"),
-                    &token,
-                    stage_request_body(host_rehearsal),
-                )?;
-                if code != 200 {
-                    return Err(format!("stage refused ({code})"));
-                }
-                let v: serde_json::Value =
-                    serde_json::from_str(&body).map_err(|_| "malformed stage response")?;
-                let sid = v
-                    .get("stage_id")
-                    .and_then(|s| s.as_str())
-                    .ok_or("stage response is missing stage_id")?;
-                let ch = v
-                    .get("challenge")
-                    .and_then(|s| s.as_str())
-                    .ok_or("stage response is missing challenge")?;
-                Ok((sid.to_string(), ch.to_string()))
-            }
+            (404, _) => post_fresh_stage(&token, host_rehearsal),
             (code, _) => Err(format!("stage lookup refused ({code})")),
         }
     })?;
+
+    // Pack generation must still match after staging.
+    if crate::gateway_pack::pack_lifecycle_generation() != pack_gen {
+        return Err(
+            "Gateway Pack changed during the Touch ID ceremony; arm aborted. Enable Gateway, then arm again."
+                .to_string(),
+        );
+    }
 
     // Avoid opening a biometric prompt when Disarm won immediately after the
     // stage boundary. A later race is still caught at the confirm boundary.
@@ -1127,6 +1209,14 @@ pub fn arm(store: &dyn SecretStore) -> Result<TouchIdStatus, String> {
         &["sign", "--challenge", &challenge, "--stage-id", &stage_id],
     )?;
     let frag = parse_sign_output(&raw, &record.credential_id)?;
+
+    // Pack generation must still match after the biometric prompt.
+    if crate::gateway_pack::pack_lifecycle_generation() != pack_gen {
+        return Err(
+            "Gateway Pack changed during the Touch ID ceremony; arm aborted. Enable Gateway, then arm again."
+                .to_string(),
+        );
+    }
 
     // 3. Confirm, bound to THIS stage. A stage_id the sidecar no longer holds
     //    is a 409/410 there — a replayed fragment can never ratify a new stage.
@@ -1143,11 +1233,22 @@ pub fn arm(store: &dyn SecretStore) -> Result<TouchIdStatus, String> {
     if code != 200 {
         return Err(format!("arm not confirmed ({code})"));
     }
+    // Final pack-generation check before accepting a green outcome.
+    if crate::gateway_pack::pack_lifecycle_generation() != pack_gen {
+        return Err(
+            "Gateway Pack changed during the Touch ID ceremony; arm aborted. Enable Gateway, then arm again."
+                .to_string(),
+        );
+    }
     let status = serde_json::from_str::<serde_json::Value>(&resp)
         .ok()
         .and_then(|v| v.get("status").and_then(|s| s.as_str()).map(str::to_string))
         .unwrap_or_default();
-    if status != "armed" && status != "rehearsal-ok" {
+    if status == "rehearsal-ok" {
+        note_rehearsal_ok();
+    } else if status == "armed" {
+        clear_rehearsal_passed();
+    } else {
         return Err("arm did not complete".to_string());
     }
     Ok(touch_id_status(store, true))
@@ -1170,6 +1271,7 @@ pub fn disarm(store: &dyn SecretStore) -> Result<TouchIdStatus, String> {
     if code != 200 {
         return Err(format!("disarm refused ({code})"));
     }
+    clear_rehearsal_passed();
     Ok(touch_id_status(store, true))
 }
 
@@ -1245,10 +1347,41 @@ mod tests {
         assert!(!effective_real_arm_permission(false, true));
         assert!(!effective_real_arm_permission(true, true));
         assert!(effective_real_arm_permission(true, false));
-        assert!(stage_request_body(true).is_some());
+    }
+
+    #[test]
+    fn stage_request_body_uses_sidecar_rehearse_key() {
+        let body = stage_request_body(true).expect("dirty host stages rehearsal");
+        assert_eq!(body, serde_json::json!({ "rehearse": true }));
+        assert!(
+            body.get("rehearsal").is_none(),
+            "must not send the wrong key the sidecar ignores"
+        );
         assert!(stage_request_body(false).is_none());
-        assert!(!pending_stage_is_safe_for_host(true, false));
-        assert!(pending_stage_is_safe_for_host(true, true));
+    }
+
+    #[test]
+    fn pending_stage_disposition_matches_resume_policy() {
+        // Dirty host + real stage → refuse.
+        assert_eq!(
+            classify_pending_stage(true, false),
+            PendingStageDisposition::RefuseRealStageOnDirtyHost
+        );
+        // Dirty host + rehearsal stage → resume.
+        assert_eq!(
+            classify_pending_stage(true, true),
+            PendingStageDisposition::Resume
+        );
+        // Clean host + real stage → resume.
+        assert_eq!(
+            classify_pending_stage(false, false),
+            PendingStageDisposition::Resume
+        );
+        // Clean host + rehearsal stage → POST fresh real stage (no resume).
+        assert_eq!(
+            classify_pending_stage(false, true),
+            PendingStageDisposition::StageFresh
+        );
     }
 
     #[test]
