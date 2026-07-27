@@ -39,14 +39,36 @@ filed ruling, and an indexed precedent. The displayed provider cost was
 
 ## Get started
 
-Run every unqualified `make ...` command in this README from the IRIN repository
-root. Component developer commands use an explicit `make -C <component> ...`
-form so their working directory is never ambiguous.
+The ordinary product path is the signed macOS app: one download, no build
+tools. The `make ...` commands after it are development paths from a source
+checkout, not the product install. Run every unqualified `make ...` command
+in this README from the IRIN repository root. Component developer commands
+use an explicit `make -C <component> ...` form so their working directory is
+never ambiguous.
 
-### macOS — streamlined full stack
+### macOS — the signed app (product install)
 
-Install and start Docker Desktop, then install Rust, Node.js 20+, Git,
-`make`, `curl`, `jq`, and OpenSSL. Tailscale is optional.
+The notarized `IRIN_<ver>_aarch64.dmg` on
+[GitHub Releases](https://github.com/irinityhq/irin/releases) installs
+**IRIN.app** — the same Council + War Room with the optional Gateway Pack
+bundled and off by default. No source checkout, Docker, or `make` is
+required for Direct mode. macOS on Apple silicon only; Intel Macs are not
+supported.
+
+1. Download `IRIN_<ver>_aarch64.dmg` from the Releases page.
+2. Verify the download against `HASHES.txt` attached to the same release.
+3. Open the DMG, drag **IRIN.app** to Applications, and launch it.
+
+The app starts and owns its bundled Council and serves War Room on loopback;
+no terminal command is involved. Open **Discover** first to see which
+provider transports IRIN detects (see
+[Discover, then deliberate](#discover-then-deliberate)).
+
+### macOS — full stack from source (development)
+
+This is the development path, not the product install. Install and start
+Docker Desktop, then install Rust, Node.js 20+, Git, `make`, `curl`, `jq`,
+and OpenSSL. Tailscale is optional.
 
 ```bash
 git clone https://github.com/irinityhq/irin.git
@@ -77,16 +99,9 @@ make app-install
 
 This builds, atomically installs, and launches the macOS app. It uses the
 same Council and War Room runtime `make setup` already started and never
-starts a competing backend.
+starts a competing backend. Most operators take the signed DMG above instead.
 
-**Signed macOS app (Apple silicon):** the notarized `IRIN_<ver>_aarch64.dmg`
-on [GitHub Releases](https://github.com/irinityhq/irin/releases) installs
-**IRIN.app** — the same Council + War Room with the optional Gateway Pack
-bundled and off by default, no source checkout or Docker required for Direct
-mode. Verify the download against `HASHES.txt` attached to the same release.
-macOS on Apple silicon only; Intel Macs are not supported.
-
-### Ubuntu — browser War Room
+### Ubuntu — browser War Room from source
 
 Install Rust, Node.js 20+, Git, `make`, `curl`, and `lsof`, then run:
 
@@ -112,7 +127,7 @@ engineering lane. See
 | War Room Web | `http://127.0.0.1:3010` |
 | Council API/WebSocket | `http://127.0.0.1:8765` |
 | Gateway | `http://127.0.0.1:18080` with macOS `make setup`, or when started separately on Ubuntu |
-| Desktop app | `IRIN.app` on macOS, same backend as above |
+| Desktop app | `IRIN.app` on macOS — the signed DMG starts and owns its bundled Council; `make app-install` reuses the source-run stack above |
 | Private phone | Installed IRIN.app Settings only: `https://<your-device>.<tailnet>.ts.net:8443` via Tailscale Serve — never a public URL, never configured by `make setup` |
 
 ## Discover, then deliberate
@@ -122,8 +137,8 @@ exported by your login shell, supported local CLI binaries, and reachable
 local model runtimes, then reports what it detected — names only, never key
 values, and no billable inference call. A detected CLI binary is not proof
 that its login is still valid; the first real seat call is. Add credentials
-to your shell profile, open a new terminal, then `make runtime-restart` to
-pick them up. See
+to your shell profile, open a new terminal, then `make runtime-restart`
+(source runtime) or relaunch IRIN.app to pick them up. See
 [`council-rs/docs/providers.md`](council-rs/docs/providers.md) for the full
 transport list.
 
@@ -199,7 +214,8 @@ operator-ready autonomous execution path. See
 
 ## Everyday commands
 
-These operate the installed local product; they are not build or test commands.
+These operate the source-run managed runtime from a checkout; they are not
+build or test commands, and the installed IRIN.app needs none of them.
 
 ```bash
 make runtime-status    # liveness, source identity, Tailscale state
