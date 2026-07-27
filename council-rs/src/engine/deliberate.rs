@@ -5,7 +5,7 @@
 //! 3. Convergence: LLM judge scores agreement 0.0–1.0 (NIM GLM primary, $0)
 //! 4. Chair synthesis: final ruling
 //!
-//! Convergence judge cascade: grok-4.20-0309-reasoning → grok-4.3 → mistralai/mistral-large-3-675b-instruct-2512 (NIM free).
+//! Convergence judge cascade: grok-4.20-0309-reasoning → grok-4.3 → mistralai/mistral-small-4-119b-2603 (NIM free).
 //! Reasoning-aware score extraction strips <reasoning> tags.
 
 use anyhow::Result;
@@ -2425,10 +2425,7 @@ mod tests {
         assert_eq!(cascade.len(), 3);
         assert_eq!(cascade[0].model, "grok-4.20-0309-reasoning");
         assert_eq!(cascade[1].model, "grok-4.3");
-        assert_eq!(
-            cascade[2].model,
-            "mistralai/mistral-large-3-675b-instruct-2512"
-        );
+        assert_eq!(cascade[2].model, "mistralai/mistral-small-4-119b-2603");
     }
 
     #[test]
@@ -2446,10 +2443,7 @@ mod tests {
         assert_eq!(cascade.len(), 4);
         assert_eq!(cascade[0].model, "grok-4.3");
         assert_eq!(cascade[1].model, "grok-4.20-0309-reasoning");
-        assert_eq!(
-            cascade[2].model,
-            "mistralai/mistral-large-3-675b-instruct-2512"
-        );
+        assert_eq!(cascade[2].model, "mistralai/mistral-small-4-119b-2603");
         assert_eq!(cascade[3].model, "gemini-3.5-flash");
         assert_eq!(cascade[3].provider, "gemini_agy");
     }
@@ -2462,7 +2456,7 @@ mod tests {
         entries.insert(
             "nim_glm".into(),
             crate::types::ModelEntry {
-                id: "mistralai/mistral-large-3-675b-instruct-2512".into(),
+                id: "mistralai/mistral-small-4-119b-2603".into(),
                 provider: "nvidia".into(),
                 description: String::new(),
                 pricing: crate::types::ModelPricing {
@@ -2476,7 +2470,7 @@ mod tests {
         unsafe {
             std::env::set_var(
                 "COUNCIL_FRAME_CHECK_MODEL",
-                "mistralai/mistral-large-3-675b-instruct-2512",
+                "mistralai/mistral-small-4-119b-2603",
             );
             std::env::remove_var("COUNCIL_FRAME_CHECK_PROVIDER");
         }

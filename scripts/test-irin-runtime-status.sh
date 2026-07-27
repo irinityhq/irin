@@ -227,46 +227,23 @@ set -e
 }
 printf 'runtime never falls back to copied provider settings: PASS\n'
 
-# Runtime status may advertise the private origin only when every expected
-# Serve handler points at this runtime's loopback service and path.
-SERVE_KEY='phone.example.ts.net:443'
-FULL_SERVE_JSON="$(jq -n \
-  --arg key "$SERVE_KEY" \
-  '{Web:{($key):{Handlers:{
-    "/":{Proxy:"http://127.0.0.1:3010"},
-    "/api":{Proxy:"http://127.0.0.1:8765/api"},
-    "/ws":{Proxy:"http://127.0.0.1:8765/ws"},
-    "/watch":{Proxy:"http://127.0.0.1:18080/watch"},
-    "/health":{Proxy:"http://127.0.0.1:18080/health"}
-  }}}}')"
-ROUTED_PHONE_OUTPUT="$(
+# Source runtime never claims private phone publication — that authority is
+# exclusive to installed IRIN.app Settings.
+NO_PHONE_OUTPUT="$(
   XDG_STATE_HOME="$STATE_HOME" \
   IRIN_RUNTIME_PATH="$FAKE_BIN:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   IRIN_GATEWAY_ENV="$GATEWAY_ENV" \
   FAKE_BUILD_SHA="$CHECKOUT_SHA" \
-  FAKE_TAILSCALE_SERVE_JSON="$FULL_SERVE_JSON" \
+  FAKE_TAILSCALE_SERVE_JSON='{"Web":{"phone.example.ts.net:8443":{"Handlers":{"/":{"Proxy":"http://127.0.0.1:3010"}}}}}' \
   EXPECTED_COUNCIL_TOKEN="$COUNCIL_TOKEN" \
   bash "$ROOT/scripts/irin-runtime.sh" status 2>&1
 )"
-grep -Fq 'PRIVATE_PHONE https://phone.example.ts.net' <<<"$ROUTED_PHONE_OUTPUT"
-
-MISSING_ROUTE_JSON="$(jq 'del(.Web["phone.example.ts.net:443"].Handlers["/ws"])' \
-  <<<"$FULL_SERVE_JSON")"
-UNROUTED_PHONE_OUTPUT="$(
-  XDG_STATE_HOME="$STATE_HOME" \
-  IRIN_RUNTIME_PATH="$FAKE_BIN:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-  IRIN_GATEWAY_ENV="$GATEWAY_ENV" \
-  FAKE_BUILD_SHA="$CHECKOUT_SHA" \
-  FAKE_TAILSCALE_SERVE_JSON="$MISSING_ROUTE_JSON" \
-  EXPECTED_COUNCIL_TOKEN="$COUNCIL_TOKEN" \
-  bash "$ROOT/scripts/irin-runtime.sh" status 2>&1
-)"
-if grep -Fq 'PRIVATE_PHONE ' <<<"$UNROUTED_PHONE_OUTPUT"; then
-  printf 'runtime status claimed phone access with an incomplete Serve mapping\n%s\n' \
-    "$UNROUTED_PHONE_OUTPUT" >&2
+if grep -Eqi 'PRIVATE_PHONE|tailscale serve|configure_tailscale' <<<"$NO_PHONE_OUTPUT"; then
+  printf 'source runtime claimed or mutated Tailscale phone publication\n%s\n' \
+    "$NO_PHONE_OUTPUT" >&2
   exit 1
 fi
-printf 'runtime status requires complete Tailscale Serve mapping: PASS\n'
+printf 'runtime status never claims private phone publication: PASS\n'
 
 # The persistent login agent must enter the user's zsh login environment before
 # booting, while preserving clone paths that require both shell and XML quoting.

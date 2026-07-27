@@ -33,6 +33,15 @@ export async function getDesktopRuntimeMode(): Promise<DesktopRuntimeMode> {
   return invoke<DesktopRuntimeMode>("desktop_runtime_mode");
 }
 
+/**
+ * Packaged installs: native setup is the sole Council startup owner.
+ * Source-dev returns false so the frontend may still call startCouncilServer.
+ */
+export async function nativeOwnsCouncilStartup(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("native_owns_council_startup");
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke: inv } = await import("@tauri-apps/api/core");
   return inv<T>(cmd, args);
@@ -136,36 +145,151 @@ export interface GatewayPackStatus {
   /** Fixed pack URL is configured (distinct from authenticated-ready). */
   gateway_url_configured: boolean;
   support_matrix_summary: string;
+  /** Pack enabled + live-authenticated — enough to spawn a governed child. */
+  spawn_capable: boolean;
+  /** Full governed readiness; Deliberate toggle and enroll/arm gates. */
+  governed_ready: boolean;
+  /** Structural hard-down for presentation demotion. */
+  hard_down: boolean;
 }
 
+/**
+ * Whether governed proceedings may start. Reads the native-serialized field
+ * only — do not re-derive from state + authenticated + council_governed.
+ */
 export function gatewayPackAllowsGoverned(
   status: GatewayPackStatus | null | undefined,
 ): boolean {
-  return (
-    status?.state === "authenticated_ready" &&
-    status.authenticated === true &&
-    status.council_governed === true
-  );
+  return status?.governed_ready === true;
 }
 
 export async function getGatewayPackStatus(): Promise<GatewayPackStatus> {
   return invoke<GatewayPackStatus>("gateway_pack_status");
 }
 
-export async function enableGatewayPack(): Promise<GatewayPackStatus> {
-  return invoke<GatewayPackStatus>("gateway_pack_enable");
+export async function enableGatewayPack(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("gateway_pack_enable");
 }
 
-export async function disableGatewayPack(): Promise<GatewayPackStatus> {
-  return invoke<GatewayPackStatus>("gateway_pack_disable");
+export async function disableGatewayPack(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("gateway_pack_disable");
 }
 
-export async function stopGatewayPack(): Promise<GatewayPackStatus> {
-  return invoke<GatewayPackStatus>("gateway_pack_stop");
+export async function stopGatewayPack(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("gateway_pack_stop");
 }
 
-export async function uninstallGatewayPack(): Promise<GatewayPackStatus> {
-  return invoke<GatewayPackStatus>("gateway_pack_uninstall");
+export async function uninstallGatewayPack(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("gateway_pack_uninstall");
+}
+
+/** Renderer-safe projection of the native Touch ID ceremony. */
+export type TouchIdState =
+  | "unavailable"
+  | "blocked"
+  | "setup_required"
+  | "reenroll_required"
+  | "ready"
+  | "ceremony_open"
+  | "armed";
+
+export type TouchIdReason =
+  | "helper_missing"
+  | "gateway_not_ready"
+  | "watch_surface_unreachable"
+  | "arm_principal_missing"
+  | "registry_unloaded"
+  | "registry_mismatch"
+  | "helper_identity_changed"
+  | "enclave_key_missing"
+  | "enrollment_missing"
+  | "rehearsal_only_build"
+  | "lease_expired";
+
+export interface TouchIdStatus {
+  state: TouchIdState;
+  reason: TouchIdReason | null;
+  armed_exp_at_ms: number | null;
+  armed_expires_in_ms: number | null;
+  stage_expires_in_ms: number | null;
+  enrolled: boolean;
+  allow_real_arm: boolean;
+  can_enroll: boolean;
+  can_arm: boolean;
+  can_renew: boolean;
+  can_disarm: boolean;
+  /** Last successful ceremony was rehearsal-ok (producer did not start). */
+  rehearsal_passed: boolean;
+}
+
+/** Host-authoritative combined status snapshot (ordered by seq). */
+export interface DesktopStatusSnapshot {
+  authority_epoch: string;
+  seq: number;
+  pack: GatewayPackStatus;
+  touch_id: TouchIdStatus;
+  phone: PhoneAccessStatus;
+}
+
+export async function getTouchIdStatus(): Promise<TouchIdStatus> {
+  return invoke<TouchIdStatus>("touch_id_status");
+}
+
+export async function getDesktopStatusSnapshot(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("desktop_status_snapshot");
+}
+
+export async function enrollTouchId(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("touch_id_enroll");
+}
+
+export async function armWithTouchId(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("touch_id_arm");
+}
+
+export async function renewTouchIdArm(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("touch_id_renew");
+}
+
+export async function disarmTouchId(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("touch_id_disarm");
+}
+
+/** Non-secret private phone publication state owned by the installed app. */
+export type PhoneAccessState =
+  | "off"
+  | "starting"
+  | "ready"
+  | "published_but_backend_down"
+  | "tailscale_unavailable"
+  | "not_logged_in"
+  | "foreign_unowned"
+  | "funnel_present"
+  | "interrupted_change"
+  | "stopping"
+  | "command_error";
+
+export interface PhoneAccessStatus {
+  state: PhoneAccessState;
+  message: string;
+  tailnet_url: string | null;
+  enabled: boolean;
+  ownership: string;
+  interrupted: boolean;
+  gateway_routes: boolean;
+  funnel_present: boolean;
+}
+
+export async function getPhoneAccessStatus(): Promise<PhoneAccessStatus> {
+  return invoke<PhoneAccessStatus>("phone_access_status");
+}
+
+export async function enablePhoneAccess(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("phone_access_enable");
+}
+
+export async function disablePhoneAccess(): Promise<DesktopStatusSnapshot> {
+  return invoke<DesktopStatusSnapshot>("phone_access_disable");
 }
 
 export async function getServerLogs(): Promise<string[]> {

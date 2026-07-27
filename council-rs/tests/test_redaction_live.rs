@@ -10,6 +10,11 @@ use council_rs::types::{Cabinet, Chair, Seat};
 
 #[tokio::test]
 async fn test_p1_d_real_provider_redaction_smoke() {
+    if env::var("COUNCIL_LIVE_PROVIDER_TEST").as_deref() != Ok("1") {
+        println!("COUNCIL_LIVE_PROVIDER_TEST is not 1. Skipping live redaction test.");
+        return;
+    }
+
     let keys_to_try = vec![
         ("NVIDIA_API_KEY", "nvidia", "nvidia/nemotron-3-nano-30b-a3b"),
         ("XAI_API_KEY", "grok", "grok-4.3"),

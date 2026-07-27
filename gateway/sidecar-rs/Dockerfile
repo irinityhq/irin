@@ -50,14 +50,23 @@ FROM chef AS builder
 # silently bust the dep cache).
 ARG CARGO_PROFILE_RELEASE_LTO=true
 ARG CARGO_PROFILE_RELEASE_CODEGEN_UNITS=1
+# Separate from Git cleanliness: local/source images remain rehearsal-only even
+# when built from a clean tree. Only the production image publisher passes true.
+ARG GW_RELEASE_ELIGIBLE=false
 ENV CARGO_PROFILE_RELEASE_LTO=${CARGO_PROFILE_RELEASE_LTO}
 ENV CARGO_PROFILE_RELEASE_CODEGEN_UNITS=${CARGO_PROFILE_RELEASE_CODEGEN_UNITS}
+ENV GW_RELEASE_ELIGIBLE=${GW_RELEASE_ELIGIBLE}
 
 COPY --from=planner /recipe.json /recipe.json
 # THE cache layer: deps only. Reused across every build (both smoke legs) until
 # Cargo.lock changes. rust:alpine targets x86_64-unknown-linux-musl natively, so
 # the default target matches the real build below (consistency keeps the cache warm).
 RUN cargo chef cook --release --recipe-path /recipe.json --package gateway-sidecar
+# cargo-chef reconstructs a dummy workspace under /build. Remove that dummy
+# tree before copying the real candidate, but retain only the cooked target/
+# cache. Cleaning before COPY is essential: cleaning afterward would erase
+# Git-visible untracked source files that belong to a dirty local candidate.
+RUN find /build -mindepth 1 -maxdepth 1 ! -name target -exec rm -rf {} +
 
 # Real source AND the COMPLETE working tree (incl .git) for THIS leg. Linked
 # worktrees are staged as normal repository directories by the smoke/demo
@@ -75,13 +84,11 @@ COPY . /build/
 # build-script fingerprint is gone and re-runs against the just-copied .git. Cooked
 # deps in target/ survive. safe.directory '*' so the root-owned .git is trusted
 # (does NOT weaken B6 — dirty is still a real `git status` over the real tree).
-# `git clean -fd` (NOT -x) removes any UNTRACKED leftovers cargo-chef cook left in
-# the tree (dummy targets it couldn't auto-clean) so the in-container `git status`
-# is FAITHFUL — a clean checkout reads clean. It keeps the gitignored cooked
-# target/ (no -x), so the dep cache survives. The staged dirty-leg marker is
-# TRACKED, so clean never removes it (the dirty signal is preserved).
+# The cargo-chef dummy tree was removed before the real COPY. Do not run
+# `git clean` here: the local dirty-image lane deliberately overlays Git-visible
+# untracked source, and deleting it would compile a different tree than the
+# manifest claims. The clean and tracked-dirty provenance legs remain unchanged.
 RUN git config --system --add safe.directory '*' \
- && git clean -fd \
  && cargo clean -p gateway-sidecar --release \
  && cargo build --release --locked -p gateway-sidecar --bin gateway-sidecar \
  && cp target/release/gateway-sidecar /build/gateway-sidecar \

@@ -30,6 +30,17 @@ pub const LEGACY_KEYCHAIN_SERVICE: &str = "com.sovereign.council.warroom";
 pub const GW_API_KEY_ACCOUNT: &str = "gateway-client-gw-api-key";
 /// Account label for the long-lived auth pepper (never co-mingled with client key).
 pub const AUTH_PEPPER_ACCOUNT: &str = "gateway-pack-auth-pepper";
+/// Account label for the Touch ID bridge's arm-principal bearer token — the
+/// `GW_ARM_PRINCIPALS` custody-domain-1 credential for this installed app.
+/// Held only in the Keychain and the per-spawn Compose process env; never
+/// written to the public env file, never returned to the renderer, never
+/// logged.
+pub const ARM_PRINCIPAL_TOKEN_ACCOUNT: &str = "gateway-pack-arm-principal-token";
+
+/// Fixed principal name for the single-operator desktop bridge. The token is
+/// the secret; the name is a stable, non-secret audit label that appears in
+/// the sidecar's hash-chained `arm_audit` rows.
+pub const ARM_PRINCIPAL_NAME: &str = "irin-desktop";
 
 /// Fixed fail-fast token when no usable login keychain is available.
 /// Never request interactive Keychain management (Reset To Defaults, create, etc.).
@@ -89,20 +100,26 @@ pub struct KeychainSecretStore;
 #[cfg(target_os = "macos")]
 mod macos_keychain {
     use core_foundation::base::{CFType, TCFType};
+    use core_foundation::boolean::CFBoolean;
     use core_foundation::data::CFData;
     use core_foundation::dictionary::CFDictionary;
     use core_foundation::string::CFString;
+    use core_foundation_sys::base::{CFGetTypeID, CFRelease, CFTypeRef};
+    use core_foundation_sys::data::CFDataRef;
     use core_foundation_sys::string::CFStringRef;
     use security_framework::base::Result as SfResult;
     use security_framework::os::macos::keychain::SecKeychain;
-    use security_framework::passwords::delete_generic_password;
     use security_framework_sys::access_control::kSecAttrAccessibleWhenUnlockedThisDeviceOnly;
-    use security_framework_sys::base::{errSecDuplicateItem, errSecItemNotFound, errSecSuccess};
+    use security_framework_sys::base::{
+        errSecDuplicateItem, errSecItemNotFound, errSecParam, errSecSuccess,
+    };
     use security_framework_sys::item::{
-        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword,
+        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecReturnData,
         kSecUseAuthenticationUI, kSecUseAuthenticationUISkip, kSecUseKeychain, kSecValueData,
     };
-    use security_framework_sys::keychain_item::{SecItemAdd, SecItemUpdate};
+    use security_framework_sys::keychain_item::{
+        SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate,
+    };
     use std::ffi::CStr;
     use std::path::PathBuf;
     use std::ptr;
@@ -334,10 +351,84 @@ mod macos_keychain {
         }
     }
 
+    /// Build a generic-password query pinned to the same resolved login
+    /// keychain used by add/update. This avoids accidentally reading from or
+    /// deleting an identically named item elsewhere in the process search list.
+    fn generic_password_query(
+        service: &str,
+        account: &str,
+        keychain: &SecKeychain,
+        return_data: bool,
+    ) -> CFDictionary<CFString, CFType> {
+        let mut pairs: Vec<(CFString, CFType)> = vec![
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecClass) },
+                unsafe { CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType() },
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecAttrService) },
+                CFString::from(service).into_CFType(),
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) },
+                CFString::from(account).into_CFType(),
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecUseKeychain) },
+                unsafe { CFType::wrap_under_get_rule(keychain.as_CFTypeRef()) },
+            ),
+            (
+                unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
+                unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUIFail).into_CFType() },
+            ),
+        ];
+        if return_data {
+            pairs.push((
+                unsafe { CFString::wrap_under_get_rule(kSecReturnData) },
+                CFBoolean::from(true).into_CFType(),
+            ));
+        }
+        CFDictionary::from_CFType_pairs(&pairs)
+    }
+
+    fn get_generic_password_from_keychain(
+        service: &str,
+        account: &str,
+        keychain: &SecKeychain,
+    ) -> SfResult<Vec<u8>> {
+        let query = generic_password_query(service, account, keychain, true);
+        let mut ret: CFTypeRef = ptr::null();
+        let status = unsafe { SecItemCopyMatching(query.as_concrete_TypeRef(), &mut ret) };
+        if status != errSecSuccess {
+            return Err(security_framework::base::Error::from_code(status));
+        }
+        if !ret.is_null() && unsafe { CFGetTypeID(ret) } == CFData::type_id() {
+            let data = unsafe { CFData::wrap_under_create_rule(ret as CFDataRef) };
+            return Ok(data.bytes().to_vec());
+        }
+        if !ret.is_null() {
+            unsafe { CFRelease(ret) };
+        }
+        Err(security_framework::base::Error::from_code(errSecParam))
+    }
+
+    fn delete_generic_password_from_keychain(
+        service: &str,
+        account: &str,
+        keychain: &SecKeychain,
+    ) -> SfResult<()> {
+        let query = generic_password_query(service, account, keychain, false);
+        let status = unsafe { SecItemDelete(query.as_concrete_TypeRef()) };
+        if status == errSecSuccess {
+            Ok(())
+        } else {
+            Err(security_framework::base::Error::from_code(status))
+        }
+    }
+
     pub fn delete_password_raw(service: &str, account: &str) -> Result<(), String> {
-        // Preflight so missing default keychain fails with fixed token.
-        let _ = resolved_keychain()?;
-        match delete_generic_password(service, account) {
+        let keychain = resolved_keychain()?;
+        match delete_generic_password_from_keychain(service, account, &keychain) {
             Ok(()) => Ok(()),
             Err(e) if is_not_found(&e) => Ok(()),
             Err(e) if is_no_default_keychain(&e) => Err(KEYCHAIN_UNAVAILABLE.to_string()),
@@ -346,29 +437,16 @@ mod macos_keychain {
     }
 
     pub fn get_password_raw(service: &str, account: &str) -> Result<Option<String>, String> {
-        let _ = resolved_keychain()?;
-        match security_framework::passwords::get_generic_password(service, account) {
+        let keychain = resolved_keychain()?;
+        match get_generic_password_from_keychain(service, account, &keychain) {
             Ok(bytes) => {
-                let s = String::from_utf8(bytes.to_vec())
+                let s = String::from_utf8(bytes)
                     .map_err(|_| "keychain item is not valid UTF-8".to_string())?;
                 Ok(Some(s))
             }
-            Err(e) => {
-                let msg = e.to_string();
-                let code = e.code();
-                if is_not_found(&e)
-                    || msg.contains("could not be found")
-                    || msg.contains("not found")
-                    || msg.contains("-25300")
-                    || code == errSecItemNotFound
-                {
-                    Ok(None)
-                } else if is_no_default_keychain(&e) {
-                    Err(KEYCHAIN_UNAVAILABLE.to_string())
-                } else {
-                    Err(format!("keychain get failed: {e}"))
-                }
-            }
+            Err(e) if is_not_found(&e) => Ok(None),
+            Err(e) if is_no_default_keychain(&e) => Err(KEYCHAIN_UNAVAILABLE.to_string()),
+            Err(e) => Err(format!("keychain get failed: {e}")),
         }
     }
 
@@ -455,6 +533,44 @@ pub fn delete_auth_pepper(store: &dyn SecretStore) -> Result<(), String> {
     store.delete_password(KEYCHAIN_SERVICE, AUTH_PEPPER_ACCOUNT)
 }
 
+/// Touch ID bridge: the arm-principal bearer token. Shape is the same
+/// `tok_` + 32 hex the sidecar's principal registry accepts as an opaque
+/// value; the strict shape check keeps a malformed/injected value (CR/LF, `:`
+/// or `,` — the `GW_ARM_PRINCIPALS` separators) out of the registry string.
+pub fn store_arm_principal_token(store: &dyn SecretStore, token: &str) -> Result<(), String> {
+    let trimmed = token.trim();
+    if !is_valid_arm_principal_token(trimmed) {
+        return Err("refusing to store invalid arm-principal token shape".to_string());
+    }
+    store.set_password(KEYCHAIN_SERVICE, ARM_PRINCIPAL_TOKEN_ACCOUNT, trimmed)
+}
+
+pub fn load_arm_principal_token(store: &dyn SecretStore) -> Result<Option<String>, String> {
+    // Fail closed on a stored value that no longer satisfies the shape rule
+    // (tampered item, older format): treat it as absent so the pack boots
+    // arm-incapable rather than shipping a malformed registry string.
+    Ok(store
+        .get_password(KEYCHAIN_SERVICE, ARM_PRINCIPAL_TOKEN_ACCOUNT)?
+        .filter(|v| is_valid_arm_principal_token(v)))
+}
+
+pub fn delete_arm_principal_token(store: &dyn SecretStore) -> Result<(), String> {
+    store.delete_password(KEYCHAIN_SERVICE, ARM_PRINCIPAL_TOKEN_ACCOUNT)
+}
+
+/// `tok_` + 32 hex. Rejects every `GW_ARM_PRINCIPALS` separator and every
+/// injection byte by construction (hex only).
+pub fn is_valid_arm_principal_token(token: &str) -> bool {
+    let b = token.as_bytes();
+    if b.len() != 4 + 32 {
+        return false;
+    }
+    if &b[0..4] != b"tok_" {
+        return false;
+    }
+    b[4..].iter().all(|c| c.is_ascii_hexdigit())
+}
+
 pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), String> {
     // Attempt every account even if one fails so a single ACL error cannot
     // leave the other secret behind while the caller thinks uninstall finished.
@@ -464,6 +580,11 @@ pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), St
     }
     if let Err(e) = delete_auth_pepper(store) {
         errors.push(format!("AUTH_PEPPER: {e}"));
+    }
+    // Uninstall removes the arm-principal token too: a pack that no longer
+    // exists must not leave a live custody-domain-1 credential behind.
+    if let Err(e) = delete_arm_principal_token(store) {
+        errors.push(format!("ARM_PRINCIPAL_TOKEN: {e}"));
     }
     if errors.is_empty() {
         Ok(())

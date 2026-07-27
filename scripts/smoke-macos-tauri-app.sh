@@ -159,7 +159,7 @@ port_is_free || {
   exit 1
 }
 expected_sha="$(git -C "$ROOT" rev-parse HEAD)"
-if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=no)" ]]; then
+if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]]; then
   expected_dirty=true
 else
   expected_dirty=false

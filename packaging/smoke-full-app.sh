@@ -24,7 +24,7 @@ TEST_APPS="$ROOT/packaging/test-apps"
 DEST_APP="${IRIN_SMOKE_APP:-$TEST_APPS/$APP_NAME}"
 TEST_HOME="$ROOT/packaging/test-home/smoke-$$"
 MOUNT="$ROOT/packaging/build/dmg-mount"
-IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-0.1.1}"
+IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-0.1.2}"
 DMG="${IRIN_DMG_PATH:-$ROOT/packaging/artifacts/IRIN_${IRIN_RELEASE_VERSION}_aarch64.dmg}"
 REPORT="$ROOT/packaging/receipts/FULL_APP_SMOKE.txt"
 WEBVIEW_SHOT="$ROOT/packaging/receipts/webview-smoke.png"
@@ -34,17 +34,24 @@ FAKE_MARKER_NAME="XAI_API_KEY"
 FAKE_MARKER_VALUE="irin-dmg-fake-marker-not-a-real-key"
 DENIED_FAKE_NAME="GW_API_KEY"
 DENIED_FAKE_VALUE="should-never-import-gateway-key"
-# Prefer explicit env, then the built DMG HASHES receipt, then HEAD.
-if [[ -z "${IRIN_TAURI_BUILD_GIT_SHA:-}" && -f "$ROOT/packaging/artifacts/HASHES.txt" ]]; then
-  IRIN_TAURI_BUILD_GIT_SHA="$(
-    awk -F= '/^source_sha=/{print $2; exit}' "$ROOT/packaging/artifacts/HASHES.txt" | tr -d '[:space:]'
-  )"
-  export IRIN_TAURI_BUILD_GIT_SHA
-fi
-EXPECTED_SHA="${IRIN_TAURI_BUILD_GIT_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)}"
+HASHES_PATH="${IRIN_DMG_HASHES_PATH:-}"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 log() { printf '%s\n' "$*" | tee -a "$REPORT"; }
+
+# Never auto-select a receipt: an explicit path binds provenance checks to the
+# same HASHES.txt that verify-dmg accepted for this candidate.
+if [[ -z "${IRIN_TAURI_BUILD_GIT_SHA:-}" && -n "$HASHES_PATH" ]]; then
+  [[ -f "$HASHES_PATH" ]] || die "explicit HASHES receipt missing: $HASHES_PATH"
+  SOURCE_SHA_COUNT="$(awk -F= '$1 == "source_sha" { count++ } END { print count + 0 }' "$HASHES_PATH")"
+  [[ "$SOURCE_SHA_COUNT" == "1" ]] \
+    || die "receipt must contain exactly one source_sha entry (found $SOURCE_SHA_COUNT): $HASHES_PATH"
+  IRIN_TAURI_BUILD_GIT_SHA="$(awk -v prefix='source_sha=' 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1); exit }' "$HASHES_PATH")"
+  [[ "$IRIN_TAURI_BUILD_GIT_SHA" =~ ^[0-9a-f]{40}$ ]] \
+    || die "receipt source_sha must be one lowercase 40-character git SHA: $HASHES_PATH"
+  export IRIN_TAURI_BUILD_GIT_SHA
+fi
+EXPECTED_SHA="${IRIN_TAURI_BUILD_GIT_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)}"
 
 mkdir -p "$ROOT/packaging/receipts" "$TEST_APPS" "$(dirname "$PIDFILE")"
 : >"$REPORT"
@@ -87,6 +94,9 @@ CABINETS="$(find "$DEST_APP/Contents/Resources" -type d -name cabinets | head -1
 [[ -n "$CABINETS" ]] || die "cabinets missing"
 BASE_DIR="$(dirname "$CABINETS")"
 log "base_dir=$BASE_DIR"
+HERMES_ADAPTER="$BASE_DIR/scripts/hermes-seat-adapter.sh"
+[[ -x "$HERMES_ADAPTER" ]] || die "hermes seat adapter missing or not executable: $HERMES_ADAPTER"
+log "hermes_adapter=$HERMES_ADAPTER"
 log "host_sha256=$(shasum -a 256 "$HOST" | awk '{print $1}')"
 log "council_sha256=$(shasum -a 256 "$SIDECAR" | awk '{print $1}')"
 
@@ -163,17 +173,10 @@ log "foreign_8765_before=${FOREIGN_8765:-none}"
 
 cleanup() {
   local status=$?
-  # Only kill processes we started.
-  if [[ -f "$PIDFILE" ]]; then
-    local p
-    p="$(cat "$PIDFILE" 2>/dev/null || true)"
-    if [[ -n "$p" ]]; then
-      kill "$p" 2>/dev/null || true
-      sleep 0.3
-      kill -9 "$p" 2>/dev/null || true
-    fi
-    rm -f "$PIDFILE"
-  fi
+  # Give the native host time to run its exit handlers and stop its Council
+  # child. The shared helper remains ownership-scoped and never kills the
+  # foreign listener recorded before this smoke.
+  stop_packaged_host || true
   if [[ -f "$SIDECAR_PIDFILE" ]]; then
     local p
     p="$(cat "$SIDECAR_PIDFILE" 2>/dev/null || true)"
@@ -184,12 +187,14 @@ cleanup() {
     fi
     rm -f "$SIDECAR_PIDFILE"
   fi
-  osascript -e 'tell application "IRIN" to quit' >/dev/null 2>&1 || true
   # Never kill FOREIGN_8765.
-  if [[ -n "${TEST_HOME:-}" && -d "${TEST_HOME:-}" ]]; then
-    # Keep receipt evidence; drop isolated login profile so marker values are not retained.
-    # Filename built without a literal shell-startup path token (release-tree hygiene).
-    rm -f "$TEST_HOME/.zprofile" "$TEST_HOME/.$(printf '%s' zsh)rc" 2>/dev/null || true
+  if [[ -n "${TEST_HOME:-}" \
+    && "$TEST_HOME" == "$ROOT/packaging/test-home/smoke-"* \
+    && -d "$TEST_HOME" ]]; then
+    # Durable receipts live under packaging/receipts. Remove only this run's
+    # guarded isolated home so generated overlays and fake provider markers do
+    # not accumulate or poison a later repository-wide secret scan.
+    rm -rf -- "$TEST_HOME"
   fi
   exit "$status"
 }
@@ -344,15 +349,40 @@ if [[ -n "$(listen_pid 8765)" ]]; then
   die ":8765 became busy unexpectedly"
 fi
 
-# Launch host under isolated HOME so private config + overlay land in TEST_HOME.
-(
-  export HOME="$TEST_HOME"
-  export TMPDIR="$TEST_HOME/tmp"
-  # Direct exec keeps our HOME; open(1) may not always inherit for GUI.
-  "$HOST" >"$ROOT/packaging/build/smoke-host.log" 2>&1 &
-  echo $! >"$PIDFILE"
-)
-HOST_PID="$(cat "$PIDFILE")"
+# Launch the bundle through LaunchServices. Executing the Mach-O directly from
+# a background shell can leave the initial Tauri window unordered and
+# invisible. Pass the isolated environment explicitly, then resolve the exact
+# packaged host PID before binding health, window evidence, and cleanup to it.
+HOST_PATTERN="$(printf '%s\n' "$HOST" | sed 's/[][\\.^$*+?{}()|]/\\&/g')"
+if pgrep -f -x "$HOST_PATTERN" >/dev/null 2>&1; then
+  die "exact packaged host is already running: $HOST"
+fi
+open -n -F -W \
+  -o "$ROOT/packaging/build/smoke-host.log" \
+  --stderr "$ROOT/packaging/build/smoke-host.log" \
+  --env "HOME=$TEST_HOME" \
+  --env "TMPDIR=$TEST_HOME/tmp" \
+  "$DEST_APP" &
+LAUNCHER_PID=$!
+HOST_PID=""
+stable=0
+for _ in $(seq 1 40); do
+  pid="$(pgrep -f -x "$HOST_PATTERN" | head -1 || true)"
+  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+    HOST_PID="$pid"
+    stable=$((stable + 1))
+    (( stable >= 3 )) && break
+  elif ! kill -0 "$LAUNCHER_PID" 2>/dev/null; then
+    tail -80 "$ROOT/packaging/build/smoke-host.log" | tee -a "$REPORT" || true
+    die "LaunchServices exited before the packaged host appeared"
+  else
+    HOST_PID=""
+    stable=0
+  fi
+  sleep 0.25
+done
+(( stable >= 3 )) || die "packaged host process did not remain stable"
+echo "$HOST_PID" >"$PIDFILE"
 log "host_pid=$HOST_PID"
 
 ok=0
@@ -417,6 +447,8 @@ assert 'auth_token' in d
 # never print token value
 " | tee -a "$REPORT"
 [[ -d "$OVERLAY/cabinets" ]] || die "writable overlay missing cabinets"
+[[ -x "$OVERLAY/scripts/hermes-seat-adapter.sh" ]] \
+  || die "writable overlay missing executable hermes seat adapter"
 log "overlay_seeded=true"
 
 # Discover via host-owned sidecar (login env merged by host).

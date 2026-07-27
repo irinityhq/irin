@@ -337,7 +337,7 @@ models:
     pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
 
   # The retired GLM 5.1 route is replaced by GLM 5.2. Utility and judge
-  # fallbacks remain on mistral_large_nim until evaluation completes.
+  # fallbacks remain on mistral_small4_nim until evaluation completes.
 
   nim_glm52:
     id: "z-ai/glm-5.2"
@@ -364,13 +364,13 @@ models:
     description: "Local Ollama — free, always-on"
     pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
 
-  # --- NIM free-tier (operator probe 2026-07-11: 45/121 invokable)
+  # --- NIM free-tier (operator probe 2026-07-25: 42/118 invokable)
   # Allowlist SSOT: config/nim-invokable-allowlist.txt
   # Re-probe: NVIDIA_API_KEY=… python3 scripts/probe-nim-catalog.py
-  mistral_large_nim:
-    id: "mistralai/mistral-large-3-675b-instruct-2512"
+  mistral_small4_nim:
+    id: "mistralai/mistral-small-4-119b-2603"
     provider: nvidia
-    description: "Mistral Large via NIM — invokable, but repeated Gate 4 live timeouts; not a starter/freeride default"
+    description: "Mistral Small 4 via NIM — live-proven for architect output and strict judge.v2 JSON (2026-07-25)"
     pricing: { input: 0.0, cached_input: 0.0, output: 0.0 }
 
   gpt_oss_120b_nim:

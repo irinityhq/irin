@@ -44,7 +44,7 @@ for model in \
   claude-opus-4-6 \
   gemini-3.1-pro-preview \
   gemini-3.5-flash \
-  mistralai/mistral-large-3-675b-instruct-2512 \
+  mistralai/mistral-small-4-119b-2603 \
   qwen/qwen3.5-397b-a17b \
   z-ai/glm-5.2 \
   nvidia/nemotron-3-ultra-550b-a55b; do

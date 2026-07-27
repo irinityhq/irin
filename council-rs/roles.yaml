@@ -17,7 +17,7 @@ roles:
         model: grok-4.3
         max_tokens: 512
       - provider: nvidia
-        model: mistralai/mistral-large-3-675b-instruct-2512
+        model: mistralai/mistral-small-4-119b-2603
         max_tokens: 512
 
   frame_check:
@@ -32,7 +32,7 @@ roles:
         model: grok-4.20-0309-reasoning
         max_tokens: 512
       - provider: nvidia
-        model: mistralai/mistral-large-3-675b-instruct-2512
+        model: mistralai/mistral-small-4-119b-2603
         max_tokens: 512
       - provider: gemini_agy
         model: gemini-3.5-flash
@@ -68,5 +68,5 @@ roles:
         model: grok-4.20-0309-reasoning
         max_tokens: 1024
       - provider: nvidia
-        model: mistralai/mistral-large-3-675b-instruct-2512
+        model: mistralai/mistral-small-4-119b-2603
         max_tokens: 1024

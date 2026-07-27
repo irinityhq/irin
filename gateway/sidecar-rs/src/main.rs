@@ -2381,9 +2381,13 @@ async fn main() -> anyhow::Result<()> {
                 deviation: arm_deviation.clone(),
                 attest_keys: attest_keys.clone(),
                 // B6 (T1 MF-1): derive the real-arm permission ONCE from the
-                // EMBEDDED build identity — a `-dirty` build can only ever run
+                // EMBEDDED build identity and production-lane eligibility.
+                // Dirty, unidentifiable, and local/source images can only run
                 // DARK/rehearsal ceremonies (the producer never starts).
-                allow_real_arm: !watch::attest::build_is_dirty(),
+                allow_real_arm: watch::attest::build_may_arm_for_real(
+                    watch::attest::build_is_dirty(),
+                    watch::attest::build_is_release_eligible(),
+                ),
             },
         ))
         // Librarian Proxy endpoints (v0.3)

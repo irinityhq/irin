@@ -7,13 +7,15 @@ import { api } from "@/lib/api";
 import { cn, providerColor } from "@/lib/cn";
 import { DEFAULT_SENSITIVITY, SENSITIVITY_LEVELS, gatewayStartFields } from "@/lib/gateway-mode";
 import { canEnableGovernedProceeding } from "@/lib/gateway-pack";
+import { mergeIfNewer } from "@/lib/desktop-status";
 import type { Cabinet, EmbeddingStats, MapmakerResult, PrecedentMatch } from "@/lib/types";
 import type { GatewaySensitivity, StartPayload } from "@/lib/ws";
 import {
   getDesktopRuntimeMode,
-  getGatewayPackStatus,
+  getDesktopStatusSnapshot,
   isTauri,
   type DesktopRuntimeMode,
+  type DesktopStatusSnapshot,
   type GatewayPackStatus,
 } from "@/lib/tauri";
 import {
@@ -31,7 +33,6 @@ import {
 } from "@/lib/use-discover";
 import CabinetSelector from "./CabinetSelector";
 import ContextUploader from "./ContextUploader";
-import ExperimentalBanner from "./ExperimentalBanner";
 import MapScanner from "./MapScanner";
 import PrecedentAmbient from "./PrecedentAmbient";
 import WeeklyDriftCard from "./WeeklyDriftCard";
@@ -119,7 +120,9 @@ export default function IdlePanel({
   const [desktopMode, setDesktopMode] = useState<
     DesktopRuntimeMode | "detecting" | "unavailable"
   >(isTauri() ? "detecting" : "unavailable");
-  const [packStatus, setPackStatus] = useState<GatewayPackStatus | null>(null);
+  const [desktopStatus, setDesktopStatus] =
+    useState<DesktopStatusSnapshot | null>(null);
+  const packStatus: GatewayPackStatus | null = desktopStatus?.pack ?? null;
   const topicRef = useRef<HTMLTextAreaElement>(null);
   const { toast } = useToast();
 
@@ -138,23 +141,34 @@ export default function IdlePanel({
     };
   }, []);
 
+  // Same host-authoritative snapshot subscription as Settings (no poll epochs).
   useEffect(() => {
     if (!isTauri() || desktopMode !== "installed-release") return;
     let cancelled = false;
-    const tick = () => {
-      void getGatewayPackStatus()
-        .then((s) => {
-          if (!cancelled) setPackStatus(s);
-        })
-        .catch(() => {
-          if (!cancelled) setPackStatus(null);
-        });
-    };
-    tick();
-    const id = window.setInterval(tick, 8000);
+    let unlisten: (() => void) | undefined;
+    void getDesktopStatusSnapshot()
+      .then((snap) => {
+        if (!cancelled) setDesktopStatus((prev) => mergeIfNewer(prev, snap));
+      })
+      .catch(() => {
+        // Keep last known projection on failure.
+      });
+    void import("@tauri-apps/api/event")
+      .then(({ listen }) =>
+        listen<DesktopStatusSnapshot>("desktop-status", (event) => {
+          if (!cancelled) {
+            setDesktopStatus((prev) => mergeIfNewer(prev, event.payload));
+          }
+        }),
+      )
+      .then((fn) => {
+        if (cancelled) fn();
+        else unlisten = fn;
+      })
+      .catch(() => {});
     return () => {
       cancelled = true;
-      window.clearInterval(id);
+      unlisten?.();
     };
   }, [desktopMode]);
 
@@ -399,14 +413,17 @@ export default function IdlePanel({
         )}
 
         {isWargameCabinet && (
-          <ExperimentalBanner
-            title="Experimental wargame cabinet"
-            icon={<Swords className="w-4 h-4" />}
-            testId="wargame-idle-help"
+          <div
+            data-testid="wargame-idle-help"
+            className="panel p-4 text-xs text-fg-muted space-y-2"
           >
+            <div className="font-display font-bold text-fg flex items-center gap-2">
+              <Swords className="w-4 h-4" />
+              Wargame cabinet
+            </div>
             <p className={variant === "shell" ? "text-[11px]" : undefined}>
               {variant === "shell" ? (
-                "MDMP-style adversarial COA analysis — convene as usual."
+                "MDMP-style adversarial analysis: Blue plans, Red attacks, White arbitrates, and Green audits feasibility."
               ) : (
                 <>
                   MDMP-style adversarial course-of-action analysis: Red attacks the
@@ -420,7 +437,7 @@ export default function IdlePanel({
             </p>
             {variant !== "shell" && cabinet && cabinet.seats.length > 0 && (
               <div className="font-mono text-[10px] text-fg-dim space-y-0.5">
-                <div className="text-fg-muted">Expected seat roles:</div>
+                <div className="text-fg-muted">Seat roles:</div>
                 {cabinet.seats.map((s) => (
                   <div key={s.name}>
                     <span className="text-fg">{s.name}</span> · {s.provider}
@@ -428,7 +445,7 @@ export default function IdlePanel({
                 ))}
               </div>
             )}
-          </ExperimentalBanner>
+          </div>
         )}
 
         <div

@@ -58,21 +58,30 @@ fn resolve_hermes_seat_bin() -> Option<PathBuf> {
         HermesAdapterProtocol::Script => {
             let rel = grok_route::hermes_transport_config().default_adapter;
             let adapter = base_dir().join(rel.trim());
-            is_executable(&adapter).then_some(adapter)
+            // The bundled adapter delegates to the Hermes CLI. Shipping the
+            // script makes the transport discoverable only when that
+            // dependency is usable; otherwise default cabinets must filter the
+            // seat instead of failing their first call with exit 127.
+            bundled_script_if_usable(adapter, which_hermes().is_some())
         }
         HermesAdapterProtocol::Direct => which_hermes(),
     }
 }
 
+fn bundled_script_if_usable(adapter: PathBuf, hermes_available: bool) -> Option<PathBuf> {
+    (is_executable(&adapter) && hermes_available).then_some(adapter)
+}
+
 fn which_hermes() -> Option<PathBuf> {
-    std::process::Command::new("hermes")
-        .arg("--version")
-        .stderr(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .status()
-        .ok()
-        .filter(|s| s.success())
-        .map(|_| PathBuf::from("hermes"))
+    hermes_on_path(std::env::var_os("PATH").as_deref())
+}
+
+fn hermes_on_path(path: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let path = path?;
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join("hermes"))
+        .find(|candidate| is_executable(candidate))
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -191,5 +200,53 @@ mod tests {
             grok_route::hermes_transport_config().adapter_protocol,
             HermesAdapterProtocol::Script
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn hermes_discovery_resolves_path_without_executing_the_binary() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::{SystemTime, UNIX_EPOCH};
+
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!(
+            "irin-hermes-path-test-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).expect("create fixture dir");
+        let hermes = dir.join("hermes");
+        // If discovery executed this file the test would hang. PATH resolution
+        // must only inspect file type and executable mode.
+        std::fs::write(&hermes, "#!/bin/sh\nsleep 300\n").expect("write fixture");
+        std::fs::set_permissions(&hermes, std::fs::Permissions::from_mode(0o755))
+            .expect("make fixture executable");
+
+        assert_eq!(hermes_on_path(Some(dir.as_os_str())), Some(hermes.clone()));
+        assert!(hermes_on_path(None).is_none());
+
+        std::fs::remove_dir_all(dir).expect("remove fixture");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundled_script_requires_hermes_dependency() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let adapter =
+            std::env::temp_dir().join(format!("irin-hermes-adapter-test-{}", std::process::id()));
+        std::fs::write(&adapter, "#!/bin/sh\nexit 0\n").expect("write adapter fixture");
+        std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755))
+            .expect("make adapter executable");
+
+        assert!(bundled_script_if_usable(adapter.clone(), false).is_none());
+        assert_eq!(
+            bundled_script_if_usable(adapter.clone(), true),
+            Some(adapter.clone())
+        );
+
+        std::fs::remove_file(adapter).expect("remove adapter fixture");
     }
 }

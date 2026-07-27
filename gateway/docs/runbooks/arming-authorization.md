@@ -28,9 +28,40 @@ Host CLIs call these sidecar routes over the management UDS:
 | Stage | `POST /watch/admin/producer/arm/stage` | Principal stages challenge v3 (JCS); default TTL **120s** (`ARM_STAGE_TTL_MS`) |
 | Pending | `GET /watch/admin/producer/arm/pending` | Crash-resume; returns **stored** challenge bytes |
 | Confirm | `POST /watch/admin/producer/arm/confirm` | SE-P256 or FIDO2-ES256 local attest; content-bound cap/window |
+| Status | `GET /watch/admin/producer/arm/status` | Principal-authenticated projection: armed/staged flags, lease deadline, registry-loaded, keyset digest. **No** challenge, signature, or principal |
 | Disarm | `POST /watch/admin/producer/disarm` | Admin token **or** any arm principal |
 
 Confirm runs in one DB transaction (pending, signature, counter, content-binding). Failures are fail-closed.
+
+## Desktop Touch ID bridge (installed IRIN.app)
+
+The installed app runs the same ceremony from Settings, beside the Gateway
+control — no terminal command. What changes:
+
+- The Gateway Pack admits exactly two arm-surface env keys on the sidecar:
+  `GW_ARM_PRINCIPALS` (Keychain-held, per-spawn only, scrubbed from the ambient
+  environment) and `GW_ARM_ATTEST_KEYS_PATH` (a fixed in-container path).
+  `WATCH_ADMIN_TOKEN` stays forced empty, and producer/dispatcher stay `false`
+  at boot.
+- The enrollment registry is an app-owned file bind-mounted read-only at
+  `/run/secrets/arm_attest_keys.json` only in the validating sidecar. It holds
+  PUBLIC credential records but remains root-owned mode `0600`. The edge never
+  receives or parses it. Instead, the desktop pack mounts an empty non-secret
+  `arm-bridge-enabled` marker read-only for its unprivileged OpenResty workers.
+  Default registry contents `[]` load as UNLOADED, so enabling Gateway arms
+  nothing.
+- The registry is boot-loaded. The installed app refreshes its owned Gateway
+  Pack as part of the explicit setup/re-enrollment action, so the new registry
+  and Keychain principal are live before the control reports ready.
+- Gateway exposes the five routes above at loopback ONLY when the desktop
+  pack's non-secret feature marker is mounted in the edge container
+  (`lua/sidecar.lua watch_arm_proxy`, exact method+path allow-list). Every other
+  deployment answers 404 and the ceremony stays UDS-only.
+- The app pins the bundled helper's SHA-256 and the registry keyset digest at
+  enrollment. A helper swap, a missing Secure Enclave blob, or a sidecar that
+  loaded a different registry forces explicit re-enrollment. App-owned prior
+  enrollment records and opaque wrapped-key blobs are atomically moved to dated
+  archives, never read, copied, deleted, or reused across identities.
 
 ## Spend ceilings (enforced)
 

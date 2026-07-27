@@ -184,23 +184,12 @@ fi
 "$RUNTIME_SCRIPT" install-login
 runtime_status="$("$RUNTIME_SCRIPT" status)"
 printf '%s\n' "$runtime_status"
-private_phone_url="$(sed -n 's/^PRIVATE_PHONE //p' <<<"$runtime_status" | sed -n '1p')"
-[[ "$private_phone_url" == https://* ]] || private_phone_url=""
 
 printf '\nIRIN is ready.\n'
 printf 'War Room: http://127.0.0.1:3010\n'
 printf 'Council: http://127.0.0.1:8765\n'
 printf 'Gateway: http://127.0.0.1:18080\n'
-if [[ "${IRIN_TAILSCALE_SERVE:-auto}" == "0" ]]; then
-  printf 'Private phone access: disabled by IRIN_TAILSCALE_SERVE=0; local access is ready.\n'
-elif [[ -n "$private_phone_url" ]]; then
-  printf 'Private phone: %s\n' "$private_phone_url"
-elif command -v tailscale >/dev/null 2>&1 \
-  && tailscale status >/dev/null 2>&1; then
-  printf 'Private phone access: Tailscale is connected, but IRIN Serve routes are not ready; local access is ready. Rerun make setup.\n'
-else
-  printf 'Private phone access: optional — install and connect Tailscale, then rerun make setup.\n'
-fi
+printf 'Private iPhone access: controlled in installed IRIN.app Settings (not by make setup).\n'
 printf 'Provider discovery uses your login shell; IRIN does not copy provider credentials.\n'
 printf 'Login recovery: enabled (opt out: ./scripts/irin-runtime.sh uninstall-login)\n'
 printf 'Next action: Open Discover\n'

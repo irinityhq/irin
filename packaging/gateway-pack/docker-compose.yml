@@ -18,6 +18,9 @@ services:
       - "${IRIN_DESKTOP_PACK_ROOT}/conf:/usr/local/openresty/nginx/conf/conf:ro"
       - "${IRIN_DESKTOP_PACK_ROOT}/lua:/usr/local/openresty/nginx/lua:ro"
       - irin_desktop_sidecar_sock:/run/sidecar
+      # Desktop-only arm-bridge signal. Empty non-secret marker; the actual
+      # root-owned 0600 registry is mounted only into the validating sidecar.
+      - "${IRIN_DESKTOP_PACK_ROOT}/arm-bridge-enabled:/run/irin-features/arm-bridge-enabled:ro"
     ports:
       - "127.0.0.1:18080:8080"
     environment:
@@ -90,18 +93,30 @@ services:
       - WATCH_MAX_FANOUT_COST_USD=${WATCH_MAX_FANOUT_COST_USD:-2.50}
       - RECON_CADENCE_SECS=
       - RECON_IMPORT_PATH=
-      - GW_ARM_PRINCIPALS=
+      # Touch ID bridge — the ONLY two arm-surface keys this pack admits.
+      # GW_ARM_PRINCIPALS is the Keychain-held custody-domain-1 bearer registry
+      # supplied per-spawn by the native host; empty means "no principal", which
+      # 401s every arm route. GW_ARM_ATTEST_KEYS_PATH points at the read-only
+      # enrollment registry mounted below; an absent/empty/`[]` registry loads
+      # UNLOADED, so every local-attest confirm rejects (fail-closed).
+      - GW_ARM_PRINCIPALS=${GW_ARM_PRINCIPALS:-}
+      - GW_ARM_ATTEST_KEYS_PATH=${GW_ARM_ATTEST_KEYS_PATH:-}
+      # Every other arm knob stays an empty literal that accepts no env input.
       - GW_ARM_DEVIATION_FLAG=
       - GW_ARM_PRINCIPAL_DOMAINS=
       - ARM_NOTIFY_URL=
       - ARM_STAGE_TTL_MS=
-      - GW_ARM_ATTEST_KEYS_PATH=
     volumes:
       - "${IRIN_DESKTOP_PACK_ROOT}/conf:/conf:ro"
       - irin_desktop_sidecar_sock:/run/sidecar
       - irin_desktop_sidecar_data:/var/lib/sidecar
       # App-owned ledger seed only — never the canonical operator ledger key.
       - "${IRIN_DESKTOP_LEDGER_KEY}:/run/secrets/ledger_key:ro"
+      # App-owned Touch ID enrollment registry (public credential records only:
+      # credential ids, SEC1 public keys, labels, timestamps). Read-only — the
+      # sidecar never mutates enrollment, and no private key material exists in
+      # this file: the Secure Enclave private key never leaves the host enclave.
+      - "${IRIN_DESKTOP_ARM_KEYS}:/run/secrets/arm_attest_keys.json:ro"
     depends_on:
       gateway:
         condition: service_started

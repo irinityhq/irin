@@ -7,7 +7,8 @@
 # Required env:
 #   IRIN_PACK_IMAGES_TAG   image tag to pin (v<semver> or rc-<sha12>)
 # Optional env:
-#   IRIN_PACK_MANIFEST_OUT  output path (default: packaging/build/gateway-pack/image-manifest.production.json)
+#   IRIN_PACK_MANIFEST_OUT       output path (default: packaging/build/gateway-pack/image-manifest.production.json)
+#   IRIN_PACK_IMAGES_SOURCE_SHA  intended release commit (default: current HEAD)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -16,6 +17,13 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 TAG="${IRIN_PACK_IMAGES_TAG:-}"
 [[ -n "$TAG" ]] || die "IRIN_PACK_IMAGES_TAG is required"
 OUT="${IRIN_PACK_MANIFEST_OUT:-$ROOT/packaging/build/gateway-pack/image-manifest.production.json}"
+INTENDED_SHA="${IRIN_PACK_IMAGES_SOURCE_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)}"
+INTENDED_SHA="$(printf '%s' "$INTENDED_SHA" | tr -d '[:space:]')"
+[[ "$INTENDED_SHA" =~ ^[0-9a-f]{40}$ ]] \
+  || die "intended release commit must be a 40-char lowercase git SHA (got ${INTENDED_SHA:-<missing>})"
+
+REVISION_ANNOTATION="org.opencontainers.image.revision"
+SIDECAR_ELIGIBILITY_ANNOTATION="io.irinity.irin.sidecar.release-eligible"
 
 GW_IMAGE="ghcr.io/irinityhq/irin-gateway"
 SC_IMAGE="ghcr.io/irinityhq/irin-sidecar"
@@ -27,6 +35,27 @@ resolve() {
   # Anonymous read: works for public packages with no registry auth.
   docker buildx imagetools inspect "$ref" --format '{{.Manifest.Digest}}' 2>/dev/null \
     || die "cannot resolve $ref — published? package public?"
+}
+
+image_annotation() {
+  local digest_ref="$1" key="$2" value
+  [[ "$digest_ref" == *@sha256:* ]] || die "annotation inspection requires a digest-bound ref (got $digest_ref)"
+  value="$(docker buildx imagetools inspect "$digest_ref" --format "{{index .Manifest.Annotations \"$key\"}}" 2>/dev/null || true)"
+  printf '%s' "$value" | tr -d '[:space:]'
+}
+
+require_revision() {
+  local digest_ref="$1" label="$2" actual
+  actual="$(image_annotation "$digest_ref" "$REVISION_ANNOTATION")"
+  [[ "$actual" == "$INTENDED_SHA" ]] \
+    || die "$label provenance mismatch: $digest_ref has ${REVISION_ANNOTATION}=${actual:-<missing>}, expected $INTENDED_SHA"
+}
+
+require_sidecar_eligibility() {
+  local digest_ref="$1" actual
+  actual="$(image_annotation "$digest_ref" "$SIDECAR_ELIGIBILITY_ANNOTATION")"
+  [[ "$actual" == "true" ]] \
+    || die "sidecar is not release-eligible: $digest_ref has ${SIDECAR_ELIGIBILITY_ANNOTATION}=${actual:-<missing>} (expected true)"
 }
 
 echo "=== resolve published digests (registry is the source of truth) ==="
@@ -47,10 +76,19 @@ case "$SC_REF" in ghcr.io/irinityhq/*) ;; *) die "registry assertion failed: $SC
 [[ "$GW_REF" != *example* && "$SC_REF" != *example* ]] || die "placeholder registry leaked into manifest"
 [[ "$GW_REF" != *irin-desktop/* && "$SC_REF" != *irin-desktop/* ]] || die "local image name leaked into manifest"
 
-SHA="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
+# Manifest provenance is admitted only after registry proof from the immutable
+# digest refs. Never infer sidecar eligibility from this generated manifest.
+require_revision "$GW_REF" "gateway"
+require_revision "$SC_REF" "sidecar"
+require_sidecar_eligibility "$SC_REF"
+SHA="$INTENDED_SHA"
 
-mkdir -p "$(dirname "$OUT")"
-cat >"$OUT" <<EOF
+OUT_PARENT="$(dirname "$OUT")"
+mkdir -p "$OUT_PARENT"
+OUT_TMP="$(mktemp "$OUT_PARENT/.image-manifest.production.XXXXXX")"
+cleanup_tmp() { rm -f "$OUT_TMP"; }
+trap cleanup_tmp EXIT
+cat >"$OUT_TMP" <<EOF
 {
   "schema_version": 1,
   "mode": "production",
@@ -74,7 +112,14 @@ cat >"$OUT" <<EOF
   }
 }
 EOF
-chmod 644 "$OUT"
+
+# Re-read the exact candidate bytes through the shared build/verification gate
+# before making the manifest visible at its requested path.
+bash "$ROOT/scripts/verify-production-image-provenance.sh" \
+  "$OUT_TMP" "$INTENDED_SHA" "${TAG#v}"
+chmod 644 "$OUT_TMP"
+mv -f "$OUT_TMP" "$OUT"
+trap - EXIT
 
 echo "=== production manifest written ==="
 echo "manifest=$OUT"

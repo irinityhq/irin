@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-prod-images production-manifest release-transaction worktree-gc
+.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction worktree-gc
 setup: ## macOS: prepare config, start the managed runtime, and enable login recovery
 	bash scripts/setup-local.sh
 
@@ -75,7 +75,7 @@ warroom-tauri-build: ## Package the War Room native desktop shell (Tauri)
 dmg-build: ## Build ad-hoc signed IRIN .app + .dmg (Apple silicon)
 	bash packaging/build-dmg.sh
 
-dmg-verify: ## Verify DMG layout/codesign on an untouched copy (never re-signs)
+dmg-verify: ## Verify untouched DMG + explicit receipt (requires IRIN_DMG_HASHES_PATH; never re-signs)
 	bash packaging/verify-dmg.sh
 
 dmg-smoke: ## Full-app packaged smoke (PROMOTION=1 for strict promotion gate)
@@ -94,6 +94,9 @@ gateway-pack-test: ## Static + isolation tests for the optional Gateway Pack
 
 gateway-pack-integration-smoke: ## Isolated compose smoke (local-dev images; foreign fixtures survive the product, harness cleans its own)
 	bash scripts/test-gateway-pack-integration-smoke.sh
+
+gateway-pack-ui-smoke: ## Local-dev packaged UI lifecycle smoke (requires copied app, dev images, free ports, Accessibility)
+	bash packaging/smoke-gateway-pack.sh
 
 gateway-pack-prod-images: ## Build + push production GHCR images (IRIN_PACK_IMAGES_TAG=vX.Y.Z|rc-<sha>)
 	bash scripts/build-gateway-pack-prod-images.sh

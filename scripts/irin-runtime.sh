@@ -28,7 +28,6 @@ GATEWAY_DIR="$ROOT/gateway"
 COUNCIL_PORT="${IRIN_COUNCIL_PORT:-8765}"
 WEB_PORT="${IRIN_WEB_PORT:-3010}"
 GATEWAY_PORT="${IRIN_GATEWAY_PORT:-18080}"
-TAILSCALE_HTTPS_PORT="${IRIN_TAILSCALE_HTTPS_PORT:-443}"
 RUNTIME_PROFILE="${IRIN_RUNTIME_PROFILE:-canonical}"
 
 CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
@@ -115,8 +114,6 @@ assert_source_identity() {
   elif [[ "$RUNTIME_PROFILE" == "worktree" ]]; then
     [[ "$branch" != "main" && -n "$branch" ]] \
       || die "worktree runtime requires a non-main branch"
-    [[ "${IRIN_TAILSCALE_SERVE:-0}" == "0" ]] \
-      || die "Tailscale Serve must remain disabled for worktree runtimes"
   else
     die "unknown IRIN_RUNTIME_PROFILE: $RUNTIME_PROFILE"
   fi
@@ -654,57 +651,6 @@ start_gateway() {
     || die "Gateway sidecar failed to expose build identity"
 }
 
-configure_tailscale() {
-  [[ "${IRIN_TAILSCALE_SERVE:-auto}" != "0" ]] || return 0
-  command -v tailscale >/dev/null 2>&1 || {
-    [[ "${IRIN_TAILSCALE_SERVE:-auto}" == "1" ]] && die "tailscale is required but unavailable"
-    log "SKIP: Tailscale Serve unavailable"
-    return 0
-  }
-  tailscale status >/dev/null 2>&1 || {
-    [[ "${IRIN_TAILSCALE_SERVE:-auto}" == "1" ]] && die "Tailscale is not connected"
-    log "SKIP: Tailscale is not connected"
-    return 0
-  }
-
-  tailscale serve --yes --bg --https="$TAILSCALE_HTTPS_PORT" "http://127.0.0.1:${WEB_PORT}" >/dev/null
-  tailscale serve --yes --bg --https="$TAILSCALE_HTTPS_PORT" --set-path=/api "http://127.0.0.1:${COUNCIL_PORT}/api" >/dev/null
-  tailscale serve --yes --bg --https="$TAILSCALE_HTTPS_PORT" --set-path=/ws "http://127.0.0.1:${COUNCIL_PORT}/ws" >/dev/null
-  tailscale serve --yes --bg --https="$TAILSCALE_HTTPS_PORT" --set-path=/watch "http://127.0.0.1:${GATEWAY_PORT}/watch" >/dev/null
-  tailscale serve --yes --bg --https="$TAILSCALE_HTTPS_PORT" --set-path=/health "http://127.0.0.1:${GATEWAY_PORT}/health" >/dev/null
-  log "OK: Tailscale Serve"
-}
-
-tailscale_phone_url() {
-  local dns_name serve_key serve_json url
-  [[ "${IRIN_TAILSCALE_SERVE:-auto}" != "0" ]] || return 1
-  command -v tailscale >/dev/null 2>&1 || return 1
-  tailscale status >/dev/null 2>&1 || return 1
-  dns_name="$(tailscale status --json 2>/dev/null \
-    | jq -er '.Self.DNSName // empty' 2>/dev/null)" || return 1
-  dns_name="${dns_name%.}"
-  [[ -n "$dns_name" ]] || return 1
-  serve_key="${dns_name}:${TAILSCALE_HTTPS_PORT}"
-  serve_json="$(tailscale serve status --json 2>/dev/null)" || return 1
-  jq -e \
-    --arg key "$serve_key" \
-    --arg web "http://127.0.0.1:${WEB_PORT}" \
-    --arg api "http://127.0.0.1:${COUNCIL_PORT}/api" \
-    --arg ws "http://127.0.0.1:${COUNCIL_PORT}/ws" \
-    --arg watch "http://127.0.0.1:${GATEWAY_PORT}/watch" \
-    --arg health "http://127.0.0.1:${GATEWAY_PORT}/health" \
-    '.Web[$key].Handlers as $handlers
-      | ($handlers["/"].Proxy == $web)
-      and ($handlers["/api"].Proxy == $api)
-      and ($handlers["/ws"].Proxy == $ws)
-      and ($handlers["/watch"].Proxy == $watch)
-      and ($handlers["/health"].Proxy == $health)' \
-    <<<"$serve_json" >/dev/null 2>&1 || return 1
-  url="https://${dns_name}"
-  [[ "$TAILSCALE_HTTPS_PORT" == "443" ]] || url+=":${TAILSCALE_HTTPS_PORT}"
-  printf '%s\n' "$url"
-}
-
 status_line() {
   local label="$1" url="$2" port="$3"
   if service_ready "$url"; then
@@ -728,7 +674,7 @@ proxy_status_line() {
 }
 
 runtime_status() {
-  local identity_status=0 private_phone_url=""
+  local identity_status=0
   load_runtime_env
   print_source_identity
   print_runtime_identity
@@ -753,14 +699,8 @@ runtime_status() {
     printf 'LOGIN %s missing — run: %s install-login\n' \
       "$LOGIN_LAUNCHD_LABEL" "$ROOT/scripts/irin-runtime.sh"
   fi
-  if [[ "${IRIN_TAILSCALE_SERVE:-auto}" != "0" ]] \
-    && command -v tailscale >/dev/null 2>&1; then
-    private_phone_url="$(tailscale_phone_url || true)"
-    if [[ -n "$private_phone_url" ]]; then
-      printf 'PRIVATE_PHONE %s\n' "$private_phone_url"
-    fi
-    tailscale serve status 2>/dev/null | sed -n '1,8p' || true
-  fi
+  # Private iPhone publication is owned exclusively by installed IRIN.app
+  # Settings (Tailscale Serve). Source runtime never claims or mutates it.
   return "$identity_status"
 }
 
@@ -779,7 +719,6 @@ runtime_start() {
   PARTIAL_START=1
   start_local_job
   start_gateway
-  configure_tailscale
   write_source_receipt
   runtime_status
   PARTIAL_START=0
@@ -798,8 +737,7 @@ runtime_boot() {
   load_runtime_env
 
   if stack_healthy && runtime_matches_checkout_and_receipt; then
-    log "OK: stack already healthy — re-applying Tailscale Serve"
-    configure_tailscale
+    log "OK: stack already healthy — preserving local services"
     write_source_receipt
     runtime_status
     return 0
@@ -812,7 +750,6 @@ runtime_boot() {
   PARTIAL_START=1
   start_local_job
   start_gateway
-  configure_tailscale
   write_source_receipt
   runtime_status
   PARTIAL_START=0
@@ -898,10 +835,6 @@ uninstall_login_agent() {
 
 runtime_stop() {
   local local_stopped=0
-  if [[ "${IRIN_TAILSCALE_SERVE:-auto}" != "0" ]] \
-    && command -v tailscale >/dev/null 2>&1; then
-    tailscale serve --yes --https="$TAILSCALE_HTTPS_PORT" off >/dev/null 2>&1 || true
-  fi
   if stop_local_job; then
     local_stopped=1
   fi
@@ -922,10 +855,6 @@ runtime_stop() {
 
 rollback_partial_start() {
   log "Rolling back partial IRIN runtime startup"
-  if [[ "${IRIN_TAILSCALE_SERVE:-auto}" != "0" ]] \
-    && command -v tailscale >/dev/null 2>&1; then
-    tailscale serve --yes --https="$TAILSCALE_HTTPS_PORT" off >/dev/null 2>&1 || true
-  fi
   stop_local_job || true
   if [[ -f "$GATEWAY_ENV" ]] && command -v docker >/dev/null 2>&1; then
     "${COMPOSE[@]}" down >/dev/null 2>&1 || true

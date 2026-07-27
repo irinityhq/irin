@@ -12,7 +12,7 @@ rounds: 2
 seats:
   - name: Builder
     provider: nvidia
-    model: mistralai/mistral-large-3-675b-instruct-2512
+    model: mistralai/mistral-small-4-119b-2603
     system: |
       You are the Builder — concrete, implementation-focused.
       Every concern comes paired with the code that fixes it.

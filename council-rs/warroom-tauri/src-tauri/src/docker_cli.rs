@@ -381,6 +381,11 @@ pub const AMBIENT_SCRUB_ENV_KEYS: &[&str] = &[
     "NVIDIA_API_KEY",
     "AUTH_PEPPER",
     "BOOTSTRAP_TOKEN",
+    // Touch ID bridge: the arm-principal registry is a bearer-token secret.
+    // An ambient `GW_ARM_PRINCIPALS` in the operator's login shell must never
+    // reach the pack sidecar — the only admissible value is the one the native
+    // host mints into the Keychain for this app.
+    "GW_ARM_PRINCIPALS",
 ];
 
 /// Watch/admin surfaces the desktop pack contract requires disarmed. Forced
@@ -547,7 +552,8 @@ fn validate_compose_invocation(
 ///    Compose variable precedence,
 /// 3. the disarmed-surface force, last, so no layer can arm Watch/admin.
 ///
-/// Assumes [`validate_compose_invocation`] already passed.
+/// Re-validates at the construction boundary so no internal caller can bypass
+/// the fixed project, argv, path, or environment allowlists.
 fn build_compose_command(
     docker: &Path,
     compose_file: &Path,
@@ -555,6 +561,7 @@ fn build_compose_command(
     extra: &[&str],
     extra_env: Option<&ComposeEnv>,
 ) -> Result<Command, String> {
+    validate_compose_invocation(compose_file, env_file, extra, extra_env)?;
     let mut cmd = Command::new(docker);
     apply_docker_cli_env(&mut cmd)?;
     apply_ambient_scrub_env(&mut cmd);
@@ -604,6 +611,19 @@ pub const COMPOSE_ENV_KEY_ALLOWLIST: &[&str] = &[
     "DAILY_SPEND_CAP_USD",
     "WATCH_MAX_FANOUT_COST_USD",
     "COUNCIL_GATEWAY_KEY_ID",
+    // Touch ID bridge — the ONLY two arm-surface keys the desktop pack admits.
+    // `GW_ARM_PRINCIPALS` is a Keychain-held bearer registry (secret channel,
+    // never written to the public env file); `GW_ARM_ATTEST_KEYS_PATH` is a
+    // non-secret in-container path pin. Every other arm knob
+    // (`GW_ARM_DEVIATION_FLAG`, `GW_ARM_PRINCIPAL_DOMAINS`, `ARM_NOTIFY_URL`,
+    // `ARM_STAGE_TTL_MS`) stays an empty compose literal, and
+    // `WATCH_ADMIN_TOKEN` remains in FORCED_DISARM_ENV.
+    "GW_ARM_PRINCIPALS",
+    "GW_ARM_ATTEST_KEYS_PATH",
+    // Host path of the app-owned enrollment registry, bind-mounted read-only.
+    // Same class as IRIN_DESKTOP_LEDGER_KEY: a validated app-owned path, not an
+    // arm-surface knob.
+    "IRIN_DESKTOP_ARM_KEYS",
 ];
 
 const COMPOSE_SUBCOMMAND_ALLOWLIST: &[&str] = &[
@@ -1120,6 +1140,115 @@ mod tests {
             env2.get("WATCH_PRODUCER_ENABLED").map(String::as_str),
             Some("false")
         );
+        let _ = fs::remove_dir_all(compose.parent().unwrap());
+    }
+
+    /// Touch ID bridge: the pack admits exactly two arm-surface env keys, and
+    /// an ambient `GW_ARM_PRINCIPALS` can never ride the spawn. Everything else
+    /// on the arm surface stays rejected by the allow-list, and
+    /// `WATCH_ADMIN_TOKEN` stays forced empty regardless of the caller.
+    #[test]
+    fn compose_env_allowlist_admits_only_the_two_arm_bridge_keys() {
+        for admitted in ["GW_ARM_PRINCIPALS", "GW_ARM_ATTEST_KEYS_PATH"] {
+            assert!(
+                COMPOSE_ENV_KEY_ALLOWLIST.contains(&admitted),
+                "{admitted} must be admissible for the Touch ID bridge"
+            );
+        }
+        for refused in [
+            "GW_ARM_DEVIATION_FLAG",
+            "GW_ARM_PRINCIPAL_DOMAINS",
+            "ARM_NOTIFY_URL",
+            "ARM_STAGE_TTL_MS",
+            "WATCH_ADMIN_TOKEN",
+            "WATCH_DISPATCHER_GATEWAY_KEY",
+        ] {
+            assert!(
+                !COMPOSE_ENV_KEY_ALLOWLIST.contains(&refused),
+                "{refused} must never be admissible on the desktop pack"
+            );
+        }
+        assert!(
+            AMBIENT_SCRUB_ENV_KEYS.contains(&"GW_ARM_PRINCIPALS"),
+            "an ambient arm-principal registry must be scrubbed before the pack env"
+        );
+        assert!(
+            FORCED_DISARM_ENV
+                .iter()
+                .any(|(k, v)| *k == "WATCH_ADMIN_TOKEN" && v.is_empty()),
+            "WATCH_ADMIN_TOKEN stays forced empty with the arm bridge wired"
+        );
+    }
+
+    #[test]
+    fn compose_spawn_admits_arm_bridge_keys_and_scrubs_ambient_principals() {
+        let _g = crate::private_config::test_env_lock();
+        let _root = SupportRootGuard::new("armbridge");
+        let _decoys = EnvDecoys::plant(&[
+            ("GW_ARM_PRINCIPALS", "ambient-op:ambient-token"),
+            ("WATCH_ADMIN_TOKEN", "ambient-admin-token"),
+        ]);
+        let compose = temp_compose_file("armbridge");
+
+        // No pack channel value -> the ambient registry is scrubbed to empty,
+        // so the sidecar boots arm-incapable (401 on every ceremony route).
+        let cmd = build_compose_command(
+            Path::new("/usr/local/bin/docker"),
+            &compose,
+            None,
+            &["config"],
+            None,
+        )
+        .expect("compose command builds without extra env");
+        let env = spawn_env(&cmd);
+        assert_eq!(env.get("GW_ARM_PRINCIPALS").map(String::as_str), Some(""));
+
+        // The validated pack channel value wins, and admin stays disarmed.
+        let mut extra = ComposeEnv::new();
+        extra.insert(
+            "GW_ARM_PRINCIPALS".into(),
+            "irin-desktop:tok_desktop_0001".into(),
+        );
+        extra.insert(
+            "GW_ARM_ATTEST_KEYS_PATH".into(),
+            "/run/secrets/arm_attest_keys.json".into(),
+        );
+        let cmd2 = build_compose_command(
+            Path::new("/usr/local/bin/docker"),
+            &compose,
+            None,
+            &["config"],
+            Some(&extra),
+        )
+        .expect("compose command builds with arm bridge env");
+        let env2 = spawn_env(&cmd2);
+        assert_eq!(
+            env2.get("GW_ARM_PRINCIPALS").map(String::as_str),
+            Some("irin-desktop:tok_desktop_0001")
+        );
+        assert_eq!(
+            env2.get("GW_ARM_ATTEST_KEYS_PATH").map(String::as_str),
+            Some("/run/secrets/arm_attest_keys.json")
+        );
+        assert_eq!(env2.get("WATCH_ADMIN_TOKEN").map(String::as_str), Some(""));
+        assert_eq!(
+            env2.get("WATCH_PRODUCER_ENABLED").map(String::as_str),
+            Some("false")
+        );
+
+        // A non-admitted arm knob is still rejected outright.
+        let mut bad = ComposeEnv::new();
+        bad.insert("ARM_NOTIFY_URL".into(), "https://example.invalid".into());
+        let err = build_compose_command(
+            Path::new("/usr/local/bin/docker"),
+            &compose,
+            None,
+            &["config"],
+            Some(&bad),
+        )
+        .expect_err("non-admitted arm knob must be refused");
+        assert!(err.contains("not allow-listed"), "{err}");
+
         let _ = fs::remove_dir_all(compose.parent().unwrap());
     }
 

@@ -120,7 +120,6 @@ IRIN_WEB_PORT=$((22000 + slot))
 IRIN_GATEWAY_PORT=$((24000 + slot))
 IRIN_RUNTIME_STATE_DIR=${HOME}/.local/state/irin/worktrees/$short-$slug
 IRIN_RUNTIME_LAUNCHD_LABEL=com.irinity.irin-runtime.worktree-$short
-IRIN_TAILSCALE_SERVE=0
 CARGO_TARGET_DIR=$cargo_target_dir
 EOF
 chmod 600 "$destination/.irin-worktree.env"

@@ -6,16 +6,27 @@ mod build_support;
 mod docker_cli;
 mod gateway_pack;
 mod keychain;
+mod lifecycle;
 mod paths;
+mod phone_access;
 mod private_config;
 mod sidecar;
+mod status_authority;
+mod tailscale_cli;
+mod touch_id;
 
 use gateway_pack::{GatewayPackState, GatewayPackStatus};
 use keychain::{load_gw_api_key, migrate_legacy_secrets, KeychainSecretStore};
+use status_authority::{DesktopStatusSnapshot, Freshness};
+use lifecycle::{
+    classify_council_lifecycle, classify_gateway_lifecycle, classify_phone_lifecycle,
+    compose_app_lifecycle, AppLifecycleStatus, CouncilLifecycleInput,
+};
 use paths::{
     build_cors_origins, default_serve_port, is_packaged_install, resolve_council_binary,
     resolve_council_rs_dir, resolve_spawn_base_dir, validate_serve_port,
 };
+use phone_access::{LiveTailscaleRunner, PhoneAccessStatus};
 use private_config::{
     ensure_writable_base_overlay, gui_login_environment, load_or_create_private_config,
 };
@@ -28,6 +39,7 @@ use std::time::Duration;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
+    webview::PageLoadEvent,
     AppHandle, Emitter, Manager, RunEvent, State,
 };
 use tauri_plugin_dialog::DialogExt;
@@ -87,6 +99,13 @@ fn desktop_runtime_mode() -> &'static str {
     desktop_runtime_mode_value()
 }
 
+/// Packaged installs: native setup is the sole Council startup owner.
+/// Source-dev (unpackaged) returns false so the frontend may still start.
+#[tauri::command]
+fn native_owns_council_startup() -> bool {
+    is_packaged_install()
+}
+
 fn desktop_runtime_config_value(port: u16) -> serde_json::Value {
     serde_json::json!({
         "apiBase": format!("http://127.0.0.1:{port}"),
@@ -131,6 +150,10 @@ fn show_main_window(app: &AppHandle) {
     if let Err(error) = window.set_focus() {
         eprintln!("[tray] failed to focus War Room window: {error}");
     }
+}
+
+fn should_reveal_main_window(webview_label: &str, event: PageLoadEvent) -> bool {
+    webview_label == "main" && event == PageLoadEvent::Finished
 }
 
 /// Best-effort kill of the tracked council sidecar (shared by stop command, tray, and app exit).
@@ -196,6 +219,111 @@ fn unix_kill_pid(pid: u32, sig: i32) {
 
 #[cfg(not(unix))]
 fn unix_kill_pid(_pid: u32, _sig: i32) {}
+
+/// Bounded post-launch promote: when cold-start fell to Direct while
+/// `via_gateway_default` stayed true, retry pack resume + governed respawn
+/// without requiring a manual Enable click. Fail-closed: a failed promote
+/// restores Direct; never invents governed readiness.
+fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>) {
+    const ATTEMPTS: u32 = 12;
+    const INTERVAL: Duration = Duration::from_secs(5);
+    tauri::async_runtime::spawn_blocking(move || {
+        for attempt in 0..ATTEMPTS {
+            std::thread::sleep(INTERVAL);
+            let store = KeychainSecretStore;
+            let persisted = match load_or_create_private_config() {
+                Ok(cfg) => cfg.via_gateway_default,
+                Err(_) => return,
+            };
+            // Operator disabled, already governed, or no Direct-owned child → stop.
+            let owned = gateway_pack::owned_council_route();
+            if !persisted || owned == Some(true) || owned != Some(false) {
+                return;
+            }
+            let pack_ok = if gateway_pack::pack_auth_revalidated(&store) {
+                true
+            } else if attempt < 4 {
+                match gateway_pack::resume_installed_pack(&store) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        let _ = app.emit(
+                            "council-log",
+                            format!(
+                                "[system] governed-promote attempt {}: pack not ready ({e})",
+                                attempt + 1
+                            ),
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if !gateway_pack::may_promote_to_governed(persisted, owned, pack_ok) {
+                continue;
+            }
+            let config = {
+                let state = app.state::<SpawnConfigCache>();
+                let guard = match state.0.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                let cloned = guard.clone();
+                drop(guard);
+                cloned
+            };
+            let token = auth_token
+                .as_deref()
+                .or(config.auth_token.as_deref())
+                .map(str::to_string);
+            stop_tracked_council_server(&app);
+            let _ =
+                wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
+            match try_start_council_server(
+                &app,
+                config.council_path.as_deref(),
+                config.server_port,
+                token.as_deref(),
+                Some(true),
+                config.council_root.as_deref(),
+                config.librarian_base.as_deref(),
+            ) {
+                Ok(msg) => {
+                    let _ = app.emit(
+                        "council-log",
+                        format!("[system] governed-promote: {msg}"),
+                    );
+                    let _ = gateway_pack::status_with_council_route(&store, true, false);
+                    let _ = status_authority::recompute(&app, Freshness::Action);
+                    return;
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        "council-log",
+                        format!(
+                            "[system] governed-promote attempt {}: governed spawn failed ({e}); restoring Direct",
+                            attempt + 1
+                        ),
+                    );
+                    let _ = try_start_council_server(
+                        &app,
+                        config.council_path.as_deref(),
+                        config.server_port,
+                        token.as_deref(),
+                        Some(false),
+                        config.council_root.as_deref(),
+                        config.librarian_base.as_deref(),
+                    );
+                    let _ = status_authority::recompute(&app, Freshness::Action);
+                }
+            }
+        }
+        let _ = app.emit(
+            "council-log",
+            "[system] governed-promote: bounded retries exhausted; pack remains Direct until Enable or next launch",
+        );
+    });
+}
 
 /// Adopt a matching external Council when available; otherwise spawn a managed
 /// `council --serve` when this is a packaged install (bundled binary + base-dir)
@@ -333,8 +461,9 @@ fn try_start_council_server(
                 // which the enable and relaunch-restore flows satisfy right
                 // after their own revalidation and a Disabled pack never does.
                 if packaged {
-                    let st = gateway_pack::gateway_pack_status(&store);
-                    if !st.allows_governed_spawn() {
+                    // Authority path: never act on a presentation cache sample.
+                    let st = gateway_pack::gateway_pack_status_fresh(&store);
+                    if !st.spawn_capable {
                         return Err(format!(
                             "Gateway is not authenticated-ready ({}). {}",
                             st.state.as_str(),
@@ -361,8 +490,20 @@ fn try_start_council_server(
     };
 
     let cors_origins = build_cors_origins(port);
+    // Packaged: pass bundled War Room export via --web-dist when present so the
+    // phone surface shares Council :8765 (no permanent :3010). Dev omits it.
+    let web_dist = if packaged {
+        paths::bundled_web_dist().map(|p| p.to_string_lossy().into_owned())
+    } else {
+        None
+    };
     // compose_sidecar_args: first arg is default base-dir; third overrides --base-dir.
-    let args = compose_sidecar_args(&spawn_base_str, port, Some(spawn_base_str.as_str()));
+    let args = compose_sidecar_args(
+        &spawn_base_str,
+        port,
+        Some(spawn_base_str.as_str()),
+        web_dist.as_deref(),
+    );
 
     let mut command = app
         .shell()
@@ -543,6 +684,16 @@ async fn start_council_server(
     council_root: Option<String>,
     librarian_base: Option<String>,
 ) -> Result<String, String> {
+    // Packaged / installed-release: native setup owns Council startup. A
+    // frontend call with via_gateway=None would force Direct and race the
+    // governed restore path ("already tracked as running" without correcting
+    // ownership). Refuse the spawn; health polling remains the frontend job.
+    if is_packaged_install() {
+        return Ok(
+            "packaged install: Council startup owned by native setup; frontend start skipped"
+                .to_string(),
+        );
+    }
     try_start_council_server(
         &app,
         council_path.as_deref(),
@@ -576,8 +727,11 @@ async fn stop_council_server(
 /// spawn config so the pairing token survives the restart; if no sidecar is
 /// tracked this simply starts one. Returns the same shape as start_council_server.
 ///
-/// Packaged installs refuse `via_gateway=true` unless the Gateway Pack reports
-/// authenticated readiness (Keychain key + live `/v1/models`).
+/// Packaged installs refuse `via_gateway=true` unless the Gateway Pack is
+/// spawn-capable (enabled + live-authenticated). Restart is the transition
+/// that creates the governed-child proof, so it must not demand
+/// `governed_ready` (chicken-and-egg). Enroll/arm still require fresh
+/// `governed_ready` after the restart completes.
 /// `council_root`: optional fresh `--base-dir` override — unlike the pairing
 /// token it can change mid-session, so the restart accepts the form value
 /// instead of trusting the cache; `None` falls back to the cached spawn value.
@@ -592,8 +746,9 @@ async fn restart_sidecar(
     tauri::async_runtime::spawn_blocking(move || {
         if via_gateway && is_packaged_install() {
             let store = KeychainSecretStore;
-            let st = gateway_pack::gateway_pack_status(&store);
-            if !st.state.allows_governed() {
+            // Authority path: fresh sample; gate is spawn_capable not governed_ready.
+            let st = gateway_pack::gateway_pack_status_fresh(&store);
+            if !st.spawn_capable {
                 return Err(format!(
                     "Cannot enable governed mode: Gateway Pack is {} — {}. \
                      Use Settings → Enable Gateway first.",
@@ -702,43 +857,44 @@ async fn gateway_pack_status() -> Result<GatewayPackStatus, String> {
 
 /// Install/start/provision/enable the app-owned Gateway Pack. Never returns secrets.
 /// Ready only when Gateway auth **and** owned Council governed restart both succeed.
+/// Returns a committed host-authoritative status snapshot after the mutation.
 #[tauri::command]
-async fn gateway_pack_enable(app: AppHandle) -> Result<GatewayPackStatus, String> {
+async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
+    let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let store = KeychainSecretStore;
         let status = gateway_pack::enable_gateway_pack(&store)?;
-        // Docker missing/down is neutral for core Direct — return status as-is.
+        // Docker missing/down is neutral for core Direct — still recompute.
         if matches!(
             status.state,
             GatewayPackState::DockerMissing | GatewayPackState::DockerDaemonDown
         ) {
-            return Ok(status);
+            return Ok(status_authority::recompute(&app2, Freshness::Action));
         }
         if !status.authenticated || !status.enabled {
-            return Ok(status);
+            return Ok(status_authority::recompute(&app2, Freshness::Action));
         }
 
         // Restart owned Council child into governed mode with Keychain key.
         let config = {
-            let state = app.state::<SpawnConfigCache>();
+            let state = app2.state::<SpawnConfigCache>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
             guard.clone()
         };
         let had_child = {
-            let state = app.state::<CouncilServer>();
+            let state = app2.state::<CouncilServer>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
             guard.child.is_some()
         };
         if !had_child {
             // No owned child: pack auth alone is not full ready for this shell.
-            return Ok(gateway_pack::status_with_council_route(
-                &store, false, false,
-            ));
+            let _ = gateway_pack::status_with_council_route(&store, false, false);
+            return Ok(status_authority::recompute(&app2, Freshness::Action));
         }
-        stop_tracked_council_server(&app);
+        stop_tracked_council_server(&app2);
         let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
         match try_start_council_server(
-            &app,
+            &app2,
             config.council_path.as_deref(),
             None,
             config.auth_token.as_deref(),
@@ -747,13 +903,12 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<GatewayPackStatus, String
             config.librarian_base.as_deref(),
         ) {
             Ok(msg) => {
-                let _ = app.emit("council-log", format!("[system] gateway enable: {msg}"));
-                Ok(gateway_pack::status_with_council_route(
-                    &store, true, false,
-                ))
+                let _ = app2.emit("council-log", format!("[system] gateway enable: {msg}"));
+                let _ = gateway_pack::status_with_council_route(&store, true, false);
+                Ok(status_authority::recompute(&app2, Freshness::Action))
             }
             Err(e) => {
-                let _ = app.emit(
+                let _ = app2.emit(
                     "council-log",
                     format!("[system] gateway enable: council governed restart failed: {e}"),
                 );
@@ -763,7 +918,7 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<GatewayPackStatus, String
                 // back up before returning the enable error — never leave the
                 // app down with state claiming governed.
                 if let Err(disable_err) = gateway_pack::disable_gateway_pack(&store) {
-                    let _ = app.emit(
+                    let _ = app2.emit(
                         "council-log",
                         format!("[system] gateway enable rollback: failed to restore Direct config: {disable_err}"),
                     );
@@ -773,7 +928,7 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<GatewayPackStatus, String
                     Duration::from_secs(5),
                 );
                 let rollback_note = match try_start_council_server(
-                    &app,
+                    &app2,
                     config.council_path.as_deref(),
                     None,
                     config.auth_token.as_deref(),
@@ -782,14 +937,14 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<GatewayPackStatus, String
                     config.librarian_base.as_deref(),
                 ) {
                     Ok(msg) => {
-                        let _ = app.emit(
+                        let _ = app2.emit(
                             "council-log",
                             format!("[system] gateway enable rollback: Council restored in Direct mode: {msg}"),
                         );
                         "Council was restored in Direct mode.".to_string()
                     }
                     Err(re) => {
-                        let _ = app.emit(
+                        let _ = app2.emit(
                             "council-log",
                             format!("[system] gateway enable rollback: Direct restart failed: {re}"),
                         );
@@ -800,6 +955,8 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<GatewayPackStatus, String
                     }
                 };
                 // Propagate failure — do not claim authenticated-ready.
+                // Still commit a truthful post-failure snapshot for the panel.
+                let _ = status_authority::recompute(&app2, Freshness::Action);
                 Err(format!(
                     "Gateway pack authenticated but Council governed restart failed: {e}. \
                      Rolled back to Direct (via_gateway_default=false). {rollback_note}"
@@ -814,26 +971,27 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<GatewayPackStatus, String
 /// Disable governed mode and restart Council in Direct mode. Keeps pack data/Keychain.
 /// Propagates Council Direct restart failures.
 #[tauri::command]
-async fn gateway_pack_disable(app: AppHandle) -> Result<GatewayPackStatus, String> {
+async fn gateway_pack_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
+    let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let store = KeychainSecretStore;
         let _status = gateway_pack::disable_gateway_pack(&store)?;
         let config = {
-            let state = app.state::<SpawnConfigCache>();
+            let state = app2.state::<SpawnConfigCache>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
             guard.clone()
         };
         let had_child = {
-            let state = app.state::<CouncilServer>();
+            let state = app2.state::<CouncilServer>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
             guard.child.is_some()
         };
         if had_child {
-            stop_tracked_council_server(&app);
+            stop_tracked_council_server(&app2);
             let _ =
                 wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
-                &app,
+                &app2,
                 config.council_path.as_deref(),
                 None,
                 config.auth_token.as_deref(),
@@ -842,14 +1000,15 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<GatewayPackStatus, Strin
                 config.librarian_base.as_deref(),
             )
             .map_err(|e| format!("Gateway disabled but Council Direct restart failed: {e}"))?;
-            let _ = app.emit(
+            let _ = app2.emit(
                 "council-log",
                 "[system] gateway disable: Council restarted in Direct mode",
             );
-            Ok(gateway_pack::status_with_council_route(&store, false, true))
+            let _ = gateway_pack::status_with_council_route(&store, false, true);
         } else {
-            Ok(gateway_pack::status_with_council_route(&store, false, true))
+            let _ = gateway_pack::status_with_council_route(&store, false, true);
         }
+        Ok(status_authority::recompute(&app2, Freshness::Action))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -858,27 +1017,28 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<GatewayPackStatus, Strin
 /// Stop the desktop Compose project only (no volume delete).
 /// Switches to Direct first (via stop_gateway_pack) and restarts owned Council in Direct.
 #[tauri::command]
-async fn gateway_pack_stop(app: AppHandle) -> Result<GatewayPackStatus, String> {
+async fn gateway_pack_stop(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
+    let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let store = KeychainSecretStore;
         // Ensure Direct config before containers stop.
         let status = gateway_pack::stop_gateway_pack(&store)?;
         let config = {
-            let state = app.state::<SpawnConfigCache>();
+            let state = app2.state::<SpawnConfigCache>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
             guard.clone()
         };
         let had_child = {
-            let state = app.state::<CouncilServer>();
+            let state = app2.state::<CouncilServer>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
             guard.child.is_some()
         };
         if had_child {
-            stop_tracked_council_server(&app);
+            stop_tracked_council_server(&app2);
             let _ =
                 wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
-                &app,
+                &app2,
                 config.council_path.as_deref(),
                 None,
                 config.auth_token.as_deref(),
@@ -896,7 +1056,8 @@ async fn gateway_pack_stop(app: AppHandle) -> Result<GatewayPackStatus, String> 
             st.message = "Gateway pack stopped; Council is in Direct mode.".into();
         }
         gateway_pack::lifecycle_stage("stop_handler_complete", "ok");
-        Ok(st)
+        let _ = st;
+        Ok(status_authority::recompute(&app2, Freshness::Action))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -905,26 +1066,27 @@ async fn gateway_pack_stop(app: AppHandle) -> Result<GatewayPackStatus, String> 
 /// Destructive uninstall of the desktop pack only. Explicit operator action.
 /// Propagates Council Direct restart failures.
 #[tauri::command]
-async fn gateway_pack_uninstall(app: AppHandle) -> Result<GatewayPackStatus, String> {
+async fn gateway_pack_uninstall(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
+    let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         let store = KeychainSecretStore;
-        let status = gateway_pack::uninstall_gateway_pack(&store)?;
+        let _status = gateway_pack::uninstall_gateway_pack(&store)?;
         let config = {
-            let state = app.state::<SpawnConfigCache>();
+            let state = app2.state::<SpawnConfigCache>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
             guard.clone()
         };
         let had_child = {
-            let state = app.state::<CouncilServer>();
+            let state = app2.state::<CouncilServer>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
             guard.child.is_some()
         };
         if had_child {
-            stop_tracked_council_server(&app);
+            stop_tracked_council_server(&app2);
             let _ =
                 wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
-                &app,
+                &app2,
                 config.council_path.as_deref(),
                 None,
                 config.auth_token.as_deref(),
@@ -936,10 +1098,171 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<GatewayPackStatus, Str
                 format!("Gateway pack uninstalled but Council Direct restart failed: {e}")
             })?;
         }
-        let mut st = status;
-        st.council_governed = false;
-        st.message = "Gateway pack uninstalled; Council is in Direct mode.".into();
-        Ok(st)
+        Ok(status_authority::recompute(&app2, Freshness::Action))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+// ---------------------------------------------------------------------------
+// Touch ID product control
+//
+// The renderer can only trigger these fixed workflows and read the non-secret
+// status projection. Helper invocation, the Secure Enclave signature, the
+// arm-principal bearer, and stage/confirm/disarm stay native. Nothing runs at
+// launch.
+// ---------------------------------------------------------------------------
+
+/// Presentation-only sticky boundary for Gateway readiness on status polls.
+///
+/// Law:
+/// - **Status path** ([`gateway_ready_for_status`]): may hold the last true
+///   `governed_ready` sample across soft probe flakes (auth/health), using a
+///   monotonic clock. `hard_down` (disabled, Docker gap, stopped/not-running)
+///   demotes immediately.
+/// - **Action path** ([`gateway_ready_for_arm`]): always a fresh uncached
+///   sample; never consults this sticky or the presentation cache.
+static GATEWAY_READY_STATUS_STICKY: std::sync::Mutex<touch_id::GatewayReadySticky> =
+    std::sync::Mutex::new(touch_id::GatewayReadySticky::new());
+
+/// Monotonic milliseconds since process start. Sticky expiry must not use wall
+/// time: an NTP step backward would otherwise extend the 20s hold indefinitely.
+fn monotonic_ms() -> i64 {
+    use std::sync::OnceLock;
+    use std::time::Instant;
+    static ORIGIN: OnceLock<Instant> = OnceLock::new();
+    ORIGIN
+        .get_or_init(Instant::now)
+        .elapsed()
+        .as_millis()
+        .min(i64::MAX as u128) as i64
+}
+
+/// Fresh pack readiness sample. Used by enroll/arm action paths so a ceremony
+/// never proceeds on sticky or cached presentation state.
+fn gateway_ready_for_arm() -> bool {
+    gateway_ready_sample_fresh().0
+}
+
+/// `(governed_ready, hard_down)` from one uncached pack-status sample.
+fn gateway_ready_sample_fresh() -> (bool, bool) {
+    let store = KeychainSecretStore;
+    let st = gateway_pack::gateway_pack_status_fresh(&store);
+    (st.governed_ready, st.hard_down)
+}
+
+/// `(governed_ready, hard_down)` from the presentation cache path.
+fn gateway_ready_sample_cached() -> (bool, bool) {
+    let store = KeychainSecretStore;
+    let st = gateway_pack::gateway_pack_status(&store);
+    (st.governed_ready, st.hard_down)
+}
+
+/// Status-path readiness: soft probe failures hold the last true sample so the
+/// Re-enroll / Set up button does not grey on an 8s background poll flake.
+/// Action paths must call [`gateway_ready_for_arm`] instead.
+fn gateway_ready_for_status() -> bool {
+    let (sample, hard_down) = gateway_ready_sample_cached();
+    let now_ms = monotonic_ms();
+    match GATEWAY_READY_STATUS_STICKY.lock() {
+        Ok(mut guard) => guard.project(
+            sample,
+            hard_down,
+            now_ms,
+            touch_id::GatewayReadySticky::DEFAULT_HOLD_MS,
+        ),
+        Err(_) => sample,
+    }
+}
+
+#[tauri::command]
+async fn touch_id_status() -> Result<touch_id::TouchIdStatus, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        let store = KeychainSecretStore;
+        Ok(touch_id::touch_id_status(
+            &store,
+            gateway_ready_for_status(),
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn touch_id_enroll(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = KeychainSecretStore;
+        touch_id::enroll(&store, gateway_ready_for_arm())?;
+
+        // Enrollment changes both the public credential registry and the
+        // Keychain-held arm principal. Refresh the operator-owned pack now so
+        // its boot-time allowlists match; setup is explicit, but no producer is
+        // armed by this action.
+        let pack = gateway_pack::enable_gateway_pack(&store)?;
+        // Post-lifecycle check: enable returns a fresh sample; require pack auth
+        // presentation (enable sets AuthenticatedReady before Council restart).
+        if !pack.enabled || !pack.authenticated || !pack.spawn_capable {
+            let _ = status_authority::recompute(&app, Freshness::Action);
+            return Err(
+                "Touch ID enrolled, but Gateway could not reload its arm registry".to_string(),
+            );
+        }
+        Ok(status_authority::recompute(&app, Freshness::Action))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn touch_id_arm(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = KeychainSecretStore;
+        // Fail closed on a fresh sample — never arm from sticky/cached presentation.
+        if !gateway_ready_for_arm() {
+            return Err(
+                "Gateway must be enabled and authenticated before Touch ID arm".to_string(),
+            );
+        }
+        touch_id::arm(&store)?;
+        Ok(status_authority::recompute(&app, Freshness::Action))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn touch_id_renew(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = KeychainSecretStore;
+        // Fail closed on a fresh sample — renew is the same ceremony as arm.
+        if !gateway_ready_for_arm() {
+            return Err(
+                "Gateway must be enabled and authenticated before Touch ID renew".to_string(),
+            );
+        }
+        touch_id::renew(&store)?;
+        Ok(status_authority::recompute(&app, Freshness::Action))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn touch_id_disarm(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = KeychainSecretStore;
+        touch_id::disarm(&store)?;
+        Ok(status_authority::recompute(&app, Freshness::Action))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Host-authoritative combined status snapshot (Background freshness).
+#[tauri::command]
+async fn desktop_status_snapshot(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        Ok(status_authority::recompute(&app, Freshness::Background))
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1007,6 +1330,132 @@ async fn save_pdf(app: AppHandle, data: Vec<u8>, filename: String) -> Result<Str
     }
 }
 
+/// Whether Gateway Pack is currently enabled (presentation/status sample).
+fn gateway_pack_enabled_flag() -> bool {
+    let store = KeychainSecretStore;
+    gateway_pack::gateway_pack_status(&store).enabled
+}
+
+/// Fresh enabled flag for authority-bearing phone publication changes.
+fn gateway_pack_enabled_flag_fresh() -> bool {
+    let store = KeychainSecretStore;
+    gateway_pack::gateway_pack_status_fresh(&store).enabled
+}
+
+/// Authenticated, build-matched Council readiness owned entirely by native
+/// code. This is the only readiness proof accepted before publishing Council
+/// to the operator's tailnet.
+fn council_backend_ready(app: &AppHandle) -> bool {
+    council_backend_ready_probe(app)
+}
+
+/// Shared probe used by phone publication and the status authority.
+fn council_backend_ready_probe(app: &AppHandle) -> bool {
+    let auth_token = {
+        let state = app.state::<SpawnConfigCache>();
+        state
+            .0
+            .lock()
+            .ok()
+            .and_then(|config| config.auth_token.clone())
+    };
+    let port = default_serve_port().unwrap_or(8765);
+    let (expected_sha, expected_dirty) = bundled_build_identity();
+    matches!(
+        probe_council_server(
+            port,
+            Duration::from_millis(400),
+            expected_sha,
+            expected_dirty,
+            auth_token.as_deref(),
+        ),
+        CouncilServerProbe::MatchingBuild
+    )
+}
+
+/// Non-secret phone access status (no bearer token, no pairing secret).
+#[tauri::command]
+async fn phone_access_status(app: AppHandle) -> Result<PhoneAccessStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let gw = gateway_pack_enabled_flag();
+        let council_ready = council_backend_ready(&app);
+        Ok(phone_access::phone_access_status(
+            &LiveTailscaleRunner,
+            gw,
+            council_ready,
+        ))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Enable private phone publication via Tailscale Serve (never Funnel).
+#[tauri::command]
+async fn phone_access_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Authority path: publication changes the Tailscale route table.
+        let gw = gateway_pack_enabled_flag_fresh();
+        let council_ready = council_backend_ready(&app);
+        if !council_ready {
+            return Err(
+                "Council is not authenticated-ready on the bundled build; phone access was not changed"
+                    .to_string(),
+            );
+        }
+        phone_access::phone_access_enable(&LiveTailscaleRunner, gw, council_ready)?;
+        Ok(status_authority::recompute(&app, Freshness::Action))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Disable phone publication by restoring the prior Serve snapshot.
+#[tauri::command]
+async fn phone_access_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Authority path: restores Serve; use a fresh enabled flag.
+        let gw = gateway_pack_enabled_flag_fresh();
+        let council_ready = council_backend_ready(&app);
+        phone_access::phone_access_disable(&LiveTailscaleRunner, gw, council_ready)?;
+        Ok(status_authority::recompute(&app, Freshness::Action))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Aggregate product lifecycle: Council, optional Gateway, phone access.
+///
+/// Pure composition over existing subsystem owners — does not spawn a second
+/// Council or Gateway launcher. Quit leaves app-owned Serve configured.
+#[tauri::command]
+async fn app_lifecycle_status(app: AppHandle) -> Result<AppLifecycleStatus, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let owned_child = {
+            let state = app.state::<CouncilServer>();
+            state.0.lock().map(|g| g.child.is_some()).unwrap_or(false)
+        };
+        let health_ready = council_backend_ready(&app);
+        let council = classify_council_lifecycle(CouncilLifecycleInput {
+            owned_child,
+            stopping: false,
+            health_ready,
+            last_error: false,
+        });
+
+        let store = KeychainSecretStore;
+        let pack = gateway_pack::gateway_pack_status(&store);
+        let gateway = classify_gateway_lifecycle(pack.state);
+
+        let phone =
+            phone_access::phone_access_status(&LiveTailscaleRunner, pack.enabled, health_ready);
+        let phone_life = classify_phone_lifecycle(phone.state);
+
+        Ok(compose_app_lifecycle(council, gateway, phone_life))
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -1026,6 +1475,16 @@ pub fn run() {
             gateway_pack_disable,
             gateway_pack_stop,
             gateway_pack_uninstall,
+            touch_id_status,
+            touch_id_enroll,
+            touch_id_arm,
+            touch_id_renew,
+            touch_id_disarm,
+            desktop_status_snapshot,
+            phone_access_status,
+            phone_access_enable,
+            phone_access_disable,
+            app_lifecycle_status,
             pick_file,
             ping_council,
             get_server_logs,
@@ -1034,8 +1493,31 @@ pub fn run() {
             save_pdf,
             desktop_runtime_mode,
             desktop_runtime_config,
+            native_owns_council_startup,
             report_council_runtime_ready
         ])
+        .on_page_load(|webview, payload| {
+            if !should_reveal_main_window(webview.label(), payload.event()) {
+                return;
+            }
+            let window = webview.window();
+            match window.is_visible() {
+                Ok(false) => {
+                    if let Err(error) = window.show() {
+                        eprintln!("[webview] failed to reveal loaded War Room window: {error}");
+                    } else {
+                        eprintln!("[webview] loaded War Room window revealed");
+                        if let Err(error) = window.set_focus() {
+                            eprintln!("[webview] failed to focus loaded War Room window: {error}");
+                        }
+                    }
+                }
+                Ok(true) => {}
+                Err(error) => {
+                    eprintln!("[webview] failed to inspect War Room window visibility: {error}")
+                }
+            }
+        })
         .setup(|app| {
             // One-time, non-destructive adoption of Keychain secrets stored by
             // the legacy "Council War Room" build (never deletes legacy items).
@@ -1043,6 +1525,8 @@ pub fn run() {
                 let store = KeychainSecretStore;
                 migrate_legacy_secrets(&store);
             }
+            // Host-authoritative status loop: ordered snapshots on desktop-status.
+            status_authority::start_background_loop(app.handle().clone());
             let handle = app.handle().clone();
             let menu = Menu::with_items(
                 app,
@@ -1121,11 +1605,11 @@ pub fn run() {
                     if packaged || cfg!(debug_assertions) {
                         let token_ref = auth_token.as_deref();
                         // Packaged launch restores the persisted governed route
-                        // ONLY after revalidating pack authentication (Docker
-                        // up, owned pack running + healthy, Keychain key passes
-                        // /v1/models). Anything less starts Direct explicitly —
-                        // status must never claim governed while the owned
-                        // child is Direct.
+                        // after revalidating pack authentication — and when the
+                        // pack is not immediately ready, a bounded resume
+                        // (compose up + wait) is attempted before fail-closed
+                        // Direct. via_gateway_default stays true so a later
+                        // promote can succeed without manual re-enable.
                         let mut launch_via_gateway = false;
                         if packaged && persisted_via_gateway {
                             let store = KeychainSecretStore;
@@ -1138,8 +1622,25 @@ pub fn run() {
                             } else {
                                 let _ = auto_start_handle.emit(
                                     "council-log",
-                                    "[system] auto-start: persisted governed route not restored — Gateway Pack unavailable or not authenticated; starting Council in Direct mode",
+                                    "[system] auto-start: pack not immediately ready — attempting bounded resume (compose up + health/auth wait)",
                                 );
+                                match gateway_pack::resume_installed_pack(&store) {
+                                    Ok(()) => {
+                                        launch_via_gateway = true;
+                                        let _ = auto_start_handle.emit(
+                                            "council-log",
+                                            "[system] auto-start: pack resume succeeded — spawning governed Council",
+                                        );
+                                    }
+                                    Err(e) => {
+                                        let _ = auto_start_handle.emit(
+                                            "council-log",
+                                            format!(
+                                                "[system] auto-start: pack resume failed ({e}); starting Council in Direct mode (via_gateway_default kept; bounded promote will retry)"
+                                            ),
+                                        );
+                                    }
+                                }
                             }
                         }
                         let mut first_attempt = true;
@@ -1168,6 +1669,7 @@ pub fn run() {
                                         // Direct so core War Room still comes
                                         // up. gateway_pack_status reports the
                                         // pack truth (child recorded Direct).
+                                        // Do not clear via_gateway_default.
                                         first_attempt = false;
                                         route = false;
                                         let _ = auto_start_handle.emit(
@@ -1189,6 +1691,17 @@ pub fn run() {
                                 }
                             }
                         }
+                        // Fail-closed Direct with pack still enabled: schedule
+                        // bounded later promote without requiring manual Enable.
+                        if packaged
+                            && persisted_via_gateway
+                            && gateway_pack::owned_council_route() == Some(false)
+                        {
+                            schedule_governed_promote_attempts(
+                                auto_start_handle.clone(),
+                                auth_token.clone(),
+                            );
+                        }
                     }
                 });
             }
@@ -1208,8 +1721,10 @@ pub fn run() {
 #[cfg(test)]
 mod runtime_mode_tests {
     use super::{
-        desktop_runtime_config_value, desktop_runtime_mode_value, validate_runtime_ready_port,
+        desktop_runtime_config_value, desktop_runtime_mode_value, should_reveal_main_window,
+        validate_runtime_ready_port,
     };
+    use tauri::webview::PageLoadEvent;
 
     #[test]
     fn runtime_mode_matches_the_native_build_profile() {
@@ -1236,5 +1751,15 @@ mod runtime_mode_tests {
     fn runtime_ready_receipt_accepts_only_the_selected_port() {
         assert!(validate_runtime_ready_port(20_321, 20_321).is_ok());
         assert!(validate_runtime_ready_port(8_765, 20_321).is_err());
+    }
+
+    #[test]
+    fn initial_main_window_reveals_only_after_page_load_finishes() {
+        assert!(!should_reveal_main_window("main", PageLoadEvent::Started));
+        assert!(should_reveal_main_window("main", PageLoadEvent::Finished));
+        assert!(!should_reveal_main_window(
+            "secondary",
+            PageLoadEvent::Finished
+        ));
     }
 }

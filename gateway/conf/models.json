@@ -267,13 +267,13 @@
       "capabilities": { "quality": 0.84, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
       "_note": "DeepSeek V4 Flash — $0.00 convergence judge. Replaces gpt-5.4-nano in cheap-tier."
     },
-    "mistralai/mistral-large-3-675b-instruct-2512": {
+    "mistralai/mistral-small-4-119b-2603": {
       "provider": "nvidia",
       "family": "mistral",
       "path": "/v1/chat/completions",
       "pricing": { "input": 0.0, "cached_input": 0.0, "output": 0.0 },
-      "capabilities": { "quality": 0.90, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
-      "_note": "Invokable NVIDIA NIM free-tier anchor and chair model."
+      "capabilities": { "quality": 0.86, "max_context": 131072, "supports_tools": true, "supports_vision": false, "supports_streaming": true },
+      "_note": "Mistral Small 4 via NVIDIA NIM; live-proven for architect output and strict judge JSON on 2026-07-25."
     },
     "qwen/qwen3.5-397b-a17b": {
       "provider": "nvidia",

@@ -15,8 +15,9 @@ use crate::docker_cli::{
     DESKTOP_COMPOSE_PROJECT, DESKTOP_GATEWAY_URL, DOCKER_CMD_TIMEOUT, DOCKER_COMPOSE_UP_TIMEOUT,
 };
 use crate::keychain::{
-    delete_all_gateway_pack_secrets, gw_api_key_present, is_valid_gw_raw_key, load_auth_pepper,
-    load_gw_api_key, store_auth_pepper, store_gw_api_key, KeychainSecretStore, SecretStore,
+    delete_all_gateway_pack_secrets, gw_api_key_present, is_valid_gw_raw_key,
+    load_arm_principal_token, load_auth_pepper, load_gw_api_key, store_auth_pepper,
+    store_gw_api_key, KeychainSecretStore, SecretStore, ARM_PRINCIPAL_NAME,
 };
 use crate::paths::{bundled_base_dir, executable_dir};
 use crate::private_config::{
@@ -30,11 +31,95 @@ use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::Duration;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::{Duration, Instant};
+
+/// Pack lifecycle generation: advances on enable/disable/stop/uninstall so an
+/// in-flight Touch ID ceremony can fail closed if the pack identity changes
+/// between stage and confirm. Independent of the presentation STATUS_CACHE
+/// generation (which also bumps on route/spawn transitions).
+static PACK_LIFECYCLE_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+/// Current pack lifecycle generation (non-secret, process-local).
+pub fn pack_lifecycle_generation() -> u64 {
+    PACK_LIFECYCLE_GENERATION.load(Ordering::SeqCst)
+}
+
+/// Advance the pack lifecycle generation. Called at the start of every pack
+/// lifecycle mutation under the lifecycle lock.
+pub fn bump_pack_lifecycle_generation() {
+    PACK_LIFECYCLE_GENERATION.fetch_add(1, Ordering::SeqCst);
+}
 
 /// Global lifecycle lock — enable/disable/stop/uninstall must not interleave.
 static LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
+
+/// Collapse concurrent pack-status probes (Settings pack card + Touch ID poll
+/// fire on the same interval). A multi-second Docker/HTTP sample is fail-closed
+/// but expensive; sharing one sample for a short window prevents probe storms
+/// from flipping presentation every few seconds.
+///
+/// Presentation/status commands only. Authority paths (enroll, governed spawn,
+/// phone publication, post-lifecycle checks) must call
+/// [`gateway_pack_status_fresh`] so they never act on a cached sample.
+///
+/// Single-flight + generation-guarded: concurrent misses share one probe, and
+/// a probe begun before [`invalidate_status_cache`] cannot commit afterward.
+const STATUS_CACHE_TTL: Duration = Duration::from_secs(2);
+
+struct StatusCacheSlot {
+    generation: u64,
+    cached: Option<(Instant, GatewayPackStatus)>,
+    inflight: Option<(u64, Arc<SharedStatusProbe>)>,
+}
+
+struct SharedStatusProbe {
+    state: Mutex<InflightProbeState>,
+    cv: Condvar,
+}
+
+enum InflightProbeState {
+    Running,
+    Done(GatewayPackStatus),
+}
+
+impl StatusCacheSlot {
+    const fn new() -> Self {
+        Self {
+            generation: 0,
+            cached: None,
+            inflight: None,
+        }
+    }
+}
+
+static STATUS_CACHE: Mutex<StatusCacheSlot> = Mutex::new(StatusCacheSlot::new());
+
+/// Drop the cached status sample and bump generation so an in-flight probe
+/// started before this call cannot repopulate the cache. Lifecycle mutations
+/// and owned-Council-route transitions must call this.
+pub fn invalidate_status_cache() {
+    if let Ok(mut guard) = STATUS_CACHE.lock() {
+        guard.generation = guard.generation.wrapping_add(1);
+        guard.cached = None;
+    }
+}
+
+/// Test-only: presentation cache generation counter (for Action vs Background
+/// freshness proofs). Not a pack lifecycle generation.
+#[cfg(test)]
+pub fn status_cache_generation_for_test() -> u64 {
+    STATUS_CACHE.lock().map(|g| g.generation).unwrap_or(0)
+}
+
+fn commit_status_cache(generation: u64, st: &GatewayPackStatus) {
+    if let Ok(mut guard) = STATUS_CACHE.lock() {
+        if guard.generation == generation {
+            guard.cached = Some((Instant::now(), st.clone()));
+        }
+    }
+}
 
 /// Proven route of the Council child owned by this shell, recorded by lib.rs
 /// at every spawn/stop/adopt/terminate transition:
@@ -52,10 +137,14 @@ static OWNED_COUNCIL_ROUTE: Mutex<Option<bool>> = Mutex::new(None);
 
 /// Record the owned Council child route. Called only from the shell's
 /// spawn/stop paths in lib.rs; the renderer never reaches this.
+///
+/// Invalidates the status cache: route truth is a field of pack status, so a
+/// spawn/stop/death transition must not leave a stale Degraded/Ready sample.
 pub fn record_owned_council_route(route: Option<bool>) {
     if let Ok(mut guard) = OWNED_COUNCIL_ROUTE.lock() {
         *guard = route;
     }
+    invalidate_status_cache();
 }
 
 /// The recorded route of the currently owned Council child, if any.
@@ -99,7 +188,7 @@ impl GatewayPackState {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GatewayPackStatus {
     pub state: GatewayPackState,
     pub message: String,
@@ -118,11 +207,21 @@ pub struct GatewayPackStatus {
     /// Distinct from authenticated: URL field present / pack project known.
     pub gateway_url_configured: bool,
     pub support_matrix_summary: String,
+    /// Pack enabled and live-authenticated — enough to spawn a governed child.
+    /// Serialized so the renderer does not re-derive capability tiers.
+    pub spawn_capable: bool,
+    /// Full governed readiness (`AuthenticatedReady`): spawn_capable plus a
+    /// proven owned governed Council child. Enroll/arm and the Deliberate toggle.
+    pub governed_ready: bool,
+    /// Structural hard-down for presentation demotion (disabled, Docker gap,
+    /// not installed, stopped/not-running). Soft Degraded (auth flake, health
+    /// flake, ungoverned child) is not hard-down.
+    pub hard_down: bool,
 }
 
 impl GatewayPackStatus {
     fn base(state: GatewayPackState, message: impl Into<String>) -> Self {
-        Self {
+        let mut st = Self {
             state,
             message: message.into(),
             pack_version: None,
@@ -138,24 +237,52 @@ impl GatewayPackStatus {
             council_governed: false,
             gateway_url_configured: true, // fixed loopback URL is always the pack target
             support_matrix_summary: SUPPORT_MATRIX_SUMMARY.to_string(),
-        }
+            spawn_capable: false,
+            governed_ready: false,
+            hard_down: true,
+        };
+        st.refresh_predicates(false);
+        st
     }
 
-    /// Permission for a governed Council spawn: this status sample proves
-    /// pack-side authentication — governed mode is enabled and the stored
-    /// client key authenticated against the live gateway (`authenticated` is
-    /// set only after a live `/v1/models` probe, and only when Docker and the
-    /// installed pack let the sample reach it).
+    /// Recompute the canonical capability predicates after mutating state fields.
     ///
-    /// Unlike [`GatewayPackState::allows_governed`], this does not require a
-    /// proven governed Council child: the spawn being gated is what creates
-    /// that proof, so the enable and relaunch-restore flows legitimately
-    /// reach the gate without one (state `Degraded` with pack auth proven).
-    /// `allows_governed()` implies this predicate, so `restart_sidecar`'s
-    /// stricter gate always passes it. A `Disabled` pack or a failed/missing
-    /// key never permits the spawn, however authentic the key looks alone.
-    pub fn allows_governed_spawn(&self) -> bool {
-        self.enabled && self.authenticated
+    /// `pack_not_running` is true when the owned compose project is known not
+    /// running (enabled-but-stopped is `Degraded` in the ladder, but still
+    /// hard-down so sticky presentation cannot claim ready).
+    pub fn refresh_predicates(&mut self, pack_not_running: bool) {
+        self.spawn_capable = self.enabled && self.authenticated;
+        // Full governed readiness requires pack auth and a proven owned child;
+        // an AuthenticatedReady-shaped value alone is not authority.
+        self.governed_ready =
+            self.spawn_capable && self.council_governed && self.state.allows_governed();
+        self.hard_down = Self::classify_hard_down(self.enabled, self.state, pack_not_running);
+    }
+
+    /// Exhaustive hard-down classifier over [`GatewayPackState`].
+    ///
+    /// Soft failures (auth/health flake, ungoverned child) stay `Degraded` with
+    /// `pack_not_running=false` and are not hard-down. Stopped containers on an
+    /// enabled pack also land as `Degraded` but pass `pack_not_running=true`.
+    pub fn classify_hard_down(
+        enabled: bool,
+        state: GatewayPackState,
+        pack_not_running: bool,
+    ) -> bool {
+        if !enabled || pack_not_running {
+            return true;
+        }
+        match state {
+            GatewayPackState::DockerMissing
+            | GatewayPackState::DockerDaemonDown
+            | GatewayPackState::NotInstalled
+            | GatewayPackState::InstalledStopped
+            | GatewayPackState::Disabled => true,
+            GatewayPackState::Installing
+            | GatewayPackState::Starting
+            | GatewayPackState::AuthenticatedReady
+            | GatewayPackState::Degraded => false,
+        }
     }
 }
 
@@ -168,7 +295,9 @@ const GATEWAY_DIR_NAME: &str = "gateway";
 const PUBLIC_ENV_NAME: &str = "compose.public.env";
 const LEDGER_KEY_NAME: &str = "ledger_key";
 const INSTALLED_MARKER: &str = "pack-installed.json";
+const ARM_KEYS_NAME: &str = "arm_attest_keys.json";
 const PACK_DIR_NAME: &str = "pack";
+const COMPOSE_UP_ARGS: &[&str] = &["up", "-d", "--remove-orphans", "--force-recreate", "--wait"];
 
 /// Fixed Application Support gateway directory (0700).
 pub fn gateway_data_dir() -> PathBuf {
@@ -187,6 +316,24 @@ pub fn runtime_env_path() -> PathBuf {
 pub fn ledger_key_path() -> PathBuf {
     gateway_data_dir().join(LEDGER_KEY_NAME)
 }
+
+/// Host path of the app-owned Touch ID enrollment registry (public credential
+/// records only — credential ids, SEC1 public keys, labels, timestamps). It
+/// lives beside the ledger key in the 0700 app gateway dir and is bind-mounted
+/// read-only into both desktop-pack containers at [`ARM_KEYS_CONTAINER_PATH`].
+/// The edge uses mount existence only as its desktop-only bridge signal; the
+/// sidecar alone parses the registry and enforces attestation.
+///
+/// It is deliberately NOT inside the pack tree: that tree is hash-verified
+/// against the install marker on every spawn, so an enrollment written there
+/// would be treated as tampering and re-staged away.
+pub fn arm_keys_path() -> PathBuf {
+    gateway_data_dir().join(ARM_KEYS_NAME)
+}
+
+/// Where the registry is mounted inside both desktop-pack containers. Also the
+/// sidecar value of the admitted `GW_ARM_ATTEST_KEYS_PATH` pin.
+pub const ARM_KEYS_CONTAINER_PATH: &str = "/run/secrets/arm_attest_keys.json";
 
 pub fn installed_marker_path() -> PathBuf {
     gateway_data_dir().join(INSTALLED_MARKER)
@@ -308,6 +455,29 @@ fn ensure_ledger_key() -> Result<PathBuf, String> {
     Ok(path)
 }
 
+/// Ensure the Touch ID enrollment registry file exists so Compose can
+/// bind-mount it as a FILE (a missing bind source becomes a directory, which
+/// would make the sidecar's registry load fail in a confusing way).
+///
+/// The default contents are the empty array `[]`, which the sidecar's
+/// `AttestKeyRegistry::parse` treats as a **fail-closed unloaded registry** —
+/// the correct not-yet-enrolled state. Enabling the pack therefore never
+/// creates arming capability; only a completed enrollment ceremony does.
+pub fn ensure_arm_keys_file() -> Result<PathBuf, String> {
+    ensure_gateway_dir()?;
+    let path = arm_keys_path();
+    if path.is_file() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+        return Ok(path);
+    }
+    write_atomic_0600(&path, b"[]\n")?;
+    Ok(path)
+}
+
 fn getrandom_fill(buf: &mut [u8]) -> Result<(), String> {
     use std::fs::File;
     use std::io::Read;
@@ -375,7 +545,21 @@ fn pack_pin_pairs(
     if !path_is_safe_argv(pack_root) || !path_is_safe_argv(ledger) {
         return Err("pack root or ledger path rejected".to_string());
     }
+    // Touch ID bridge: the app-owned enrollment registry, mounted read-only.
+    // Same validation class as the ledger key path.
+    let arm_keys = arm_keys_path();
+    if !path_is_safe_argv(&arm_keys) {
+        return Err("arm attest keys path rejected".to_string());
+    }
     let mut pairs = vec![
+        (
+            "IRIN_DESKTOP_ARM_KEYS".into(),
+            arm_keys.display().to_string(),
+        ),
+        (
+            "GW_ARM_ATTEST_KEYS_PATH".into(),
+            ARM_KEYS_CONTAINER_PATH.to_string(),
+        ),
         (
             "IRIN_GATEWAY_IMAGE".into(),
             gateway_image.as_str().to_string(),
@@ -483,6 +667,21 @@ fn build_compose_secret_env(
         env.insert("BOOTSTRAP_TOKEN".into(), String::new());
     }
 
+    // Touch ID bridge — custody domain 1. The arm-principal registry string is
+    // built ONLY from the Keychain-held token, never from the ambient
+    // environment (`GW_ARM_PRINCIPALS` is in AMBIENT_SCRUB_ENV_KEYS) and never
+    // written to the public env file. Absent/invalid token => empty registry =>
+    // the sidecar parses zero principals and every arm route 401s: enabling the
+    // pack cannot create arming capability on its own.
+    let principals = match load_arm_principal_token(store)
+        .map_err(|e| format!("keychain load arm principal: {e}"))?
+    {
+        Some(tok) => format!("{ARM_PRINCIPAL_NAME}:{tok}"),
+        None => String::new(),
+    };
+    validate_env_value("GW_ARM_PRINCIPALS", &principals)?;
+    env.insert("GW_ARM_PRINCIPALS".into(), principals);
+
     // Provider keys from login/process only — never persisted to app env file.
     // Skip gui_login_environment when IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV=1 (tests).
     let login = if std::env::var_os("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV").is_some() {
@@ -554,18 +753,17 @@ fn build_full_compose_env(
 /// teardown — empty pins plus empty secret slots still scrub ambient secrets
 /// via the docker_cli spawn path and force disarmed Watch/admin surfaces.
 fn teardown_compose_env(pack_root: &Path, key_id: Option<&str>) -> ComposeEnv {
-    let mut env = match load_validated_manifest(pack_root).and_then(|v| {
-        build_pack_pin_env(
-            pack_root,
-            &ledger_key_path(),
-            &v.gateway,
-            &v.sidecar,
-            key_id,
-        )
-    }) {
-        Ok(pins) => pins,
-        Err(_) => ComposeEnv::new(),
-    };
+    let mut env = load_validated_manifest(pack_root)
+        .and_then(|v| {
+            build_pack_pin_env(
+                pack_root,
+                &ledger_key_path(),
+                &v.gateway,
+                &v.sidecar,
+                key_id,
+            )
+        })
+        .unwrap_or_default();
     // Empty secret slots win over any pin defaults and replace ambient values
     // after the spawn scrub — never Keychain or login-shell material.
     for key in [
@@ -575,9 +773,18 @@ fn teardown_compose_env(pack_root: &Path, key_id: Option<&str>) -> ComposeEnv {
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
         "NVIDIA_API_KEY",
+        // Touch ID bridge: teardown never carries the arm-principal registry.
+        "GW_ARM_PRINCIPALS",
     ] {
         env.insert(key.to_string(), String::new());
     }
+    // The bind-mount source and the in-container registry path are non-secret
+    // pins Compose must still interpolate for `down`; fall back to the fixed
+    // app-owned values when the manifest was unreadable.
+    env.entry("IRIN_DESKTOP_ARM_KEYS".to_string())
+        .or_insert_with(|| arm_keys_path().display().to_string());
+    env.entry("GW_ARM_ATTEST_KEYS_PATH".to_string())
+        .or_insert_with(|| ARM_KEYS_CONTAINER_PATH.to_string());
     env
 }
 
@@ -1065,7 +1272,170 @@ fn provision_council_client(store: &dyn SecretStore, bootstrap: &str) -> Result<
 }
 
 /// Compute truthful pack status without starting anything.
+///
+/// Presentation/status only: may return a ≤2s cached sample. Authority-bearing
+/// callers must use [`gateway_pack_status_fresh`].
 pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
+    gateway_pack_status_cached(store, probe_live_status)
+}
+
+/// Uncached sample that also refreshes the presentation cache when the current
+/// generation still matches. Used by enroll/arm, governed spawn/restart, phone
+/// publication, and post-lifecycle checks.
+pub fn gateway_pack_status_fresh(store: &dyn SecretStore) -> GatewayPackStatus {
+    // Bump generation first so any probe begun before this call cannot commit.
+    invalidate_status_cache();
+    let generation = STATUS_CACHE.lock().map(|g| g.generation).unwrap_or(0);
+    let st = probe_live_status(store);
+    commit_status_cache(generation, &st);
+    st
+}
+
+fn gateway_pack_status_cached(
+    store: &dyn SecretStore,
+    probe: fn(&dyn SecretStore) -> GatewayPackStatus,
+) -> GatewayPackStatus {
+    loop {
+        let (generation, shared) = {
+            let Ok(mut slot) = STATUS_CACHE.lock() else {
+                return probe(store);
+            };
+            if let Some((at, st)) = &slot.cached {
+                if at.elapsed() < STATUS_CACHE_TTL {
+                    return st.clone();
+                }
+            }
+            let generation = slot.generation;
+            if let Some((inflight_gen, probe_shared)) = &slot.inflight {
+                if *inflight_gen == generation {
+                    let shared = Arc::clone(probe_shared);
+                    drop(slot);
+                    // Test-only: positive proof a caller joined the in-flight
+                    // waiter branch (not inferred from sleep). No-op outside tests.
+                    #[cfg(test)]
+                    notify_test_inflight_waiter_joined(generation);
+                    let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+                    while matches!(*state, InflightProbeState::Running) {
+                        state = shared.cv.wait(state).unwrap_or_else(|e| e.into_inner());
+                    }
+                    if let InflightProbeState::Done(st) = &*state {
+                        let sample = st.clone();
+                        drop(state);
+                        // If generation advanced while we waited, re-enter.
+                        if STATUS_CACHE
+                            .lock()
+                            .map(|s| s.generation == generation)
+                            .unwrap_or(false)
+                        {
+                            return sample;
+                        }
+                        continue;
+                    }
+                    continue;
+                }
+            }
+            let shared = Arc::new(SharedStatusProbe {
+                state: Mutex::new(InflightProbeState::Running),
+                cv: Condvar::new(),
+            });
+            slot.inflight = Some((generation, Arc::clone(&shared)));
+            (generation, shared)
+        };
+
+        let st = probe(store);
+
+        {
+            let mut state = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+            *state = InflightProbeState::Done(st.clone());
+            shared.cv.notify_all();
+        }
+
+        // Commit only for the generation we probed under. If invalidation
+        // advanced the generation mid-probe, clear our inflight slot and
+        // re-enter — never return the pre-invalidation sample to the leader.
+        let generation_still_current = if let Ok(mut slot) = STATUS_CACHE.lock() {
+            let current = slot.generation == generation;
+            if current {
+                slot.cached = Some((Instant::now(), st.clone()));
+            }
+            if let Some((g, handle)) = &slot.inflight {
+                if *g == generation && Arc::ptr_eq(handle, &shared) {
+                    slot.inflight = None;
+                }
+            }
+            current
+        } else {
+            // Lock poisoned: fall back to the live sample we just took.
+            true
+        };
+        if generation_still_current {
+            return st;
+        }
+        continue;
+    }
+}
+
+fn probe_live_status(store: &dyn SecretStore) -> GatewayPackStatus {
+    #[cfg(test)]
+    if let Some(st) = test_status_probe_override() {
+        return st;
+    }
+    gateway_pack_status_uncached(store)
+}
+
+#[cfg(test)]
+static TEST_STATUS_PROBE: Mutex<Option<fn() -> GatewayPackStatus>> = Mutex::new(None);
+
+/// Test-only sink: when set, each in-flight waiter join sends the generation
+/// it joined. Used to positively synchronize concurrency tests before invalidate.
+#[cfg(test)]
+static TEST_INFLIGHT_WAITER_JOINED: Mutex<Option<std::sync::mpsc::Sender<u64>>> = Mutex::new(None);
+
+#[cfg(test)]
+fn test_status_probe_override() -> Option<GatewayPackStatus> {
+    let probe = TEST_STATUS_PROBE.lock().ok().and_then(|g| *g);
+    probe.map(|f| f())
+}
+
+#[cfg(test)]
+fn notify_test_inflight_waiter_joined(generation: u64) {
+    if let Ok(guard) = TEST_INFLIGHT_WAITER_JOINED.lock() {
+        if let Some(tx) = guard.as_ref() {
+            let _ = tx.send(generation);
+        }
+    }
+}
+
+#[cfg(test)]
+fn status_cache_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    crate::private_config::test_env_lock()
+}
+
+#[cfg(test)]
+fn with_test_status_probe<R>(probe: fn() -> GatewayPackStatus, body: impl FnOnce() -> R) -> R {
+    let _serial = status_cache_test_lock();
+    invalidate_status_cache();
+    {
+        let mut guard = TEST_STATUS_PROBE.lock().expect("test probe lock");
+        *guard = Some(probe);
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(body));
+    {
+        let mut guard = TEST_STATUS_PROBE.lock().expect("test probe lock");
+        *guard = None;
+    }
+    // Always drop any waiter-join sink so a panicking test cannot leak into peers.
+    if let Ok(mut guard) = TEST_INFLIGHT_WAITER_JOINED.lock() {
+        *guard = None;
+    }
+    invalidate_status_cache();
+    match result {
+        Ok(v) => v,
+        Err(payload) => std::panic::resume_unwind(payload),
+    }
+}
+
+fn gateway_pack_status_uncached(store: &dyn SecretStore) -> GatewayPackStatus {
     let mut st = GatewayPackStatus::base(
         GatewayPackState::NotInstalled,
         "Gateway Pack is not installed. Core War Room works in Direct mode without Docker.",
@@ -1083,6 +1453,7 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
             st.state = GatewayPackState::DockerMissing;
             st.docker = "cli_missing".into();
             st.message = "Docker CLI not found. Install Docker Desktop to use the optional Gateway Pack. Core War Room stays healthy in Direct mode.".into();
+            st.refresh_predicates(false);
             return st;
         }
         DockerDaemonState::DaemonDown => {
@@ -1092,6 +1463,7 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
             if is_pack_installed() {
                 st.message.push_str(" Pack files are present on disk.");
             }
+            st.refresh_predicates(false);
             return st;
         }
         DockerDaemonState::Ready => {
@@ -1107,6 +1479,7 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
             if bundled_pack_root().is_some() {
                 st.message = "Gateway Pack assets are bundled but not installed. Use Enable Gateway to install into Application Support.".into();
             }
+            st.refresh_predicates(false);
             return st;
         }
     };
@@ -1148,6 +1521,7 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
         } else {
             st.state = GatewayPackState::NotInstalled;
         }
+        st.refresh_predicates(true);
         return st;
     }
 
@@ -1155,6 +1529,7 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
         st.state = GatewayPackState::Degraded;
         st.message = "Gateway containers are up but /health failed. Check Docker logs for irin-desktop-gateway.".into();
         st.council_governed = false;
+        st.refresh_predicates(false);
         return st;
     }
 
@@ -1187,6 +1562,7 @@ pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
                 .into();
         st.council_governed = false;
     }
+    st.refresh_predicates(false);
     st
 }
 
@@ -1269,25 +1645,19 @@ fn compose_up(compose: &Path, env_path: &Path, spawn_env: &ComposeEnv) -> Result
     if let Some(pack_root) = compose.parent() {
         verify_pack_asset_integrity(pack_root)?;
     }
+    // Every explicit Enable is a boot-time configuration reload: Keychain arm
+    // principals, the attestation registry, provider env, and atomically staged
+    // bind mounts must all reach fresh containers. A successful no-op `up`
+    // leaves old allowlists and stale macOS file-share mounts in place.
     let up = compose_command_with_env(
         compose,
         Some(env_path),
-        &["up", "-d", "--remove-orphans", "--wait"],
+        COMPOSE_UP_ARGS,
         Some(spawn_env),
         DOCKER_COMPOSE_UP_TIMEOUT,
     )?;
-    if up.status.success() {
-        return Ok(());
-    }
-    let up2 = compose_command_with_env(
-        compose,
-        Some(env_path),
-        &["up", "-d", "--remove-orphans", "--force-recreate"],
-        Some(spawn_env),
-        DOCKER_COMPOSE_UP_TIMEOUT,
-    )?;
-    if !up2.status.success() {
-        return Err(format_cmd_failure("gateway pack up", &up2));
+    if !up.status.success() {
+        return Err(format_cmd_failure("gateway pack up", &up));
     }
     Ok(())
 }
@@ -1321,16 +1691,20 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     let _guard = LIFECYCLE_LOCK
         .lock()
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
+    bump_pack_lifecycle_generation();
+    invalidate_status_cache();
+    // A pack identity change invalidates any prior rehearsal presentation.
+    crate::touch_id::clear_rehearsal_passed();
     lifecycle_stage("enable_begin", "ok");
 
     match probe_docker_daemon() {
         DockerDaemonState::CliMissing => {
             lifecycle_stage("enable_abort", "docker_cli_missing");
-            return Ok(gateway_pack_status(store));
+            return Ok(gateway_pack_status_fresh(store));
         }
         DockerDaemonState::DaemonDown => {
             lifecycle_stage("enable_abort", "docker_daemon_down");
-            return Ok(gateway_pack_status(store));
+            return Ok(gateway_pack_status_fresh(store));
         }
         DockerDaemonState::Ready => {}
     }
@@ -1353,6 +1727,13 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         lifecycle_stage("ledger", "error");
     })?;
     lifecycle_stage("ledger", "ok");
+    // Touch ID bridge: the registry bind source must exist as a FILE before
+    // compose up. Default `[]` = fail-closed unloaded registry, so enabling
+    // Gateway never arms anything.
+    ensure_arm_keys_file().inspect_err(|_| {
+        lifecycle_stage("arm_keys", "error");
+    })?;
+    lifecycle_stage("arm_keys", "ok");
     let existing_key_id = load_or_create_private_config()?.gateway_key_id;
     let env_path = write_public_compose_env(
         &pack_root,
@@ -1508,13 +1889,16 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     assert_private_json_has_no_raw_key()?;
     lifecycle_stage("enable_complete", "authenticated");
 
-    let mut st = gateway_pack_status(store);
-    // Not fully ready until Council restart succeeds — lib marks council_governed.
+    let mut st = gateway_pack_status_fresh(store);
+    // Not fully ready until Council restart succeeds — lib marks the proven
+    // governed child. Pack auth alone is spawn-capable but not governed-ready.
     if st.authenticated && st.enabled {
-        st.state = GatewayPackState::AuthenticatedReady;
+        st.state = GatewayPackState::Degraded;
+        st.council_governed = false;
         st.message =
             "Gateway Pack authenticated. Council restart required for governed mode.".into();
     }
+    st.refresh_predicates(false);
     Ok(st)
 }
 
@@ -1570,11 +1954,14 @@ pub fn disable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus
     let _guard = LIFECYCLE_LOCK
         .lock()
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
+    bump_pack_lifecycle_generation();
+    invalidate_status_cache();
+    crate::touch_id::clear_rehearsal_passed();
     let mut cfg = load_or_create_private_config()?;
     cfg.via_gateway_default = false;
     write_private_config_at(&crate::private_config::private_config_path(), &cfg)?;
     let _ = store;
-    Ok(gateway_pack_status(store))
+    Ok(gateway_pack_status_fresh(store))
 }
 
 /// Stop desktop compose project only after Direct mode is recorded.
@@ -1589,6 +1976,9 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
             return Err("gateway pack lifecycle lock poisoned".to_string());
         }
     };
+    bump_pack_lifecycle_generation();
+    invalidate_status_cache();
+    crate::touch_id::clear_rehearsal_passed();
     lifecycle_stage("stop_lock", "ok");
 
     let mut cfg = match load_or_create_private_config() {
@@ -1658,7 +2048,7 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
             }
         }
     }
-    let status = gateway_pack_status(store);
+    let status = gateway_pack_status_fresh(store);
     lifecycle_stage("stop_complete", "ok");
     Ok(status)
 }
@@ -1668,6 +2058,9 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
     let _guard = LIFECYCLE_LOCK
         .lock()
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
+    bump_pack_lifecycle_generation();
+    invalidate_status_cache();
+    crate::touch_id::clear_rehearsal_passed();
 
     let key_id = load_or_create_private_config()
         .ok()
@@ -1725,7 +2118,7 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
             "Gateway Pack files removed, but Keychain cleanup failed ({e}).              GW_API_KEY and/or AUTH_PEPPER may still be present under the IRIN              Keychain service — re-run Uninstall or delete those items manually."
         ));
     }
-    Ok(gateway_pack_status(store))
+    Ok(gateway_pack_status_fresh(store))
 }
 
 #[allow(dead_code)]
@@ -1744,7 +2137,7 @@ pub struct GatewayChildEnv {
 pub fn gateway_child_env_if_ready(
     store: &dyn SecretStore,
 ) -> Result<Option<GatewayChildEnv>, String> {
-    let st = gateway_pack_status(store);
+    let st = gateway_pack_status_fresh(store);
     if !st.enabled || st.state != GatewayPackState::AuthenticatedReady {
         return Ok(None);
     }
@@ -1761,6 +2154,9 @@ pub fn gateway_child_env_if_ready(
 /// key still passing `/v1/models`. Proves pack authentication only — at launch
 /// no Council child exists yet, so this says nothing about any child route.
 /// Callers spawn the child (governed or Direct) after this decision.
+///
+/// This function starts nothing. When containers are stopped or Docker is
+/// still coming up, use [`resume_installed_pack`] for a bounded start+wait.
 pub fn pack_auth_revalidated(store: &dyn SecretStore) -> bool {
     if !matches!(probe_docker_daemon(), DockerDaemonState::Ready) {
         return false;
@@ -1774,13 +2170,171 @@ pub fn pack_auth_revalidated(store: &dyn SecretStore) -> bool {
     }
 }
 
+/// Cold-launch / recovery resume: start the already-installed app-owned pack
+/// and wait bounded for control-plane health + Keychain key auth.
+///
+/// Does **not** provision new keys, does **not** flip `via_gateway_default`,
+/// and does **not** claim Council is governed. Fail-closed: `Err` means the
+/// pack is not authenticated-ready (caller starts Council Direct and may
+/// schedule a later bounded promote).
+pub fn resume_installed_pack(store: &dyn SecretStore) -> Result<(), String> {
+    if pack_auth_revalidated(store) {
+        return Ok(());
+    }
+    match probe_docker_daemon() {
+        DockerDaemonState::Ready => {}
+        DockerDaemonState::CliMissing => {
+            return Err("Docker CLI missing; cannot resume Gateway Pack".to_string());
+        }
+        DockerDaemonState::DaemonDown => {
+            return Err("Docker daemon not ready; cannot resume Gateway Pack".to_string());
+        }
+    }
+    let pack_root = installed_pack_root().ok_or_else(|| {
+        "Gateway Pack is not installed; cannot resume governed route".to_string()
+    })?;
+    let validated = load_validated_manifest(&pack_root)?;
+    verify_images_present(&validated)?;
+    let ledger = ensure_ledger_key()?;
+    let _ = ensure_arm_keys_file();
+    let existing_key_id = load_or_create_private_config()?.gateway_key_id;
+    let env_path = write_public_compose_env(
+        &pack_root,
+        &ledger,
+        &validated.gateway,
+        &validated.sidecar,
+        existing_key_id.as_deref(),
+    )?;
+    if port_busy_by_foreign_gateway()? {
+        return Err(
+            "port 18080 is in use by a process outside irin-desktop-gateway; cannot resume"
+                .to_string(),
+        );
+    }
+    let key = load_gw_api_key(store)?.ok_or_else(|| {
+        "GW_API_KEY missing from Keychain; cannot resume governed route".to_string()
+    })?;
+    let spawn_env = build_full_compose_env(
+        store,
+        None,
+        &pack_root,
+        &ledger,
+        &validated,
+        existing_key_id.as_deref(),
+    )?;
+    lifecycle_stage("resume_compose_up", "begin");
+    compose_up(&compose_file(&pack_root), &env_path, &spawn_env).inspect_err(|_| {
+        lifecycle_stage("resume_compose_up", "error");
+    })?;
+    lifecycle_stage("resume_compose_up", "ok");
+    wait_control_plane().inspect_err(|_| {
+        lifecycle_stage("resume_wait", "error");
+    })?;
+    lifecycle_stage("resume_wait", "ok");
+    if !models_authenticated(&key) {
+        lifecycle_stage("resume_auth", "error");
+        return Err("Gateway client key failed /v1/models after pack resume".to_string());
+    }
+    lifecycle_stage("resume_auth", "ok");
+    if !pack_auth_revalidated(store) {
+        return Err("pack resume completed but revalidation still false".to_string());
+    }
+    Ok(())
+}
+
+/// Pure launch decision: spawn governed only when the operator left the pack
+/// enabled and pack-side auth is proven (or was just resumed).
+#[cfg(test)]
+pub fn decide_launch_via_gateway(persisted_via_gateway: bool, pack_auth_ok: bool) -> bool {
+    persisted_via_gateway && pack_auth_ok
+}
+
+/// Pure: packaged installs must not let the frontend call `start_council_server`.
+/// Source-dev (unpackaged) keeps the existing frontend start path.
+#[cfg(test)]
+pub fn frontend_may_start_council(packaged_install: bool) -> bool {
+    !packaged_install
+}
+
+/// Pure cold-launch race model: first starter owns the child lock; the loser
+/// cannot correct ownership. Packaged policy forbids frontend start so native
+/// is the sole owner.
+///
+/// Returns the owned child's `via_gateway` after both sides attempt, or `None`
+/// if nobody starts.
+#[cfg(test)]
+pub fn cold_launch_owned_via_gateway(
+    packaged: bool,
+    persisted_via_gateway: bool,
+    pack_auth_ok: bool,
+    frontend_starts: bool,
+    frontend_wins_race: bool,
+) -> Option<bool> {
+    let native_starts = packaged;
+    let native_via = decide_launch_via_gateway(persisted_via_gateway, pack_auth_ok);
+    // Packaged frontend start uses via_gateway=None → Direct.
+    let frontend_via = false;
+    match (native_starts, frontend_starts) {
+        (false, false) => None,
+        (true, false) => Some(native_via),
+        (false, true) => Some(frontend_via),
+        (true, true) => {
+            if frontend_wins_race {
+                Some(frontend_via)
+            } else {
+                Some(native_via)
+            }
+        }
+    }
+}
+
+/// Pure: after a fail-closed Direct spawn with pack still enabled, a later
+/// recovery may promote to governed without manual re-enable when pack auth
+/// becomes ready and the owned child is still Direct.
+pub fn may_promote_to_governed(
+    persisted_via_gateway: bool,
+    owned_route: Option<bool>,
+    pack_auth_ok: bool,
+) -> bool {
+    persisted_via_gateway && owned_route == Some(false) && pack_auth_ok
+}
+
+/// Pure resume outcome for launch (success + fail-closed). Does not invent
+/// governed readiness: governed only when pack is ready and spawn succeeds.
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LaunchResumeOutcome {
+    Governed,
+    DirectFailClosed,
+}
+
+#[cfg(test)]
+pub fn decide_launch_resume_outcome(
+    persisted_via_gateway: bool,
+    pack_ready_immediately: bool,
+    resume_ok: bool,
+    governed_spawn_ok: bool,
+) -> LaunchResumeOutcome {
+    if !persisted_via_gateway {
+        return LaunchResumeOutcome::DirectFailClosed;
+    }
+    let pack_ok = pack_ready_immediately || resume_ok;
+    if pack_ok && governed_spawn_ok {
+        LaunchResumeOutcome::Governed
+    } else {
+        LaunchResumeOutcome::DirectFailClosed
+    }
+}
+
 /// Mark status after Council restart proof (called from lib.rs).
+///
+/// Always takes a fresh sample: this is a post-lifecycle authority surface.
 pub fn status_with_council_route(
     store: &dyn SecretStore,
     council_governed: bool,
     council_direct: bool,
 ) -> GatewayPackStatus {
-    let mut st = gateway_pack_status(store);
+    let mut st = gateway_pack_status_fresh(store);
     if council_governed && st.authenticated && st.enabled && gateway_health_ok() {
         st.state = GatewayPackState::AuthenticatedReady;
         st.council_governed = true;
@@ -1796,6 +2350,9 @@ pub fn status_with_council_route(
         st.message = "Gateway is authenticated but Council did not enter governed mode.".into();
     }
     let _ = gw_api_key_present(store);
+    // Post-lifecycle: pack is expected running when we reach here after enable;
+    // do not treat as stopped hard-down solely because child route changed.
+    st.refresh_predicates(false);
     st
 }
 
@@ -1817,6 +2374,14 @@ mod tests {
     fn project_constant() {
         assert_eq!(DESKTOP_COMPOSE_PROJECT, "irin-desktop-gateway");
         assert_eq!(crate::keychain::KEYCHAIN_SERVICE, "com.irinity.irin");
+    }
+
+    #[test]
+    fn explicit_enable_force_recreates_boot_time_configuration() {
+        assert_eq!(
+            COMPOSE_UP_ARGS,
+            &["up", "-d", "--remove-orphans", "--force-recreate", "--wait"]
+        );
     }
 
     #[test]
@@ -2015,7 +2580,7 @@ mod tests {
     fn status_docker_missing_is_actionable() {
         let st = GatewayPackStatus::base(GatewayPackState::DockerMissing, "Docker CLI not found");
         assert!(!st.state.allows_governed());
-        assert!(!st.allows_governed_spawn());
+        assert!(!st.spawn_capable);
         assert!(!st.authenticated);
     }
 
@@ -2025,8 +2590,22 @@ mod tests {
         let mut st = GatewayPackStatus::base(GatewayPackState::AuthenticatedReady, "ready");
         st.enabled = true;
         st.authenticated = true;
-        assert!(st.allows_governed_spawn());
+        st.council_governed = true;
+        st.refresh_predicates(false);
+        assert!(st.spawn_capable);
+        assert!(st.governed_ready);
         assert!(st.state.allows_governed());
+        assert!(!st.hard_down);
+
+        // A ready-shaped state without owned-child route proof is not full
+        // governed readiness.
+        let mut st =
+            GatewayPackStatus::base(GatewayPackState::AuthenticatedReady, "unproven child");
+        st.enabled = true;
+        st.authenticated = true;
+        st.refresh_predicates(false);
+        assert!(st.spawn_capable);
+        assert!(!st.governed_ready);
 
         // So does the enable / relaunch-restore position: pack auth is proven
         // but the owned child is not governed yet (state Degraded) — the
@@ -2034,23 +2613,496 @@ mod tests {
         let mut st = GatewayPackStatus::base(GatewayPackState::Degraded, "child not proven");
         st.enabled = true;
         st.authenticated = true;
-        assert!(st.allows_governed_spawn());
+        st.refresh_predicates(false);
+        assert!(st.spawn_capable);
+        assert!(!st.governed_ready);
         assert!(!st.state.allows_governed());
+        assert!(!st.hard_down);
 
         // An authenticating key with governed mode disabled must not permit
         // a governed spawn (the old gate's hole).
         let mut st = GatewayPackStatus::base(GatewayPackState::Disabled, "disabled");
         st.authenticated = true;
-        assert!(!st.allows_governed_spawn());
+        st.refresh_predicates(false);
+        assert!(!st.spawn_capable);
+        assert!(st.hard_down);
 
         // Enabled but the key failed / is missing: no proof, no spawn.
         let mut st = GatewayPackStatus::base(GatewayPackState::Degraded, "key failed");
         st.enabled = true;
-        assert!(!st.allows_governed_spawn());
+        st.refresh_predicates(false);
+        assert!(!st.spawn_capable);
 
         // Neither enabled nor authenticated: base defaults refuse.
         let st = GatewayPackStatus::base(GatewayPackState::NotInstalled, "absent");
-        assert!(!st.allows_governed_spawn());
+        assert!(!st.spawn_capable);
+        assert!(st.hard_down);
+    }
+
+    #[test]
+    fn governed_ready_implies_spawn_capable() {
+        // Vary council_governed too — without it governed_ready is never true and
+        // the implication is vacuous.
+        let mut saw_governed_ready = false;
+        for state in [
+            GatewayPackState::NotInstalled,
+            GatewayPackState::DockerMissing,
+            GatewayPackState::DockerDaemonDown,
+            GatewayPackState::Installing,
+            GatewayPackState::InstalledStopped,
+            GatewayPackState::Starting,
+            GatewayPackState::AuthenticatedReady,
+            GatewayPackState::Degraded,
+            GatewayPackState::Disabled,
+        ] {
+            for enabled in [false, true] {
+                for authenticated in [false, true] {
+                    for council_governed in [false, true] {
+                        for pack_not_running in [false, true] {
+                            let mut st = GatewayPackStatus::base(state, "probe");
+                            st.enabled = enabled;
+                            st.authenticated = authenticated;
+                            st.council_governed = council_governed;
+                            st.refresh_predicates(pack_not_running);
+                            if st.governed_ready {
+                                saw_governed_ready = true;
+                                assert!(
+                                    st.spawn_capable,
+                                    "governed_ready without spawn_capable for {:?}",
+                                    state
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            saw_governed_ready,
+            "fixture must produce at least one governed_ready case"
+        );
+    }
+
+    #[test]
+    fn hard_down_classifier_is_exhaustive_and_treats_stopped_as_hard() {
+        assert!(GatewayPackStatus::classify_hard_down(
+            false,
+            GatewayPackState::AuthenticatedReady,
+            false
+        ));
+        assert!(GatewayPackStatus::classify_hard_down(
+            true,
+            GatewayPackState::Disabled,
+            false
+        ));
+        assert!(GatewayPackStatus::classify_hard_down(
+            true,
+            GatewayPackState::DockerMissing,
+            false
+        ));
+        assert!(GatewayPackStatus::classify_hard_down(
+            true,
+            GatewayPackState::InstalledStopped,
+            false
+        ));
+        // Enabled pack whose containers are down is Degraded + not_running.
+        assert!(GatewayPackStatus::classify_hard_down(
+            true,
+            GatewayPackState::Degraded,
+            true
+        ));
+        // Soft degraded (auth/health flake, ungoverned child) is not hard-down.
+        assert!(!GatewayPackStatus::classify_hard_down(
+            true,
+            GatewayPackState::Degraded,
+            false
+        ));
+        assert!(!GatewayPackStatus::classify_hard_down(
+            true,
+            GatewayPackState::AuthenticatedReady,
+            false
+        ));
+        assert!(!GatewayPackStatus::classify_hard_down(
+            true,
+            GatewayPackState::Starting,
+            false
+        ));
+    }
+
+    fn test_status_ready() -> GatewayPackStatus {
+        let mut st = GatewayPackStatus::base(GatewayPackState::AuthenticatedReady, "ready");
+        st.enabled = true;
+        st.authenticated = true;
+        st.council_governed = true;
+        st.refresh_predicates(false);
+        st
+    }
+
+    fn test_status_stopped() -> GatewayPackStatus {
+        let mut st = GatewayPackStatus::base(
+            GatewayPackState::Degraded,
+            "Gateway was enabled but the pack is not running.",
+        );
+        st.enabled = true;
+        st.authenticated = false;
+        st.refresh_predicates(true);
+        st
+    }
+
+    #[test]
+    fn status_cache_coalesces_concurrent_misses_to_one_probe() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static ENTER: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+        static GO: Mutex<Option<mpsc::Receiver<()>>> = Mutex::new(None);
+
+        fn slow_probe() -> GatewayPackStatus {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            if let Some(tx) = ENTER.lock().ok().and_then(|mut g| g.take()) {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = GO.lock().ok().and_then(|mut g| g.take()) {
+                let _ = rx.recv();
+            }
+            test_status_ready()
+        }
+
+        let (enter_tx, enter_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        *ENTER.lock().expect("enter") = Some(enter_tx);
+        *GO.lock().expect("go") = Some(go_rx);
+        CALLS.store(0, Ordering::SeqCst);
+        with_test_status_probe(slow_probe, || {
+            let store = MemorySecretStore::default();
+            let h1 = std::thread::spawn(|| {
+                let store = MemorySecretStore::default();
+                gateway_pack_status(&store)
+            });
+            enter_rx.recv().expect("leader entered probe");
+            // Second miss while the leader is still probing must join single-flight.
+            let h2 = std::thread::spawn(|| {
+                let store = MemorySecretStore::default();
+                gateway_pack_status(&store)
+            });
+            std::thread::sleep(Duration::from_millis(50));
+            go_tx.send(()).expect("release leader");
+            let s1 = h1.join().expect("join h1");
+            let s2 = h2.join().expect("join h2");
+            assert!(s1.governed_ready);
+            assert!(s2.governed_ready);
+            assert_eq!(
+                CALLS.load(Ordering::SeqCst),
+                1,
+                "concurrent misses must share one probe"
+            );
+            let _ = gateway_pack_status(&store);
+            assert_eq!(CALLS.load(Ordering::SeqCst), 1, "cache hit");
+            let _ = store;
+        });
+        *ENTER.lock().expect("enter") = None;
+        *GO.lock().expect("go") = None;
+    }
+
+    #[test]
+    fn status_cache_inflight_invalidation_discards_stale_commit() {
+        // Generation-guard unit proof: a sample captured under gen N cannot
+        // commit after invalidate advances the generation. Concurrent hang
+        // coverage lives in status_cache_coalesces_concurrent_misses and
+        // status_cache_leader_reprobes_after_inflight_invalidation.
+        let _serial = status_cache_test_lock();
+        invalidate_status_cache();
+        let gen_before = STATUS_CACHE
+            .lock()
+            .map(|s| s.generation)
+            .expect("cache lock");
+        let ready = test_status_ready();
+        // Simulate a pre-invalidation probe finishing after invalidate.
+        invalidate_status_cache();
+        commit_status_cache(gen_before, &ready);
+        let store = MemorySecretStore::default();
+        // Cache must be empty; live probe (no override) returns whatever the
+        // environment has — assert only that ready was not committed.
+        if let Ok(slot) = STATUS_CACHE.lock() {
+            assert!(
+                slot.cached.is_none(),
+                "stale generation must not repopulate the cache"
+            );
+            assert_ne!(slot.generation, gen_before);
+        }
+        // Fresh path also bumps generation and installs a new sample.
+        {
+            let mut guard = TEST_STATUS_PROBE.lock().expect("probe lock");
+            *guard = Some(test_status_stopped);
+        }
+        let fresh = gateway_pack_status_fresh(&store);
+        assert!(fresh.hard_down);
+        assert!(!fresh.governed_ready);
+        let cached = gateway_pack_status(&store);
+        assert!(cached.hard_down);
+        {
+            let mut guard = TEST_STATUS_PROBE.lock().expect("probe lock");
+            *guard = None;
+        }
+        invalidate_status_cache();
+        let _ = store;
+    }
+
+    #[test]
+    fn status_cache_leader_reprobes_after_inflight_invalidation() {
+        // Leader + waiter both enlisted under gen N before invalidate. Both
+        // must re-enter, share one gen N+1 probe, return hard-down, and leave
+        // only that sample in the presentation cache. Coordination uses
+        // timeout-bounded channels so a hang is a test failure, not a stall.
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        // Nested probe fn cannot capture outer locals; keep timeout as a literal.
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static ENTER: Mutex<Option<mpsc::Sender<()>>> = Mutex::new(None);
+        static GO: Mutex<Option<mpsc::Receiver<()>>> = Mutex::new(None);
+
+        fn phased_probe() -> GatewayPackStatus {
+            let n = CALLS.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                if let Some(tx) = ENTER.lock().ok().and_then(|mut g| g.take()) {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = GO.lock().ok().and_then(|mut g| g.take()) {
+                    // Timeout-bounded: a stuck release is a hard failure.
+                    match rx.recv_timeout(Duration::from_secs(5)) {
+                        Ok(()) => {}
+                        Err(_) => panic!("old-generation probe release timed out"),
+                    }
+                }
+                // Pre-invalidation sample — must not be returned by either caller.
+                test_status_ready()
+            } else {
+                test_status_stopped()
+            }
+        }
+
+        let (enter_tx, enter_rx) = mpsc::channel();
+        let (go_tx, go_rx) = mpsc::channel();
+        *ENTER.lock().expect("enter") = Some(enter_tx);
+        *GO.lock().expect("go") = Some(go_rx);
+        CALLS.store(0, Ordering::SeqCst);
+        with_test_status_probe(phased_probe, || {
+            let coord_timeout = Duration::from_secs(5);
+            let (leader_tx, leader_rx) = mpsc::channel();
+            let (waiter_tx, waiter_rx) = mpsc::channel();
+            let (join_tx, join_rx) = mpsc::channel();
+            *TEST_INFLIGHT_WAITER_JOINED.lock().expect("join sink") = Some(join_tx);
+
+            let gen_n = STATUS_CACHE
+                .lock()
+                .map(|s| s.generation)
+                .expect("status cache lock");
+
+            let leader = std::thread::spawn(move || {
+                let store = MemorySecretStore::default();
+                let st = gateway_pack_status(&store);
+                let _ = leader_tx.send(st);
+            });
+
+            enter_rx
+                .recv_timeout(coord_timeout)
+                .expect("leader entered first probe");
+
+            // Enlist a waiter under the same in-flight generation before invalidate.
+            let waiter = std::thread::spawn(move || {
+                let store = MemorySecretStore::default();
+                let st = gateway_pack_status(&store);
+                let _ = waiter_tx.send(st);
+            });
+            // Positive, timeout-bounded enlistment proof — not a scheduler sleep.
+            let joined_gen = join_rx
+                .recv_timeout(coord_timeout)
+                .expect("waiter join acknowledgement timed out");
+            assert_eq!(
+                joined_gen, gen_n,
+                "waiter must join generation-N in-flight branch before invalidate"
+            );
+            assert_eq!(
+                CALLS.load(Ordering::SeqCst),
+                1,
+                "waiter must join single-flight under gen N (no second probe)"
+            );
+
+            // Invalidate while the old-generation probe is still in flight.
+            invalidate_status_cache();
+            go_tx.send(()).expect("release old-generation leader probe");
+
+            let leader_sample = leader_rx
+                .recv_timeout(coord_timeout)
+                .expect("leader result timed out");
+            let waiter_sample = waiter_rx
+                .recv_timeout(coord_timeout)
+                .expect("waiter result timed out");
+            leader.join().expect("leader thread panicked");
+            waiter.join().expect("waiter thread panicked");
+
+            assert!(
+                !leader_sample.governed_ready && leader_sample.hard_down,
+                "leader must return post-invalidation hard-down, not ready"
+            );
+            assert!(
+                !waiter_sample.governed_ready && waiter_sample.hard_down,
+                "waiter must return post-invalidation hard-down, not ready"
+            );
+            assert_eq!(
+                CALLS.load(Ordering::SeqCst),
+                2,
+                "gen N+1 re-probe must be single-flight (1 old + 1 shared new), got {}",
+                CALLS.load(Ordering::SeqCst)
+            );
+
+            // Cache holds only the post-invalidation sample; next read is a hit.
+            if let Ok(slot) = STATUS_CACHE.lock() {
+                let cached = slot
+                    .cached
+                    .as_ref()
+                    .expect("post-invalidation sample must be cached");
+                assert!(
+                    cached.1.hard_down && !cached.1.governed_ready,
+                    "cache must contain only the hard-down re-probe sample"
+                );
+            } else {
+                panic!("status cache lock poisoned");
+            }
+            let store = MemorySecretStore::default();
+            let hit = gateway_pack_status(&store);
+            assert!(hit.hard_down && !hit.governed_ready);
+            assert_eq!(
+                CALLS.load(Ordering::SeqCst),
+                2,
+                "warm cache hit must not re-probe"
+            );
+            let _ = store;
+        });
+        *ENTER.lock().expect("enter") = None;
+        *GO.lock().expect("go") = None;
+    }
+
+    #[test]
+    fn arm_action_gate_sample_bypasses_warm_ready_presentation_cache() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static READY: AtomicBool = AtomicBool::new(true);
+
+        fn dual_probe() -> GatewayPackStatus {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            if READY.load(Ordering::SeqCst) {
+                test_status_ready()
+            } else {
+                // Ungoverned-but-auth path also fails the arm gate.
+                let mut st = GatewayPackStatus::base(
+                    GatewayPackState::Degraded,
+                    "Gateway is up but Council is not governed.",
+                );
+                st.enabled = true;
+                st.authenticated = true;
+                st.council_governed = false;
+                st.refresh_predicates(false);
+                st
+            }
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        READY.store(true, Ordering::SeqCst);
+        with_test_status_probe(dual_probe, || {
+            let store = MemorySecretStore::default();
+            let warm = gateway_pack_status(&store);
+            assert!(warm.governed_ready, "warm presentation cache is ready");
+            assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+            // World loses governed child while presentation cache is warm.
+            READY.store(false, Ordering::SeqCst);
+            // Presentation path may still show the warm ready sample.
+            let presentation = gateway_pack_status(&store);
+            assert!(
+                presentation.governed_ready,
+                "warm presentation cache still ready within TTL"
+            );
+            assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+            // Arm/renew gate uses gateway_pack_status_fresh (via gateway_ready_for_arm).
+            let fresh = gateway_pack_status_fresh(&store);
+            assert!(
+                !fresh.governed_ready,
+                "fresh arm gate must fail closed on ungoverned sample"
+            );
+            assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+            let _ = store;
+        });
+    }
+
+    #[test]
+    fn owned_council_route_record_invalidates_status_cache() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        fn counting_probe() -> GatewayPackStatus {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            test_status_ready()
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        with_test_status_probe(counting_probe, || {
+            let store = MemorySecretStore::default();
+            let _ = gateway_pack_status(&store);
+            assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+            let _ = gateway_pack_status(&store);
+            assert_eq!(CALLS.load(Ordering::SeqCst), 1, "cache hit");
+            record_owned_council_route(Some(true));
+            let _ = gateway_pack_status(&store);
+            assert_eq!(
+                CALLS.load(Ordering::SeqCst),
+                2,
+                "route write must invalidate"
+            );
+            record_owned_council_route(None);
+            let _ = store;
+        });
+    }
+
+    #[test]
+    fn credential_authority_path_bypasses_warm_cache() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        static READY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+        fn dual_probe() -> GatewayPackStatus {
+            CALLS.fetch_add(1, Ordering::SeqCst);
+            if READY.load(Ordering::SeqCst) {
+                test_status_ready()
+            } else {
+                test_status_stopped()
+            }
+        }
+
+        CALLS.store(0, Ordering::SeqCst);
+        READY.store(true, Ordering::SeqCst);
+        with_test_status_probe(dual_probe, || {
+            let store = MemorySecretStore::default();
+            let warm = gateway_pack_status(&store);
+            assert!(warm.governed_ready);
+            assert_eq!(CALLS.load(Ordering::SeqCst), 1);
+            // World dies while cache is warm.
+            READY.store(false, Ordering::SeqCst);
+            // The credential-returning helper must take a fresh sample rather
+            // than returning a key based on the warm presentation cache.
+            let env = gateway_child_env_if_ready(&store).expect("authority sample");
+            assert!(env.is_none());
+            assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+            // The authority sample also re-caches the new truth for presentation.
+            let after = gateway_pack_status(&store);
+            assert!(after.hard_down);
+            assert_eq!(CALLS.load(Ordering::SeqCst), 2);
+            let _ = store;
+        });
     }
 
     #[test]
@@ -2564,6 +3616,81 @@ mod tests {
         out
     }
 
+    /// Touch ID bridge: the arm-principal registry exists ONLY when the
+    /// Keychain holds a token, and it never reaches the public env file.
+    #[test]
+    fn arm_principals_come_from_the_keychain_and_never_the_env_file() {
+        let _g = test_env_lock();
+        let prev_skip = std::env::var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV").ok();
+        std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", "1");
+        let store = MemorySecretStore::default();
+
+        // No token stored: the registry string is empty, so the sidecar boots
+        // with zero principals and every arm route 401s.
+        let env = build_compose_secret_env(&store, None).unwrap();
+        assert_eq!(env.get("GW_ARM_PRINCIPALS").map(String::as_str), Some(""));
+
+        // With a token: `<name>:<token>`, and the name is the audit label.
+        let token = format!("tok_{:032x}", std::process::id());
+        crate::keychain::store_arm_principal_token(&store, &token).unwrap();
+        let env = build_compose_secret_env(&store, None).unwrap();
+        let registry = env.get("GW_ARM_PRINCIPALS").cloned().unwrap_or_default();
+        assert_eq!(registry, format!("irin-desktop:{token}"));
+        // No separator or injection byte can appear inside the value.
+        assert_eq!(registry.matches(':').count(), 1);
+        assert!(!registry.contains(',') && !registry.contains('\n'));
+
+        // The PUBLIC env file carries the non-secret path pins and nothing else.
+        let pins = build_pack_pin_env(
+            Path::new("/app/pack"),
+            Path::new("/app/ledger"),
+            &test_image_ref("ghcr.io/irin/gateway", "e"),
+            &test_image_ref("ghcr.io/irin/sidecar", "f"),
+            None,
+        )
+        .unwrap();
+        assert!(
+            !pins.contains_key("GW_ARM_PRINCIPALS"),
+            "the arm-principal registry is never a public pin"
+        );
+        assert_eq!(
+            pins.get("GW_ARM_ATTEST_KEYS_PATH").map(String::as_str),
+            Some(ARM_KEYS_CONTAINER_PATH)
+        );
+        assert_eq!(
+            pins.get("IRIN_DESKTOP_ARM_KEYS").map(String::as_str),
+            Some(arm_keys_path().display().to_string().as_str())
+        );
+
+        let body = serialize_public_env(
+            &pins
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect::<Vec<_>>(),
+        )
+        .unwrap();
+        assert!(!body.contains("GW_ARM_PRINCIPALS"));
+        assert!(!body.contains("tok_"));
+
+        match prev_skip {
+            Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", v),
+            None => std::env::remove_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV"),
+        }
+    }
+
+    /// Teardown never carries the arm-principal registry, and still pins the
+    /// paths Compose must interpolate for `down`.
+    #[test]
+    fn teardown_env_drops_arm_principals_but_keeps_path_pins() {
+        let env = teardown_compose_env(Path::new("/app/pack"), None);
+        assert_eq!(env.get("GW_ARM_PRINCIPALS").map(String::as_str), Some(""));
+        assert_eq!(
+            env.get("GW_ARM_ATTEST_KEYS_PATH").map(String::as_str),
+            Some(ARM_KEYS_CONTAINER_PATH)
+        );
+        assert!(env.contains_key("IRIN_DESKTOP_ARM_KEYS"));
+    }
+
     #[test]
     fn every_compose_interpolated_var_is_pinned_scrubbed_or_disarmed() {
         // Every variable the pack compose file interpolates must be forced by
@@ -2601,6 +3728,9 @@ mod tests {
             "COUNCIL_GATEWAY_TOKEN",
             "WATCH_PRODUCER_ENABLED",
             "WATCH_DISPATCHER_ENABLED",
+            // Touch ID bridge: Keychain-held, supplied by the secret env layer
+            // and scrubbed from the ambient environment before it.
+            "GW_ARM_PRINCIPALS",
         ]
         .into_iter()
         .collect();
@@ -2615,5 +3745,85 @@ mod tests {
                 "compose interpolates ${var} but no spawn-env layer forces it"
             );
         }
+    }
+
+    #[test]
+    fn packaged_frontend_must_not_start_council() {
+        assert!(!frontend_may_start_council(true));
+        assert!(frontend_may_start_council(false));
+    }
+
+    #[test]
+    fn cold_launch_single_governed_owner_when_frontend_defers() {
+        // Policy: packaged + frontend deferred → exactly one native-owned route.
+        assert!(!frontend_may_start_council(true));
+        let route = cold_launch_owned_via_gateway(
+            true,  // packaged
+            true,  // via_gateway_default
+            true,  // pack_auth_ok
+            false, // frontend does not start
+            true,  // would-have-won is irrelevant
+        );
+        assert_eq!(route, Some(true));
+        // Only one owner: native governed, no second Direct child.
+        assert_eq!(
+            cold_launch_owned_via_gateway(true, true, true, false, false),
+            Some(true)
+        );
+    }
+
+    #[test]
+    fn cold_launch_race_sticks_direct_if_frontend_still_starts() {
+        // Documents the fixed bug path: frontend Direct wins the lock and
+        // native cannot correct ownership ("already tracked as running").
+        let stuck = cold_launch_owned_via_gateway(true, true, true, true, true);
+        assert_eq!(stuck, Some(false));
+    }
+
+    #[test]
+    fn decide_launch_via_gateway_requires_persisted_and_auth() {
+        assert!(!decide_launch_via_gateway(false, true));
+        assert!(!decide_launch_via_gateway(true, false));
+        assert!(decide_launch_via_gateway(true, true));
+    }
+
+    #[test]
+    fn launch_resume_success_and_fail_closed() {
+        assert_eq!(
+            decide_launch_resume_outcome(true, true, false, true),
+            LaunchResumeOutcome::Governed
+        );
+        assert_eq!(
+            decide_launch_resume_outcome(true, false, true, true),
+            LaunchResumeOutcome::Governed
+        );
+        // Pack never ready → Direct fail-closed (truthful; not invented governed).
+        assert_eq!(
+            decide_launch_resume_outcome(true, false, false, true),
+            LaunchResumeOutcome::DirectFailClosed
+        );
+        // Pack ready but governed spawn fails → Direct fail-closed.
+        assert_eq!(
+            decide_launch_resume_outcome(true, true, false, false),
+            LaunchResumeOutcome::DirectFailClosed
+        );
+        // Not enabled → Direct.
+        assert_eq!(
+            decide_launch_resume_outcome(false, true, true, true),
+            LaunchResumeOutcome::DirectFailClosed
+        );
+    }
+
+    #[test]
+    fn later_promote_without_manual_reenable() {
+        assert!(may_promote_to_governed(true, Some(false), true));
+        // Already governed: no promote needed.
+        assert!(!may_promote_to_governed(true, Some(true), true));
+        // No owned child.
+        assert!(!may_promote_to_governed(true, None, true));
+        // Operator disabled.
+        assert!(!may_promote_to_governed(false, Some(false), true));
+        // Pack still not ready.
+        assert!(!may_promote_to_governed(true, Some(false), false));
     }
 }

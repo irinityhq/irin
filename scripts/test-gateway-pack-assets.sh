@@ -23,10 +23,36 @@ grep -q 'WATCH_DISPATCHER_ENABLED=false' "$COMPOSE" || die "dispatcher false"
 grep -q '127.0.0.1:18080:8080' "$COMPOSE" || die "fixed loopback port"
 grep -q 'IRIN_DESKTOP_LEDGER_KEY' "$COMPOSE" || die "app-owned ledger mount"
 grep -q 'IRIN_DESKTOP_PACK_ROOT' "$COMPOSE" || die "pack root mount"
+ARM_MOUNT='${IRIN_DESKTOP_ARM_KEYS}:/run/secrets/arm_attest_keys.json:ro'
+[[ "$(grep -Fc "$ARM_MOUNT" "$COMPOSE")" -eq 1 ]] ||
+  die "Touch ID public registry must be read-only and sidecar-only"
+ARM_MARKER_MOUNT='${IRIN_DESKTOP_PACK_ROOT}/arm-bridge-enabled:/run/irin-features/arm-bridge-enabled:ro'
+[[ "$(grep -Fc "$ARM_MARKER_MOUNT" "$COMPOSE")" -eq 1 ]] ||
+  die "Touch ID edge must receive exactly one read-only desktop marker"
+grep -q 'ARM_BRIDGE_MARKER_PATH = "/run/irin-features/arm-bridge-enabled"' "$ROOT/gateway/lua/sidecar.lua" ||
+  die "Touch ID bridge must check the desktop marker"
+grep -Fq 'local body_file = ngx.req.get_body_file()' "$ROOT/gateway/lua/sidecar.lua" ||
+  die "Touch ID bridge must preserve Nginx file-buffered confirm bodies"
+grep -Fq 'ARM_BRIDGE_MAX_BODY_BYTES = 65536' "$ROOT/gateway/lua/sidecar.lua" ||
+  die "Touch ID bridge must bound file-buffered confirm bodies"
+grep -Fq 'return ""' "$ROOT/gateway/lua/sidecar.lua" ||
+  die "Touch ID bridge must normalize a truly empty POST for lua-resty-http"
+grep -Fq 'if body and #body > 0 then' "$ROOT/gateway/lua/sidecar.lua" ||
+  die "Touch ID bridge must not label an empty POST body as JSON"
+! grep -q '/run/secrets/arm_attest_keys.json' "$ROOT/gateway/lua/sidecar.lua" ||
+  die "Touch ID edge Lua must never read the root-owned registry"
 grep -q 'Vertex' "$README" || die "support matrix must mention Vertex"
 grep -q 'Not supported' "$README" || die "support matrix negatives"
 grep -q '"mode": "production"' "$EXAMPLE" || die "example mode"
 grep -q '@sha256:' "$EXAMPLE" || die "example digests"
+# Real arming requires an explicit production/test lane compile claim. The
+# Dockerfile and ordinary local-dev image builder must remain rehearsal-only.
+grep -q '^ARG GW_RELEASE_ELIGIBLE=false$' "$ROOT/gateway/sidecar-rs/Dockerfile" ||
+  die "sidecar Dockerfile must default release eligibility false"
+! grep -q 'GW_RELEASE_ELIGIBLE=true' "$ROOT/scripts/build-gateway-pack-dev-images.sh" ||
+  die "local-dev image builder must remain rehearsal-only"
+grep -q -- '--build-arg GW_RELEASE_ELIGIBLE=true' "$ROOT/scripts/build-gateway-pack-prod-images.sh" ||
+  die "production image publisher must opt into release eligibility"
 
 # Digest-shaped refs in example (even placeholders).
 python3 - <<'PY' "$EXAMPLE" || die "example manifest shape"
@@ -73,6 +99,9 @@ IRIN_GATEWAY_PACK_MODE=local-dev \
   bash "$ROOT/scripts/stage-gateway-pack.sh" "$TMP/gateway-pack"
 [[ -f "$TMP/gateway-pack/docker-compose.yml" ]] || die "stage compose"
 [[ -f "$TMP/gateway-pack/nginx.conf" ]] || die "stage nginx"
+[[ -f "$TMP/gateway-pack/arm-bridge-enabled" ]] || die "stage arm bridge marker"
+python3 -c 'import os,sys; assert (os.stat(sys.argv[1]).st_mode & 0o777) == 0o644' \
+  "$TMP/gateway-pack/arm-bridge-enabled" || die "arm bridge marker must be mode 0644"
 [[ -d "$TMP/gateway-pack/conf" ]] || die "stage conf"
 [[ -d "$TMP/gateway-pack/lua" ]] || die "stage lua"
 [[ -f "$TMP/gateway-pack/image-manifest.json" ]] || die "stage manifest"
@@ -84,5 +113,8 @@ if IRIN_GATEWAY_PACK_MODE=production \
   bash "$ROOT/scripts/stage-gateway-pack.sh" "$TMP/gateway-pack-prod" 2>/dev/null; then
   die "production stage must refuse local-dev manifest"
 fi
+
+bash "$ROOT/scripts/test-production-image-provenance.sh" ||
+  die "production image provenance contracts"
 
 pass "gateway pack static assets"

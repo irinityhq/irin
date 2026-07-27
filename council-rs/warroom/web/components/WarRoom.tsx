@@ -13,11 +13,13 @@ import {
 import {
   getGatewayPackStatus,
   isTauri,
+  nativeOwnsCouncilStartup,
   reportCouncilRuntimeReady,
   startCouncilServer,
   type GatewayPackStatus,
 } from "@/lib/tauri";
 import { gatewayHeaderTruth } from "@/lib/gateway-pack";
+import { warroomHealthLabel } from "@/lib/warroom-health-label";
 import { cn } from "@/lib/cn";
 import type { Cabinet, HealthResponse } from "@/lib/types";
 import type { StartPayload } from "@/lib/ws";
@@ -55,6 +57,8 @@ export default function WarRoom() {
   const lastStartRef = useRef<StartPayload | null>(null);
   const sidecarAutoStartRef = useRef(false);
   const [hasLastStart, setHasLastStart] = useState(false);
+  /** Mount-time health retry window (1.5/3/6s): header stays CONNECTING. */
+  const [bootRetryActive, setBootRetryActive] = useState(false);
 
   const start = useCallback(
     (p: StartPayload) => {
@@ -150,6 +154,21 @@ export default function WarRoom() {
   useEffect(() => {
     initRuntimeConfig();
     let aborted = false;
+    const bootDelays = [1500, 3000, 6000];
+
+    const scheduleBootHealthRetries = () => {
+      setBootRetryActive(true);
+      bootDelays.forEach((ms, i) => {
+        window.setTimeout(() => {
+          if (aborted) return;
+          void loadInitialState().finally(() => {
+            if (!aborted && i === bootDelays.length - 1) {
+              setBootRetryActive(false);
+            }
+          });
+        }, ms);
+      });
+    };
 
     void loadRuntimeConfig();
     void loadInitialState();
@@ -157,23 +176,49 @@ export default function WarRoom() {
     void configReady.then((cfg) => {
       if (!isTauri() || sidecarAutoStartRef.current) return;
       sidecarAutoStartRef.current = true;
-      void startCouncilServer(
-        cfg.councilPath || undefined,
-        councilPortFromApiBase(cfg.apiBase),
-        cfg.authToken,
-        cfg.councilRoot || undefined,
-        cfg.librarianBase || undefined,
-      )
-        .then(() => {
-          // The sidecar takes a moment to bind; the mount-time health check
-          // has usually already failed by now, so re-poll a few times.
-          for (const ms of [1500, 3000, 6000]) {
-            window.setTimeout(() => {
-              if (!aborted) void loadInitialState();
-            }, ms);
+
+      // Packaged install: native setup is the sole Council startup owner.
+      // Frontend only polls/retries health — never startCouncilServer (would
+      // force Direct via_gateway=None and race the governed restore).
+      void nativeOwnsCouncilStartup()
+        .then((nativeOwns) => {
+          if (aborted) return;
+          if (nativeOwns) {
+            scheduleBootHealthRetries();
+            return;
           }
+          void startCouncilServer(
+            cfg.councilPath || undefined,
+            councilPortFromApiBase(cfg.apiBase),
+            cfg.authToken,
+            cfg.councilRoot || undefined,
+            cfg.librarianBase || undefined,
+          )
+            .then(() => {
+              if (!aborted) scheduleBootHealthRetries();
+            })
+            .catch(() => {
+              // Still poll health; source-dev start can fail transiently.
+              if (!aborted) scheduleBootHealthRetries();
+            });
         })
-        .catch(() => {});
+        .catch(() => {
+          // Command missing on older shells: keep source-dev start path.
+          if (aborted) return;
+          void startCouncilServer(
+            cfg.councilPath || undefined,
+            councilPortFromApiBase(cfg.apiBase),
+            cfg.authToken,
+            cfg.councilRoot || undefined,
+            cfg.librarianBase || undefined,
+          )
+            .then(() => {
+              if (!aborted) scheduleBootHealthRetries();
+            })
+            .catch(() => {
+              if (!aborted) scheduleBootHealthRetries();
+            });
+        });
     });
 
     const onConfig = () => {
@@ -204,6 +249,7 @@ export default function WarRoom() {
         health={health}
         gatewayPack={gatewayPack}
         apiStatus={apiStatus}
+        bootRetryActive={bootRetryActive}
         active={isActive}
         sessionDone={isDone}
         onReset={reset}
@@ -313,6 +359,7 @@ function Header({
   health,
   gatewayPack,
   apiStatus,
+  bootRetryActive,
   active,
   sessionDone,
   onReset,
@@ -323,11 +370,18 @@ function Header({
   health: HealthResponse | null;
   gatewayPack: GatewayPackStatus | null;
   apiStatus: ApiStatus;
+  bootRetryActive: boolean;
   active: boolean;
   sessionDone?: boolean;
   onReset: () => void;
   onAbort: () => void;
 }) {
+  const healthLabel = warroomHealthLabel(
+    health?.council_version ?? null,
+    health?.stream_version ?? null,
+    apiStatus,
+    bootRetryActive,
+  );
   return (
     <header className="border-b border-border bg-bg-deep sticky top-0 z-30">
       <div className="max-w-[1600px] w-full mx-auto px-4 md:px-6 h-12 flex items-center gap-3 md:gap-6">
@@ -343,9 +397,7 @@ function Header({
               data-testid="warroom-health-status"
               className="text-[9px] font-mono uppercase tracking-widest text-fg-dim"
             >
-              {health
-                ? `gen ${health.council_version} · stream ${health.stream_version}`
-                : apiStatus === "loading" ? "connecting" : "offline"}
+              {healthLabel}
             </div>
           </div>
         </div>

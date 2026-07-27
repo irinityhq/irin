@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # IRIN release transaction: the single fail-closed ladder from source to an
-# accepted, notarized IRIN.dmg. Nothing here publishes a GitHub Release in
-# --dry-run-rc mode; in release mode assets attach to the DRAFT release that
-# .github/workflows/release.yml creates on the tag.
+# accepted, notarized IRIN.dmg. --dry-run-rc is a real release-candidate proof:
+# it pushes mutable rc-* images to GHCR and submits the DMG to Apple's notary
+# service, but it does not create, upload to, or publish a GitHub Release.
+# In release mode assets attach to the DRAFT release that release.yml creates.
 #
 # Usage:
 #   scripts/release-transaction.sh --tag v0.1.0          # release mode (post-merge, tag pushed)
@@ -33,7 +34,6 @@ note "preflight: machine and credentials"
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS only"
 [[ "$(uname -m)" == "arm64" ]] || die "Apple silicon only"
 command -v docker >/dev/null && docker info >/dev/null 2>&1 || die "Docker required for the promotion smoke"
-command -v gh >/dev/null || die "gh CLI required"
 [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]] || die "APPLE_SIGNING_IDENTITY is required"
 [[ -n "${APPLE_NOTARY_PROFILE:-}" ]] || die "APPLE_NOTARY_PROFILE is required"
 security find-identity -v -p codesigning | grep -F "$APPLE_SIGNING_IDENTITY" >/dev/null \
@@ -50,6 +50,7 @@ SHA="$(git rev-parse HEAD)"
 
 case "$MODE" in
   release)
+    command -v gh >/dev/null || die "gh CLI required in release mode"
     [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || die "bad tag: $TAG"
     [[ "$(git rev-parse "$TAG^{commit}" 2>/dev/null || true)" == "$SHA" ]] \
       || die "HEAD ($SHA) is not the tagged commit ($TAG)"
@@ -69,6 +70,9 @@ case "$MODE" in
 esac
 export IRIN_RELEASE_VERSION
 echo "source_sha=$SHA images_tag=$IMAGES_TAG mode=$MODE release_version=$IRIN_RELEASE_VERSION"
+if [[ "$MODE" == "rc" ]]; then
+  note "RC proof external effects: pushes/overwrites rc-* GHCR images and submits to Apple notarization; no GitHub Release mutation"
+fi
 
 note "images: ensure published digests exist"
 if [[ "$MODE" == "rc" ]]; then
@@ -94,17 +98,24 @@ IRIN_GATEWAY_PACK_PROD_MANIFEST="$MANIFEST" \
 IRIN_DMG_REQUIRE_CLEAN=1 \
 make dmg-build
 
-note "dmg: verify untouched artifact"
-IRIN_DMG_PACK_MODE=production make dmg-verify
-
-note "promotion smoke on the untouched DMG"
-PROMOTION=1 bash packaging/smoke-full-app.sh
-
-note "checksums and receipt"
 HASHES="$ROOT/packaging/artifacts/HASHES.txt"
 [[ -f "$HASHES" ]] || die "HASHES.txt missing"
 DMG="$ROOT/packaging/artifacts/IRIN_${IRIN_RELEASE_VERSION}_aarch64.dmg"
 [[ -f "$DMG" ]] || die "DMG artifact missing: $DMG"
+
+note "dmg: verify untouched artifact and explicit receipt"
+IRIN_DMG_PACK_MODE=production \
+IRIN_DMG_HASHES_PATH="$HASHES" \
+IRIN_DMG_PATH="$DMG" \
+make dmg-verify
+
+note "promotion smoke on the untouched DMG"
+IRIN_DMG_HASHES_PATH="$HASHES" \
+IRIN_DMG_PATH="$DMG" \
+PROMOTION=1 \
+bash packaging/smoke-full-app.sh
+
+note "checksums and receipt"
 shasum -a 256 "$DMG"
 
 RECEIPT="$ROOT/packaging/receipts/release-transaction-$(date +%Y%m%dT%H%M%S).txt"
@@ -128,5 +139,5 @@ if [[ "$MODE" == "release" ]]; then
   gh release upload "$TAG" "$DMG" "$HASHES" --clobber
   echo "NEXT: re-download the asset from the draft, checksum-compare, install, launch — then publish."
 else
-  note "dry-run complete: production path proven on rc images; no release mutated"
+  note "RC proof complete: rc-* GHCR images were pushed and Apple notarization/stapling completed; no GitHub Release was mutated"
 fi

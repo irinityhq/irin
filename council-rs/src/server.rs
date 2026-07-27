@@ -54,7 +54,7 @@ use axum::{
     http::{HeaderMap, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{any, get, post},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::Deserialize;
@@ -73,6 +73,7 @@ use crate::librarian;
 use crate::mode::Mode;
 use crate::precedent;
 use crate::provider;
+use crate::static_web::WebDist;
 use crate::stream::deliberate::{self, StreamConfig};
 use crate::stream::events::StreamEvent;
 use crate::stream::intervention::{Intervention, InterventionQueue};
@@ -305,8 +306,21 @@ fn resolve_max_deliberations(raw: Option<String>) -> usize {
         .unwrap_or(DEFAULT_MAX_DELIBERATIONS)
 }
 
-/// Build the axum router.
+/// Build the axum router with the API and WebSocket surface only.
+///
+/// Behaviour is unchanged from before `--web-dist` existed: an unmatched path
+/// still falls through to axum's default 404 behind the auth layer.
 pub fn router(config: Arc<Config>) -> Router {
+    router_with_web_dist(config, None)
+}
+
+/// Build the axum router, optionally serving the War Room static export from
+/// the same origin.
+///
+/// Real and unmatched `/api/**` and `/ws/**` paths remain inside the existing
+/// auth layer. Only non-reserved unmatched paths can reach the public static
+/// fallback.
+pub fn router_with_web_dist(config: Arc<Config>, web_dist: Option<WebDist>) -> Router {
     let auth = AuthConfig::from_env();
     auth.announce();
     AUTH_CONFIG.get_or_init(|| auth);
@@ -333,7 +347,7 @@ pub fn router(config: Arc<Config>) -> Router {
         .allow_methods(tower_http::cors::Any)
         .allow_headers(tower_http::cors::Any);
 
-    Router::new()
+    let api = Router::new()
         .route("/api/health", get(health))
         .route("/api/discover", get(discover_providers))
         .route("/api/cabinets", get(cabinets))
@@ -371,11 +385,34 @@ pub fn router(config: Arc<Config>) -> Router {
         // second auth subject, it must inherit the same concurrency cap.
         .route("/ws/deliberate", get(ws_deliberate))
         .route("/ws/librarian/{chat_id}", get(ws_librarian))
+        // Keep unknown reserved-prefix paths behind the same auth middleware
+        // as real API and WebSocket routes. These also prevent the static SPA
+        // fallback from turning an API typo into a 200 HTML response.
+        .route("/api", any(reserved_not_found))
+        .route("/api/{*path}", any(reserved_not_found))
+        .route("/ws", any(reserved_not_found))
+        .route("/ws/{*path}", any(reserved_not_found))
         .with_state(state)
         .nest("/api/librarian", librarian::routes::router(librarian_state))
         .nest("/api/governance", governance::router())
-        .layer(middleware::from_fn(auth_middleware))
-        .layer(cors)
+        .layer(middleware::from_fn(auth_middleware));
+
+    let app = match web_dist {
+        Some(dist) => {
+            let dist = Arc::new(dist);
+            api.fallback(move |method: axum::http::Method, uri: axum::http::Uri| {
+                let dist = Arc::clone(&dist);
+                async move { dist.serve(&method, uri.path()).await }
+            })
+        }
+        None => api,
+    };
+
+    app.layer(cors)
+}
+
+async fn reserved_not_found() -> StatusCode {
+    StatusCode::NOT_FOUND
 }
 
 fn default_cors_origins() -> Vec<HeaderValue> {

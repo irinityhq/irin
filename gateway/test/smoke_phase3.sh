@@ -326,8 +326,10 @@ source "$SCRIPT_DIR/lib/worktree_docker_context.sh"
 build_sidecar_image() {
     # Build the provenance-correct sidecar IMAGE via the unified cargo-chef
     # Dockerfile (context=repo root, .git in-context — Review). The
-    # image binary carries the GW_BUILD_DIRTY baked from THIS checkout's real git
-    # state, so a clean tree -> clean image -> real arm with NO host cargo build and
+    # image binary carries GW_BUILD_DIRTY from THIS checkout's real Git state.
+    # This explicit real-arm proof lane also opts into GW_RELEASE_ELIGIBLE=true;
+    # ordinary source/local-dev image builders keep the Dockerfile default false.
+    # A clean tree + this test-only eligibility -> real arm with NO host cargo build and
     # NO binary bind-mount overlay (both removed: the host build was the killed
     # compile #2; the overlay only existed to mask the old always-DARK image).
     # The DIRTY leg is proven separately by test/prove_provenance_legs.sh.
@@ -348,6 +350,7 @@ EOF
     PATH="$docker_path" docker compose $COMPOSE_FILE_ARGS ${extra_compose:+-f "$extra_compose"} build \
         --build-arg CARGO_PROFILE_RELEASE_LTO="${PHASE3_SMOKE_LTO:-false}" \
         --build-arg CARGO_PROFILE_RELEASE_CODEGEN_UNITS="${PHASE3_SMOKE_CGU:-16}" \
+        --build-arg GW_RELEASE_ELIGIBLE=true \
         sidecar \
         || { [ -z "$ctx_cleanup" ] || rm -rf "$ctx_cleanup"; [ -z "$extra_compose" ] || rm -f "$extra_compose"; fail "sidecar image build failed (unified Dockerfile)"; }
     # NOT `[ -n ... ] && rm`: on a non-worktree checkout the empty-var guard
@@ -451,7 +454,7 @@ perform_real_arm() {
     # for several CI cycles.
     REHEARSAL=$(printf '%s' "$STAGE_BODY" | jq -r '.rehearsal | tostring')
     if [ "$REHEARSAL" != "false" ]; then
-        # The just-built binary is proven CLEAN (buildid_probe build_is_dirty=false)
+        # The just-built binary is proven CLEAN and test-eligible by buildid_probe
         # and the sidecar does NOT log the B6 rehearsal-forcing warn — so a missing
         # `.rehearsal` field (jq `// "true"` default), not a DARK build, is the
         # likely cause. Dump the RAW stage response + which build_id the sidecar
@@ -462,7 +465,7 @@ perform_real_arm() {
         echo "REHEARSAL(parsed)=[$REHEARSAL] STAGE_ID=[$STAGE_ID] CHALLENGE_len=[${#CHALLENGE_B64}]" >&2
         echo "--- sidecar arm/build log lines ---" >&2
         PATH="$docker_path" docker compose $COMPOSE_FILE_ARGS logs sidecar 2>&1 | grep -iE "build_id|forcing REHEARSAL|may not arm|arm stage|arm/stage|rehearsal|allow_real" | tail -8 >&2 || echo "(no arm log line found)" >&2
-        fail "arm STAGE returned rehearsal=$REHEARSAL (expected false). See RAW stage response above (binary is clean per buildid_probe; suspect response shape, not DARK build)."
+        fail "arm STAGE returned rehearsal=$REHEARSAL (expected false). See RAW stage response above (binary is clean and test-eligible per buildid_probe; suspect response shape, not DARK build)."
     fi
     [ -n "$STAGE_ID" ] && [ -n "$CHALLENGE_B64" ] || fail "stage response missing stage_id or challenge"
     # Negative control (Council P1-6): read the EMBEDDED build_id straight out of the

@@ -62,7 +62,7 @@ fn git_is_dirty(dir: &Path) -> Option<bool> {
     let output = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["status", "--porcelain", "--untracked-files=no"])
+        .args(["status", "--porcelain", "--untracked-files=normal"])
         .output()
         .ok()?;
     if !output.status.success() {

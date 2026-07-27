@@ -1,6 +1,9 @@
 /**
  * Client helpers for the installed-release Gateway Pack.
  * Status is non-secret; raw GW_API_KEY never crosses this boundary.
+ *
+ * Ordering is owned by the host status authority + `applyIfNewer` in
+ * `desktop-status.ts`. This file has no operation fences.
  */
 
 import type { GatewayPackState, GatewayPackStatus } from "./tauri";
@@ -81,7 +84,7 @@ export function gatewayHeaderTruth(
   pack: GatewayPackStatus | null | undefined,
   healthGatewayConfigured: boolean,
 ): GatewayHeaderTruth {
-  if (pack?.state === "authenticated_ready" && pack.authenticated && pack.council_governed) {
+  if (pack?.governed_ready === true) {
     return {
       label: "governed",
       tone: "ok",

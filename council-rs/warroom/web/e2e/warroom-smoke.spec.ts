@@ -346,7 +346,7 @@ test.describe("War Room smoke", () => {
     await expect(page.getByTestId("settings-health-probes")).toBeVisible();
   });
 
-  test("wargame cabinet shows experimental help callout", async ({
+  test("wargame cabinet shows neutral role help", async ({
     page,
     request,
   }) => {
@@ -371,9 +371,10 @@ test.describe("War Room smoke", () => {
     await wargameChip.first().click();
     const help = page.getByTestId("wargame-idle-help");
     await expect(help).toBeVisible();
-    // Mode hint, seat roles, and experimental warning.
+    // Mode hint and seat roles, without experimental labeling.
     await expect(help).toContainText(/adversarial/i);
-    await expect(help).toContainText(/validate output quality/i);
+    await expect(help).toContainText(/Blue plans/i);
+    await expect(help).not.toContainText(/experimental/i);
   });
 
   test("gateway routing toggle on Deliberate idle", async ({ page }) => {
@@ -413,15 +414,20 @@ test.describe("War Room smoke", () => {
   test("Librarian tab loads or skips when unreachable", async ({ page }) => {
     await page.goto("/");
     const librarianReachable = await page.evaluate(async (backend) => {
+      const controller = new AbortController();
+      const timeout = window.setTimeout(() => controller.abort(), 3000);
       try {
         const resp = await fetch(`${backend}/api/librarian/health`, {
           cache: "no-store",
+          signal: controller.signal,
         });
         if (!resp.ok) return false;
         const body = (await resp.json()) as { state?: string };
         return body.state !== "offline";
       } catch {
         return false;
+      } finally {
+        window.clearTimeout(timeout);
       }
     }, BACKEND);
     test.skip(

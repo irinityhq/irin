@@ -1,14 +1,40 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   canEnableGovernedProceeding,
+  gatewayHeaderTruth,
   gatewayPackIsCoreNeutral,
   gatewayPackStateLabel,
   type GatewayPackStatus,
 } from "./gateway-pack";
+import { gatewayPackAllowsGoverned } from "./tauri";
+
+describe("packaged cold-launch single owner (source contract)", () => {
+  it("WarRoom defers startCouncilServer when native owns startup", () => {
+    const src = readFileSync(
+      path.join(__dirname, "../components/WarRoom.tsx"),
+      "utf8",
+    );
+    expect(src).toContain("nativeOwnsCouncilStartup");
+    expect(src).toContain("scheduleBootHealthRetries");
+    // Frontend must check native ownership before starting Council.
+    const ownsIdx = src.indexOf("nativeOwnsCouncilStartup");
+    const startIdx = src.indexOf("startCouncilServer(");
+    expect(ownsIdx).toBeGreaterThan(-1);
+    expect(startIdx).toBeGreaterThan(ownsIdx);
+  });
+});
 
 function status(
   partial: Partial<GatewayPackStatus> & Pick<GatewayPackStatus, "state">,
 ): GatewayPackStatus {
+  const authenticated = partial.authenticated ?? false;
+  const enabled = partial.enabled ?? false;
+  const council_governed = partial.council_governed ?? false;
+  const governed_ready =
+    partial.governed_ready ??
+    (partial.state === "authenticated_ready" && authenticated && council_governed);
   return {
     message: "",
     pack_version: null,
@@ -16,14 +42,24 @@ function status(
     gateway_url: "http://127.0.0.1:18080",
     project: "irin-desktop-gateway",
     key_id: null,
-    enabled: false,
+    enabled,
     docker: "ready",
     watch_producer_enabled: false,
     watch_dispatcher_enabled: false,
-    authenticated: false,
-    council_governed: false,
+    authenticated,
+    council_governed,
     gateway_url_configured: true,
     support_matrix_summary: "",
+    spawn_capable: partial.spawn_capable ?? (enabled && authenticated),
+    governed_ready,
+    hard_down:
+      partial.hard_down ??
+      (!enabled ||
+        partial.state === "docker_missing" ||
+        partial.state === "docker_daemon_down" ||
+        partial.state === "not_installed" ||
+        partial.state === "installed_stopped" ||
+        partial.state === "disabled"),
     ...partial,
   };
 }
@@ -59,6 +95,7 @@ describe("governed proceeding gate", () => {
       authenticated: true,
       enabled: true,
       council_governed: true,
+      governed_ready: true,
     });
     expect(
       canEnableGovernedProceeding(ready, {
@@ -68,12 +105,22 @@ describe("governed proceeding gate", () => {
     ).toBe(true);
   });
 
-  it("requires authenticated flag even if state string is ready", () => {
+  it("reads governed_ready only — does not re-derive from state fields", () => {
     const fake = status({
       state: "authenticated_ready",
-      authenticated: false,
+      authenticated: true,
+      council_governed: true,
+      governed_ready: false,
     });
     expect(canEnableGovernedProceeding(fake)).toBe(false);
+
+    const onlyField = status({
+      state: "degraded",
+      authenticated: false,
+      council_governed: false,
+      governed_ready: true,
+    });
+    expect(canEnableGovernedProceeding(onlyField)).toBe(true);
   });
 
   it("allows development mode without pack", () => {
@@ -122,7 +169,33 @@ describe("governed proceeding gate", () => {
   });
 });
 
-import { gatewayHeaderTruth } from "./gateway-pack";
+describe("gatewayPackAllowsGoverned vocabulary", () => {
+  it("is a single-field read of governed_ready", () => {
+    expect(
+      gatewayPackAllowsGoverned(
+        status({
+          state: "degraded",
+          governed_ready: true,
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      gatewayPackAllowsGoverned(
+        status({
+          state: "authenticated_ready",
+          authenticated: true,
+          council_governed: true,
+          governed_ready: false,
+        }),
+      ),
+    ).toBe(false);
+    // Source shape guard: implementation must not re-derive.
+    const source = readFileSync(path.join(__dirname, "tauri.ts"), "utf8");
+    expect(source).toMatch(
+      /export function gatewayPackAllowsGoverned[\s\S]*?return status\?\.governed_ready === true;/,
+    );
+  });
+});
 
 describe("gateway header truth", () => {
   it("distinguishes url-set from pack-authenticated and governed", () => {
@@ -153,5 +226,14 @@ describe("gateway header truth", () => {
     expect(
       gatewayHeaderTruth(status({ state: "docker_missing" }), false).tone,
     ).toBe("neutral");
+  });
+});
+
+describe("status authority migration", () => {
+  it("no longer exports renderer operation fences", () => {
+    const source = readFileSync(path.join(__dirname, "gateway-pack.ts"), "utf8");
+    expect(source).not.toContain("GatewayPackOperationFence");
+    expect(source).not.toContain("shouldApplyBackgroundStatusPoll");
+    expect(source).not.toContain("runGatewayPackStatusWriterIfCurrent");
   });
 });
