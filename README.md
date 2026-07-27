@@ -60,7 +60,11 @@ supported.
 3. Open the DMG, drag **IRIN.app** to Applications, and launch it.
 
 The app starts and owns its bundled Council and serves War Room on loopback;
-no terminal command is involved. Open **Discover** first to see which
+no terminal command is involved. (One exception: if a Council with the
+identical build identity is already healthy on :8765 — for example from a
+source checkout — the app adopts that process instead of starting a second
+one, and stopping that external runtime then affects the app. A Council with
+a different source identity is refused, never killed.) Open **Discover** first to see which
 provider transports IRIN detects (see
 [Discover, then deliberate](#discover-then-deliberate)).
 
@@ -127,7 +131,7 @@ engineering lane. See
 | War Room Web | `http://127.0.0.1:3010` |
 | Council API/WebSocket | `http://127.0.0.1:8765` |
 | Gateway | `http://127.0.0.1:18080` with macOS `make setup`, or when started separately on Ubuntu |
-| Desktop app | `IRIN.app` on macOS — the signed DMG starts and owns its bundled Council; `make app-install` reuses the source-run stack above |
+| Desktop app | `IRIN.app` on macOS — the signed DMG starts and owns its bundled Council, adopting an already-running Council only when its build identity matches exactly; `make app-install` reuses the source-run stack above |
 | Private phone | Installed IRIN.app Settings only: `https://<your-device>.<tailnet>.ts.net:8443` via Tailscale Serve — never a public URL, never configured by `make setup` |
 
 ## Discover, then deliberate

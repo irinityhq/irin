@@ -4,8 +4,11 @@ Primary operator UI for council-rs: a **Tauri v2** desktop shell hosting the ful
 **Next.js** War Room from `warroom/web/` (including Deliberation, Outbox,
 Librarian, and Drift). Installed release builds start and own their bundled
 Council on **8765** and serve War Room same-origin on loopback; no
-source-development command is needed. Debug desktop builds retain a
-developer-only `council --serve` sidecar.
+source-development command is needed. If a Council with the identical build
+identity is already healthy on 8765 (for example from a source runtime), the
+installed build adopts that process rather than spawning its bundled one; a
+Council with a different source identity is refused, never killed. Debug
+desktop builds retain a developer-only `council --serve` sidecar.
 
 ## Product install versus component development
 
@@ -86,8 +89,9 @@ test -f .next-tauri/index.html
 2. Confirm the debug sidecar serves `/api/health`, cabinets, and the
    Outbox/Librarian tabs.
 3. Release: follow the root README's product installation path.
-4. Confirm the installed app starts and owns its bundled Council and that
-   Discover matches the browser War Room.
+4. Confirm the installed app starts and owns its bundled Council (or adopts a
+   running Council with the identical build identity) and that Discover
+   matches the browser War Room.
 
 Use `COUNCIL_WS_SMOKE_ONLY=1` on the backend for WebSocket proof without provider spend:
 
