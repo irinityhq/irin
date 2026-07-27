@@ -33,6 +33,15 @@ export async function getDesktopRuntimeMode(): Promise<DesktopRuntimeMode> {
   return invoke<DesktopRuntimeMode>("desktop_runtime_mode");
 }
 
+/**
+ * Packaged installs: native setup is the sole Council startup owner.
+ * Source-dev returns false so the frontend may still call startCouncilServer.
+ */
+export async function nativeOwnsCouncilStartup(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("native_owns_council_startup");
+}
+
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
   const { invoke: inv } = await import("@tauri-apps/api/core");
   return inv<T>(cmd, args);

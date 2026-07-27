@@ -222,9 +222,36 @@ pub struct TailscaleNodeStatus {
     pub logged_in: bool,
 }
 
+/// Truthful, non-secret classification when CLI stdout is not JSON.
+///
+/// Includes CLI path, exit code, byte count, and first-byte hex — never
+/// content (node data is sensitive) and never the raw serde message operators
+/// saw on the phone panel (`expected value at line 1 column 1`).
+pub fn classify_non_json_stdout(
+    kind: &str,
+    raw: &str,
+    cli_path: Option<&str>,
+    exit_code: Option<i32>,
+) -> String {
+    let bytes = raw.len();
+    let first_byte = raw
+        .as_bytes()
+        .first()
+        .map(|b| format!("0x{b:02x}"))
+        .unwrap_or_else(|| "none".to_string());
+    let path = cli_path.unwrap_or("unknown");
+    let exit = exit_code
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "n/a".to_string());
+    format!(
+        "{kind}: non-JSON output (cli={path}, exit={exit}, bytes={bytes}, first_byte={first_byte})"
+    )
+}
+
 /// Parse Tailscale node status JSON. Never returns tokens or keys.
 pub fn parse_status_json(raw: &str) -> Result<TailscaleNodeStatus, String> {
-    let v: Value = serde_json::from_str(raw).map_err(|e| format!("status json: {e}"))?;
+    let v: Value = serde_json::from_str(raw)
+        .map_err(|_| classify_non_json_stdout("status json", raw, None, None))?;
     let backend_state = v
         .get("BackendState")
         .and_then(Value::as_str)
@@ -294,7 +321,9 @@ pub fn parse_serve_status_json(raw: &str) -> Result<ServeStatusView, String> {
 
 /// Parse Serve status JSON scoped to one HTTPS port.
 pub fn parse_serve_status_json_for_port(raw: &str, port: u16) -> Result<ServeStatusView, String> {
-    let v: Value = serde_json::from_str(raw).map_err(|e| format!("serve status json: {e}"))?;
+    let v: Value = serde_json::from_str(raw).map_err(|_| {
+        classify_non_json_stdout("serve status json", raw, None, None)
+    })?;
     let funnel_present = detect_funnel_for_port(&v, port);
     let unsupported_surfaces_present = tcp_has_unsupported_for_port(&v, port);
     let mut handlers = Vec::new();
@@ -728,6 +757,52 @@ mod tests {
         let st = parse_status_json(raw).unwrap();
         assert!(!st.running);
         assert!(!st.logged_in);
+    }
+
+    #[test]
+    fn non_json_status_never_leaks_serde_or_content() {
+        // Dave hit: non-empty non-JSON (first byte not '{'/JSON) used to surface
+        // raw serde "expected value at line 1 column 1" on the phone panel.
+        let raw = "tailscale: unexpected host message";
+        let err = parse_status_json(raw).unwrap_err();
+        assert!(err.starts_with("status json: non-JSON output"));
+        assert!(err.contains("cli=unknown"));
+        assert!(err.contains("exit=n/a"));
+        assert!(err.contains("bytes=34"));
+        assert!(err.contains("first_byte=0x74")); // 't'
+        assert!(!err.contains("expected value"));
+        assert!(!err.contains("line 1"));
+        assert!(!err.contains("unexpected host"));
+        assert!(!err.contains(raw));
+    }
+
+    #[test]
+    fn non_json_serve_status_same_classification() {
+        let raw = "NotLoggedIn";
+        let err = parse_serve_status_json(raw).unwrap_err();
+        assert!(err.starts_with("serve status json: non-JSON output"));
+        assert!(err.contains("bytes=11"));
+        assert!(err.contains("first_byte=0x4e")); // 'N'
+        assert!(!err.contains("expected value"));
+        assert!(!err.contains("NotLoggedIn"));
+    }
+
+    #[test]
+    fn classify_non_json_empty_and_brace_prefix() {
+        let empty = classify_non_json_stdout(
+            "status json",
+            "",
+            Some("/opt/homebrew/bin/tailscale"),
+            Some(0),
+        );
+        assert!(empty.contains("cli=/opt/homebrew/bin/tailscale"));
+        assert!(empty.contains("exit=0"));
+        assert!(empty.contains("bytes=0"));
+        assert!(empty.contains("first_byte=none"));
+        // JSON-looking but invalid still uses the non-serde path.
+        let broken = parse_status_json("{not-json").unwrap_err();
+        assert!(broken.contains("first_byte=0x7b"));
+        assert!(!broken.contains("expected"));
     }
 
     #[test]

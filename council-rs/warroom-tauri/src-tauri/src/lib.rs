@@ -99,6 +99,13 @@ fn desktop_runtime_mode() -> &'static str {
     desktop_runtime_mode_value()
 }
 
+/// Packaged installs: native setup is the sole Council startup owner.
+/// Source-dev (unpackaged) returns false so the frontend may still start.
+#[tauri::command]
+fn native_owns_council_startup() -> bool {
+    is_packaged_install()
+}
+
 fn desktop_runtime_config_value(port: u16) -> serde_json::Value {
     serde_json::json!({
         "apiBase": format!("http://127.0.0.1:{port}"),
@@ -212,6 +219,111 @@ fn unix_kill_pid(pid: u32, sig: i32) {
 
 #[cfg(not(unix))]
 fn unix_kill_pid(_pid: u32, _sig: i32) {}
+
+/// Bounded post-launch promote: when cold-start fell to Direct while
+/// `via_gateway_default` stayed true, retry pack resume + governed respawn
+/// without requiring a manual Enable click. Fail-closed: a failed promote
+/// restores Direct; never invents governed readiness.
+fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>) {
+    const ATTEMPTS: u32 = 12;
+    const INTERVAL: Duration = Duration::from_secs(5);
+    tauri::async_runtime::spawn_blocking(move || {
+        for attempt in 0..ATTEMPTS {
+            std::thread::sleep(INTERVAL);
+            let store = KeychainSecretStore;
+            let persisted = match load_or_create_private_config() {
+                Ok(cfg) => cfg.via_gateway_default,
+                Err(_) => return,
+            };
+            // Operator disabled, already governed, or no Direct-owned child → stop.
+            let owned = gateway_pack::owned_council_route();
+            if !persisted || owned == Some(true) || owned != Some(false) {
+                return;
+            }
+            let pack_ok = if gateway_pack::pack_auth_revalidated(&store) {
+                true
+            } else if attempt < 4 {
+                match gateway_pack::resume_installed_pack(&store) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        let _ = app.emit(
+                            "council-log",
+                            format!(
+                                "[system] governed-promote attempt {}: pack not ready ({e})",
+                                attempt + 1
+                            ),
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if !gateway_pack::may_promote_to_governed(persisted, owned, pack_ok) {
+                continue;
+            }
+            let config = {
+                let state = app.state::<SpawnConfigCache>();
+                let guard = match state.0.lock() {
+                    Ok(g) => g,
+                    Err(_) => return,
+                };
+                let cloned = guard.clone();
+                drop(guard);
+                cloned
+            };
+            let token = auth_token
+                .as_deref()
+                .or(config.auth_token.as_deref())
+                .map(str::to_string);
+            stop_tracked_council_server(&app);
+            let _ =
+                wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
+            match try_start_council_server(
+                &app,
+                config.council_path.as_deref(),
+                config.server_port,
+                token.as_deref(),
+                Some(true),
+                config.council_root.as_deref(),
+                config.librarian_base.as_deref(),
+            ) {
+                Ok(msg) => {
+                    let _ = app.emit(
+                        "council-log",
+                        format!("[system] governed-promote: {msg}"),
+                    );
+                    let _ = gateway_pack::status_with_council_route(&store, true, false);
+                    let _ = status_authority::recompute(&app, Freshness::Action);
+                    return;
+                }
+                Err(e) => {
+                    let _ = app.emit(
+                        "council-log",
+                        format!(
+                            "[system] governed-promote attempt {}: governed spawn failed ({e}); restoring Direct",
+                            attempt + 1
+                        ),
+                    );
+                    let _ = try_start_council_server(
+                        &app,
+                        config.council_path.as_deref(),
+                        config.server_port,
+                        token.as_deref(),
+                        Some(false),
+                        config.council_root.as_deref(),
+                        config.librarian_base.as_deref(),
+                    );
+                    let _ = status_authority::recompute(&app, Freshness::Action);
+                }
+            }
+        }
+        let _ = app.emit(
+            "council-log",
+            "[system] governed-promote: bounded retries exhausted; pack remains Direct until Enable or next launch",
+        );
+    });
+}
 
 /// Adopt a matching external Council when available; otherwise spawn a managed
 /// `council --serve` when this is a packaged install (bundled binary + base-dir)
@@ -572,6 +684,16 @@ async fn start_council_server(
     council_root: Option<String>,
     librarian_base: Option<String>,
 ) -> Result<String, String> {
+    // Packaged / installed-release: native setup owns Council startup. A
+    // frontend call with via_gateway=None would force Direct and race the
+    // governed restore path ("already tracked as running" without correcting
+    // ownership). Refuse the spawn; health polling remains the frontend job.
+    if is_packaged_install() {
+        return Ok(
+            "packaged install: Council startup owned by native setup; frontend start skipped"
+                .to_string(),
+        );
+    }
     try_start_council_server(
         &app,
         council_path.as_deref(),
@@ -1371,6 +1493,7 @@ pub fn run() {
             save_pdf,
             desktop_runtime_mode,
             desktop_runtime_config,
+            native_owns_council_startup,
             report_council_runtime_ready
         ])
         .on_page_load(|webview, payload| {
@@ -1482,11 +1605,11 @@ pub fn run() {
                     if packaged || cfg!(debug_assertions) {
                         let token_ref = auth_token.as_deref();
                         // Packaged launch restores the persisted governed route
-                        // ONLY after revalidating pack authentication (Docker
-                        // up, owned pack running + healthy, Keychain key passes
-                        // /v1/models). Anything less starts Direct explicitly —
-                        // status must never claim governed while the owned
-                        // child is Direct.
+                        // after revalidating pack authentication — and when the
+                        // pack is not immediately ready, a bounded resume
+                        // (compose up + wait) is attempted before fail-closed
+                        // Direct. via_gateway_default stays true so a later
+                        // promote can succeed without manual re-enable.
                         let mut launch_via_gateway = false;
                         if packaged && persisted_via_gateway {
                             let store = KeychainSecretStore;
@@ -1499,8 +1622,25 @@ pub fn run() {
                             } else {
                                 let _ = auto_start_handle.emit(
                                     "council-log",
-                                    "[system] auto-start: persisted governed route not restored — Gateway Pack unavailable or not authenticated; starting Council in Direct mode",
+                                    "[system] auto-start: pack not immediately ready — attempting bounded resume (compose up + health/auth wait)",
                                 );
+                                match gateway_pack::resume_installed_pack(&store) {
+                                    Ok(()) => {
+                                        launch_via_gateway = true;
+                                        let _ = auto_start_handle.emit(
+                                            "council-log",
+                                            "[system] auto-start: pack resume succeeded — spawning governed Council",
+                                        );
+                                    }
+                                    Err(e) => {
+                                        let _ = auto_start_handle.emit(
+                                            "council-log",
+                                            format!(
+                                                "[system] auto-start: pack resume failed ({e}); starting Council in Direct mode (via_gateway_default kept; bounded promote will retry)"
+                                            ),
+                                        );
+                                    }
+                                }
                             }
                         }
                         let mut first_attempt = true;
@@ -1529,6 +1669,7 @@ pub fn run() {
                                         // Direct so core War Room still comes
                                         // up. gateway_pack_status reports the
                                         // pack truth (child recorded Direct).
+                                        // Do not clear via_gateway_default.
                                         first_attempt = false;
                                         route = false;
                                         let _ = auto_start_handle.emit(
@@ -1549,6 +1690,17 @@ pub fn run() {
                                     break;
                                 }
                             }
+                        }
+                        // Fail-closed Direct with pack still enabled: schedule
+                        // bounded later promote without requiring manual Enable.
+                        if packaged
+                            && persisted_via_gateway
+                            && gateway_pack::owned_council_route() == Some(false)
+                        {
+                            schedule_governed_promote_attempts(
+                                auto_start_handle.clone(),
+                                auth_token.clone(),
+                            );
                         }
                     }
                 });
