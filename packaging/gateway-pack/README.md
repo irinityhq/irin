@@ -20,7 +20,7 @@ Optional, app-owned Gateway runtime for the installed Apple-silicon DMG.
 | xAI / OpenAI / Anthropic / NVIDIA API keys | Supported when login-shell provider env is present | Supported | Keys injected only by native code into app-owned 0600 runtime files; never from the renderer |
 | Vertex / gcloud ADC | **Not supported** | Supported when host ADC is available | No host `~/.config/gcloud` mount; keep Vertex Direct-only |
 | Claude CLI / Codex CLI proxies | **Not supported** | Supported when CLIs are installed/authenticated | DMG does not install or authenticate those CLIs |
-| Watch producer / dispatcher arming | **Disabled / not exposed** | N/A | Forced `false` in every pack path; no arming control in the UI |
+| Watch producer / dispatcher | Off at boot; only the producer is armable, via the app's Touch ID ceremony | N/A | Producer and dispatcher are forced `false` at boot in every pack path. Enroll, rehearse, and arm run from Settings (see `gateway/docs/runbooks/arming-authorization.md`, "Desktop Touch ID bridge"); the completed ceremony arms the producer by writing the signed `active_arm` that spend requires. The dispatcher is a separate env gate the ceremony does not touch |
 
 ## Runtime assets (bundled)
 

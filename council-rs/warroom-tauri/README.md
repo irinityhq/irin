@@ -2,16 +2,21 @@
 
 Primary operator UI for council-rs: a **Tauri v2** desktop shell hosting the full
 **Next.js** War Room from `warroom/web/` (including Deliberation, Outbox,
-Librarian, and Drift). Installed release builds adopt the canonical Council on
-**8765** started by root `make setup`; they never start a second backend. Debug
+Librarian, and Drift). Installed release builds start and own their bundled
+Council on **8765** and serve War Room same-origin on loopback; no
+source-development command is needed. If a Council with the identical build
+identity is already healthy on 8765 (for example from a source runtime), the
+installed build adopts that process rather than spawning its bundled one; a
+Council with a different source identity is refused, never killed. Debug
 desktop builds retain a developer-only `council --serve` sidecar.
 
 ## Product install versus component development
 
-Product installation is owned by the root [IRIN README](../../README.md): run
-root `make setup`, with root `make app-install` as the optional desktop-app
-step. The commands below are component developer and packaging commands, not an
-alternate installation path.
+Product installation is owned by the root [IRIN README](../../README.md): the
+signed, notarized DMG from GitHub Releases is the product path, with root
+`make setup` and the optional root `make app-install` as the source
+development path. The commands below are component developer and packaging
+commands, not an alternate installation path.
 
 Development-only overrides:
 
@@ -84,7 +89,8 @@ test -f .next-tauri/index.html
 2. Confirm the debug sidecar serves `/api/health`, cabinets, and the
    Outbox/Librarian tabs.
 3. Release: follow the root README's product installation path.
-4. Confirm the installed app adopts the already-running Council and Discover
+4. Confirm the installed app starts and owns its bundled Council (or adopts a
+   running Council with the identical build identity) and that Discover
    matches the browser War Room.
 
 Use `COUNCIL_WS_SMOKE_ONLY=1` on the backend for WebSocket proof without provider spend:
