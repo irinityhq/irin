@@ -139,34 +139,331 @@ pub async fn run(
         return;
     }
 
+    emit_scope_auditor_stub(
+        &event_tx,
+        &provisional_session_id,
+        stream_config.scope_auditor,
+    )
+    .await;
+    if cancel.is_cancelled() {
+        return;
+    }
+
+    let Some(ready) = prepare_stream_run(
+        config,
+        stream_config,
+        event_tx,
+        cancel,
+        &provisional_session_id,
+    )
+    .await
+    else {
+        return;
+    };
+
+    run_stream_phases(ready, &mut interventions).await;
+}
+
+/// Phase loop: pathfind → optional tear-down, then terminal `done`.
+async fn run_stream_phases(ready: StreamRunReady, interventions: &mut InterventionQueue) {
+    let phases_total =
+        if ready.stream_config.then_tear_down && ready.stream_config.mode == Mode::Pathfind {
+            2
+        } else {
+            1
+        };
+    let mut accum = RunAccum::new();
+    let available_set: std::collections::HashSet<&str> = ready
+        .available
+        .iter()
+        .filter(|(_, ok)| *ok)
+        .map(|(name, _)| *name)
+        .collect();
+    // Same as the original post-availability snapshot: full cabinet seats, no drops.
+    let active_seats: Vec<&Seat> = ready.cabinet.seats.iter().collect();
+    let dropped_seats: Vec<&Seat> = Vec::new();
+
+    'phases: for phase_idx in 0..phases_total {
+        if ready.cancel.is_cancelled() {
+            return;
+        }
+        if ready
+            .stream_config
+            .budget_max_usd
+            .is_some_and(|max| accum.cumulative_spend >= max)
+        {
+            break 'phases;
+        }
+        let session_id = Uuid::new_v4().to_string()[..12].to_string();
+        accum.last_session_id = session_id.clone();
+        let (phase_mode, phase_topic, phase_context) = if phase_idx == 0 {
+            (
+                ready.stream_config.mode,
+                ready.stream_config.topic.clone(),
+                ready.stream_config.context.clone(),
+            )
+        } else {
+            let teardown_context = format!(
+                "## PATHFINDER OUTPUT TO STRESS-TEST\n\n{}\n\n---\n\n{}",
+                accum.pathfinder_synthesis, ready.stream_config.context
+            );
+            let teardown_topic = format!(
+                "STRESS-TEST the following plan produced by a Pathfinder deliberation on: {}",
+                ready.stream_config.topic
+            );
+            (Mode::TearDown, teardown_topic, teardown_context)
+        };
+
+        if phase_idx > 0 {
+            let _ = ready
+                .event_tx
+                .send(StreamEvent::phase_started(
+                    &session_id,
+                    2,
+                    "Tear-down — stress-testing pathfinder plan",
+                    &accum.pathfinder_session_id,
+                ))
+                .await;
+        }
+
+        let topic = phase_topic.as_str();
+        let context = phase_context.as_str();
+        let mode = phase_mode;
+
+        emit_phase_session_started(
+            &ready,
+            &session_id,
+            topic,
+            mode,
+            phase_idx,
+            phases_total,
+            &active_seats,
+            &dropped_seats,
+        )
+        .await;
+
+        // ── Precedent injection ──
+        let (precedent_text, precedent_ids) = inject_phase_precedent(
+            &ready.event_tx,
+            &session_id,
+            topic,
+            ready.stream_config.blind,
+        )
+        .await;
+
+        let Some(rounds_out) = run_phase_rounds(
+            &ready,
+            interventions,
+            &session_id,
+            topic,
+            context,
+            mode,
+            &precedent_text,
+            accum.cumulative_spend,
+            &available_set,
+        )
+        .await
+        else {
+            return;
+        };
+        let PhaseRoundOutcome {
+            all_rounds,
+            manual_specops_signal,
+            budget_paused,
+            validator_cost_usd,
+            judge_usage,
+        } = rounds_out;
+
+        if ready.cancel.is_cancelled() {
+            return;
+        }
+
+        if budget_paused {
+            // Strip accumulation to avoid double-count with normal tail (which will now run).
+            // Keep the phase summary for paused info.
+            accum.phase_summaries.push(json!({
+                "phase": phase_idx + 1,
+                "session_id": session_id,
+                "deliberation_mode": match mode {
+                    Mode::Pathfind => "pathfind",
+                    Mode::TearDown => "teardown",
+                    Mode::Harden => "harden",
+                },
+                "rounds_run": all_rounds.len(),
+                "budget_paused": true,
+            }));
+            // Fall through to specops/synthesize/save (like CLI), then break after.
+            // Do NOT break here.
+        }
+
+        let Some((specops_text, specops_tokens)) = run_auto_specops_if_needed(
+            &ready,
+            &session_id,
+            topic,
+            &all_rounds,
+            &manual_specops_signal,
+            &available_set,
+            &mut accum.cumulative_spend,
+        )
+        .await
+        else {
+            return;
+        };
+
+        let phase_final_conv = all_rounds
+            .last()
+            .map(|r| r.convergence_score)
+            .unwrap_or(1.0);
+
+        let Some(synth) = run_chair_synthesis_stage(
+            &ready,
+            &session_id,
+            topic,
+            context,
+            mode,
+            &all_rounds,
+            &specops_text,
+        )
+        .await
+        else {
+            return;
+        };
+
+        if persist_phase_session(
+            &ready,
+            &mut accum,
+            &session_id,
+            phase_idx,
+            phases_total,
+            &phase_topic,
+            mode,
+            &all_rounds,
+            &synth,
+            &specops_text,
+            specops_tokens,
+            validator_cost_usd,
+            &judge_usage,
+            budget_paused,
+            phase_final_conv,
+            &precedent_ids,
+        )
+        .await
+        .is_none()
+        {
+            return;
+        }
+
+        if budget_paused {
+            break 'phases;
+        }
+    }
+
+    if ready.cancel.is_cancelled() {
+        return;
+    }
+
+    // ── done ──
+    emit_stream_done(&ready, &accum, phases_total).await;
+}
+
+/// Immutable-after-prep inputs shared by streaming stages.
+struct StreamRunReady {
+    config: Arc<Config>,
+    stream_config: StreamConfig,
+    event_tx: mpsc::Sender<StreamEvent>,
+    cancel: CancellationToken,
+    cabinet: Cabinet,
+    rounds_planned: u32,
+    frame_check_enabled: bool,
+    req_ctx: RequestContext,
+    effective_via_gateway: bool,
+    effective_sensitivity: String,
+    available: Vec<(&'static str, bool)>,
+}
+
+/// Cumulative cross-phase state for a streaming deliberation.
+struct RunAccum {
+    pathfinder_session_id: String,
+    pathfinder_synthesis: String,
+    cumulative_tokens: u32,
+    cumulative_cost: f64,
+    cumulative_latency: u64,
+    final_synthesis_text: String,
+    final_conv: f64,
+    final_rounds_run: u32,
+    last_session_id: String,
+    cumulative_spend: f64,
+    phases_completed: u32,
+    phase_summaries: Vec<serde_json::Value>,
+}
+
+impl RunAccum {
+    fn new() -> Self {
+        Self {
+            pathfinder_session_id: String::new(),
+            pathfinder_synthesis: String::new(),
+            cumulative_tokens: 0,
+            cumulative_cost: 0.0,
+            cumulative_latency: 0,
+            final_synthesis_text: String::new(),
+            final_conv: 1.0,
+            final_rounds_run: 0,
+            last_session_id: String::new(),
+            cumulative_spend: 0.0,
+            phases_completed: 0,
+            phase_summaries: Vec::new(),
+        }
+    }
+}
+
+/// Outcome of the per-phase seat fan-out / intervention loop.
+struct PhaseRoundOutcome {
+    all_rounds: Vec<RoundResult>,
+    manual_specops_signal: String,
+    budget_paused: bool,
+    validator_cost_usd: f64,
+    judge_usage: JudgeUsage,
+}
+
+async fn emit_scope_auditor_stub(
+    event_tx: &mpsc::Sender<StreamEvent>,
+    provisional_session_id: &str,
+    scope_auditor: bool,
+) {
     // Minimal stub for scope_auditor (from bs-detector plan): prevent silent no-op.
     // Real impl (early/late investigator, declared_slice, report hoisting) pending.
     // Use info() so it appears in OperatorLog (info_messages) during streaming.
-    if stream_config.scope_auditor {
+    if scope_auditor {
         let _ = event_tx
             .send(StreamEvent::info(
-                &provisional_session_id,
+                provisional_session_id,
                 "scope_auditor requested (Scope Auditor / steering detection). Engine wiring not yet implemented per the spec. Flag parsed but ignored for this run.",
             ))
             .await;
     }
-    if cancel.is_cancelled() {
-        return;
-    }
-    let cabinet_owned;
-    let cabinet: &crate::types::Cabinet = if let Some(ref custom) = stream_config.custom_cabinet {
+}
+
+/// Resolve cabinet, enforce WS synthesis guards, run governed preflight, and
+/// fail closed if any required provider transport is unavailable.
+async fn prepare_stream_run(
+    config: Arc<Config>,
+    stream_config: StreamConfig,
+    event_tx: mpsc::Sender<StreamEvent>,
+    cancel: CancellationToken,
+    provisional_session_id: &str,
+) -> Option<StreamRunReady> {
+    let cabinet = if let Some(ref custom) = stream_config.custom_cabinet {
         if let Err(e) = config.validate_cabinet_for_execution("custom_cabinet", custom) {
             let _ = event_tx
                 .send(StreamEvent::error(
-                    &provisional_session_id,
+                    provisional_session_id,
                     &format!("Cabinet validation failed: {}", e),
                     true,
                 ))
                 .await;
-            return;
+            return None;
         }
-        cabinet_owned = custom.clone();
-        &cabinet_owned
+        custom.clone()
     } else {
         // resolve_cabinet_owned (feature contract): registry hit returns a clone; a miss
         // falls back to <base_dir>/cabinets/<name>.yaml so cabinets saved after
@@ -174,19 +471,16 @@ pub async fn run(
         // is immutable). The disk path runs the same per-run execution gate the
         // custom_cabinet branch above uses.
         match config.resolve_cabinet_owned(&stream_config.cabinet_name) {
-            Ok(c) => {
-                cabinet_owned = c;
-                &cabinet_owned
-            }
+            Ok(c) => c,
             Err(e) => {
                 let _ = event_tx
                     .send(StreamEvent::error(
-                        &provisional_session_id,
+                        provisional_session_id,
                         &format!("Cabinet load failed: {}", e),
                         true,
                     ))
                     .await;
-                return;
+                return None;
             }
         }
     };
@@ -200,21 +494,21 @@ pub async fn run(
     if cabinet.synthesis_mode == SynthesisMode::DirectiveProposalV1 {
         let _ = event_tx
             .send(StreamEvent::error(
-                &provisional_session_id,
+                provisional_session_id,
                 "synthesis_mode 'directive_proposal_v1' (council-triage) is not supported on the \
                  streaming/WS path — it does not enforce the directive fence. Use the REST \
                  /api/deliberate surface for triage.",
                 true,
             ))
             .await;
-        return;
+        return None;
     }
     if cancel.is_cancelled() {
-        return;
+        return None;
     }
 
     let rounds_planned = stream_config.max_rounds.unwrap_or(cabinet.rounds);
-    let frame_check_enabled = stream_frame_check_enabled(&stream_config, cabinet);
+    let frame_check_enabled = stream_frame_check_enabled(&stream_config, &cabinet);
 
     // Per-session gateway routing (feature contract): override the process default for
     // every provider call carrying session content — seat fan-out,
@@ -229,7 +523,7 @@ pub async fn run(
         .clone()
         .unwrap_or_else(provider::default_sensitivity);
 
-    let required_models = governed_required_transport_models(cabinet);
+    let required_models = governed_required_transport_models(&cabinet);
     let alternatives = governed_alternative_transport_model_groups(
         &config,
         frame_check_enabled,
@@ -242,12 +536,12 @@ pub async fn run(
     {
         let _ = event_tx
             .send(StreamEvent::error(
-                &provisional_session_id,
+                provisional_session_id,
                 &format!("Governed Gateway preflight failed: {err}"),
                 true,
             ))
             .await;
-        return;
+        return None;
     }
 
     // Check which providers are available — gateway mode unlocks all of them.
@@ -277,7 +571,7 @@ pub async fn run(
         }
         let _ = event_tx
             .send(StreamEvent::error(
-                &provisional_session_id,
+                provisional_session_id,
                 &format!(
                     "Cabinet cannot start because required provider transports are unavailable: {}",
                     missing.join(", ")
@@ -285,1182 +579,1261 @@ pub async fn run(
                 true,
             ))
             .await;
-        return;
+        return None;
     }
-    let active_seats: Vec<&Seat> = cabinet.seats.iter().collect();
-    let dropped_seats: Vec<&Seat> = Vec::new();
 
-    let phases_total = if stream_config.then_tear_down && stream_config.mode == Mode::Pathfind {
-        2
-    } else {
-        1
-    };
-    let mut pathfinder_session_id = String::new();
-    let mut pathfinder_synthesis = String::new();
-    let mut cumulative_tokens: u32 = 0;
-    let mut cumulative_cost: f64 = 0.0;
-    let mut cumulative_latency: u64 = 0;
-    let mut final_synthesis_text = String::new();
-    let mut final_conv = 1.0f64;
-    let mut final_rounds_run = 0u32;
-    let mut last_session_id = String::new();
-    let mut cumulative_spend: f64 = 0.0;
-    let mut phases_completed: u32 = 0;
-    let mut phase_summaries: Vec<serde_json::Value> = Vec::new();
+    Some(StreamRunReady {
+        config,
+        stream_config,
+        event_tx,
+        cancel,
+        cabinet,
+        rounds_planned,
+        frame_check_enabled,
+        req_ctx,
+        effective_via_gateway,
+        effective_sensitivity,
+        available,
+    })
+}
 
-    'phases: for phase_idx in 0..phases_total {
-        if cancel.is_cancelled() {
-            return;
-        }
-        if stream_config
-            .budget_max_usd
-            .is_some_and(|max| cumulative_spend >= max)
-        {
-            break 'phases;
-        }
-        let session_id = Uuid::new_v4().to_string()[..12].to_string();
-        last_session_id = session_id.clone();
-        let (phase_mode, phase_topic, phase_context) = if phase_idx == 0 {
-            (
-                stream_config.mode,
-                stream_config.topic.clone(),
-                stream_config.context.clone(),
+/// One retrieval receipt per phase: the `precedent_loaded` WS event,
+/// the injected prompt text, and the saved `precedent_ids` all come
+/// from this single retrieve(). The idle preview uses the same fn +
+/// defaults but re-queries while typing — same ranker, not the same
+/// frozen object.
+async fn inject_phase_precedent(
+    event_tx: &mpsc::Sender<StreamEvent>,
+    session_id: &str,
+    topic: &str,
+    blind: bool,
+) -> (String, Vec<String>) {
+    if !blind {
+        // precedent::retrieve performs synchronous filesystem work (and may
+        // block on embedding-model init). Offload from streaming engine
+        // path (post-delib / WarRoom WS). On join err: log + empty.
+        let topic_c = topic.to_string();
+        let join_res = tokio::task::spawn_blocking(move || {
+            precedent::retrieve(
+                &topic_c,
+                precedent::RETRIEVE_LIMIT,
+                precedent::RETRIEVE_THRESHOLD,
+                false,
             )
-        } else {
-            let teardown_context = format!(
-                "## PATHFINDER OUTPUT TO STRESS-TEST\n\n{}\n\n---\n\n{}",
-                pathfinder_synthesis, stream_config.context
-            );
-            let teardown_topic = format!(
-                "STRESS-TEST the following plan produced by a Pathfinder deliberation on: {}",
-                stream_config.topic
-            );
-            (Mode::TearDown, teardown_topic, teardown_context)
-        };
+        })
+        .await;
+        match join_res {
+            Ok(receipt) if !receipt.hits.is_empty() => {
+                let text = precedent::format_for_injection(&receipt);
+                let matches = precedent::receipt_to_match_values(&receipt);
+                let _ = event_tx
+                    .send(StreamEvent::precedent_loaded(session_id, matches))
+                    .await;
+                let _ = event_tx
+                    .send(StreamEvent::info(
+                        session_id,
+                        &format!(
+                            "Precedent: {} prior sessions found (engine={})",
+                            receipt.hits.len(),
+                            receipt.engine
+                        ),
+                    ))
+                    .await;
+                (text, receipt.ids())
+            }
+            Ok(_) => (String::new(), vec![]),
+            Err(e) => {
+                eprintln!(
+                    "ERROR: stream precedent retrieve spawn_blocking join failed session_id={}: {}",
+                    session_id, e
+                );
+                (String::new(), vec![])
+            }
+        }
+    } else {
+        (String::new(), vec![])
+    }
+}
+#[allow(clippy::too_many_arguments)] // stage extraction of monobody captures
+#[allow(clippy::needless_borrow)] // verbatim monobody; &ready fields are already refs
+async fn emit_phase_session_started(
+    ready: &StreamRunReady,
+    session_id: &str,
+    topic: &str,
+    mode: Mode,
+    phase_idx: u32,
+    phases_total: u32,
+    active_seats: &[&Seat],
+    dropped_seats: &[&Seat],
+) {
+    let StreamRunReady {
+        stream_config,
+        event_tx,
+        cabinet,
+        rounds_planned,
+        effective_via_gateway,
+        effective_sensitivity,
+        available,
+        ..
+    } = ready;
+    // ── session_started ──
+    let _ = event_tx
+        .send(StreamEvent::session_started(
+            session_id,
+            json!({
+                "topic": topic,
+                "cabinet_name": cabinet.name,
+                "rounds_planned": rounds_planned,
+                "mode": if stream_config.blind { "blind" } else { "normal" },
+                "active_seats": active_seats.iter().map(|s| json!({
+                    "name": s.name, "provider": s.provider, "model": s.model
+                })).collect::<Vec<_>>(),
+                "dropped_seats": dropped_seats.iter().map(|s| json!({
+                    "name": s.name, "provider": s.provider
+                })).collect::<Vec<_>>(),
+                "chair": {
+                    "provider": &cabinet.chair.provider,
+                    "model": &cabinet.chair.model,
+                },
+                "available_providers": available.iter().filter(|(_, ok)| *ok).map(|(n, _)| n).collect::<Vec<_>>(),
+                "council_version": env!("CARGO_PKG_VERSION"),
+                "stream_version": "rs-1.0.0",
+                "tier": stream_config.tier,
+                "phase": phase_idx + 1,
+                "phases_total": phases_total,
+                "deliberation_mode": match mode {
+                    Mode::Pathfind => "pathfind",
+                    Mode::TearDown => "teardown",
+                    Mode::Harden => "harden",
+                },
+                // feature contract: also emitted by the smoke shim (src/server.rs) — keep in sync.
+                "via_gateway": effective_via_gateway,
+                "execution_route": if *effective_via_gateway { "governed" } else { "direct" },
+                "sensitivity": effective_sensitivity.to_lowercase(),
+            }),
+        ))
+        .await;
+}
+/// Per-phase deliberation: frame check, seat fan-out, judge, validate,
+/// budget pause, and operator intervention loop.
+#[allow(clippy::too_many_arguments)] // stage extraction of monobody captures
+#[allow(clippy::question_mark)] // keep original let-Some/else cancel shape
+#[allow(clippy::needless_borrow)] // verbatim monobody; &ready fields are already refs
+async fn run_phase_rounds(
+    ready: &StreamRunReady,
+    interventions: &mut InterventionQueue,
+    session_id: &str,
+    topic: &str,
+    context: &str,
+    mode: Mode,
+    precedent_text: &str,
+    cumulative_spend: f64,
+    available_set: &std::collections::HashSet<&str>,
+) -> Option<PhaseRoundOutcome> {
+    let StreamRunReady {
+        config,
+        stream_config,
+        event_tx,
+        cancel,
+        cabinet,
+        rounds_planned,
+        frame_check_enabled,
+        req_ctx,
+        effective_via_gateway,
+        ..
+    } = ready;
+    let rounds_planned = *rounds_planned;
+    let frame_check_enabled = *frame_check_enabled;
+    let effective_via_gateway = *effective_via_gateway;
+    // Re-own so spawn/clone sites match the original monobody `session_id: String`
+    // (parameter is &str only to avoid moving the caller's local).
+    let session_id = session_id.to_string();
 
-        if phase_idx > 0 {
-            let _ = event_tx
-                .send(StreamEvent::phase_started(
-                    &session_id,
-                    2,
-                    "Tear-down — stress-testing pathfinder plan",
-                    &pathfinder_session_id,
-                ))
-                .await;
+    // ── Deliberation loop ──
+    let mut all_rounds: Vec<RoundResult> = Vec::new();
+    let mut extra_context = String::new();
+    let mut manual_specops_signal = String::new();
+    let mut early_exit = false;
+    let mut budget_paused = false;
+    let mut validator_cost_usd = 0.0;
+    let mut judge_usage = JudgeUsage::default();
+
+    // Per-phase evidence cache for validate dedup (topic stable within phase).
+    let evidence_cache = crate::engine::sheldon::EvidenceCache::default();
+    let (budget_signal, _budget_tier) = crate::engine::deliberate::fetch_budget_signal(
+        std::env::var("HERMES_PROFILE").ok().as_deref(),
+        Some(&session_id),
+    );
+    // Working copy of seats (for swap_seat mutations)
+    let mut live_seats: Vec<Seat> = cabinet.seats.clone();
+
+    for round_num in 1..=rounds_planned {
+        if early_exit || cancel.is_cancelled() {
+            if cancel.is_cancelled() {
+                return None;
+            }
+            break;
         }
 
-        let topic = phase_topic.as_str();
-        let context = phase_context.as_str();
-        let mode = phase_mode;
-
-        // ── session_started ──
-        let _ = event_tx.send(StreamEvent::session_started(&session_id, json!({
-        "topic": topic,
-        "cabinet_name": cabinet.name,
-        "rounds_planned": rounds_planned,
-        "mode": if stream_config.blind { "blind" } else { "normal" },
-        "active_seats": active_seats.iter().map(|s| json!({
-            "name": s.name, "provider": s.provider, "model": s.model
-        })).collect::<Vec<_>>(),
-        "dropped_seats": dropped_seats.iter().map(|s| json!({
-            "name": s.name, "provider": s.provider
-        })).collect::<Vec<_>>(),
-        "chair": {
-            "provider": &cabinet.chair.provider,
-            "model": &cabinet.chair.model,
-        },
-        "available_providers": available.iter().filter(|(_, ok)| *ok).map(|(n, _)| n).collect::<Vec<_>>(),
-        "council_version": env!("CARGO_PKG_VERSION"),
-        "stream_version": "rs-1.0.0",
-        "tier": stream_config.tier,
-        "phase": phase_idx + 1,
-        "phases_total": phases_total,
-        "deliberation_mode": match mode {
-            Mode::Pathfind => "pathfind",
-            Mode::TearDown => "teardown",
-            Mode::Harden => "harden",
-        },
-        // feature contract: also emitted by the smoke shim (src/server.rs) — keep in sync.
-        "via_gateway": effective_via_gateway,
-        "execution_route": if effective_via_gateway { "governed" } else { "direct" },
-        "sensitivity": effective_sensitivity.to_lowercase(),
-    }))).await;
-
-        // ── Precedent injection ──
-        // One retrieval receipt per phase: the `precedent_loaded` WS event,
-        // the injected prompt text, and the saved `precedent_ids` all come
-        // from this single retrieve(). The idle preview uses the same fn +
-        // defaults but re-queries while typing — same ranker, not the same
-        // frozen object.
-        let (precedent_text, precedent_ids) = if !stream_config.blind {
-            // precedent::retrieve performs synchronous filesystem work (and may
-            // block on embedding-model init). Offload from streaming engine
-            // path (post-delib / WarRoom WS). On join err: log + empty.
-            let topic_c = topic.to_string();
-            let join_res = tokio::task::spawn_blocking(move || {
-                precedent::retrieve(
-                    &topic_c,
-                    precedent::RETRIEVE_LIMIT,
-                    precedent::RETRIEVE_THRESHOLD,
-                    false,
-                )
-            })
+        // ── round_started ──
+        let _ = event_tx
+            .send(StreamEvent::round_started(
+                &session_id,
+                round_num,
+                rounds_planned,
+            ))
             .await;
-            match join_res {
-                Ok(receipt) if !receipt.hits.is_empty() => {
-                    let text = precedent::format_for_injection(&receipt);
-                    let matches = precedent::receipt_to_match_values(&receipt);
-                    let _ = event_tx
-                        .send(StreamEvent::precedent_loaded(&session_id, matches))
-                        .await;
-                    let _ = event_tx
-                        .send(StreamEvent::info(
-                            &session_id,
-                            &format!(
-                                "Precedent: {} prior sessions found (engine={})",
-                                receipt.hits.len(),
-                                receipt.engine
-                            ),
-                        ))
-                        .await;
-                    (text, receipt.ids())
-                }
-                Ok(_) => (String::new(), vec![]),
-                Err(e) => {
-                    eprintln!(
-                        "ERROR: stream precedent retrieve spawn_blocking join failed session_id={}: {}",
-                        session_id, e
-                    );
-                    (String::new(), vec![])
+
+        // Build prompts
+        let mut prompts: Vec<(String, String)> = live_seats
+            .iter()
+            .map(|seat| {
+                let prompt = build_round_prompt(
+                    topic,
+                    context,
+                    &extra_context,
+                    &precedent_text,
+                    &all_rounds,
+                    &budget_signal,
+                    seat,
+                    round_num,
+                );
+                (seat.name.clone(), prompt)
+            })
+            .collect();
+
+        // v9.10.0: Frame check — scan R1 prompts for embedded assumptions
+        if round_num == 1 && frame_check_enabled {
+            // Run frame check on the first seat's prompt (all share the same topic base)
+            if let Some((_, first_prompt)) = prompts.first() {
+                let Some(checked) = until_cancelled(
+                    &cancel,
+                    crate::engine::deliberate::frame_check_prompt(
+                        first_prompt,
+                        &config.roles,
+                        &config.models,
+                        &req_ctx,
+                    ),
+                )
+                .await
+                else {
+                    return None;
+                };
+                if checked != *first_prompt {
+                    // Frame check found assumptions — apply the warning suffix to all prompts
+                    let suffix = &checked[first_prompt.len()..];
+                    for (_, prompt) in prompts.iter_mut() {
+                        prompt.push_str(suffix);
+                    }
                 }
             }
-        } else {
-            (String::new(), vec![])
-        };
+        }
 
-        // ── Deliberation loop ──
-        let mut all_rounds: Vec<RoundResult> = Vec::new();
-        let mut extra_context = String::new();
-        let mut manual_specops_signal = String::new();
-        let mut early_exit = false;
-        let mut budget_paused = false;
-        let mut validator_cost_usd = 0.0;
-        let mut judge_usage = JudgeUsage::default();
-
-        // Per-phase evidence cache for validate dedup (topic stable within phase).
-        let evidence_cache = crate::engine::sheldon::EvidenceCache::default();
-        let (budget_signal, _budget_tier) = crate::engine::deliberate::fetch_budget_signal(
-            std::env::var("HERMES_PROFILE").ok().as_deref(),
-            Some(&session_id),
-        );
-        // Working copy of seats (for swap_seat mutations)
-        let mut live_seats: Vec<Seat> = active_seats.iter().map(|s| (*s).clone()).collect();
-
-        for round_num in 1..=rounds_planned {
-            if early_exit || cancel.is_cancelled() {
-                if cancel.is_cancelled() {
-                    return;
-                }
-                break;
-            }
-
-            // ── round_started ──
+        // Emit seat_started for all seats
+        for seat in &live_seats {
             let _ = event_tx
-                .send(StreamEvent::round_started(
+                .send(StreamEvent::seat_started(
                     &session_id,
                     round_num,
-                    rounds_planned,
+                    &seat.name,
+                    &seat.provider,
+                    &seat.model,
                 ))
                 .await;
+        }
 
-            // Build prompts
-            let mut prompts: Vec<(String, String)> = live_seats
-                .iter()
-                .map(|seat| {
-                    let prompt = build_round_prompt(
-                        topic,
-                        context,
-                        &extra_context,
-                        &precedent_text,
-                        &all_rounds,
-                        &budget_signal,
-                        seat,
-                        round_num,
+        // Fan-out: all seats in parallel
+        let mut set = JoinSet::new();
+        for (seat, (_, prompt)) in live_seats.iter().zip(prompts.iter()) {
+            if cancel.is_cancelled() {
+                set.abort_all();
+                return None;
+            }
+            let seat_name = seat.name.clone();
+            let prov = seat.provider.clone();
+            let model = seat.model.clone();
+            let base_system = match config.render_system_prompt(&seat.system) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "ERROR: render_system_prompt failed for seat {}: {}",
+                        seat.name, e
                     );
-                    (seat.name.clone(), prompt)
-                })
-                .collect();
+                    seat.system.clone()
+                }
+            };
+            let system = format!("{}\n\n{}", base_system, seat_preamble_for(cabinet, mode));
+            let prompt = prompt.clone();
+            let ctx = req_ctx.clone();
+            // N01: token streaming. For streaming-capable providers
+            // (openai_compat SSE family, gateway routing excluded), forward
+            // each visible delta as a `seat_chunk` between seat_started and
+            // seat_complete. seat_complete.text stays authoritative. Other
+            // providers fall back to the buffered call (zero chunks — legal).
+            let stream_chunks = provider::is_streaming_capable(&prov, effective_via_gateway);
+            let chunk_tx = event_tx.clone();
+            let chunk_sid = session_id.clone();
 
-            // v9.10.0: Frame check — scan R1 prompts for embedded assumptions
-            if round_num == 1 && frame_check_enabled {
-                // Run frame check on the first seat's prompt (all share the same topic base)
-                if let Some((_, first_prompt)) = prompts.first() {
-                    let Some(checked) = until_cancelled(
+            set.spawn(async move {
+                let resp = if stream_chunks {
+                    let mut seq: u32 = 0;
+                    // try_send (non-blocking) keeps a slow consumer from
+                    // back-pressuring the provider read; seat_complete still
+                    // carries the full text, so a dropped chunk is cosmetic.
+                    // T24: deltas stream to the authed loopback warroom client
+                    // raw (pre-redaction). Per-fragment scrubbing would
+                    // false-positive and still miss a secret spanning a
+                    // fragment boundary; the persisted form (seat_complete via
+                    // the from_provider closure below) is redacted. See
+                    // SECURITY.md#t24-data-flow-redaction.
+                    let on_delta = |delta: &str| {
+                        let evt =
+                            StreamEvent::seat_chunk(&chunk_sid, round_num, &seat_name, delta, seq);
+                        seq = seq.saturating_add(1);
+                        let _ = chunk_tx.try_send(evt);
+                    };
+                    provider::ask_streaming_with_context(
+                        &prov, &prompt, &system, &model, &ctx, on_delta,
+                    )
+                    .await
+                } else {
+                    provider::ask_with_context(&prov, &prompt, &system, &model, &ctx).await
+                };
+                tracing::info!(
+                    provider = %prov,
+                    model = %model,
+                    seat = %seat_name,
+                    tokens_in = resp.tokens_in,
+                    tokens_out = resp.tokens_out,
+                    latency_ms = resp.latency_ms,
+                    "Provider call completed"
+                );
+                SeatResponse::from_provider(&seat_name, &prov, round_num, resp, |s| {
+                    let text = crate::scrub::redact(s);
+                    crate::librarian::redaction::redact_secrets(&text).0
+                })
+            });
+        }
+
+        // Collect responses as they complete
+        let mut responses: Vec<SeatResponse> = Vec::new();
+        loop {
+            let result = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => {
+                    set.abort_all();
+                    while set.join_next().await.is_some() {}
+                    return None;
+                }
+                result = set.join_next() => result,
+            };
+            let Some(result) = result else {
+                break;
+            };
+            match result {
+                Ok(resp) => {
+                    // Calculate cost
+                    let mut resp = resp;
+                    resp.cost_usd = config.models.estimate_cost(
+                        &resp.model,
+                        resp.tokens_in,
+                        resp.tokens_out,
+                        resp.cached_in,
+                    );
+                    let _ = event_tx
+                        .send(StreamEvent::seat_complete(
+                            &session_id,
+                            serde_json::to_value(&resp).unwrap_or_default(),
+                        ))
+                        .await;
+                    responses.push(resp);
+                }
+                Err(e) => {
+                    let _ = event_tx
+                        .send(StreamEvent::error(
+                            &session_id,
+                            &format!("Seat task panicked: {}", e),
+                            false,
+                        ))
+                        .await;
+                }
+            }
+        }
+
+        // v9.12.0: Structured convergence judge (shared with CLI engine)
+        let _ = event_tx
+            .send(StreamEvent::info(&session_id, "Scoring convergence…"))
+            .await;
+        let Some(judge) = until_cancelled(
+            &cancel,
+            judge_round(&responses, topic, &req_ctx, &config.roles, &config.models),
+        )
+        .await
+        else {
+            return None;
+        };
+        judge_usage += judge.usage;
+        let score = judge.score;
+        let judge_prov = judge.provider;
+        let judge_assess = judge.assessment;
+        let judge_gateway_attempts = judge.gateway_attempts;
+        // Use mode's convergence_threshold as base (matching CLI engine in run_with_cancel),
+        // not auto_specops_threshold (which is for low-conv auto-specops trigger).
+        // This ensures homogeneity/quality penalties from effective_convergence_threshold
+        // are applied against the mode-intended bar (TearDown 0.8, Pathfind 0.6, Harden 0.7).
+        let base_threshold = mode.convergence_threshold();
+        let effective_threshold = effective_convergence_threshold(
+            base_threshold,
+            judge_assess.as_ref(),
+            convergence_quality_penalty_enabled(stream_config.validate),
+        );
+        let converged = score >= effective_threshold;
+
+        let _ = event_tx
+            .send(StreamEvent::convergence_scored(
+                &session_id,
+                round_num,
+                score,
+                converged,
+            ))
+            .await;
+
+        // N02: per-seat divergence map. Embed the seats' responses for this
+        // round and project to 2D via PCA, then emit `round_divergence`.
+        // Embedding is sync (fastembed lock + possible model download), so
+        // it runs in spawn_blocking per the async-hygiene convention. If
+        // embeddings are unavailable or there are < 2 usable seats, the
+        // event is omitted — the UI tolerates absence.
+        if until_cancelled(
+            &cancel,
+            emit_round_divergence(&event_tx, &session_id, round_num, &responses),
+        )
+        .await
+        .is_none()
+        {
+            return None;
+        }
+
+        let flip_hash = judge_assess.as_ref().map(|a| {
+            let mut hasher = DefaultHasher::new();
+            format!("{}|{}", a.drift.as_deref().unwrap_or(""), a.recommendation).hash(&mut hasher);
+            format!("{:x}", hasher.finish())[..8].to_string()
+        });
+
+        // Sheldon claim validator (mirrors CLI engine/deliberate.rs)
+        // Tries full claim_validator cascade from roles.yaml until one succeeds.
+        let mut validation_report = None;
+        if stream_config.validate && round_num <= rounds_planned {
+            let claim_role = &config.roles.claim_validator; // note: stream has access via outer config
+            if crate::engine::sheldon::claim_validator_ready(claim_role, round_num) {
+                for step in &claim_role.cascade {
+                    if cancel.is_cancelled() {
+                        return None;
+                    }
+                    let v_provider = step.provider.clone();
+                    let v_model = Some(step.model.clone());
+                    let vcfg = crate::engine::sheldon::ValidatorConfig {
+                        provider: v_provider.clone(),
+                        model: v_model,
+                        gate: stream_config.validate_gate,
+                        verbose: false,
+                    };
+                    let _ = event_tx
+                        .send(StreamEvent::info(&session_id, "Validating round…"))
+                        .await;
+                    let Some(val_result) = until_cancelled(
                         &cancel,
-                        crate::engine::deliberate::frame_check_prompt(
-                            first_prompt,
-                            &config.roles,
-                            &config.models,
+                        crate::engine::sheldon::validate_round(
+                            &responses,
+                            topic,
+                            context,
+                            round_num,
+                            &vcfg,
                             &req_ctx,
+                            Some(&evidence_cache),
                         ),
                     )
                     .await
                     else {
-                        return;
+                        return None;
                     };
-                    if checked != *first_prompt {
-                        // Frame check found assumptions — apply the warning suffix to all prompts
-                        let suffix = &checked[first_prompt.len()..];
-                        for (_, prompt) in prompts.iter_mut() {
-                            prompt.push_str(suffix);
+                    match val_result {
+                        crate::engine::sheldon::ValidateRoundOutcome::Ok(report, c) => {
+                            validation_report = Some(report.clone());
+                            validator_cost_usd += c;
+                            // Gate decision moved below: see P2 early-stop handling.
+                            if let Some(ref r) = validation_report {
+                                let verdicts_json = serde_json::to_value(r).unwrap_or(json!([]));
+                                let _ = event_tx
+                                    .send(StreamEvent::round_validation(
+                                        &session_id,
+                                        round_num,
+                                        stream_config.validate_gate,
+                                        &verdicts_json,
+                                    ))
+                                    .await;
+                            }
+                            break;
                         }
+                        crate::engine::sheldon::ValidateRoundOutcome::Skipped(_) => {
+                            break;
+                        }
+                        crate::engine::sheldon::ValidateRoundOutcome::ProviderFailed => {}
                     }
                 }
             }
+        }
 
-            // Emit seat_started for all seats
-            for seat in &live_seats {
+        // P2: Gate redaction (responses) only on continuing intermediate rounds.
+        // On terminating rounds (planned last, or early via budget/convergence)
+        // leave responses un-gated so the Chair transcript + append_validation_context
+        // receives full evidence alongside the authoritative validation_report.
+        // Compute would-budget using post-validator spend to decide "terminating".
+        if stream_config.validate_gate && validation_report.is_some() {
+            let this_seat_cost: f64 = responses.iter().map(|r| r.cost_usd).sum();
+            let spend_at =
+                cumulative_spend + this_seat_cost + validator_cost_usd + judge_usage.cost_usd;
+            let would_budget = should_pause_for_budget(
+                stream_config.budget_max_usd,
+                spend_at,
+                round_num,
+                rounds_planned,
+            );
+            let is_terminating = round_num >= rounds_planned || converged || would_budget;
+            if !is_terminating && let Some(ref rpt) = validation_report {
+                responses = crate::engine::sheldon::gate_responses(&responses, rpt);
+            }
+        }
+
+        all_rounds.push(RoundResult {
+            round_num,
+            responses,
+            convergence_score: score,
+            converged,
+            judge_provider: judge_prov,
+            judge_assessment: judge_assess,
+            judge_gateway_attempts,
+            flip_flop_hash: flip_hash,
+            // T24: claim/reasoning are raw validator output that bypasses the
+            // per-seat from_provider redaction closure — scrub before persist.
+            validation_report: validation_report.map(crate::scrub::redact_validation_report),
+        });
+
+        let is_last = round_num >= rounds_planned;
+        let _ = event_tx
+            .send(StreamEvent::round_complete(
+                &session_id,
+                round_num,
+                score,
+                converged,
+                converged && !is_last,
+            ))
+            .await;
+
+        let phase_seat_cost: f64 = all_rounds
+            .iter()
+            .flat_map(|r| &r.responses)
+            .map(|r| r.cost_usd)
+            .sum();
+        let spend_at_boundary =
+            cumulative_spend + phase_seat_cost + validator_cost_usd + judge_usage.cost_usd;
+        if should_pause_for_budget(
+            stream_config.budget_max_usd,
+            spend_at_boundary,
+            round_num,
+            rounds_planned,
+        ) {
+            budget_paused = true;
+            if let Some(max) = stream_config.budget_max_usd {
                 let _ = event_tx
-                    .send(StreamEvent::seat_started(
+                    .send(StreamEvent::budget_paused(
                         &session_id,
                         round_num,
-                        &seat.name,
-                        &seat.provider,
-                        &seat.model,
+                        spend_at_boundary,
+                        max,
                     ))
                     .await;
             }
+            break;
+        }
 
-            // Fan-out: all seats in parallel
-            let mut set = JoinSet::new();
-            for (seat, (_, prompt)) in live_seats.iter().zip(prompts.iter()) {
-                if cancel.is_cancelled() {
-                    set.abort_all();
-                    return;
-                }
-                let seat_name = seat.name.clone();
-                let prov = seat.provider.clone();
-                let model = seat.model.clone();
-                let base_system = match config.render_system_prompt(&seat.system) {
-                    Ok(s) => s,
-                    Err(e) => {
-                        eprintln!(
-                            "ERROR: render_system_prompt failed for seat {}: {}",
-                            seat.name, e
-                        );
-                        seat.system.clone()
-                    }
-                };
-                let system = format!("{}\n\n{}", base_system, seat_preamble_for(cabinet, mode));
-                let prompt = prompt.clone();
-                let ctx = req_ctx.clone();
-                // N01: token streaming. For streaming-capable providers
-                // (openai_compat SSE family, gateway routing excluded), forward
-                // each visible delta as a `seat_chunk` between seat_started and
-                // seat_complete. seat_complete.text stays authoritative. Other
-                // providers fall back to the buffered call (zero chunks — legal).
-                let stream_chunks = provider::is_streaming_capable(&prov, effective_via_gateway);
-                let chunk_tx = event_tx.clone();
-                let chunk_sid = session_id.clone();
+        // Early convergence exit (no pause)
+        if converged && !is_last && !stream_config.pause_after_each_round {
+            break;
+        }
 
-                set.spawn(async move {
-                    let resp = if stream_chunks {
-                        let mut seq: u32 = 0;
-                        // try_send (non-blocking) keeps a slow consumer from
-                        // back-pressuring the provider read; seat_complete still
-                        // carries the full text, so a dropped chunk is cosmetic.
-                        // T24: deltas stream to the authed loopback warroom client
-                        // raw (pre-redaction). Per-fragment scrubbing would
-                        // false-positive and still miss a secret spanning a
-                        // fragment boundary; the persisted form (seat_complete via
-                        // the from_provider closure below) is redacted. See
-                        // SECURITY.md#t24-data-flow-redaction.
-                        let on_delta = |delta: &str| {
-                            let evt = StreamEvent::seat_chunk(
-                                &chunk_sid, round_num, &seat_name, delta, seq,
-                            );
-                            seq = seq.saturating_add(1);
-                            let _ = chunk_tx.try_send(evt);
-                        };
-                        provider::ask_streaming_with_context(
-                            &prov, &prompt, &system, &model, &ctx, on_delta,
-                        )
-                        .await
-                    } else {
-                        provider::ask_with_context(&prov, &prompt, &system, &model, &ctx).await
-                    };
-                    tracing::info!(
-                        provider = %prov,
-                        model = %model,
-                        seat = %seat_name,
-                        tokens_in = resp.tokens_in,
-                        tokens_out = resp.tokens_out,
-                        latency_ms = resp.latency_ms,
-                        "Provider call completed"
-                    );
-                    SeatResponse::from_provider(&seat_name, &prov, round_num, resp, |s| {
-                        let text = crate::scrub::redact(s);
-                        crate::librarian::redaction::redact_secrets(&text).0
-                    })
-                });
-            }
+        // ── Pause for operator input ──
+        if stream_should_await_operator_input(
+            stream_config.pause_after_each_round,
+            is_last,
+            early_exit,
+        ) {
+            let full_options = &[
+                "continue",
+                "end_early",
+                "escalate_specops",
+                "escalate_munger",
+                "escalate_contrarian",
+                "escalate_kiss",
+                "inject_context",
+                "swap_seat",
+            ];
+            let _ = event_tx
+                .send(StreamEvent::awaiting_input(
+                    &session_id,
+                    round_num,
+                    score,
+                    converged,
+                    full_options,
+                    None,
+                ))
+                .await;
 
-            // Collect responses as they complete
-            let mut responses: Vec<SeatResponse> = Vec::new();
-            loop {
-                let result = tokio::select! {
-                    biased;
-                    _ = cancel.cancelled() => {
-                        set.abort_all();
-                        while set.join_next().await.is_some() {}
-                        return;
-                    }
-                    result = set.join_next() => result,
+            let action = loop {
+                let Some(candidate) = until_cancelled(&cancel, interventions.wait(900)).await
+                else {
+                    return None;
                 };
-                let Some(result) = result else {
-                    break;
-                };
-                match result {
-                    Ok(resp) => {
-                        // Calculate cost
-                        let mut resp = resp;
-                        resp.cost_usd = config.models.estimate_cost(
-                            &resp.model,
-                            resp.tokens_in,
-                            resp.tokens_out,
-                            resp.cached_in,
-                        );
-                        let _ = event_tx
-                            .send(StreamEvent::seat_complete(
-                                &session_id,
-                                serde_json::to_value(&resp).unwrap_or_default(),
-                            ))
-                            .await;
-                        responses.push(resp);
-                    }
-                    Err(e) => {
+                if effective_via_gateway && candidate.is_escalation() {
+                    let mode = candidate.escalation_mode().unwrap_or("specops");
+                    let required = crate::engine::direct_fire::spec(mode)
+                        .map(|spec| {
+                            vec![provider::gateway::TransportModel::new(
+                                spec.provider,
+                                spec.model,
+                            )]
+                        })
+                        .unwrap_or_default();
+                    if let Err(error) = provider::gateway::preflight_pairs(&required).await {
                         let _ = event_tx
                             .send(StreamEvent::error(
                                 &session_id,
-                                &format!("Seat task panicked: {}", e),
+                                &format!("Governed escalation rejected before dispatch: {error}"),
                                 false,
                             ))
                             .await;
-                    }
-                }
-            }
-
-            // v9.12.0: Structured convergence judge (shared with CLI engine)
-            let _ = event_tx
-                .send(StreamEvent::info(&session_id, "Scoring convergence…"))
-                .await;
-            let Some(judge) = until_cancelled(
-                &cancel,
-                judge_round(&responses, topic, &req_ctx, &config.roles, &config.models),
-            )
-            .await
-            else {
-                return;
-            };
-            judge_usage += judge.usage;
-            let score = judge.score;
-            let judge_prov = judge.provider;
-            let judge_assess = judge.assessment;
-            let judge_gateway_attempts = judge.gateway_attempts;
-            // Use mode's convergence_threshold as base (matching CLI engine in run_with_cancel),
-            // not auto_specops_threshold (which is for low-conv auto-specops trigger).
-            // This ensures homogeneity/quality penalties from effective_convergence_threshold
-            // are applied against the mode-intended bar (TearDown 0.8, Pathfind 0.6, Harden 0.7).
-            let base_threshold = mode.convergence_threshold();
-            let effective_threshold = effective_convergence_threshold(
-                base_threshold,
-                judge_assess.as_ref(),
-                convergence_quality_penalty_enabled(stream_config.validate),
-            );
-            let converged = score >= effective_threshold;
-
-            let _ = event_tx
-                .send(StreamEvent::convergence_scored(
-                    &session_id,
-                    round_num,
-                    score,
-                    converged,
-                ))
-                .await;
-
-            // N02: per-seat divergence map. Embed the seats' responses for this
-            // round and project to 2D via PCA, then emit `round_divergence`.
-            // Embedding is sync (fastembed lock + possible model download), so
-            // it runs in spawn_blocking per the async-hygiene convention. If
-            // embeddings are unavailable or there are < 2 usable seats, the
-            // event is omitted — the UI tolerates absence.
-            if until_cancelled(
-                &cancel,
-                emit_round_divergence(&event_tx, &session_id, round_num, &responses),
-            )
-            .await
-            .is_none()
-            {
-                return;
-            }
-
-            let flip_hash = judge_assess.as_ref().map(|a| {
-                let mut hasher = DefaultHasher::new();
-                format!("{}|{}", a.drift.as_deref().unwrap_or(""), a.recommendation)
-                    .hash(&mut hasher);
-                format!("{:x}", hasher.finish())[..8].to_string()
-            });
-
-            // Sheldon claim validator (mirrors CLI engine/deliberate.rs)
-            // Tries full claim_validator cascade from roles.yaml until one succeeds.
-            let mut validation_report = None;
-            if stream_config.validate && round_num <= rounds_planned {
-                let claim_role = &config.roles.claim_validator; // note: stream has access via outer config
-                if crate::engine::sheldon::claim_validator_ready(claim_role, round_num) {
-                    for step in &claim_role.cascade {
-                        if cancel.is_cancelled() {
-                            return;
-                        }
-                        let v_provider = step.provider.clone();
-                        let v_model = Some(step.model.clone());
-                        let vcfg = crate::engine::sheldon::ValidatorConfig {
-                            provider: v_provider.clone(),
-                            model: v_model,
-                            gate: stream_config.validate_gate,
-                            verbose: false,
-                        };
-                        let _ = event_tx
-                            .send(StreamEvent::info(&session_id, "Validating round…"))
-                            .await;
-                        let Some(val_result) = until_cancelled(
-                            &cancel,
-                            crate::engine::sheldon::validate_round(
-                                &responses,
-                                topic,
-                                context,
-                                round_num,
-                                &vcfg,
-                                &req_ctx,
-                                Some(&evidence_cache),
-                            ),
-                        )
-                        .await
-                        else {
-                            return;
-                        };
-                        match val_result {
-                            crate::engine::sheldon::ValidateRoundOutcome::Ok(report, c) => {
-                                validation_report = Some(report.clone());
-                                validator_cost_usd += c;
-                                // Gate decision moved below: see P2 early-stop handling.
-                                if let Some(ref r) = validation_report {
-                                    let verdicts_json =
-                                        serde_json::to_value(r).unwrap_or(json!([]));
-                                    let _ = event_tx
-                                        .send(StreamEvent::round_validation(
-                                            &session_id,
-                                            round_num,
-                                            stream_config.validate_gate,
-                                            &verdicts_json,
-                                        ))
-                                        .await;
-                                }
-                                break;
-                            }
-                            crate::engine::sheldon::ValidateRoundOutcome::Skipped(_) => {
-                                break;
-                            }
-                            crate::engine::sheldon::ValidateRoundOutcome::ProviderFailed => {}
-                        }
-                    }
-                }
-            }
-
-            // P2: Gate redaction (responses) only on continuing intermediate rounds.
-            // On terminating rounds (planned last, or early via budget/convergence)
-            // leave responses un-gated so the Chair transcript + append_validation_context
-            // receives full evidence alongside the authoritative validation_report.
-            // Compute would-budget using post-validator spend to decide "terminating".
-            if stream_config.validate_gate && validation_report.is_some() {
-                let this_seat_cost: f64 = responses.iter().map(|r| r.cost_usd).sum();
-                let spend_at =
-                    cumulative_spend + this_seat_cost + validator_cost_usd + judge_usage.cost_usd;
-                let would_budget = should_pause_for_budget(
-                    stream_config.budget_max_usd,
-                    spend_at,
-                    round_num,
-                    rounds_planned,
-                );
-                let is_terminating = round_num >= rounds_planned || converged || would_budget;
-                if !is_terminating && let Some(ref rpt) = validation_report {
-                    responses = crate::engine::sheldon::gate_responses(&responses, rpt);
-                }
-            }
-
-            all_rounds.push(RoundResult {
-                round_num,
-                responses,
-                convergence_score: score,
-                converged,
-                judge_provider: judge_prov,
-                judge_assessment: judge_assess,
-                judge_gateway_attempts,
-                flip_flop_hash: flip_hash,
-                // T24: claim/reasoning are raw validator output that bypasses the
-                // per-seat from_provider redaction closure — scrub before persist.
-                validation_report: validation_report.map(crate::scrub::redact_validation_report),
-            });
-
-            let is_last = round_num >= rounds_planned;
-            let _ = event_tx
-                .send(StreamEvent::round_complete(
-                    &session_id,
-                    round_num,
-                    score,
-                    converged,
-                    converged && !is_last,
-                ))
-                .await;
-
-            let phase_seat_cost: f64 = all_rounds
-                .iter()
-                .flat_map(|r| &r.responses)
-                .map(|r| r.cost_usd)
-                .sum();
-            let spend_at_boundary =
-                cumulative_spend + phase_seat_cost + validator_cost_usd + judge_usage.cost_usd;
-            if should_pause_for_budget(
-                stream_config.budget_max_usd,
-                spend_at_boundary,
-                round_num,
-                rounds_planned,
-            ) {
-                budget_paused = true;
-                if let Some(max) = stream_config.budget_max_usd {
-                    let _ = event_tx
-                        .send(StreamEvent::budget_paused(
-                            &session_id,
-                            round_num,
-                            spend_at_boundary,
-                            max,
-                        ))
-                        .await;
-                }
-                break;
-            }
-
-            // Early convergence exit (no pause)
-            if converged && !is_last && !stream_config.pause_after_each_round {
-                break;
-            }
-
-            // ── Pause for operator input ──
-            if stream_should_await_operator_input(
-                stream_config.pause_after_each_round,
-                is_last,
-                early_exit,
-            ) {
-                let full_options = &[
-                    "continue",
-                    "end_early",
-                    "escalate_specops",
-                    "escalate_munger",
-                    "escalate_contrarian",
-                    "escalate_kiss",
-                    "inject_context",
-                    "swap_seat",
-                ];
-                let _ = event_tx
-                    .send(StreamEvent::awaiting_input(
-                        &session_id,
-                        round_num,
-                        score,
-                        converged,
-                        full_options,
-                        None,
-                    ))
-                    .await;
-
-                let action = loop {
-                    let Some(candidate) = until_cancelled(&cancel, interventions.wait(900)).await
-                    else {
-                        return;
-                    };
-                    if effective_via_gateway && candidate.is_escalation() {
-                        let mode = candidate.escalation_mode().unwrap_or("specops");
-                        let required = crate::engine::direct_fire::spec(mode)
-                            .map(|spec| {
-                                vec![provider::gateway::TransportModel::new(
-                                    spec.provider,
-                                    spec.model,
-                                )]
-                            })
-                            .unwrap_or_default();
-                        if let Err(error) = provider::gateway::preflight_pairs(&required).await {
-                            let _ = event_tx
-                                .send(StreamEvent::error(
-                                    &session_id,
-                                    &format!(
-                                        "Governed escalation rejected before dispatch: {error}"
-                                    ),
-                                    false,
-                                ))
-                                .await;
-                            let _ = event_tx
-                                .send(StreamEvent::awaiting_input(
-                                    &session_id,
-                                    round_num,
-                                    score,
-                                    converged,
-                                    full_options,
-                                    None,
-                                ))
-                                .await;
-                            continue;
-                        }
-                    }
-                    break candidate;
-                };
-                let _ = event_tx
-                    .send(StreamEvent::intervention_received(
-                        &session_id,
-                        serde_json::to_value(&action).unwrap_or_default(),
-                    ))
-                    .await;
-
-                extra_context.clear(); // Reset per-round injection
-
-                match &action {
-                    Intervention::EndEarly => {
-                        early_exit = true;
-                    }
-                    Intervention::InjectContext { text } => {
-                        extra_context = text.clone();
-                    }
-                    Intervention::SwapSeat {
-                        seat_name,
-                        provider,
-                        model,
-                        system,
-                    } => {
-                        let replacement_ready = if effective_via_gateway {
-                            let current = live_seats.iter().find(|seat| &seat.name == seat_name);
-                            let effective_provider = provider
-                                .as_deref()
-                                .or_else(|| current.map(|seat| seat.provider.as_str()));
-                            let effective_model = model
-                                .as_deref()
-                                .or_else(|| current.map(|seat| seat.model.as_str()));
-                            if let (Some(transport), Some(model)) =
-                                (effective_provider, effective_model)
-                            {
-                                let required = [provider::gateway::TransportModel::new(
-                                    crate::provider::canonical_provider_name(transport),
-                                    model,
-                                )];
-                                match provider::gateway::preflight_pairs(&required).await {
-                                    Ok(()) => true,
-                                    Err(error) => {
-                                        let _ = event_tx
-                                            .send(StreamEvent::error(
-                                                &session_id,
-                                                &format!(
-                                                    "Governed seat swap rejected before dispatch: {error}"
-                                                ),
-                                                false,
-                                            ))
-                                            .await;
-                                        false
-                                    }
-                                }
-                            } else {
-                                true
-                            }
-                        } else {
-                            true
-                        };
-                        if replacement_ready
-                            && let Some(seat) = live_seats.iter_mut().find(|s| &s.name == seat_name)
-                        {
-                            if let Some(p) = provider {
-                                seat.provider = p.clone();
-                            }
-                            if let Some(m) = model {
-                                seat.model = m.clone();
-                            }
-                            if let Some(s) = system {
-                                seat.system = s.clone();
-                            }
-                        }
-                    }
-                    _ if action.is_escalation() => {
-                        let esc_mode = action.escalation_mode().unwrap_or("specops");
-                        let _ = event_tx
-                            .send(StreamEvent::specops_started(
-                                &session_id,
-                                "manual",
-                                esc_mode,
-                            ))
-                            .await;
-
-                        // Run escalation
-                        let Some(sig) = until_cancelled(
-                            &cancel,
-                            run_escalation(
-                                &config,
-                                topic,
-                                &all_rounds,
-                                esc_mode,
-                                &available_set,
-                                &req_ctx,
-                            ),
-                        )
-                        .await
-                        else {
-                            return;
-                        };
-                        let _ = event_tx
-                            .send(StreamEvent::specops_signal(
-                                &session_id,
-                                serde_json::to_value(&sig).unwrap_or_default(),
-                            ))
-                            .await;
-
-                        let sig_text = sig.text.clone();
-                        manual_specops_signal = sig_text.clone();
-                        extra_context = format!("INTERVENTION ({}): {}", esc_mode, sig_text);
-
-                        // ── RE-PAUSE after escalation (race condition fix) ──
-                        // Without this, next round starts immediately and user
-                        // never sees the signal. Matches Python fix.
-                        let post_options = &["continue", "end_early", "inject_context"];
                         let _ = event_tx
                             .send(StreamEvent::awaiting_input(
                                 &session_id,
                                 round_num,
                                 score,
                                 converged,
-                                post_options,
-                                Some(&sig_text),
+                                full_options,
+                                None,
                             ))
                             .await;
-
-                        let Some(post_action) =
-                            until_cancelled(&cancel, interventions.wait(900)).await
-                        else {
-                            return;
-                        };
-                        let _ = event_tx
-                            .send(StreamEvent::intervention_received(
-                                &session_id,
-                                serde_json::to_value(&post_action).unwrap_or_default(),
-                            ))
-                            .await;
-
-                        match &post_action {
-                            Intervention::EndEarly => {
-                                early_exit = true;
-                            }
-                            Intervention::InjectContext { text } => {
-                                extra_context = format!(
-                                    "{}\n\nADDITIONAL OPERATOR NOTE: {}",
-                                    extra_context, text
-                                );
-                            }
-                            _ => {} // Continue
-                        }
+                        continue;
                     }
-                    Intervention::Continue if converged => {
-                        break; // Converged + continue = done
-                    }
-                    _ => {} // Continue to next round
                 }
-            }
-        }
-
-        if cancel.is_cancelled() {
-            return;
-        }
-
-        if budget_paused {
-            // Strip accumulation to avoid double-count with normal tail (which will now run).
-            // Keep the phase summary for paused info.
-            phase_summaries.push(json!({
-                "phase": phase_idx + 1,
-                "session_id": session_id,
-                "deliberation_mode": match mode {
-                    Mode::Pathfind => "pathfind",
-                    Mode::TearDown => "teardown",
-                    Mode::Harden => "harden",
-                },
-                "rounds_run": all_rounds.len(),
-                "budget_paused": true,
-            }));
-            // Fall through to specops/synthesize/save (like CLI), then break after.
-            // Do NOT break here.
-        }
-
-        // ── Auto SpecOps if low convergence ──
-        let mut specops_text = manual_specops_signal.clone();
-        let phase_final_conv = all_rounds
-            .last()
-            .map(|r| r.convergence_score)
-            .unwrap_or(1.0);
-        let mut specops_tokens: u32 = 0;
-        let wants_auto_specops = specops_text.is_empty()
-            && phase_final_conv < stream_config.auto_specops_threshold
-            && available_set.contains("grok");
-        let auto_specops_ready = if wants_auto_specops && effective_via_gateway {
-            let required = crate::engine::direct_fire::spec("specops")
-                .map(|spec| {
-                    vec![provider::gateway::TransportModel::new(
-                        spec.provider,
-                        spec.model,
-                    )]
-                })
-                .unwrap_or_default();
-            match provider::gateway::preflight_pairs(&required).await {
-                Ok(()) => true,
-                Err(error) => {
-                    let _ = event_tx
-                        .send(StreamEvent::error(
-                            &session_id,
-                            &format!("Governed auto-SpecOps skipped before dispatch: {error}"),
-                            false,
-                        ))
-                        .await;
-                    false
-                }
-            }
-        } else {
-            true
-        };
-
-        if wants_auto_specops && auto_specops_ready {
-            let _ = event_tx
-                .send(StreamEvent::specops_started(&session_id, "auto", "specops"))
-                .await;
-            let Some(sig) = until_cancelled(
-                &cancel,
-                run_escalation(
-                    &config,
-                    topic,
-                    &all_rounds,
-                    "specops",
-                    &available_set,
-                    &req_ctx,
-                ),
-            )
-            .await
-            else {
-                return;
+                break candidate;
             };
             let _ = event_tx
-                .send(StreamEvent::specops_signal(
+                .send(StreamEvent::intervention_received(
                     &session_id,
-                    serde_json::to_value(&sig).unwrap_or_default(),
+                    serde_json::to_value(&action).unwrap_or_default(),
                 ))
                 .await;
-            specops_text = sig.text;
-            specops_tokens = sig.tokens_in.saturating_add(sig.tokens_out);
-            cumulative_spend += sig.cost_usd;
-        }
 
-        // A chair cannot synthesize an empty deliberation. Partial seat
-        // participation remains valid, but zero usable responses is a failed
-        // Council run and must not be persisted as apparent success.
-        if !has_usable_seat_response(&all_rounds) {
-            let _ = event_tx
-                .send(StreamEvent::error(
-                    &session_id,
-                    "All Council seats failed; synthesis was not attempted.",
-                    true,
-                ))
-                .await;
-            return;
-        }
+            extra_context.clear(); // Reset per-round injection
 
-        // ── Chair synthesis ──
+            match &action {
+                Intervention::EndEarly => {
+                    early_exit = true;
+                }
+                Intervention::InjectContext { text } => {
+                    extra_context = text.clone();
+                }
+                Intervention::SwapSeat {
+                    seat_name,
+                    provider,
+                    model,
+                    system,
+                } => {
+                    let replacement_ready = if effective_via_gateway {
+                        let current = live_seats.iter().find(|seat| &seat.name == seat_name);
+                        let effective_provider = provider
+                            .as_deref()
+                            .or_else(|| current.map(|seat| seat.provider.as_str()));
+                        let effective_model = model
+                            .as_deref()
+                            .or_else(|| current.map(|seat| seat.model.as_str()));
+                        if let (Some(transport), Some(model)) =
+                            (effective_provider, effective_model)
+                        {
+                            let required = [provider::gateway::TransportModel::new(
+                                crate::provider::canonical_provider_name(transport),
+                                model,
+                            )];
+                            match provider::gateway::preflight_pairs(&required).await {
+                                Ok(()) => true,
+                                Err(error) => {
+                                    let _ = event_tx
+                                    .send(StreamEvent::error(
+                                        &session_id,
+                                        &format!(
+                                            "Governed seat swap rejected before dispatch: {error}"
+                                        ),
+                                        false,
+                                    ))
+                                    .await;
+                                    false
+                                }
+                            }
+                        } else {
+                            true
+                        }
+                    } else {
+                        true
+                    };
+                    if replacement_ready
+                        && let Some(seat) = live_seats.iter_mut().find(|s| &s.name == seat_name)
+                    {
+                        if let Some(p) = provider {
+                            seat.provider = p.clone();
+                        }
+                        if let Some(m) = model {
+                            seat.model = m.clone();
+                        }
+                        if let Some(s) = system {
+                            seat.system = s.clone();
+                        }
+                    }
+                }
+                _ if action.is_escalation() => {
+                    let esc_mode = action.escalation_mode().unwrap_or("specops");
+                    let _ = event_tx
+                        .send(StreamEvent::specops_started(
+                            &session_id,
+                            "manual",
+                            esc_mode,
+                        ))
+                        .await;
+
+                    // Run escalation
+                    let Some(sig) = until_cancelled(
+                        &cancel,
+                        run_escalation(
+                            &config,
+                            topic,
+                            &all_rounds,
+                            esc_mode,
+                            &available_set,
+                            &req_ctx,
+                        ),
+                    )
+                    .await
+                    else {
+                        return None;
+                    };
+                    let _ = event_tx
+                        .send(StreamEvent::specops_signal(
+                            &session_id,
+                            serde_json::to_value(&sig).unwrap_or_default(),
+                        ))
+                        .await;
+
+                    let sig_text = sig.text.clone();
+                    manual_specops_signal = sig_text.clone();
+                    extra_context = format!("INTERVENTION ({}): {}", esc_mode, sig_text);
+
+                    // ── RE-PAUSE after escalation (race condition fix) ──
+                    // Without this, next round starts immediately and user
+                    // never sees the signal. Matches Python fix.
+                    let post_options = &["continue", "end_early", "inject_context"];
+                    let _ = event_tx
+                        .send(StreamEvent::awaiting_input(
+                            &session_id,
+                            round_num,
+                            score,
+                            converged,
+                            post_options,
+                            Some(&sig_text),
+                        ))
+                        .await;
+
+                    let Some(post_action) = until_cancelled(&cancel, interventions.wait(900)).await
+                    else {
+                        return None;
+                    };
+                    let _ = event_tx
+                        .send(StreamEvent::intervention_received(
+                            &session_id,
+                            serde_json::to_value(&post_action).unwrap_or_default(),
+                        ))
+                        .await;
+
+                    match &post_action {
+                        Intervention::EndEarly => {
+                            early_exit = true;
+                        }
+                        Intervention::InjectContext { text } => {
+                            extra_context =
+                                format!("{}\n\nADDITIONAL OPERATOR NOTE: {}", extra_context, text);
+                        }
+                        _ => {} // Continue
+                    }
+                }
+                Intervention::Continue if converged => {
+                    break; // Converged + continue = done
+                }
+                _ => {} // Continue to next round
+            }
+        }
+    }
+
+    Some(PhaseRoundOutcome {
+        all_rounds,
+        manual_specops_signal,
+        budget_paused,
+        validator_cost_usd,
+        judge_usage,
+    })
+}
+/// Auto SpecOps when convergence is below threshold (manual signal wins if set).
+#[allow(clippy::too_many_arguments)] // stage extraction of monobody captures
+#[allow(clippy::question_mark)] // keep original let-Some/else cancel shape
+#[allow(clippy::needless_borrow)] // verbatim monobody; &ready fields are already refs
+async fn run_auto_specops_if_needed(
+    ready: &StreamRunReady,
+    session_id: &str,
+    topic: &str,
+    all_rounds: &[RoundResult],
+    manual_specops_signal: &str,
+    available_set: &std::collections::HashSet<&str>,
+    cumulative_spend: &mut f64,
+) -> Option<(String, u32)> {
+    let StreamRunReady {
+        config,
+        stream_config,
+        event_tx,
+        cancel,
+        req_ctx,
+        effective_via_gateway,
+        ..
+    } = ready;
+    let effective_via_gateway = *effective_via_gateway;
+    // Re-own so event sites match the original monobody `session_id: String`.
+    let session_id = session_id.to_string();
+
+    // ── Auto SpecOps if low convergence ──
+    let mut specops_text = manual_specops_signal.to_string();
+    let phase_final_conv = all_rounds
+        .last()
+        .map(|r| r.convergence_score)
+        .unwrap_or(1.0);
+    let mut specops_tokens: u32 = 0;
+    let wants_auto_specops = specops_text.is_empty()
+        && phase_final_conv < stream_config.auto_specops_threshold
+        && available_set.contains("grok");
+    let auto_specops_ready = if wants_auto_specops && effective_via_gateway {
+        let required = crate::engine::direct_fire::spec("specops")
+            .map(|spec| {
+                vec![provider::gateway::TransportModel::new(
+                    spec.provider,
+                    spec.model,
+                )]
+            })
+            .unwrap_or_default();
+        match provider::gateway::preflight_pairs(&required).await {
+            Ok(()) => true,
+            Err(error) => {
+                let _ = event_tx
+                    .send(StreamEvent::error(
+                        &session_id,
+                        &format!("Governed auto-SpecOps skipped before dispatch: {error}"),
+                        false,
+                    ))
+                    .await;
+                false
+            }
+        }
+    } else {
+        true
+    };
+
+    if wants_auto_specops && auto_specops_ready {
         let _ = event_tx
-            .send(StreamEvent::synthesis_started(
-                &session_id,
-                &cabinet.chair.model,
-            ))
+            .send(StreamEvent::specops_started(&session_id, "auto", "specops"))
             .await;
-
-        let Some(synth) = until_cancelled(
+        let Some(sig) = until_cancelled(
             &cancel,
-            synthesize(
+            run_escalation(
                 &config,
-                cabinet,
                 topic,
-                context,
                 &all_rounds,
-                mode,
-                &specops_text,
+                "specops",
+                &available_set,
                 &req_ctx,
             ),
         )
         .await
         else {
-            return;
+            return None;
         };
-
-        if let Some(err) = synth.error.as_deref() {
-            let _ = event_tx
-                .send(StreamEvent::error(
-                    &session_id,
-                    &format!("Council chair synthesis failed: {err}"),
-                    true,
-                ))
-                .await;
-            return;
-        }
-        if synth.text.trim().is_empty() {
-            let _ = event_tx
-                .send(StreamEvent::error(
-                    &session_id,
-                    "Council chair synthesis returned no usable response.",
-                    true,
-                ))
-                .await;
-            return;
-        }
-
-        tracing::info!(
-            provider = %cabinet.chair.provider,
-            model = %cabinet.chair.model,
-            latency_ms = synth.latency_ms,
-            "Chair synthesis completed"
-        );
-
         let _ = event_tx
-            .send(StreamEvent::synthesis_complete(
+            .send(StreamEvent::specops_signal(
                 &session_id,
-                &synth.text,
-                &synth.model,
-                synth.latency_ms,
-                synth.cost_usd,
-                synth.provider_provenance.clone(),
+                serde_json::to_value(&sig).unwrap_or_default(),
             ))
             .await;
+        specops_text = sig.text;
+        specops_tokens = sig.tokens_in.saturating_add(sig.tokens_out);
+        *cumulative_spend += sig.cost_usd;
+    }
 
-        // ── Persist ──
-        let seat_tok: u32 = all_rounds
-            .iter()
-            .flat_map(|r| &r.responses)
-            .map(|r| r.tokens_in + r.tokens_out)
-            .sum();
-        let total_tok: u32 = seat_tok
-            .saturating_add(synth.tokens_in + synth.tokens_out + specops_tokens)
-            .saturating_add(judge_usage.tokens);
-        let total_lat: u64 = all_rounds
-            .iter()
-            .flat_map(|r| &r.responses)
-            .map(|r| r.latency_ms)
-            .sum::<u64>()
-            .saturating_add(synth.latency_ms)
-            .saturating_add(judge_usage.latency_ms);
-        let total_cost: f64 = all_rounds
-            .iter()
-            .flat_map(|r| &r.responses)
-            .map(|r| r.cost_usd)
-            .sum::<f64>()
-            + synth.cost_usd
-            + validator_cost_usd
-            + judge_usage.cost_usd;
+    // A chair cannot synthesize an empty deliberation. Partial seat
+    // participation remains valid, but zero usable responses is a failed
 
-        let session = CouncilSession {
-            session_id: session_id.clone(),
-            topic: crate::scrub::redact(&phase_topic),
-            cabinet_name: cabinet.name.clone(),
-            rounds: all_rounds.clone(),
-            synthesis: Some(synth.text.clone()),
-            synthesis_model: Some(synth.model),
-            total_tokens: total_tok,
-            total_latency_ms: total_lat,
-            total_cost_usd: total_cost,
-            specops_triggered: !specops_text.is_empty(),
-            specops_cost_usd: 0.0,
-            mode: match mode {
-                Mode::TearDown => SessionMode::TearDown,
-                Mode::Pathfind => SessionMode::Pathfind,
-                Mode::Harden => SessionMode::Harden,
-            },
-            precedent_ids: precedent_ids.clone(),
-            timestamp: Utc::now(),
-            schema_version: 2,
-            tier: stream_config.tier.clone(),
-            budget: stream_config.budget_max_usd.map(|max| BudgetRecord {
-                max_usd: max,
-                paused: budget_paused,
-                action_taken: budget_paused.then_some("end_early".to_string()),
-            }),
-            context_sources: vec![],
-            // Streaming path is the warroom UI — tag as Warroom for §4.4 filtering.
-            // chair token plumbing for the streaming path is v0.1.1 work; emit 0
-            // for now so the serde shape is correct.
-            origin: crate::types::SessionOrigin::Warroom,
-            execution_route: if effective_via_gateway {
-                crate::types::ExecutionRoute::Governed
-            } else {
-                crate::types::ExecutionRoute::Direct
-            },
-            gateway_sensitivity: effective_via_gateway.then_some(effective_sensitivity.clone()),
-            chair_tokens_in: synth.tokens_in,
-            chair_tokens_out: synth.tokens_out,
-            chair_cost_usd: synth.cost_usd,
-            chair_provider_provenance: synth.provider_provenance,
-            chair_gateway_provenance: synth.gateway_provenance,
-            parent_request_id: None,
-            worker_provenance: stream_config.worker_provenance.clone(),
-            worker_metrics: None,
-        };
+    Some((specops_text, specops_tokens))
+}
+/// Usable-response gate + chair synthesis, with synthesis events.
+#[allow(clippy::too_many_arguments)] // stage extraction of monobody captures
+#[allow(clippy::question_mark)] // keep original let-Some/else cancel shape
+#[allow(clippy::needless_borrow)] // verbatim monobody; &ready fields are already refs
+async fn run_chair_synthesis_stage(
+    ready: &StreamRunReady,
+    session_id: &str,
+    topic: &str,
+    context: &str,
+    mode: Mode,
+    all_rounds: &[RoundResult],
+    specops_text: &str,
+) -> Option<StreamChairResult> {
+    let StreamRunReady {
+        config,
+        event_tx,
+        cancel,
+        cabinet,
+        req_ctx,
+        ..
+    } = ready;
+    // Re-own so event sites match the original monobody `session_id: String`.
+    let session_id = session_id.to_string();
 
-        if cancel.is_cancelled() {
-            return;
-        }
+    if !has_usable_seat_response(&all_rounds) {
+        let _ = event_tx
+            .send(StreamEvent::error(
+                &session_id,
+                "All Council seats failed; synthesis was not attempted.",
+                true,
+            ))
+            .await;
+        return None;
+    }
 
-        // Save session
-        let save_path = match save_session(&session) {
-            Ok(p) => p,
-            Err(e) => {
-                let _ = event_tx
-                    .send(StreamEvent::error(
-                        &session_id,
-                        &format!("Session save failed: {}", e),
-                        false,
-                    ))
-                    .await;
-                String::new()
-            }
-        };
-        if !save_path.is_empty() {
-            let _ = event_tx
-                .send(StreamEvent::session_saved(&session_id, &save_path))
-                .await;
-        }
+    // ── Chair synthesis ──
+    let _ = event_tx
+        .send(StreamEvent::synthesis_started(
+            &session_id,
+            &cabinet.chair.model,
+        ))
+        .await;
 
-        if cancel.is_cancelled() {
-            return;
-        }
+    let Some(synth) = until_cancelled(
+        &cancel,
+        synthesize(
+            &config,
+            cabinet,
+            topic,
+            context,
+            &all_rounds,
+            mode,
+            &specops_text,
+            &req_ctx,
+        ),
+    )
+    .await
+    else {
+        return None;
+    };
 
-        // Index for precedent engine
-        if let Err(e) = precedent::index_session(&session) {
+    if let Some(err) = synth.error.as_deref() {
+        let _ = event_tx
+            .send(StreamEvent::error(
+                &session_id,
+                &format!("Council chair synthesis failed: {err}"),
+                true,
+            ))
+            .await;
+        return None;
+    }
+    if synth.text.trim().is_empty() {
+        let _ = event_tx
+            .send(StreamEvent::error(
+                &session_id,
+                "Council chair synthesis returned no usable response.",
+                true,
+            ))
+            .await;
+        return None;
+    }
+
+    tracing::info!(
+        provider = %cabinet.chair.provider,
+        model = %cabinet.chair.model,
+        latency_ms = synth.latency_ms,
+        "Chair synthesis completed"
+    );
+
+    let _ = event_tx
+        .send(StreamEvent::synthesis_complete(
+            &session_id,
+            &synth.text,
+            &synth.model,
+            synth.latency_ms,
+            synth.cost_usd,
+            synth.provider_provenance.clone(),
+        ))
+        .await;
+
+    Some(synth)
+}
+/// Persist session, index precedent/embeddings/lineage/flight, update accum.
+#[allow(clippy::too_many_arguments)] // stage extraction of monobody captures
+#[allow(clippy::question_mark)] // keep original let-Some/else cancel shape
+#[allow(clippy::needless_borrow)] // verbatim monobody; &ready fields are already refs
+async fn persist_phase_session(
+    ready: &StreamRunReady,
+    accum: &mut RunAccum,
+    session_id: &str,
+    phase_idx: u32,
+    phases_total: u32,
+    phase_topic: &str,
+    mode: Mode,
+    all_rounds: &[RoundResult],
+    synth: &StreamChairResult,
+    specops_text: &str,
+    specops_tokens: u32,
+    validator_cost_usd: f64,
+    judge_usage: &JudgeUsage,
+    budget_paused: bool,
+    phase_final_conv: f64,
+    precedent_ids: &[String],
+) -> Option<()> {
+    let StreamRunReady {
+        stream_config,
+        event_tx,
+        cancel,
+        cabinet,
+        effective_via_gateway,
+        effective_sensitivity,
+        ..
+    } = ready;
+    let effective_via_gateway = *effective_via_gateway;
+    // Re-own so event/save sites match the original monobody `session_id: String`.
+    let session_id = session_id.to_string();
+
+    // ── Persist ──
+    let seat_tok: u32 = all_rounds
+        .iter()
+        .flat_map(|r| &r.responses)
+        .map(|r| r.tokens_in + r.tokens_out)
+        .sum();
+    let total_tok: u32 = seat_tok
+        .saturating_add(synth.tokens_in + synth.tokens_out + specops_tokens)
+        .saturating_add(judge_usage.tokens);
+    let total_lat: u64 = all_rounds
+        .iter()
+        .flat_map(|r| &r.responses)
+        .map(|r| r.latency_ms)
+        .sum::<u64>()
+        .saturating_add(synth.latency_ms)
+        .saturating_add(judge_usage.latency_ms);
+    let total_cost: f64 = all_rounds
+        .iter()
+        .flat_map(|r| &r.responses)
+        .map(|r| r.cost_usd)
+        .sum::<f64>()
+        + synth.cost_usd
+        + validator_cost_usd
+        + judge_usage.cost_usd;
+
+    let session = CouncilSession {
+        session_id: session_id.clone(),
+        topic: crate::scrub::redact(&phase_topic),
+        cabinet_name: cabinet.name.clone(),
+        rounds: all_rounds.to_vec(),
+        synthesis: Some(synth.text.clone()),
+        synthesis_model: Some(synth.model.clone()),
+        total_tokens: total_tok,
+        total_latency_ms: total_lat,
+        total_cost_usd: total_cost,
+        specops_triggered: !specops_text.is_empty(),
+        specops_cost_usd: 0.0,
+        mode: match mode {
+            Mode::TearDown => SessionMode::TearDown,
+            Mode::Pathfind => SessionMode::Pathfind,
+            Mode::Harden => SessionMode::Harden,
+        },
+        precedent_ids: precedent_ids.to_vec(),
+        timestamp: Utc::now(),
+        schema_version: 2,
+        tier: stream_config.tier.clone(),
+        budget: stream_config.budget_max_usd.map(|max| BudgetRecord {
+            max_usd: max,
+            paused: budget_paused,
+            action_taken: budget_paused.then_some("end_early".to_string()),
+        }),
+        context_sources: vec![],
+        // Streaming path is the warroom UI — tag as Warroom for §4.4 filtering.
+        // chair token plumbing for the streaming path is v0.1.1 work; emit 0
+        // for now so the serde shape is correct.
+        origin: crate::types::SessionOrigin::Warroom,
+        execution_route: if effective_via_gateway {
+            crate::types::ExecutionRoute::Governed
+        } else {
+            crate::types::ExecutionRoute::Direct
+        },
+        gateway_sensitivity: effective_via_gateway.then_some(effective_sensitivity.clone()),
+        chair_tokens_in: synth.tokens_in,
+        chair_tokens_out: synth.tokens_out,
+        chair_cost_usd: synth.cost_usd,
+        chair_provider_provenance: synth.provider_provenance.clone(),
+        chair_gateway_provenance: synth.gateway_provenance.clone(),
+        parent_request_id: None,
+        worker_provenance: stream_config.worker_provenance.clone(),
+        worker_metrics: None,
+    };
+
+    if cancel.is_cancelled() {
+        return None;
+    }
+
+    // Save session
+    let save_path = match save_session(&session) {
+        Ok(p) => p,
+        Err(e) => {
             let _ = event_tx
                 .send(StreamEvent::error(
                     &session_id,
-                    &format!("Precedent indexing failed: {}", e),
+                    &format!("Session save failed: {}", e),
+                    false,
+                ))
+                .await;
+            String::new()
+        }
+    };
+    if !save_path.is_empty() {
+        let _ = event_tx
+            .send(StreamEvent::session_saved(&session_id, &save_path))
+            .await;
+    }
+
+    if cancel.is_cancelled() {
+        return None;
+    }
+
+    // Index for precedent engine
+    if let Err(e) = precedent::index_session(&session) {
+        let _ = event_tx
+            .send(StreamEvent::error(
+                &session_id,
+                &format!("Precedent indexing failed: {}", e),
+                false,
+            ))
+            .await;
+    }
+
+    if cancel.is_cancelled() {
+        return None;
+    }
+
+    // Incremental embedding index — keeps semantic search fresh
+    let sid = session_id.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        crate::warroom::embeddings::append_session(&sid);
+    })
+    .await;
+
+    if phase_idx == 0
+        && let Some(ref parent_id) = stream_config.parent_session_id
+    {
+        let cab_label = cabinet.name.clone();
+        if let Err(e) = crate::warroom::lineage::record_fork(
+            &session_id,
+            parent_id,
+            &stream_config.swaps,
+            &cab_label,
+        ) {
+            let _ = event_tx
+                .send(StreamEvent::error(
+                    &session_id,
+                    &format!("Lineage record failed: {}", e),
                     false,
                 ))
                 .await;
         }
-
-        if cancel.is_cancelled() {
-            return;
-        }
-
-        // Incremental embedding index — keeps semantic search fresh
-        let sid = session_id.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            crate::warroom::embeddings::append_session(&sid);
-        })
-        .await;
-
-        if phase_idx == 0
-            && let Some(ref parent_id) = stream_config.parent_session_id
-        {
-            let cab_label = cabinet.name.clone();
-            if let Err(e) = crate::warroom::lineage::record_fork(
-                &session_id,
-                parent_id,
-                &stream_config.swaps,
-                &cab_label,
-            ) {
-                let _ = event_tx
-                    .send(StreamEvent::error(
-                        &session_id,
-                        &format!("Lineage record failed: {}", e),
-                        false,
-                    ))
-                    .await;
-            }
-        }
-
-        if cancel.is_cancelled() {
-            return;
-        }
-
-        // Flight recorder
-        match precedent::write_flight_record(&session) {
-            Ok(path) => {
-                let _ = event_tx
-                    .send(StreamEvent::info(
-                        &session_id,
-                        &format!("Flight record: {}", path),
-                    ))
-                    .await;
-            }
-            Err(e) => {
-                let _ = event_tx
-                    .send(StreamEvent::error(
-                        &session_id,
-                        &format!("Flight record failed: {}", e),
-                        false,
-                    ))
-                    .await;
-            }
-        }
-
-        if phase_idx == 0 && phases_total > 1 {
-            pathfinder_session_id = session_id.clone();
-            pathfinder_synthesis = synth.text.clone();
-        }
-        cumulative_tokens += total_tok;
-        cumulative_cost += total_cost;
-        cumulative_latency += total_lat;
-        cumulative_spend += total_cost;
-        final_synthesis_text = synth.text.clone();
-        final_conv = phase_final_conv;
-        final_rounds_run = all_rounds.len() as u32;
-        phases_completed += 1;
-        phase_summaries.push(json!({
-            "phase": phase_idx + 1,
-            "session_id": session_id,
-            "deliberation_mode": match mode {
-                Mode::Pathfind => "pathfind",
-                Mode::TearDown => "teardown",
-                Mode::Harden => "harden",
-            },
-            "rounds_run": all_rounds.len(),
-            "convergence_final": phase_final_conv,
-            "total_cost_usd": total_cost,
-        }));
-
-        if budget_paused {
-            break 'phases;
-        }
     }
 
     if cancel.is_cancelled() {
-        return;
+        return None;
     }
 
-    // ── done ──
-    let _ = event_tx
+    // Flight recorder
+    match precedent::write_flight_record(&session) {
+        Ok(path) => {
+            let _ = event_tx
+                .send(StreamEvent::info(
+                    &session_id,
+                    &format!("Flight record: {}", path),
+                ))
+                .await;
+        }
+        Err(e) => {
+            let _ = event_tx
+                .send(StreamEvent::error(
+                    &session_id,
+                    &format!("Flight record failed: {}", e),
+                    false,
+                ))
+                .await;
+        }
+    }
+
+    if phase_idx == 0 && phases_total > 1 {
+        accum.pathfinder_session_id = session_id.clone();
+        accum.pathfinder_synthesis = synth.text.clone();
+    }
+    accum.cumulative_tokens += total_tok;
+    accum.cumulative_cost += total_cost;
+    accum.cumulative_latency += total_lat;
+    accum.cumulative_spend += total_cost;
+    accum.final_synthesis_text = synth.text.clone();
+    accum.final_conv = phase_final_conv;
+    accum.final_rounds_run = all_rounds.len() as u32;
+    accum.phases_completed += 1;
+    accum.phase_summaries.push(json!({
+        "phase": phase_idx + 1,
+        "session_id": session_id,
+        "deliberation_mode": match mode {
+            Mode::Pathfind => "pathfind",
+            Mode::TearDown => "teardown",
+            Mode::Harden => "harden",
+        },
+        "rounds_run": all_rounds.len(),
+        "convergence_final": phase_final_conv,
+        "total_cost_usd": total_cost,
+    }));
+
+    Some(())
+}
+
+async fn emit_stream_done(ready: &StreamRunReady, accum: &RunAccum, phases_total: u32) {
+    let _ = ready
+        .event_tx
         .send(StreamEvent::done(
-            &last_session_id,
-            cumulative_tokens,
-            cumulative_cost,
-            cumulative_latency,
-            &final_synthesis_text,
-            final_conv,
-            final_rounds_run,
+            &accum.last_session_id,
+            accum.cumulative_tokens,
+            accum.cumulative_cost,
+            accum.cumulative_latency,
+            &accum.final_synthesis_text,
+            accum.final_conv,
+            accum.final_rounds_run,
             Some(json!({
-                "phases_completed": phases_completed,
+                "phases_completed": accum.phases_completed,
                 "phases_total": phases_total,
-                "phase_summaries": phase_summaries,
-                "cumulative_spend_usd": cumulative_spend,
+                "phase_summaries": accum.phase_summaries,
+                "cumulative_spend_usd": accum.cumulative_spend,
             })),
         ))
         .await;
