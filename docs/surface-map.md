@@ -157,3 +157,9 @@ and frozen [`COMMS_CONTRACT.md`](../sentinel/COMMS_CONTRACT.md).
 - The built-in worker loop is a default-off development path, while its
   authenticated management APIs are mounted.
 - The supported operator path ends at a signed directive artifact.
+
+For the process/language boundary inventory (Lua↔sidecar JSON, Council↔Gateway
+headers, tauri spawn env, envelope ownership), see
+[`cross-process-boundaries.md`](cross-process-boundaries.md). For optional
+local Gortex layer allow-lists (never committed), see
+[`security-tooling.md`](security-tooling.md#local-gortex-architecture-layers-operator-only).

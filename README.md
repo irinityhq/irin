@@ -262,6 +262,10 @@ from the fork. See [`docs/troubleshooting.md`](docs/troubleshooting.md).
 
 - [`docs/architecture.md`](docs/architecture.md) — War Room, Council,
   Direct/Gateway, source receipts, precedent retrieval, Watch, and Outbox.
+- [`docs/cross-process-boundaries.md`](docs/cross-process-boundaries.md) —
+  process/language boundary inventory (Lua↔sidecar, governed headers, spawn env).
+- [`docs/security-tooling.md`](docs/security-tooling.md) — local scanners,
+  Selene, config-key convention, optional Gortex layer map.
 - [`docs/cabinets.md`](docs/cabinets.md) — cabinet selection, customization,
   the optional NVIDIA starter, and model entitlement churn.
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — setup, Docker,

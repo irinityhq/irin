@@ -217,6 +217,12 @@ phone.
   recovery issues.
 - [`docs/security-claims-vs-reality.md`](security-claims-vs-reality.md) —
   claim-by-claim security boundary.
+- [`docs/cross-process-boundaries.md`](cross-process-boundaries.md) —
+  process/language boundary inventory (Lua↔sidecar, governed headers, spawn
+  env, what sovereign-protocol covers).
+- [`docs/security-tooling.md`](security-tooling.md) — local scanners, Selene,
+  config-key convention, optional Gortex layer map.
+- [`docs/surface-map.md`](surface-map.md) — compact operator surface index.
 - [`council-rs/docs/war-room.md`](../council-rs/docs/war-room.md) — War Room
   runtime shape and backend contract in detail.
 - [`gateway/COUNCIL_GATEWAY_CONTRACT.md`](../gateway/COUNCIL_GATEWAY_CONTRACT.md)
