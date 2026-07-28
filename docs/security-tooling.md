@@ -13,6 +13,7 @@ agents; scanners stay separate tools agents invoke on paths Gortex selects.
 | `cargo-deny` + `cargo-audit` | Advisories, licenses, banned sources |
 | gitleaks | Secret scan |
 | CodeQL | OSS language SAST (not the local custom-rule path) |
+| Opengrep + Selene | **Advisory** job `security-scanners` in `ci.yml`: same scripts as `make lint-security` / `make lint-lua` (no `IRIN_*_FAIL`). Findings do not fail the job; bootstrap/tool/config errors do. Opengrep JSON/SARIF uploaded as the `security-scanner-findings` artifact. |
 
 ## Local / gitignored state
 
@@ -41,6 +42,9 @@ rustup toolchain install nightly -c miri
 ```
 
 ## Run (advisory by default)
+
+Local and CI use the same runners. CI bootstraps via `scripts/bootstrap-dev-tools.sh`
+then calls `scripts/run-opengrep.sh` and `scripts/run-selene.sh` without fail-closed env.
 
 ```bash
 make lint-security         # Opengrep IRIN rules → .irin-tools/findings/
