@@ -198,9 +198,11 @@ install_selene() {
       binary_sha=30887c8f10ab901fe5883ef655f7b9fe47e628b83c709c3d7548b02e966e67a4
       ;;
     *)
-      printf 'ERROR: unsupported selene platform: %s/%s\n' "$os" "$arch" >&2
+      # Advisory tool: skip where official assets do not exist instead of
+      # aborting make tools; the runner treats a missing binary as a skip.
+      printf 'selene: skip unsupported platform: %s/%s\n' "$os" "$arch" >&2
       printf '  supported: Darwin/arm64, Linux/x86_64 (official 0.31.0 release assets)\n' >&2
-      exit 1
+      return 0
       ;;
   esac
 

@@ -73,10 +73,13 @@ Env/config keys are unique strings. When a key is added, renamed, or removed,
 its readers are one search away — no graph build, no emitter:
 
 ```bash
-rg -n 'BOOTSTRAP_TOKEN' -g '*.rs' -g '*.lua' -g '*.ts'
+rg -n 'BOOTSTRAP_TOKEN'
 ```
 
-Every hit is a reader or provider of that key; that is the blast radius.
+Search everything, then classify the hits: providers live in env examples,
+compose files, and setup scripts, not only in `*.rs` / `*.lua` / `*.ts`
+sources. Every hit is a reader or provider of that key; that is the blast
+radius.
 Gortex's `config_readers` / `env_var_users` kinds currently emit config edges
 for Go-shaped code only, so they return empty on this Rust/Lua-heavy tree —
 expected, not misconfiguration. `analyze contracts` still surfaces env

@@ -87,16 +87,23 @@ if [[ ${#paths[@]} -eq 0 ]]; then
 fi
 
 scan_paths=()
+missing=0
 for p in "${paths[@]}"; do
   if [[ -e "$p" ]]; then
     scan_paths+=("$p")
   else
     printf 'run-selene: skip missing path: %s\n' "$p" >&2
+    missing=1
   fi
 done
 if [[ ${#scan_paths[@]} -eq 0 ]]; then
   printf 'run-selene: ERROR: no lint paths exist\n' >&2
   exit 1
+fi
+# Hard mode must not succeed on a partial scan of explicitly requested targets.
+if [[ "$missing" == "1" && "$fail_hard" == "1" ]]; then
+  printf 'run-selene: ERROR: hard mode requires every requested target to exist\n' >&2
+  exit 2
 fi
 
 cmd=(
@@ -107,11 +114,20 @@ cmd=(
 
 printf 'run-selene: %s\n' "${cmd[*]}"
 set +e
-"${cmd[@]}"
+out="$("${cmd[@]}" 2>&1)"
 rc=$?
 set -e
+printf '%s\n' "$out"
 
-# Selene: 0 clean, 1 findings, other = tool/config error.
+# Selene exits 1 for findings AND for config/startup failures; only a real
+# lint run prints a Results summary. A nonzero exit without one is a
+# tool/config error and must stay nonzero in every mode.
+if [[ "$rc" -ne 0 ]] && ! grep -q '^Results:' <<<"$out"; then
+  printf 'run-selene: tool/config error (rc=%s)\n' "$rc" >&2
+  exit 2
+fi
+
+# Remaining codes: 0 clean, 1 findings, other = tool/config error.
 if [[ "$fail_hard" == "1" ]]; then
   exit "$rc"
 fi
