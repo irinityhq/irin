@@ -42,6 +42,7 @@ Every pull request reports these jobs, including documentation-only changes:
 - GitHub Actions lint;
 - path classification;
 - root secret scan;
+- security scanners (advisory Opengrep + Selene; findings non-blocking);
 - release-tree hygiene;
 - public PR language; and
 - the `ci / CI required` aggregate.

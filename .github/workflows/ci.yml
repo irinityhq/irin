@@ -133,6 +133,47 @@ jobs:
       - name: Run root tree secret scan
         run: gitleaks dir --config .gitleaks.toml --verbose .
 
+  security-scanners:
+    name: Security scanners (advisory)
+    runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install unzip on hosted runners
+        if: runner.environment != 'self-hosted'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq unzip
+
+      - name: Verify unzip on self-hosted runners
+        if: runner.environment == 'self-hosted'
+        run: command -v unzip
+
+      - name: Bootstrap pinned scanners
+        run: scripts/bootstrap-dev-tools.sh
+
+      - name: Opengrep (advisory findings)
+        run: scripts/run-opengrep.sh
+
+      - name: Selene Lua (advisory findings)
+        run: scripts/run-selene.sh
+
+      - name: Upload scanner findings
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: security-scanner-findings
+          # Findings live under gitignored .irin-tools/ — v4+ excludes hidden
+          # paths unless this is set (otherwise the artifact is empty).
+          include-hidden-files: true
+          path: |
+            .irin-tools/findings/opengrep-*.json
+            .irin-tools/findings/opengrep-*.sarif
+          if-no-files-found: warn
+          retention-days: 14
+
   release-tree:
     name: Release tree
     runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
@@ -716,6 +757,7 @@ jobs:
       - actionlint
       - detect-changes
       - gitleaks
+      - security-scanners
       - release-tree
       - public-pr-language
       - workspace-supply-chain
