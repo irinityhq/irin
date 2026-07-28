@@ -173,6 +173,12 @@ to run by hand. See
 [`council-rs/warroom/docs/TAURI-AUTH.md`](../council-rs/warroom/docs/TAURI-AUTH.md)
 for auth-token behavior across release and debug builds.
 
+The native visual proof in `make ship-check`
+(`scripts/smoke-macos-tauri-app.sh`) requires a real on-screen window. On a
+headless or display-asleep machine it fails with `no on-screen window for pid`
+even though the app is healthy — wake the display and keep it awake for the
+run, e.g. `caffeinate -dims make ship-check`.
+
 ## Teardown
 
 ```bash
