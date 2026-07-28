@@ -216,8 +216,14 @@ mod tests {
         assert!(!admin_token_matches("", Some("anything")));
         assert!(!admin_token_matches("secret", None));
         assert!(!admin_token_matches("secret", Some("")));
-        assert!(admin_token_matches("bootstrap-token", Some("bootstrap-token")));
-        assert!(!admin_token_matches("bootstrap-token", Some("bootstrap-tokeN")));
+        assert!(admin_token_matches(
+            "bootstrap-token",
+            Some("bootstrap-token")
+        ));
+        assert!(!admin_token_matches(
+            "bootstrap-token",
+            Some("bootstrap-tokeN")
+        ));
         // Length-bounded work: oversize provided is rejected without matching.
         let long = "x".repeat(129);
         assert!(!admin_token_matches("secret", Some(&long)));
