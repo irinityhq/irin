@@ -17,6 +17,10 @@ IRIN_OPENGREP_FAIL=1 scripts/run-opengrep.sh --fail   # CI-style hard fail
 JSON + SARIF land under `.irin-tools/findings/` (gitignored). Latest pointers:
 `opengrep-latest.json`, `opengrep-latest.sarif`.
 
+**Prefer JSON for paths.** Opengrep's SARIF commonly uses `uriBaseId: %SRCROOT%`
+without `originalUriBaseIds`; the runner treats JSON `results[].path` as the
+authoritative file location and fails if any finding lacks a path.
+
 ## Rules
 
 | ID | Lang | Intent |

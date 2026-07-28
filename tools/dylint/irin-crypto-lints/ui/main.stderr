@@ -49,4 +49,3 @@ LL |     left == right
    = help: use `bool::from(left.ct_eq(right))` (crate `subtle`) instead of `==`
 
 warning: 6 warnings emitted
-

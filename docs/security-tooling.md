@@ -1,8 +1,10 @@
-# Security tooling (Gortex spine + Tier 1)
+# Security tooling (Tier 1, local-first)
 
-Local-first tools that fill gaps around Gortex. Agents still start with Gortex
-(`detect_changes` / impact / editing context). Deeper scanners run on the
-affected subgraph; findings join back to Gortex symbols via the merger.
+Local scanners and formal checks that complement the existing CI supply-chain
+gates (`cargo-deny`, `cargo-audit`, gitleaks, CodeQL). **Authoritative finding
+shape is file + line** (Opengrep JSON under `.irin-tools/findings/`). There is
+no SARIF→Gortex symbol merger in-tree: Gortex remains the structural spine for
+agents; scanners stay separate tools agents invoke on paths Gortex selects.
 
 ## What is already in CI
 
@@ -10,7 +12,7 @@ affected subgraph; findings join back to Gortex symbols via the merger.
 | --- | --- |
 | `cargo-deny` + `cargo-audit` | Advisories, licenses, banned sources |
 | gitleaks | Secret scan |
-| CodeQL | OSS language SAST (keep; not the local custom-rule path) |
+| CodeQL | OSS language SAST (not the local custom-rule path) |
 
 ## Local / gitignored state
 
@@ -19,14 +21,12 @@ Pinned binaries and scan artifacts live under **`.irin-tools/`** (gitignored):
 ```text
 .irin-tools/bin/opengrep      # bootstrap via make tools
 .irin-tools/bin/cargo-deny
-.irin-tools/findings/*.json   # Opengrep outputs
-.irin-tools/findings/*.sarif
-.irin-tools/findings/merged-*.jsonl
+.irin-tools/findings/*.json   # Opengrep outputs (paths are authoritative)
+.irin-tools/findings/*.sarif  # optional; prefer JSON for path reliability
 ```
 
-Never force-add this directory. Operator machine toolchains (kani, miri,
-cargo-dylint, selene) install into the user cargo/rustup homes — also not
-committed.
+Never force-add this directory. Operator toolchains (kani, miri, cargo-dylint)
+install into the user cargo/rustup homes — also not committed.
 
 ## Install
 
@@ -45,9 +45,6 @@ rustup toolchain install nightly -c miri
 make lint-security         # Opengrep IRIN rules → .irin-tools/findings/
 make lint-crypto           # dylint IRIN crypto lints
 make verify-formal         # selective Kani + Miri on sovereign-protocol JCS
-
-# Map SARIF onto Gortex symbols (JSONL stays under .irin-tools/findings/)
-python3 scripts/merge-findings-to-gortex.py .irin-tools/findings/<latest>.sarif
 ```
 
 Fail-closed (opt-in):
@@ -60,24 +57,23 @@ IRIN_KANI_FAIL=1 IRIN_MIRI_FAIL=1 make verify-formal
 
 ## Agent workflow
 
-1. Gortex: `detect` / impact on the change set.
+1. Gortex: `detect` / impact on the change set (structure only).
 2. If signing, arming, budget, redaction, or JCS paths move → `make lint-security`
-   (or `scripts/run-opengrep.sh <paths>`).
+   (or `scripts/run-opengrep.sh <paths>`). Read **JSON** findings for file:line.
 3. Key-type / compare changes → `make lint-crypto`.
 4. Pure JCS / fail-closed helpers in `sovereign-protocol` → update Kani harnesses
    under `src/jcs/kani_proofs.rs`, then `make verify-formal`.
-5. Merge SARIF and query findings by symbol when blast-radius questions need
-   security edges.
 
 ## Rules and lints (committed)
 
 | Path | Content |
 | --- | --- |
-| `security/opengrep/rules/` | IRIN Opengrep YAML (taint/crypto/arming/Lua) |
+| `security/opengrep/rules/` | IRIN Opengrep YAML (crypto/arming/Lua) |
 | `tools/dylint/irin-crypto-lints/` | Custom dylint library (external workspace) |
 | `sentinel/sovereign-protocol/src/jcs/kani_proofs.rs` | Selective formal proofs |
 
-## Explicit non-goals (Tier 3 / later)
+## Explicit non-goals
 
-Lockbud, loom/shuttle, KCL migration, Structurizr, dual graph SSOT, hard-fail
-ship-check on all scanners before baselines settle.
+- SARIF→Gortex symbol attribution (needs a real range-to-symbol API + fixtures)
+- Lockbud, loom/shuttle, KCL migration, Structurizr
+- Hard-fail ship-check on all scanners before baselines settle

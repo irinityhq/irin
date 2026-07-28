@@ -96,7 +96,9 @@ pub(super) async fn admin_provision_key(
     };
 
     let bootstrap_token = std::env::var("BOOTSTRAP_TOKEN").unwrap_or_default();
-    if !bootstrap_token.is_empty() && admin_key == bootstrap_token {
+    // Same CT comparator as the watch-plane admin bearer path — never plain `==`
+    // on secret material (length/timing oracle).
+    if crate::watch::api::admin_token_matches(&bootstrap_token, Some(admin_key.as_str())) {
         // Bootstrap path — allowed for initial key creation.
         tracing::info!("Admin provision via BOOTSTRAP_TOKEN");
     } else {

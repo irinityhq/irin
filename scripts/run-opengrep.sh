@@ -174,17 +174,37 @@ fi
 
 findings=0
 if [[ -f "$json_out" ]] && command -v python3 >/dev/null 2>&1; then
-  findings="$(python3 - "$json_out" <<'PY'
+  # JSON is the authoritative surface (paths). Opengrep SARIF often emits
+  # uriBaseId=%SRCROOT% without originalUriBaseIds — do not treat SARIF as
+  # path-authoritative without a dedicated, tested importer.
+  path_check="$(python3 - "$json_out" <<'PY'
 import json, sys
 path = sys.argv[1]
 try:
     with open(path) as f:
         data = json.load(f)
-    print(len(data.get("results") or []))
-except Exception:
-    print(0)
+except Exception as exc:
+    print(f"error:{exc}")
+    raise SystemExit(0)
+results = data.get("results") or []
+missing = [
+    i for i, r in enumerate(results)
+    if not (isinstance(r, dict) and isinstance(r.get("path"), str) and r["path"].strip())
+]
+print(f"count={len(results)}")
+print(f"missing_paths={len(missing)}")
+if missing:
+    print(f"missing_indexes={missing[:10]}")
 PY
 )"
+  findings="$(printf '%s\n' "$path_check" | awk -F= '/^count=/{print $2; exit}')"
+  findings="${findings:-0}"
+  missing_paths="$(printf '%s\n' "$path_check" | awk -F= '/^missing_paths=/{print $2; exit}')"
+  if [[ "${missing_paths:-0}" != "0" ]]; then
+    printf 'run-opengrep: ERROR: %s finding(s) lack path in JSON (producer contract)\n' "$missing_paths" >&2
+    printf '%s\n' "$path_check" >&2
+    exit 1
+  fi
   printf 'run-opengrep: findings=%s json=%s sarif=%s\n' "$findings" "$json_out" "$sarif_out"
 else
   printf 'run-opengrep: json=%s sarif=%s (rc=%s)\n' "$json_out" "$sarif_out" "$rc"
