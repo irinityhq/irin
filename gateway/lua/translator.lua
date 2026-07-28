@@ -199,9 +199,7 @@ function _M.denormalize_messages_to_responses(resp)
     local first = resp.choices[1] or {}
     local finish = first.finish_reason
     local status = "completed"
-    if finish == "length" then
-        status = "incomplete"
-    elseif finish == "content_filter" then
+    if finish == "length" or finish == "content_filter" then
         status = "incomplete"
     end
 
@@ -240,7 +238,7 @@ end
 
 local openai_bridge = {}
 
-function openai_bridge.translate_request(req, model_id)
+function openai_bridge.translate_request(req, _model_id)
     local target_path = _M._target_path or ""
     local is_responses_endpoint = target_path:find("/v1/responses") ~= nil
 
@@ -341,7 +339,7 @@ end
 
 local nvidia_translator = {}
 
-function nvidia_translator.translate_request(req, model_id)
+function nvidia_translator.translate_request(req, _model_id)
     -- NVIDIA speaks chat/completions natively
     -- If request has "input" (responses API format), convert to messages
     if req.input and not req.messages then
@@ -594,7 +592,7 @@ end
 
 local vertex_translator = {}
 
-function vertex_translator.translate_request(req, model_id)
+function vertex_translator.translate_request(req, _model_id)
     local translated = {}
 
     -- Extract messages (from messages[] or input)

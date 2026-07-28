@@ -154,7 +154,7 @@ end
 -- @return table|nil  Auth result (allowed, budget_key, tier, limits...)
 -- @return string|nil Error message
 function _M.auth_check(raw_key, ip)
-    local result, err, status = sidecar_post("/auth/check", {
+    local result, err = sidecar_post("/auth/check", {
         raw_key = raw_key,
         ip      = ip,
     })
@@ -1216,7 +1216,7 @@ function _M.librarian_context(tenant_id)
         return nil, "sidecar request failed: " .. (req_err or "unknown")
     end
 
-    local body, body_err = res:read_body()
+    local body = res:read_body()
     httpc:set_keepalive(60000, 10)
 
     if res.status ~= 200 then

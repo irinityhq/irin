@@ -767,7 +767,6 @@ function _M.account()
         local response_size = ngx.ctx.gw_response_len or 0
         local fb_request_id  = record.request_id
         local fb_provider    = record.provider
-        local fb_alias       = record.alias
         local fb_caller_key  = record.caller_key
         local fb_status      = ngx.status
         local fb_latency     = latency_ms
@@ -1055,10 +1054,10 @@ function _M.account()
 
     if ngx.ctx.gw_credentials_redacted then
         -- Metric for credentials scrubbed (Phase 3 stub)
-        local metrics = ngx.shared.gw_metrics
-        if metrics and ngx.ctx.gw_credentials_matched then
+        local shared_metrics = ngx.shared.gw_metrics
+        if shared_metrics and ngx.ctx.gw_credentials_matched then
             for pattern, count in pairs(ngx.ctx.gw_credentials_matched) do
-                metrics:incr("credentials_redacted_total:" .. pattern, count, 0)
+                shared_metrics:incr("credentials_redacted_total:" .. pattern, count, 0)
             end
         end
     end
