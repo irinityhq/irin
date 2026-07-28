@@ -1443,7 +1443,7 @@ fn main_rs_spawns_live_dispatcher_after_hydration() {
     // Find the hydration sweep call site (the actual invocation after probe)
     let hydration_pos = boot_src
         .find("run_boot_hydration_sweep(&watch_db, hydration_token, &directive_key)")
-        .or_else(|| boot_src.find("run_boot_hydration_sweep"))
+        .or_else(|| boot_src.find("run_boot_hydration_sweep(&"))
         .expect("hydration sweep call must exist in boot.rs");
 
     // Find the actual spawn *call* (not the import) in the 3b.5 wiring block.
