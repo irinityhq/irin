@@ -173,6 +173,24 @@ to run by hand. See
 [`council-rs/warroom/docs/TAURI-AUTH.md`](../council-rs/warroom/docs/TAURI-AUTH.md)
 for auth-token behavior across release and debug builds.
 
+The native visual proof in `make ship-check`
+(`scripts/smoke-macos-tauri-app.sh`) requires a real on-screen window in an
+interactive GUI session. It fails with `no on-screen window for pid` when the
+display is asleep, the session is locked without a visible desktop, or the
+machine is genuinely headless — even though the app process is healthy.
+`caffeinate -dims` alone only *prevents* later sleep; it does not wake an
+already-off display. Wake the display first (`caffeinate -u -t 1` turns it on
+briefly), then keep it awake for the run:
+
+```bash
+caffeinate -u -t 1
+caffeinate -dims make ship-check
+```
+
+A single `caffeinate -dimsu make ship-check` also works on many machines
+(`-u` asserts user activity and can turn the display on). Headless or
+SSH-only hosts without a GUI session still cannot satisfy this proof.
+
 ## Teardown
 
 ```bash
