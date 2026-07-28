@@ -1,0 +1,192 @@
+# OpenResty / ngx_lua surface used by gateway/lua.
+# Derived from a grep of ngx.* usage in that tree (no ndk.* in tree).
+# Base is applied via selene.toml: std = "lua51+security/selene/std/openresty"
+---
+base: lua51
+
+structs:
+  SharedDict:
+    get:
+      method: true
+      args:
+        - type: string
+      must_use: true
+    set:
+      method: true
+      args:
+        - type: string
+        - type: any
+        - type: number
+          required: false
+        - type: number
+          required: false
+    incr:
+      method: true
+      args:
+        - type: string
+        - type: number
+        - type: any
+          required: false
+        - type: number
+          required: false
+    get_keys:
+      method: true
+      args:
+        - type: number
+          required: false
+      must_use: true
+    add:
+      method: true
+      args:
+        - type: string
+        - type: any
+        - type: number
+          required: false
+        - type: number
+          required: false
+    delete:
+      method: true
+      args:
+        - type: string
+
+globals:
+  # --- log levels (numbers) ---
+  ngx.DEBUG:
+    property: read-only
+  ngx.INFO:
+    property: read-only
+  ngx.WARN:
+    property: read-only
+  ngx.ERR:
+    property: read-only
+  ngx.CRIT:
+    property: read-only
+  ngx.ALERT:
+    property: read-only
+  ngx.EMERG:
+    property: read-only
+  ngx.NOTICE:
+    property: read-only
+  ngx.STDERR:
+    property: read-only
+
+  # --- request/response state (mutated by handlers) ---
+  ngx.status:
+    property: override-fields
+  ngx.header:
+    property: full-write
+  ngx.ctx:
+    property: full-write
+  ngx.arg:
+    property: full-write
+
+  # nginx variables used by gateway/lua (some assigned before proxy)
+  ngx.var:
+    property: full-write
+  ngx.var.uri:
+    property: read-only
+  ngx.var.args:
+    property: read-only
+  ngx.var.is_args:
+    property: read-only
+  ngx.var.request_id:
+    property: read-only
+  ngx.var.request_method:
+    property: read-only
+  ngx.var.remote_addr:
+    property: read-only
+  ngx.var.upstream_http_x_chair_tokens:
+    property: read-only
+  ngx.var.target_url:
+    property: override-fields
+  ngx.var.target_host:
+    property: override-fields
+  ngx.var.auth_value:
+    property: override-fields
+
+  # shared memory dict declared in nginx conf
+  ngx.shared.gw_metrics:
+    struct: SharedDict
+
+  # --- functions ---
+  ngx.log:
+    args:
+      - type: number
+      - type: any
+      - type: "..."
+        required: false
+  ngx.say:
+    args:
+      - type: any
+        required: false
+      - type: "..."
+        required: false
+  ngx.print:
+    args:
+      - type: any
+        required: false
+      - type: "..."
+        required: false
+  ngx.exit:
+    args:
+      - type: number
+  ngx.now:
+    args: []
+    must_use: true
+  ngx.localtime:
+    args: []
+    must_use: true
+  ngx.sleep:
+    args:
+      - type: number
+  ngx.on_abort:
+    args:
+      - type: function
+
+  ngx.req.read_body:
+    args: []
+  ngx.req.get_body_data:
+    args: []
+    must_use: true
+  ngx.req.get_body_file:
+    args: []
+    must_use: true
+  ngx.req.get_headers:
+    args:
+      - type: number
+        required: false
+    must_use: true
+  ngx.req.get_method:
+    args: []
+    must_use: true
+  ngx.req.set_header:
+    args:
+      - type: string
+      - type: any
+  ngx.req.clear_header:
+    args:
+      - type: string
+  ngx.req.set_body_data:
+    args:
+      - type: string
+
+  ngx.timer.at:
+    args:
+      - type: number
+      - type: function
+      - type: "..."
+        required: false
+  ngx.timer.every:
+    args:
+      - type: number
+      - type: function
+      - type: "..."
+        required: false
+
+  ngx.socket.tcp:
+    args: []
+    must_use: true
+
+  ngx.worker.id:
+    args: []
+    must_use: true
