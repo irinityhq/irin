@@ -111,8 +111,68 @@ conversation; do not build a config-edge emitter on speculation.
 | Hard mode | `IRIN_SELENE_FAIL=1 make lint-lua` or `scripts/run-selene.sh --fail` |
 | Missing binary | Runner prints a bootstrap hint and exits 0 (does not auto-install) |
 
+## Local Gortex architecture layers (operator-only)
+
+Layer allow-lists for agents live in a **repo-local, never-committed**
+`.gortex.yaml`. The release tree rejects a tracked `.gortex.yaml`
+(`scripts/check-release-tree.sh`), so keep it in `.git/info/exclude` (or an
+equivalent personal ignore) — do not open a PR that commits the file.
+
+Suggested shape (paths may use repo-relative globs and/or the `irin/` graph
+prefix; both are fine):
+
+```yaml
+project: irin
+workspace: irin
+
+architecture:
+  severity: warn   # set error to refuse on layer breaks
+  layers:
+    - name: warroom_web
+      paths: [council-rs/warroom/web/**, irin/council-rs/warroom/web/**]
+      allow: []
+    - name: warroom_tauri
+      paths: [council-rs/warroom-tauri/**, irin/council-rs/warroom-tauri/**]
+      allow: []
+    - name: council
+      paths: [council-rs/src/**, irin/council-rs/src/**]
+      allow: [sovereign_protocol]
+    - name: gateway_lua
+      paths: [gateway/lua/**, irin/gateway/lua/**]
+      allow: []
+    - name: gateway_sidecar
+      paths: [gateway/sidecar-rs/**, irin/gateway/sidecar-rs/**]
+      allow: [sovereign_protocol]
+    - name: sovereign_protocol
+      paths: [sentinel/sovereign-protocol/**, irin/sentinel/sovereign-protocol/**]
+      allow: []
+```
+
+Invariants encoded here:
+
+- War Room (web/tauri) has no code deps into Gateway or the protocol crate
+  (HTTP/env only at runtime).
+- Council and Gateway sidecar may depend on `sovereign-protocol` (shared wire
+  types); the protocol crate is a leaf.
+- Gateway Lua is the OpenResty front door; Lua↔sidecar is UDS at runtime, not a
+  Rust crate edge.
+
+**Direct vs Governed** provider routing is a runtime seat choice
+(`COUNCIL_VIA_GATEWAY` / per-seat Governed), not a path layer — see
+[`architecture.md`](architecture.md).
+
+After editing `.gortex.yaml`, run `gortex daemon reload` (or restart the
+daemon) so the running daemon re-reads the file. `change_contract`'s
+architecture family evaluates the layers; a separate `guards:` rule list is
+optional and not required for the layer map.
+
+Cross-process wire inventory (Lua↔sidecar, Council↔Gateway headers, tauri
+spawn env, what sovereign-protocol does and does not cover):
+[`cross-process-boundaries.md`](cross-process-boundaries.md).
+
 ## Explicit non-goals
 
 - SARIF→Gortex symbol attribution (needs a real range-to-symbol API + fixtures)
 - Lockbud, loom/shuttle, KCL migration, Structurizr
 - Hard-fail ship-check on all scanners before baselines settle
+- Committing `.gortex.yaml` into the release tree (private operator config only)

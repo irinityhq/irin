@@ -155,7 +155,7 @@ for path in "${files[@]}"; do
         council-rs/docs/providers.md|council-rs/docs/war-room.md|\
         council-rs/warroom-tauri/README.md|council-rs/warroom/docs/TAURI-AUTH.md|\
         council-rs/warroom-ios/README.md|\
-        docs/architecture.md|docs/cabinets.md|docs/ci-operating-model.md|docs/development-workflow.md|docs/release-runbook.md|docs/security-claims-vs-reality.md|\
+        docs/architecture.md|docs/cabinets.md|docs/ci-operating-model.md|docs/cross-process-boundaries.md|docs/development-workflow.md|docs/release-runbook.md|docs/security-claims-vs-reality.md|\
         docs/security-tooling.md|docs/surface-map.md|docs/troubleshooting.md|\
         packaging/gateway-pack/README.md|\
         gateway/COUNCIL_GATEWAY_CONTRACT.md|gateway/README.md|gateway/SECURITY.md|\
