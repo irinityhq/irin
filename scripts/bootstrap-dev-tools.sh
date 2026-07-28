@@ -115,7 +115,7 @@ install_cargo_deny() {
 # ---------------------------------------------------------------------------
 install_opengrep() {
   local version=1.26.0
-  local asset binary_sha destination tmp candidate url actual
+  local asset binary_sha destination tmp candidate url actual version_out
 
   case "$os/$arch" in
     Darwin/arm64)
@@ -126,13 +126,16 @@ install_opengrep() {
       asset=opengrep_osx_x86
       binary_sha=36c00a2b6eeb45796275e69cb8f74ef27c42724a1b3c98f6c8d861bad7a8529d
       ;;
+    # manylinux (glibc), not musllinux: GitHub ubuntu-* and irin-ci hosts lack
+    # /lib/ld-musl-*.so.1, so musl-dynamic assets fail at --version with a
+    # misleading "version mismatch" after a clean checksum install.
     Linux/x86_64)
-      asset=opengrep_musllinux_x86
-      binary_sha=18aeca114221e2816ec26e1a731f1a2583408c8e4578cd868cd2d47c12fd29f8
+      asset=opengrep_manylinux_x86
+      binary_sha=40c21299eeddabf743b856daa843d24f9d4a027130671cd45b3b21776fd9ab26
       ;;
     Linux/aarch64|Linux/arm64)
-      asset=opengrep_musllinux_aarch64
-      binary_sha=d4e20ac57b6f9bb32c2b0ffc0501b8c6acb92ecee60f11f1cd72db9b11647857
+      asset=opengrep_manylinux_aarch64
+      binary_sha=3042a3b1aa98fa93407b9d66a45ab1f179b5b367e76965f56afdbd2c038fb1fa
       ;;
     *) printf 'ERROR: unsupported opengrep platform: %s/%s\n' "$os" "$arch" >&2; exit 1 ;;
   esac
@@ -169,8 +172,14 @@ install_opengrep() {
     printf 'ERROR: installed opengrep executable checksum mismatch\n' >&2
     exit 1
   }
-  "$destination" --version 2>/dev/null | grep -Eq "(^| )${version}([ .]|$)" || {
+  version_out="$("$destination" --version 2>&1)" || {
+    printf 'ERROR: installed opengrep failed to run --version (want %s)\n' "$version" >&2
+    printf '  output: %s\n' "$version_out" >&2
+    exit 1
+  }
+  printf '%s\n' "$version_out" | grep -Eq "(^| )${version}([ .]|$)" || {
     printf 'ERROR: installed opengrep version mismatch (want %s)\n' "$version" >&2
+    printf '  output: %s\n' "$version_out" >&2
     exit 1
   }
   printf 'opengrep %s: installed (%s)\n' "$version" "$destination"
