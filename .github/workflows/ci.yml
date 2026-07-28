@@ -165,6 +165,9 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: security-scanner-findings
+          # Findings live under gitignored .irin-tools/ — v4+ excludes hidden
+          # paths unless this is set (otherwise the artifact is empty).
+          include-hidden-files: true
           path: |
             .irin-tools/findings/opengrep-*.json
             .irin-tools/findings/opengrep-*.sarif
