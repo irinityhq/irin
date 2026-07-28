@@ -1,0 +1,16 @@
+# Selene config for IRIN gateway OpenResty Lua (gateway/lua).
+# Advisory local lint — see scripts/run-selene.sh and docs/security-tooling.md.
+std = "lua51+security/selene/std/openresty"
+
+exclude = [
+  "**/target/**",
+  "**/node_modules/**",
+  "**/.irin-tools/**",
+  "**/vendor/**",
+]
+
+[lints]
+# Baseline triage (quiet style noise; leave substantive rules on).
+# Re-enable as real cleanups land — do not mass-edit gateway/lua for style.
+multiple_statements = "allow" # compact OpenResty one-liners are idiomatic here
+empty_if = "allow"            # intentional comment-only branches (fail-closed docs)

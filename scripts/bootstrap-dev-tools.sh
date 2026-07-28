@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Install pinned, checksum-verified ship tooling into ignored repo-local state.
-# Tools: cargo-deny, opengrep
+# Tools: cargo-deny, opengrep, selene
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
@@ -178,5 +178,84 @@ install_opengrep() {
   rm -rf "$tmp"
 }
 
+# ---------------------------------------------------------------------------
+# selene 0.31.0 (zip archive + nested binary checksum)
+# Official assets: Kampfkarren/selene — macos (arm64) + linux (x86_64).
+# ---------------------------------------------------------------------------
+install_selene() {
+  local version=0.31.0
+  local asset archive_sha binary_sha destination tmp archive url actual candidate
+
+  case "$os/$arch" in
+    Darwin/arm64)
+      asset=selene-${version}-macos.zip
+      archive_sha=67f644e57e14ccb74a0c272bc44af0dc7909d8bdff58e4e59bb3524717da5741
+      binary_sha=bc0457112c121a9f608f6b55857b4ab6843d92f1ce6884d32aa5d3b7000a007b
+      ;;
+    Linux/x86_64)
+      asset=selene-${version}-linux.zip
+      archive_sha=dac452422747999ec4919bbb8bb52992b66aae533b60022bf005669de8616671
+      binary_sha=30887c8f10ab901fe5883ef655f7b9fe47e628b83c709c3d7548b02e966e67a4
+      ;;
+    *)
+      # Advisory tool: skip where official assets do not exist instead of
+      # aborting make tools; the runner treats a missing binary as a skip.
+      printf 'selene: skip unsupported platform: %s/%s\n' "$os" "$arch" >&2
+      printf '  supported: Darwin/arm64, Linux/x86_64 (official 0.31.0 release assets)\n' >&2
+      return 0
+      ;;
+  esac
+
+  destination="$BIN_DIR/selene"
+  if [[ -x "$destination" ]]; then
+    if [[ "$(sha256_file "$destination")" == "$binary_sha" ]] &&
+      "$destination" --version 2>/dev/null | grep -Eq "(^| )${version}([ .]|$)"; then
+      printf 'selene %s: checksum verified (%s)\n' "$version" "$destination"
+      return 0
+    fi
+    printf 'selene cache: rejected (checksum or version mismatch); reinstalling\n' >&2
+  fi
+
+  require_cmds curl unzip
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/irin-tools-selene.XXXXXX")"
+  # EXIT (not only RETURN): set -e failures must still clean the temp dir.
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT
+  archive="$tmp/selene.zip"
+  url="https://github.com/Kampfkarren/selene/releases/download/${version}/${asset}"
+  printf 'Downloading selene %s (%s)\n' "$version" "$asset"
+  curl -fsSL --retry 3 --retry-all-errors -o "$archive" "$url"
+  actual="$(sha256_file "$archive")"
+  [[ "$actual" == "$archive_sha" ]] || {
+    printf 'ERROR: selene archive checksum mismatch\n' >&2
+    printf '  expected: %s\n' "$archive_sha" >&2
+    printf '  actual:   %s\n' "$actual" >&2
+    exit 1
+  }
+  unzip -qo "$archive" -d "$tmp"
+  candidate="$(find "$tmp" -type f -name selene -print -quit)"
+  [[ -n "$candidate" ]] || {
+    printf 'ERROR: selene missing from verified archive\n' >&2
+    exit 1
+  }
+  [[ "$(sha256_file "$candidate")" == "$binary_sha" ]] || {
+    printf 'ERROR: selene executable checksum mismatch\n' >&2
+    exit 1
+  }
+  install -m 0755 "$candidate" "$destination"
+  [[ "$(sha256_file "$destination")" == "$binary_sha" ]] || {
+    printf 'ERROR: installed selene executable checksum mismatch\n' >&2
+    exit 1
+  }
+  "$destination" --version 2>/dev/null | grep -Eq "(^| )${version}([ .]|$)" || {
+    printf 'ERROR: installed selene version mismatch (want %s)\n' "$version" >&2
+    exit 1
+  }
+  printf 'selene %s: installed (%s)\n' "$version" "$destination"
+  trap - EXIT
+  rm -rf "$tmp"
+}
+
 install_cargo_deny
 install_opengrep
+install_selene

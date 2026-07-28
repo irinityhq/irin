@@ -58,7 +58,7 @@ function _M.init()
 
     -- Load shape limits
     local shape_path = "/usr/local/openresty/nginx/conf/conf/shape_limits.json"
-    local f_shape, err_shape = io.open(shape_path, "r")
+    local f_shape = io.open(shape_path, "r")
     if f_shape then
         local raw_shape = f_shape:read("*a")
         f_shape:close()

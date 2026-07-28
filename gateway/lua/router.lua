@@ -232,7 +232,7 @@ local function route_batch(headers, raw_body)
     end
 
     -- Auth + IP gate
-    local ok, raw_key, auth_result, client_ip = authenticate_request(headers)
+    local ok, _, auth_result = authenticate_request(headers)
     if not ok then return end
 
     local budget_key = headers["x-budget-key"] or ""
@@ -944,7 +944,6 @@ function _M.route()
         ngx.log(ngx.INFO, "router: cache hit alias=", record.alias,
                 " provider=", cached_provider)
 
-        local fb_alias_hit    = record.alias
         local fb_req_id_hit   = record.request_id
         local fb_sens_hit     = record.sensitivity
         local fb_role_hit     = record.council_role
@@ -1582,14 +1581,14 @@ function _M.route()
     -- This handles the 1-hour expiration. If it fails, fall back to the
     -- static VERTEX_ADC_TOKEN or whatever was set as `api_key` in config.
     if model_cfg.provider == "vertex" then
-        local token_resp, err = sidecar.vertex_token()
+        local token_resp, token_err = sidecar.vertex_token()
         if token_resp and token_resp.token then
             ngx.var.auth_value = "Bearer " .. token_resp.token
             ngx.log(ngx.DEBUG, "router: using fresh Vertex ADC token (source: ",
                     token_resp.source, ")")
         else
             ngx.log(ngx.WARN, "router: failed to fetch fresh Vertex token (",
-                    err, ") — falling back to static API key config")
+                    token_err, ") — falling back to static API key config")
             if api_key == "" then
                 ngx.log(ngx.ERR, "router: no Vertex ADC token or static API key configured")
                 return json_error(502, "API key not configured for provider",
