@@ -42,7 +42,7 @@ grep -qE '/usr/local/bin/docker' \
 grep -qE 'irin-desktop-gateway' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/docker_cli.rs" || die "fixed project in rust"
 grep -qE 'authenticated_ready' \
-  "$ROOT/council-rs/warroom-tauri/src-tauri/src/gateway_pack/mod.rs" || die "ready state"
+  "$ROOT/council-rs/warroom-tauri/src-tauri/src/gateway_pack/types.rs" || die "ready state"
 grep -qE 'GW_API_KEY' \
   "$ROOT/council-rs/warroom-tauri/src-tauri/src/private_config.rs" || die "deny import"
 
