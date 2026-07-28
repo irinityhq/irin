@@ -56,20 +56,21 @@ fn test_p1_b1_redaction_covers_all_models_yaml_providers() {
 
 #[test]
 fn test_p1_b2_bind_string_is_loopback() {
-    let server_path = "src/server.rs";
+    // Bind logic lives in server/mod.rs since server.rs became a module tree.
+    let server_path = "src/server/mod.rs";
     if let Ok(content) = fs::read_to_string(server_path) {
         assert!(
             !content.contains("\"0.0.0.0\""),
-            "server.rs contains 0.0.0.0 bind!"
+            "server/mod.rs contains 0.0.0.0 bind!"
         );
         assert!(
             content.contains("127.0.0.1"),
-            "server.rs must explicitly bind to 127.0.0.1"
+            "server/mod.rs must explicitly bind to 127.0.0.1"
         );
     }
 
-    // Check sidecar-rs if possible
-    let sidecar_path = "../gateway/sidecar-rs/src/main.rs";
+    // Check sidecar-rs if possible (bind/serve moved main.rs → boot.rs).
+    let sidecar_path = "../gateway/sidecar-rs/src/boot.rs";
     if let Ok(content) = fs::read_to_string(sidecar_path) {
         assert!(
             !content.contains("\"0.0.0.0\""),
