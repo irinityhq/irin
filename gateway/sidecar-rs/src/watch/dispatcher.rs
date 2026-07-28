@@ -1948,6 +1948,85 @@ pub(crate) fn recover_council_response_staged(
     audit_sink: &mut Vec<WatchPhase3AuditEvent>,
     signing_key: crate::keymgmt::DirectiveSigningKey, // owned for crossing conn.call (P0-epsilon)
 ) -> anyhow::Result<(RecoveryOutcome, Vec<WatchPhase3AuditEvent>)> {
+    // Phase pipeline (0..6). Bodies live in the phase fns below — bit-identical to the
+    // prior monolithic path: same guards, dead-letter reasons, signature seam, tx shape,
+    // and event order.
+    match check_recover_arm_gate(conn, escalation_id, tenant, audit_sink)? {
+        RecoverStep::Done(out) => return Ok(out),
+        RecoverStep::Next(()) => {}
+    }
+
+    let (body, headers) =
+        match parse_staged_envelope(conn, escalation_id, tenant, council_response_json)? {
+            RecoverStep::Done(out) => return Ok(out),
+            RecoverStep::Next(v) => v,
+        };
+
+    let (session_id, cost_usd) =
+        match validate_staged_session_cost(conn, escalation_id, tenant, &body, &headers)? {
+            RecoverStep::Done(out) => return Ok(out),
+            RecoverStep::Next(v) => v,
+        };
+
+    let enriched = match parse_and_enrich_proposal(
+        conn,
+        escalation_id,
+        tenant,
+        &body,
+        session_id,
+        cost_usd,
+    )? {
+        RecoverStep::Done(out) => return Ok(out),
+        RecoverStep::Next(v) => v,
+    };
+
+    let (canonical, sig_b64) = sign_recovered_directive(&signing_key, &enriched.persisted);
+    let (row, now_ms) = build_signed_outbox_row(
+        escalation_id,
+        tenant,
+        &enriched,
+        canonical,
+        sig_b64,
+        signing_key.kid(),
+    );
+
+    persist_signed_directive_tx(
+        conn,
+        escalation_id,
+        tenant,
+        audit_sink,
+        row,
+        enriched.verdict,
+        now_ms,
+    )
+}
+
+/// Control flow for recovery phase extraction.
+/// `Done` finishes the recovery (ArmHeld / DeadLettered / SkewHeld / success).
+/// `Next` carries intermediate state into the following phase.
+enum RecoverStep<T> {
+    Next(T),
+    Done((RecoveryOutcome, Vec<WatchPhase3AuditEvent>)),
+}
+
+/// Owned intermediate after phase 3 (parse + enrich). Fields mirror what the
+/// monolithic path held in locals between enrichment and outbox row build.
+struct EnrichedRecoveredProposal {
+    persisted: Value,
+    envelope_json: String,
+    authority_str: String,
+    verdict: &'static str,
+    session_id: String,
+    cost_usd: f64,
+}
+
+/// 0. ARM GATE (disarm re-check at the sign seam).
+fn check_recover_arm_gate(
+    conn: &mut rusqlite::Connection,
+    escalation_id: &str,
+    tenant: &str,
+    audit_sink: &mut Vec<WatchPhase3AuditEvent>,
+) -> anyhow::Result<RecoverStep<()>> {
     // 0. ARM GATE (disarm re-check at the sign seam). Every path through this
     // function ends in a SIGNED outbox row (Act *and* Dismiss), so signing is
     // gated on a currently-valid hardware-attested arm — the SAME decision the
@@ -1984,10 +2063,19 @@ pub(crate) fn recover_council_response_staged(
                 reason: reason.to_string(),
             };
             audit_sink.push(event.clone());
-            return Ok((RecoveryOutcome::ArmHeld, vec![event]));
+            return Ok(RecoverStep::Done((RecoveryOutcome::ArmHeld, vec![event])));
         }
     }
+    Ok(RecoverStep::Next(()))
+}
 
+/// 1. Parse durable envelope.
+fn parse_staged_envelope(
+    conn: &mut rusqlite::Connection,
+    escalation_id: &str,
+    tenant: &str,
+    council_response_json: &str,
+) -> anyhow::Result<RecoverStep<(String, serde_json::Map<String, Value>)>> {
     // 1. Parse durable envelope
     let envelope: Value = match serde_json::from_str(council_response_json) {
         Ok(v) => v,
@@ -1998,10 +2086,11 @@ pub(crate) fn recover_council_response_staged(
                 tenant,
                 "malformed durable envelope (not valid JSON)",
             )
+            .map(RecoverStep::Done);
         }
     };
     let body = match envelope.get("body").and_then(|v| v.as_str()) {
-        Some(v) => v,
+        Some(v) => v.to_string(),
         None => {
             return dead_letter_staged_row(
                 conn,
@@ -2009,10 +2098,11 @@ pub(crate) fn recover_council_response_staged(
                 tenant,
                 "missing body in durable envelope",
             )
+            .map(RecoverStep::Done);
         }
     };
     let headers = match envelope.get("headers").and_then(|v| v.as_object()) {
-        Some(v) => v,
+        Some(v) => v.clone(),
         None => {
             return dead_letter_staged_row(
                 conn,
@@ -2020,9 +2110,20 @@ pub(crate) fn recover_council_response_staged(
                 tenant,
                 "missing headers in durable envelope",
             )
+            .map(RecoverStep::Done);
         }
     };
+    Ok(RecoverStep::Next((body, headers)))
+}
 
+/// 2. Validate session + cost (strict), including exact-one-fence rule.
+fn validate_staged_session_cost(
+    conn: &mut rusqlite::Connection,
+    escalation_id: &str,
+    tenant: &str,
+    body: &str,
+    headers: &serde_json::Map<String, Value>,
+) -> anyhow::Result<RecoverStep<(String, f64)>> {
     // 2. Validate session + cost (strict)
     let session_id = match headers
         .get("x-council-session-id")
@@ -2037,6 +2138,7 @@ pub(crate) fn recover_council_response_staged(
                 tenant,
                 "missing or empty x-council-session-id in durable envelope",
             )
+            .map(RecoverStep::Done);
         }
     };
 
@@ -2054,6 +2156,7 @@ pub(crate) fn recover_council_response_staged(
                 tenant,
                 "invalid, non-finite, negative or excessive council cost in durable envelope",
             )
+            .map(RecoverStep::Done);
         }
     };
 
@@ -2066,9 +2169,22 @@ pub(crate) fn recover_council_response_staged(
             escalation_id,
             tenant,
             "multiple JSON fences in council-triage response (exactly one fence required by machine-output contract)",
-        );
+        )
+        .map(RecoverStep::Done);
     }
 
+    Ok(RecoverStep::Next((session_id, cost_usd)))
+}
+
+/// 3. Parse proposal body + build enriched persisted payload.
+fn parse_and_enrich_proposal(
+    conn: &mut rusqlite::Connection,
+    escalation_id: &str,
+    tenant: &str,
+    body: &str,
+    session_id: String,
+    cost_usd: f64,
+) -> anyhow::Result<RecoverStep<EnrichedRecoveredProposal>> {
     // 3. Parse proposal body + build enriched persisted payload.
     // council-triage's machine-output contract returns a ```json fence; raw JSON
     // remains accepted for older staged rows and unit fixtures.
@@ -2082,7 +2198,8 @@ pub(crate) fn recover_council_response_staged(
                 escalation_id,
                 tenant,
                 &format!("proposal intake rejected: {e}"),
-            );
+            )
+            .map(RecoverStep::Done);
         }
     };
     let proposal_obj = match proposal.as_object() {
@@ -2094,6 +2211,7 @@ pub(crate) fn recover_council_response_staged(
                 tenant,
                 "proposal in durable envelope is not a JSON object",
             )
+            .map(RecoverStep::Done);
         }
     };
     if proposal_obj.get("schema").and_then(Value::as_str) != Some("irin.directive.proposal.v1") {
@@ -2102,7 +2220,8 @@ pub(crate) fn recover_council_response_staged(
             escalation_id,
             tenant,
             "wrong schema in proposal fence (expected irin.directive.proposal.v1)",
-        );
+        )
+        .map(RecoverStep::Done);
     }
     if proposal_obj.get("in_response_to").and_then(Value::as_str) != Some(escalation_id) {
         return dead_letter_staged_row(
@@ -2110,7 +2229,8 @@ pub(crate) fn recover_council_response_staged(
             escalation_id,
             tenant,
             "proposal in_response_to does not match escalation id",
-        );
+        )
+        .map(RecoverStep::Done);
     }
     let authority_str = match proposal_obj.get("authority").and_then(Value::as_str) {
         Some(a) => a,
@@ -2120,7 +2240,8 @@ pub(crate) fn recover_council_response_staged(
                 escalation_id,
                 tenant,
                 "proposal missing authority",
-            );
+            )
+            .map(RecoverStep::Done);
         }
     };
 
@@ -2139,7 +2260,8 @@ pub(crate) fn recover_council_response_staged(
                         "capability token verification failed for authority '{}'",
                         authority_str
                     ),
-                );
+                )
+                .map(RecoverStep::Done);
             }
         } else {
             return dead_letter_staged_row(
@@ -2147,7 +2269,8 @@ pub(crate) fn recover_council_response_staged(
                 escalation_id,
                 tenant,
                 "proposal authority must be recommend, prepare, or execute",
-            );
+            )
+            .map(RecoverStep::Done);
         }
     }
     let verdict = match proposal_obj.get("verdict").and_then(Value::as_str) {
@@ -2160,6 +2283,7 @@ pub(crate) fn recover_council_response_staged(
                 tenant,
                 "invalid verdict in proposal (must be Act or Dismiss)",
             )
+            .map(RecoverStep::Done);
         }
     };
 
@@ -2174,7 +2298,8 @@ pub(crate) fn recover_council_response_staged(
             escalation_id,
             tenant,
             "missing or empty rationale in proposal (required for both Act and Dismiss)",
-        );
+        )
+        .map(RecoverStep::Done);
     }
 
     if verdict == "Act" {
@@ -2188,7 +2313,8 @@ pub(crate) fn recover_council_response_staged(
                 escalation_id,
                 tenant,
                 "Act proposal scope.tenant does not match escalation tenant",
-            );
+            )
+            .map(RecoverStep::Done);
         }
 
         // Full Act required fields per spec (job, stop_condition, return_expectation, scope.subject + non-empty allowed_actions)
@@ -2203,7 +2329,8 @@ pub(crate) fn recover_council_response_staged(
                     escalation_id,
                     tenant,
                     &format!("Act proposal missing or empty {} (required for Act)", field),
-                );
+                )
+                .map(RecoverStep::Done);
             }
         }
         if let Some(scope) = proposal_obj.get("scope").and_then(Value::as_object) {
@@ -2217,7 +2344,8 @@ pub(crate) fn recover_council_response_staged(
                     escalation_id,
                     tenant,
                     "Act proposal scope missing or empty subject",
-                );
+                )
+                .map(RecoverStep::Done);
             }
             match scope.get("allowed_actions").and_then(Value::as_array) {
                 Some(arr)
@@ -2231,7 +2359,8 @@ pub(crate) fn recover_council_response_staged(
                         escalation_id,
                         tenant,
                         "Act proposal scope.allowed_actions must be non-empty array of non-empty strings",
-                    );
+                    )
+                    .map(RecoverStep::Done);
                 }
             }
         } else {
@@ -2240,7 +2369,8 @@ pub(crate) fn recover_council_response_staged(
                 escalation_id,
                 tenant,
                 "Act proposal missing scope object",
-            );
+            )
+            .map(RecoverStep::Done);
         }
     }
 
@@ -2257,7 +2387,8 @@ pub(crate) fn recover_council_response_staged(
             escalation_id,
             tenant,
             &format!("proposal failed shared v1 shape validator: {}", e),
-        );
+        )
+        .map(RecoverStep::Done);
     }
 
     let mut persisted = proposal.clone();
@@ -2284,19 +2415,47 @@ pub(crate) fn recover_council_response_staged(
         // today; this is a hard runtime trap at the signing boundary, NOT a live-bug
         // fix. Hard guard (no debug_assert — that compiles out in release).
         if let Err(reason) = insert_finite_f64(obj, "council_cost_usd", cost_usd) {
-            return dead_letter_staged_row(conn, escalation_id, tenant, &reason);
+            return dead_letter_staged_row(conn, escalation_id, tenant, &reason)
+                .map(RecoverStep::Done);
         }
     }
 
+    // Same position as the monolithic path: serialize enriched payload before sign.
     let envelope_json = serde_json::to_string(&persisted)?;
 
+    Ok(RecoverStep::Next(EnrichedRecoveredProposal {
+        persisted,
+        envelope_json,
+        authority_str: authority_str.to_string(),
+        verdict,
+        session_id,
+        cost_usd,
+    }))
+}
+
+/// 4. Real Ed25519 signature via the Phase 3 JCS canonical signing seam.
+fn sign_recovered_directive(
+    signing_key: &crate::keymgmt::DirectiveSigningKey,
+    persisted: &Value,
+) -> (String, String) {
     // 4. Real Ed25519 signature via the Phase 3 JCS canonical signing seam.
     // The helper in DirectiveSigningKey is the chokepoint for both the persisted
     // canonical string and the signed bytes, so a future RFC 8785 JCS swap stays
     // localized there. Keeps v0.2 boot semantics untouched.
-    let (canonical, sig) = signing_key.sign_directive_envelope(&persisted);
+    let (canonical, sig) = signing_key.sign_directive_envelope(persisted);
     let sig_b64 = base64::engine::general_purpose::STANDARD.encode(sig.to_bytes());
+    (canonical, sig_b64)
+}
 
+/// 5. Build the outbox row (tenant-scoped id, authority pre-seal, single clock).
+fn build_signed_outbox_row(
+    escalation_id: &str,
+    tenant: &str,
+    enriched: &EnrichedRecoveredProposal,
+    canonical: String,
+    sig_b64: String,
+    signing_kid: &str,
+) -> (DirectiveOutboxRow, i64) {
     // 5. Build the outbox row
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2312,32 +2471,44 @@ pub(crate) fn recover_council_response_staged(
         id: tenant_scoped_directive_id,
         in_response_to: escalation_id.to_string(),
         tenant: tenant.to_string(),
-        status: if verdict == "Dismiss" {
+        status: if enriched.verdict == "Dismiss" {
             "dismissed".to_string()
         } else {
             "staged".to_string()
         },
-        verdict: verdict.to_string(),
+        verdict: enriched.verdict.to_string(),
         // Pre-seal W2 authority integrity: the stored authority column MUST be
         // the authority the proposal was validated under and signed with
         // (`authority_str`, checked + capability-gated at staging above), NOT a
         // hardcoded `recommend`. The worker keys its capability-token gate off
         // this column / the signed envelope; pinning it to recommend let an
         // execute/prepare directive bypass the worker-side captoken check.
-        authority: authority_str.to_string(),
-        envelope_json,
+        authority: enriched.authority_str.clone(),
+        envelope_json: enriched.envelope_json.clone(),
         envelope_json_canonical: canonical,
         signature_b64: sig_b64,
-        signing_kid: signing_key.kid().to_string(),
-        council_session_id: Some(session_id),
-        council_cost_usd: Some(cost_usd),
+        signing_kid: signing_kid.to_string(),
+        council_session_id: Some(enriched.session_id.clone()),
+        council_cost_usd: Some(enriched.cost_usd),
         // Single clock sample: created_at_ms and expires_at_ms are stamped from the
         // same `now_ms`. The insert helper normalizes created_at_ms forward on backward
         // skew and shifts expires_at_ms by the identical delta, preserving the window.
         created_at_ms: now_ms,
         expires_at_ms: now_ms + directive_stage_ttl_ms(),
     };
+    (row, now_ms)
+}
 
+/// 6. Exact transaction shape: insert, audit-in-tx, W3 verbatim hash, event bridge.
+fn persist_signed_directive_tx(
+    conn: &mut rusqlite::Connection,
+    escalation_id: &str,
+    tenant: &str,
+    audit_sink: &mut Vec<WatchPhase3AuditEvent>,
+    row: DirectiveOutboxRow,
+    verdict: &str,
+    now_ms: i64,
+) -> anyhow::Result<(RecoveryOutcome, Vec<WatchPhase3AuditEvent>)> {
     // 6. Exact transaction shape requested
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     tx.execute("PRAGMA defer_foreign_keys = ON;", [])?;
