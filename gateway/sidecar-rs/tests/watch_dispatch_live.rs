@@ -1327,7 +1327,8 @@ fn spawn_live_dispatcher_source_assertion() {
 }
 
 // ==========================================================================
-// Phase 3b.5 tests: env config parsing + wiring order in main.rs
+// Phase 3b.5 tests: env config parsing + wiring order in boot.rs
+// (startup stages moved from main.rs; order assertion targets the boot module)
 // ==========================================================================
 
 #[test]
@@ -1434,27 +1435,29 @@ fn should_spawn_live_dispatcher_respects_enabled_flag() {
 
 #[test]
 fn main_rs_spawns_live_dispatcher_after_hydration() {
-    // Source-order assertion (test 5)
-    let main_src = include_str!("../src/main.rs");
+    // Source-order assertion (test 5). Boot wiring lives in boot.rs after the
+    // main.rs routes/boot extract; order (hydration before live dispatcher) is
+    // what this pins.
+    let boot_src = include_str!("../src/boot.rs");
 
     // Find the hydration sweep call site (the actual invocation after probe)
-    let hydration_pos = main_src
+    let hydration_pos = boot_src
         .find("run_boot_hydration_sweep(&watch_db, hydration_token, &directive_key)")
-        .or_else(|| main_src.find("run_boot_hydration_sweep"))
-        .expect("hydration sweep call must exist in main.rs");
+        .or_else(|| boot_src.find("run_boot_hydration_sweep(&"))
+        .expect("hydration sweep call must exist in boot.rs");
 
     // Find the actual spawn *call* (not the import) in the 3b.5 wiring block.
-    // lease liveness: main.rs now calls the quarantine-threaded variant
+    // lease liveness: boot now calls the quarantine-threaded variant
     // (spawn_live_dispatcher_loop_with_quarantine) so mid-flight lease losses
     // are counted; both spellings are the same boot-order seam.
-    let spawn_call_pos = main_src
+    let spawn_call_pos = boot_src
         .find("spawn_live_dispatcher_loop_with_quarantine(")
-        .or_else(|| main_src.find("spawn_live_dispatcher_loop("))
-        .expect("spawn_live_dispatcher_loop call must exist in main.rs");
+        .or_else(|| boot_src.find("spawn_live_dispatcher_loop("))
+        .expect("spawn_live_dispatcher_loop call must exist in boot.rs");
 
     assert!(
         spawn_call_pos > hydration_pos,
-        "live dispatcher spawn call must appear after boot hydration sweep in main.rs (boot order preserved)"
+        "live dispatcher spawn call must appear after boot hydration sweep in boot.rs (boot order preserved)"
     );
 }
 
