@@ -204,10 +204,24 @@ pub(super) fn assert_canary_tenant(scope: &str, configured: &str) -> Option<Resp
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_canary_from, CANARY_TENANT_DEFAULT};
+    use super::{admin_token_matches, resolve_canary_from, CANARY_TENANT_DEFAULT};
     use std::env::VarError;
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt;
+
+    /// Bootstrap and watch admin both use this CT path — empty expected must
+    /// fail closed, equal secrets must pass, unequal secrets must reject.
+    #[test]
+    fn admin_token_matches_bootstrap_secret_contract() {
+        assert!(!admin_token_matches("", Some("anything")));
+        assert!(!admin_token_matches("secret", None));
+        assert!(!admin_token_matches("secret", Some("")));
+        assert!(admin_token_matches("bootstrap-token", Some("bootstrap-token")));
+        assert!(!admin_token_matches("bootstrap-token", Some("bootstrap-tokeN")));
+        // Length-bounded work: oversize provided is rejected without matching.
+        let long = "x".repeat(129);
+        assert!(!admin_token_matches("secret", Some(&long)));
+    }
 
     // W1 re-gate P0 (review): table-test the PURE resolution core.
     // No env mutation, no #[serial] — the policy is exercised by feeding the

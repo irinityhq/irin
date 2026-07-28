@@ -156,12 +156,14 @@ for path in "${files[@]}"; do
         council-rs/warroom-tauri/README.md|council-rs/warroom/docs/TAURI-AUTH.md|\
         council-rs/warroom-ios/README.md|\
         docs/architecture.md|docs/cabinets.md|docs/ci-operating-model.md|docs/development-workflow.md|docs/release-runbook.md|docs/security-claims-vs-reality.md|\
-        docs/surface-map.md|docs/troubleshooting.md|\
+        docs/security-tooling.md|docs/surface-map.md|docs/troubleshooting.md|\
         packaging/gateway-pack/README.md|\
         gateway/COUNCIL_GATEWAY_CONTRACT.md|gateway/README.md|gateway/SECURITY.md|\
         gateway/docs/gateway-core-surfaces.md|gateway/docs/operator-quickstart.md|gateway/docs/runbook.md|\
         gateway/docs/runbooks/arming-authorization.md|gateway/docs/verify.md|\
         gateway/docs/watch-api.md|gateway/docs/watch-plane-retention.md|\
+        security/opengrep/README.md|\
+        tools/dylint/README.md|tools/dylint/irin-crypto-lints/README.md|\
         sentinel/COMMS_CONTRACT.md|sentinel/README.md|sentinel/SECURITY.md|\
         sentinel/docs/protocol-implementation.md|sentinel/docs/YOUR-AGENT.md|sentinel/docs/runbooks/arm-producer.md|\
         sentinel/docs/runbooks/disarm-producer.md)

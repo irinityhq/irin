@@ -1,0 +1,222 @@
+#!/usr/bin/env bash
+# Run IRIN Opengrep rules on critical product-security surfaces (Phase 1A).
+#
+# Default paths: gateway/sidecar-rs/src, sentinel/sovereign-protocol/src,
+#                council-rs/src, gateway/lua
+# Rules:         security/opengrep/rules/
+# Artifacts:     .irin-tools/findings/opengrep-<ts>.{json,sarif} (gitignored)
+#
+# Exit policy:
+#   - advisory (default): exit 0 even when findings exist
+#   - IRIN_OPENGREP_FAIL=1 or --fail: nonzero when findings or scan errors
+#
+# Usage:
+#   scripts/run-opengrep.sh
+#   scripts/run-opengrep.sh gateway/sidecar-rs/src/watch/api
+#   scripts/run-opengrep.sh --fail --sarif /tmp/out.sarif path...
+set -euo pipefail
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+}
+cd "$ROOT"
+
+BIN="$ROOT/.irin-tools/bin/opengrep"
+RULES="$ROOT/security/opengrep/rules"
+FINDINGS_DIR="$ROOT/.irin-tools/findings"
+BOOTSTRAP="$ROOT/scripts/bootstrap-dev-tools.sh"
+
+DEFAULT_PATHS=(
+  gateway/sidecar-rs/src
+  sentinel/sovereign-protocol/src
+  council-rs/src
+  gateway/lua
+)
+
+fail_hard=0
+if [[ "${IRIN_OPENGREP_FAIL:-0}" == "1" ]]; then
+  fail_hard=1
+fi
+
+sarif_override=""
+paths=()
+
+usage() {
+  cat <<'EOF'
+Usage: scripts/run-opengrep.sh [--fail] [--sarif PATH] [PATH...]
+
+  --fail         Nonzero exit on findings (or set IRIN_OPENGREP_FAIL=1)
+  --sarif PATH   Write SARIF to PATH (JSON still under .irin-tools/findings/)
+  PATH...        Scan targets (default: critical gateway/council/sentinel paths)
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --fail)
+      fail_hard=1
+      shift
+      ;;
+    --sarif)
+      [[ $# -ge 2 ]] || {
+        printf 'run-opengrep: --sarif requires a path\n' >&2
+        exit 2
+      }
+      sarif_override="$2"
+      shift 2
+      ;;
+    --)
+      shift
+      paths+=("$@")
+      break
+      ;;
+    -*)
+      printf 'run-opengrep: unknown option: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      paths+=("$1")
+      shift
+      ;;
+  esac
+done
+
+if [[ ! -x "$BIN" ]]; then
+  printf 'run-opengrep: opengrep missing; bootstrapping tools\n' >&2
+  bash "$BOOTSTRAP"
+fi
+[[ -x "$BIN" ]] || {
+  printf 'run-opengrep: ERROR: opengrep not installed at %s\n' "$BIN" >&2
+  exit 1
+}
+[[ -d "$RULES" ]] || {
+  printf 'run-opengrep: ERROR: rules dir missing: %s\n' "$RULES" >&2
+  exit 1
+}
+
+if [[ ${#paths[@]} -eq 0 ]]; then
+  paths=("${DEFAULT_PATHS[@]}")
+fi
+
+scan_paths=()
+for p in "${paths[@]}"; do
+  if [[ -e "$p" ]]; then
+    scan_paths+=("$p")
+  else
+    printf 'run-opengrep: skip missing path: %s\n' "$p" >&2
+  fi
+done
+if [[ ${#scan_paths[@]} -eq 0 ]]; then
+  printf 'run-opengrep: ERROR: no scan paths exist\n' >&2
+  exit 1
+fi
+
+mkdir -p "$FINDINGS_DIR"
+ts="$(date -u +%Y%m%dT%H%M%SZ)"
+json_out="$FINDINGS_DIR/opengrep-${ts}.json"
+if [[ -n "$sarif_override" ]]; then
+  sarif_out="$sarif_override"
+  mkdir -p "$(dirname "$sarif_out")"
+else
+  sarif_out="$FINDINGS_DIR/opengrep-${ts}.sarif"
+fi
+
+# Symlink "latest" pointers for agent/CI convenience (still gitignored).
+latest_json="$FINDINGS_DIR/opengrep-latest.json"
+latest_sarif="$FINDINGS_DIR/opengrep-latest.sarif"
+
+cmd=(
+  "$BIN" scan
+  --config "$RULES"
+  --disable-version-check
+  --json-output "$json_out"
+  --sarif-output "$sarif_out"
+  --exclude '**/target/**'
+  --exclude '**/node_modules/**'
+  --exclude '**/.irin-tools/**'
+)
+if [[ "$fail_hard" == "1" ]]; then
+  cmd+=(--error)
+fi
+cmd+=("${scan_paths[@]}")
+
+printf 'run-opengrep: %s\n' "${cmd[*]}"
+set +e
+"${cmd[@]}"
+rc=$?
+set -e
+
+# Opengrep: 0 clean, 1 findings (with --error), other = tool/config error.
+# Absolute targets so relative --sarif paths (e.g. reports/out.sarif) never
+# become dangling symlinks relative to .irin-tools/findings/.
+abs_path() {
+  local p="$1"
+  if [[ "$p" != /* ]]; then
+    p="$ROOT/$p"
+  fi
+  local dir base
+  dir="$(cd "$(dirname "$p")" 2>/dev/null && pwd)" || return 1
+  base="$(basename "$p")"
+  printf '%s/%s\n' "$dir" "$base"
+}
+
+if [[ -f "$json_out" ]]; then
+  ln -sfn "$(abs_path "$json_out")" "$latest_json"
+fi
+if [[ -f "$sarif_out" ]]; then
+  ln -sfn "$(abs_path "$sarif_out")" "$latest_sarif"
+fi
+
+findings=0
+if [[ -f "$json_out" ]] && command -v python3 >/dev/null 2>&1; then
+  # JSON is the authoritative surface (paths). Opengrep SARIF often emits
+  # uriBaseId=%SRCROOT% without originalUriBaseIds — do not treat SARIF as
+  # path-authoritative without a dedicated, tested importer.
+  path_check="$(python3 - "$json_out" <<'PY'
+import json, sys
+path = sys.argv[1]
+try:
+    with open(path) as f:
+        data = json.load(f)
+except Exception as exc:
+    print(f"error:{exc}")
+    raise SystemExit(0)
+results = data.get("results") or []
+missing = [
+    i for i, r in enumerate(results)
+    if not (isinstance(r, dict) and isinstance(r.get("path"), str) and r["path"].strip())
+]
+print(f"count={len(results)}")
+print(f"missing_paths={len(missing)}")
+if missing:
+    print(f"missing_indexes={missing[:10]}")
+PY
+)"
+  findings="$(printf '%s\n' "$path_check" | awk -F= '/^count=/{print $2; exit}')"
+  findings="${findings:-0}"
+  missing_paths="$(printf '%s\n' "$path_check" | awk -F= '/^missing_paths=/{print $2; exit}')"
+  if [[ "${missing_paths:-0}" != "0" ]]; then
+    printf 'run-opengrep: ERROR: %s finding(s) lack path in JSON (producer contract)\n' "$missing_paths" >&2
+    printf '%s\n' "$path_check" >&2
+    exit 1
+  fi
+  printf 'run-opengrep: findings=%s json=%s sarif=%s\n' "$findings" "$json_out" "$sarif_out"
+else
+  printf 'run-opengrep: json=%s sarif=%s (rc=%s)\n' "$json_out" "$sarif_out" "$rc"
+fi
+
+if [[ "$fail_hard" == "1" ]]; then
+  exit "$rc"
+fi
+
+# Advisory: tool/config failure still surfaces nonzero (rule broken ≠ product finding).
+if [[ "$rc" -ge 2 ]]; then
+  printf 'run-opengrep: tool/config error (rc=%s)\n' "$rc" >&2
+  exit "$rc"
+fi
+exit 0

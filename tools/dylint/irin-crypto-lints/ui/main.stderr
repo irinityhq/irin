@@ -1,0 +1,51 @@
+warning: deriving `Debug` on key-material type `SigningKey` can leak secrets via logs and panics
+  --> $DIR/main.rs:8:8
+   |
+LL | struct SigningKey([u8; 32]);
+   |        ^^^^^^^^^^
+   |
+   = help: remove `Debug` from the derive list, or implement a redacting `Debug` manually
+   = note: `#[warn(no_debug_on_signing_key_types)]` on by default
+
+warning: deriving `Debug` on key-material type `LedgerKey` can leak secrets via logs and panics
+  --> $DIR/main.rs:11:8
+   |
+LL | struct LedgerKey {
+   |        ^^^^^^^^^
+   |
+   = help: remove `Debug` from the derive list, or implement a redacting `Debug` manually
+
+warning: deriving `Debug` on key-material type `Holder` can leak secrets via logs and panics
+  --> $DIR/main.rs:17:8
+   |
+LL | struct Holder {
+   |        ^^^^^^
+   |
+   = help: remove `Debug` from the derive list, or implement a redacting `Debug` manually
+
+warning: deriving `PartialEq` on key-material type `PrivateKey` invites non-constant-time secret compares
+  --> $DIR/main.rs:33:8
+   |
+LL | struct PrivateKey([u8; 32]);
+   |        ^^^^^^^^^^
+   |
+   = help: omit `PartialEq`, or compare via `subtle::ConstantTimeEq` in dedicated helpers
+   = note: `#[warn(prefer_subtle_ct_eq)]` on by default
+
+warning: byte equality in `verify_mac` may not be constant-time; prefer `subtle::ConstantTimeEq`
+  --> $DIR/main.rs:36:5
+   |
+LL |     a == b
+   |     ^^^^^^
+   |
+   = help: use `bool::from(left.ct_eq(right))` (crate `subtle`) instead of `==`
+
+warning: byte equality in `compare_tokens` may not be constant-time; prefer `subtle::ConstantTimeEq`
+  --> $DIR/main.rs:40:5
+   |
+LL |     left == right
+   |     ^^^^^^^^^^^^^
+   |
+   = help: use `bool::from(left.ct_eq(right))` (crate `subtle`) instead of `==`
+
+warning: 6 warnings emitted

@@ -1,0 +1,91 @@
+# IRIN — arming / watch-plane auth hygiene (best-effort; some rules are INFO).
+rules:
+  - id: irin.rust.arming-without-auth-pattern
+    message: >-
+      Watch-plane arm/disarm path may accept a bearer without going through
+      ArmPrincipals::authenticate or admin_token_matches. Review auth wiring.
+      (Experimental / may be noisy — severity INFO.)
+    severity: INFO
+    languages: [rust]
+    metadata:
+      irin.surface: arming
+      irin.category: authz
+      confidence: low
+      irin.experimental: true
+    paths:
+      include:
+        - "**/watch/api/**"
+        - "**/watch/dispatcher.rs"
+        - "**/watch/db/arming.rs"
+    patterns:
+      - pattern-either:
+          - pattern: |
+              async fn $FN(...) {
+                ...
+                $X.stage_arm(...);
+                ...
+              }
+          - pattern: |
+              async fn $FN(...) {
+                ...
+                $X.confirm_arm(...);
+                ...
+              }
+          - pattern: |
+              async fn $FN(...) {
+                ...
+                $X.confirm_arm_attest(...);
+                ...
+              }
+          - pattern: |
+              async fn $FN(...) {
+                ...
+                $X.disarm(...);
+                ...
+              }
+      - pattern-not: |
+          async fn $FN(...) {
+            ...
+            $A.authenticate(...);
+            ...
+          }
+      - pattern-not: |
+          async fn $FN(...) {
+            ...
+            admin_token_matches(...);
+            ...
+          }
+
+  - id: irin.rust.arming-bearer-eq
+    message: >-
+      Direct string equality on a bearer/token secret field in a watch path.
+      Use ArmPrincipals::authenticate or admin_token_matches (SHA-256 + ct_eq).
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: arming
+      irin.category: crypto-compare
+      confidence: medium
+    paths:
+      include:
+        - "**/watch/**"
+    patterns:
+      - pattern-either:
+          - pattern: $B == $E
+          - pattern: $B != $E
+      - metavariable-regex:
+          metavariable: $B
+          # Exact-ish secret names; avoid cap_token.tenant / expires_at noise.
+          regex: (?i)^(bearer|token|provided|given|admin_token|provided_token|expected_token|raw_token)$|(?i).*\.(bearer|token|admin_token|secret)$
+      - metavariable-regex:
+          metavariable: $E
+          regex: ^[^"'].*
+      - pattern-not: $B == None
+      - pattern-not: $B != None
+      - pattern-not: $B == ""
+      - pattern-not: $B != ""
+      - pattern-not: $B == "..."
+      - pattern-not: $B != "..."
+      - pattern-not: $B == Some(...)
+      - pattern-not: $B == 0
+      - pattern-not: $B != 0

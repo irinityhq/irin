@@ -1,0 +1,82 @@
+# IRIN — signing-key / secret material leakage via Debug, format, logs.
+rules:
+  - id: irin.rust.no-debug-signing-key
+    message: >-
+      Debug/format of signing-key or seed-like value ($K). SigningKey and
+      private seeds must use a redacting Debug impl (see DirectiveSigningKey).
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: ledger,keymgmt
+      irin.category: key-leak
+      confidence: medium
+    patterns:
+      - pattern-either:
+          - pattern: format!("{:?}", $K)
+          - pattern: format!("{:#?}", $K)
+          - pattern: println!("{:?}", $K)
+          - pattern: eprintln!("{:?}", $K)
+          - pattern: dbg!($K)
+          - pattern: tracing::debug!("{:?}", $K)
+          - pattern: tracing::info!("{:?}", $K)
+          - pattern: tracing::warn!("{:?}", $K)
+          - pattern: tracing::error!("{:?}", $K)
+          - pattern: debug!("{:?}", $K)
+          - pattern: info!("{:?}", $K)
+          - pattern: warn!("{:?}", $K)
+          - pattern: error!("{:?}", $K)
+      - metavariable-regex:
+          metavariable: $K
+          regex: (?i)^(?!.*verifying).*(signing_key|private_key|secret_key|seed|key_bytes|ledger_key|directive_signing).*
+
+  - id: irin.rust.raw-key-bytes-in-string
+    message: >-
+      Hex-encoding likely private key/seed material into a String ($K).
+      Public keys and signatures for storage are OK; private seeds must never
+      become loggable strings.
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: ledger,keymgmt,auth
+      irin.category: key-leak
+      confidence: medium
+    patterns:
+      - pattern-either:
+          - pattern: hex::encode($K)
+          - pattern: hex::encode($K.to_bytes())
+          - pattern: hex::encode_upper($K)
+          - pattern: hex::encode_upper($K.to_bytes())
+      - metavariable-regex:
+          metavariable: $K
+          # Exclude verifying_key / pubkey paths; focus on private seed material.
+          regex: (?i)^(?!.*verif)(?!.*pub).*(seed|private_key|secret_key|raw_key|sk_bytes).*
+
+  - id: irin.rust.token-in-log
+    message: >-
+      Secret/token-like identifier may be interpolated into a log/tracing event ($T).
+      Log key_id / principal name only — never raw tokens or admin keys.
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: auth,arming,admin
+      irin.category: log-leak
+      confidence: low
+    patterns:
+      - pattern-either:
+          - pattern: tracing::info!(..., $T, ...)
+          - pattern: tracing::debug!(..., $T, ...)
+          - pattern: tracing::warn!(..., $T, ...)
+          - pattern: tracing::error!(..., $T, ...)
+          - pattern: tracing::trace!(..., $T, ...)
+          - pattern: info!(..., $T, ...)
+          - pattern: debug!(..., $T, ...)
+          - pattern: warn!(..., $T, ...)
+          - pattern: error!(..., $T, ...)
+          - pattern: trace!(..., $T, ...)
+      - metavariable-regex:
+          metavariable: $T
+          # Identifier-like only (reject string literals containing the words).
+          regex: (?i)^[A-Za-z_][A-Za-z0-9_]*$
+      - metavariable-regex:
+          metavariable: $T
+          regex: (?i).*(raw_key|admin_key|bootstrap_token|api_key|password|secret|bearer|auth_token|signing_key).*

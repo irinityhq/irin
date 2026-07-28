@@ -1,0 +1,63 @@
+# IRIN — non-constant-time compares near secrets / signatures.
+# Prefer subtle::ConstantTimeEq (see ArmPrincipals::authenticate, admin_token_matches).
+rules:
+  - id: irin.rust.no-eq-on-signature-bytes
+    message: >-
+      Non-constant-time compare on secret/signature-like bytes ($X).
+      Use subtle::ConstantTimeEq (or SHA-256 digests + ct_eq) to avoid timing oracles.
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: signing,arming,auth
+      irin.category: crypto-compare
+      confidence: medium
+    patterns:
+      - pattern-either:
+          - pattern: $X == $Y
+          - pattern: $X != $Y
+      - metavariable-regex:
+          metavariable: $X
+          # Word-ish secret names; skip .len(), JSON pointer paths, public kid fields.
+          # admin_key/bootstrap covered by irin.rust.eq-on-admin-secret (avoid double-hit).
+          regex: (?i)^(?!.*\.len\(\))(?!.*pointer\()(?!.*\bkid\b).*(^|[^A-Za-z0-9_])(signature(_(der|bytes|hex|array))?|sig_(der|bytes|hex|array)|token_digest|raw_key|bearer|password|private_key|secret_key)([^A-Za-z0-9_]|$).*|(?i)^(?!.*\.len\(\))(token|secret|seed|signature|sig_bytes|sig_der|raw_key|bearer)$
+      # Skip string/numeric sentinels on the RHS.
+      - metavariable-regex:
+          metavariable: $Y
+          regex: ^(?![0-9]+$)[^"'].*
+      - pattern-not: $X == None
+      - pattern-not: $X != None
+      - pattern-not: $X == Some(...)
+      - pattern-not: $X != Some(...)
+      - pattern-not: $X == "..."
+      - pattern-not: $X != "..."
+      - pattern-not: $X == b"..."
+      - pattern-not: $X != b"..."
+      - pattern-not: $X == 0
+      - pattern-not: $X != 0
+
+  - id: irin.rust.eq-on-admin-secret
+    message: >-
+      Plain `==` on admin/bootstrap/API secret material. Prefer hashed
+      constant-time compare (admin_token_matches / subtle_eq).
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: auth,admin
+      irin.category: crypto-compare
+      confidence: high
+    patterns:
+      - pattern-either:
+          - pattern: $A == $B
+          - pattern: $A != $B
+      - metavariable-regex:
+          metavariable: $A
+          regex: (?i).*(^|[^A-Za-z0-9_])(admin_key|bootstrap_token|api_key|raw_key|gateway_token|auth_token|watch_admin_token)([^A-Za-z0-9_]|$).*|(?i)^(admin_key|bootstrap_token|api_key|raw_key|gateway_token|auth_token)$
+      - metavariable-regex:
+          metavariable: $B
+          regex: ^(?![0-9]+$)[^"'].*
+      - pattern-not: $A == None
+      - pattern-not: $A != None
+      - pattern-not: $A == ""
+      - pattern-not: $A != ""
+      - pattern-not: $A == "..."
+      - pattern-not: $A != "..."

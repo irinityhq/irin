@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools preflight check ship-check verify verify-down runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction worktree-gc
+.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools lint-crypto preflight check ship-check verify verify-down verify-formal runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction worktree-gc lint-security opengrep
 setup: ## macOS: prepare config, start the managed runtime, and enable login recovery
 	bash scripts/setup-local.sh
 
@@ -28,6 +28,14 @@ tools: ## Install checksum-verified ship tools into ignored repo-local state
 	bash scripts/bootstrap-dev-tools.sh
 	bash scripts/bootstrap-actionlint.sh
 
+lint-crypto: ## Advisory IRIN crypto dylints (IRIN_DYLINT_FAIL=1 to gate)
+	bash scripts/run-dylint.sh
+
+lint-security: ## Advisory Opengrep scan of critical product-security paths
+	bash scripts/run-opengrep.sh
+
+opengrep: lint-security ## Alias for lint-security
+
 preflight: ## Prove branch, base, worktree isolation, and Gortex readiness before editing
 	bash scripts/dev-preflight.sh
 
@@ -42,6 +50,10 @@ verify: ## Prove the loop ($0, no keys): one signed directive lands in the outbo
 
 verify-down: ## Tear down the isolated verification stack and its local state
 	$(MAKE) -C gateway verify-down
+
+verify-formal: ## Selective Kani + Miri on sovereign-protocol JCS (advisory if tools missing)
+	bash scripts/run-kani.sh
+	bash scripts/run-miri.sh
 
 runtime-up: ## Build and start the canonical local product runtime
 	bash scripts/irin-runtime.sh start
