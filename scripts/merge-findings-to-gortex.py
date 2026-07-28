@@ -45,8 +45,9 @@ Resolution order per finding (file, line):
      the tool is catalogued but often not call-mounted; failure is ignored.
   2. Fallback: `gortex call search_symbols` with the file basename, filter
      results to the same relative path, then `gortex node <id> -f json` to
-     obtain start_line/end_line. Pick the tightest enclosing symbol
-     (largest start_line with start_line <= line <= end_line).
+     obtain start_line/end_line. Pick the tightest *enclosing* symbol
+     (start_line <= line <= end_line). Never assign a non-enclosing
+     "nearest" symbol — prefer null over wrong attribution.
   3. On any failure: emit the finding with symbol_id/symbol_name null.
      Path and line are always populated; the merger must not crash.
 
@@ -136,12 +137,68 @@ def _uri_to_path(uri: str | None, repo_root: Path) -> str | None:
     return s
 
 
+def _base_uri_map(run: dict[str, Any]) -> dict[str, str]:
+    """Map SARIF uriBaseId → base URI string from originalUriBaseIds."""
+    out: dict[str, str] = {}
+    bases = run.get("originalUriBaseIds") or {}
+    if not isinstance(bases, dict):
+        return out
+    for key, val in bases.items():
+        if not isinstance(key, str):
+            continue
+        if isinstance(val, str) and val:
+            out[key] = val
+            continue
+        if isinstance(val, dict):
+            uri = val.get("uri")
+            if isinstance(uri, str) and uri:
+                out[key] = uri
+    return out
+
+
+def _resolve_artifact_uri(
+    artifact: dict[str, Any],
+    base_uris: dict[str, str],
+) -> str | None:
+    """Combine uri / uriBaseId per SARIF 2.1.0; never treat base id as a path."""
+    uri = artifact.get("uri")
+    base_id = artifact.get("uriBaseId")
+    uri_s = uri if isinstance(uri, str) and uri else None
+    base_id_s = base_id if isinstance(base_id, str) and base_id else None
+
+    if uri_s and not base_id_s:
+        return uri_s
+
+    if base_id_s:
+        base = base_uris.get(base_id_s)
+        if not base:
+            # Unknown base: only usable if uri is already absolute/file.
+            if uri_s and (uri_s.startswith("file:") or uri_s.startswith("/")):
+                return uri_s
+            return None
+        if not uri_s:
+            return base
+        # Join base + relative uri (avoid double slashes).
+        if uri_s.startswith("file:") or uri_s.startswith("/"):
+            return uri_s
+        if base.endswith("/") or base.endswith("\\"):
+            return base + uri_s
+        return base + "/" + uri_s
+
+    return uri_s
+
+
 def parse_sarif(sarif_path: Path, repo_root: Path) -> list[dict[str, Any]]:
     """Extract flat findings from a SARIF 2.1.0 document."""
     data = json.loads(sarif_path.read_text(encoding="utf-8"))
     findings: list[dict[str, Any]] = []
     for run in data.get("runs") or []:
+        if not isinstance(run, dict):
+            continue
+        base_uris = _base_uri_map(run)
         for result in run.get("results") or []:
+            if not isinstance(result, dict):
+                continue
             rule_id = result.get("ruleId") or result.get("rule", {}).get("id") or "unknown"
             level = (result.get("level") or "warning").lower()
             message = _message_text(result.get("message"))
@@ -162,9 +219,11 @@ def parse_sarif(sarif_path: Path, repo_root: Path) -> list[dict[str, Any]]:
             for loc in locations:
                 phys = (loc or {}).get("physicalLocation") or {}
                 artifact = phys.get("artifactLocation") or {}
+                if not isinstance(artifact, dict):
+                    artifact = {}
                 region = phys.get("region") or {}
-                uri = artifact.get("uri") or artifact.get("uriBaseId")
-                path = _uri_to_path(uri if isinstance(uri, str) else None, repo_root)
+                resolved_uri = _resolve_artifact_uri(artifact, base_uris)
+                path = _uri_to_path(resolved_uri, repo_root)
                 start_line = region.get("startLine")
                 end_line = region.get("endLine") or start_line
                 start_col = region.get("startColumn")
@@ -465,13 +524,7 @@ class GortexResolver:
                 name = node.get("name") or c["name"]
                 return {"symbol_id": str(node.get("id") or c["id"]), "symbol_name": str(name)}
 
-        # Last resort: nearest prior start_line without confirmed end_line.
-        if prior:
-            c = prior[0]
-            self.stats["mapped_heuristic"] += 1
-            self.stats["mapped"] += 1
-            return {"symbol_id": c["id"], "symbol_name": c["name"]}
-
+        # Prefer null over attributing a finding to a non-enclosing symbol.
         self.stats["unmapped"] += 1
         return empty
 

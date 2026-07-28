@@ -152,16 +152,24 @@ rc=$?
 set -e
 
 # Opengrep: 0 clean, 1 findings (with --error), other = tool/config error.
+# Absolute targets so relative --sarif paths (e.g. reports/out.sarif) never
+# become dangling symlinks relative to .irin-tools/findings/.
+abs_path() {
+  local p="$1"
+  if [[ "$p" != /* ]]; then
+    p="$ROOT/$p"
+  fi
+  local dir base
+  dir="$(cd "$(dirname "$p")" 2>/dev/null && pwd)" || return 1
+  base="$(basename "$p")"
+  printf '%s/%s\n' "$dir" "$base"
+}
+
 if [[ -f "$json_out" ]]; then
-  ln -sfn "$(basename "$json_out")" "$latest_json"
+  ln -sfn "$(abs_path "$json_out")" "$latest_json"
 fi
 if [[ -f "$sarif_out" ]]; then
-  # latest_sarif always under findings; custom --sarif may be outside.
-  if [[ "$sarif_out" == "$FINDINGS_DIR/"* ]]; then
-    ln -sfn "$(basename "$sarif_out")" "$latest_sarif"
-  else
-    ln -sfn "$sarif_out" "$latest_sarif"
-  fi
+  ln -sfn "$(abs_path "$sarif_out")" "$latest_sarif"
 fi
 
 findings=0
