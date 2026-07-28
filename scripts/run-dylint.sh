@@ -59,10 +59,10 @@ fi
 echo "run-dylint: cargo dylint --path $LINT_PATH -- --workspace"
 set +e
 if [[ "$FAIL" == "1" ]]; then
-  # Promote IRIN crypto lints to hard errors in gate mode.
-  cargo dylint --path "$LINT_PATH" -- --workspace -- \
-    -D no_debug_on_signing_key_types \
-    -D prefer_subtle_ct_eq
+  # Promote IRIN crypto lints to hard errors via rustc flags (not cargo args).
+  # cargo-dylint 6.x: DYLINT_RUSTFLAGS is forwarded to rustc for the check.
+  DYLINT_RUSTFLAGS="-D no_debug_on_signing_key_types -D prefer_subtle_ct_eq" \
+    cargo dylint --path "$LINT_PATH" -- --workspace
 else
   cargo dylint --path "$LINT_PATH" -- --workspace
 fi

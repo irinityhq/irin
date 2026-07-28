@@ -19,7 +19,7 @@ cargo install cargo-dylint dylint-link --locked
 
 ```bash
 ./scripts/run-dylint.sh
-# make lint-crypto   # if wired in Makefile
+# or: make lint-crypto
 ```
 
 Default is **advisory** (exit 0 when tools are missing; findings print but do not fail). Set `IRIN_DYLINT_FAIL=1` for gate mode.

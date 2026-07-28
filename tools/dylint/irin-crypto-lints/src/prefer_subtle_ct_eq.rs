@@ -108,6 +108,11 @@ impl<'tcx> LateLintPass<'tcx> for PreferSubtleCtEqLate {
             return;
         }
 
+        let help = if op.node == BinOpKind::Ne {
+            "use `!bool::from(left.ct_eq(right))` (crate `subtle`) instead of `!=`"
+        } else {
+            "use `bool::from(left.ct_eq(right))` (crate `subtle`) instead of `==`"
+        };
         span_lint_and_help(
             cx,
             PREFER_SUBTLE_CT_EQ,
@@ -116,7 +121,7 @@ impl<'tcx> LateLintPass<'tcx> for PreferSubtleCtEqLate {
                 "byte equality in `{fn_name}` may not be constant-time; prefer `subtle::ConstantTimeEq`"
             ),
             None,
-            "use `bool::from(left.ct_eq(right))` (crate `subtle`) instead of `==` / `!=`",
+            help,
         );
     }
 }

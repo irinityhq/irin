@@ -78,8 +78,9 @@ install_cargo_deny() {
 
   require_cmds curl tar
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/irin-tools-deny.XXXXXX")"
+  # EXIT (not only RETURN): set -e failures must still clean the temp dir.
   # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" RETURN
+  trap "rm -rf '$tmp'" EXIT
   archive="$tmp/cargo-deny.tar.gz"
   url="https://github.com/EmbarkStudios/cargo-deny/releases/download/$version/cargo-deny-$version-$triple.tar.gz"
   printf 'Downloading cargo-deny %s for %s\n' "$version" "$triple"
@@ -105,7 +106,7 @@ install_cargo_deny() {
     exit 1
   }
   "$destination" --version | grep -Fx "cargo-deny $version"
-  trap - RETURN
+  trap - EXIT
   rm -rf "$tmp"
 }
 
@@ -148,8 +149,9 @@ install_opengrep() {
 
   require_cmds curl
   tmp="$(mktemp -d "${TMPDIR:-/tmp}/irin-tools-opengrep.XXXXXX")"
+  # EXIT (not only RETURN): set -e failures must still clean the temp dir.
   # shellcheck disable=SC2064
-  trap "rm -rf '$tmp'" RETURN
+  trap "rm -rf '$tmp'" EXIT
   candidate="$tmp/opengrep"
   url="https://github.com/opengrep/opengrep/releases/download/v${version}/${asset}"
   printf 'Downloading opengrep %s (%s)\n' "$version" "$asset"
@@ -172,7 +174,7 @@ install_opengrep() {
     exit 1
   }
   printf 'opengrep %s: installed (%s)\n' "$version" "$destination"
-  trap - RETURN
+  trap - EXIT
   rm -rf "$tmp"
 }
 

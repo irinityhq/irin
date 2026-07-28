@@ -122,18 +122,20 @@ def _uri_to_path(uri: str | None, repo_root: Path) -> str | None:
             rel = p.resolve().relative_to(repo_root.resolve())
             return rel.as_posix()
     except (ValueError, OSError):
-        # Not under repo_root — fall through and strip known prefixes.
-        pass
-    # Already relative, or absolute outside repo: strip leading ./ and repo name.
+        # Absolute path outside the repo cannot own a Gortex symbol here.
+        if p.is_absolute() or raw.startswith("/"):
+            return None
+    # Relative path (or absolute whose resolve failed non-OSError): normalize.
     s = raw.replace("\\", "/")
     while s.startswith("./"):
         s = s[2:]
     if s.startswith("/"):
-        # Last-resort: if the absolute path contains the repo root string, slice.
+        # Only accept if the absolute string is under repo_root; never strip
+        # the leading slash to invent a repo-relative path (e.g. /tmp/api.rs).
         root_s = str(repo_root.resolve()).replace("\\", "/")
         if s.startswith(root_s + "/"):
             return s[len(root_s) + 1 :]
-        return s.lstrip("/")
+        return None
     return s
 
 
@@ -397,11 +399,12 @@ class GortexResolver:
     def _path_matches(self, candidate_path: str, target: str) -> bool:
         c = candidate_path.replace("\\", "/")
         t = target.replace("\\", "/")
-        if c == t or c.endswith("/" + t) or c.endswith(t):
+        # Exact or slash-delimited suffix only — never bare endswith (avoids
+        # legacyapi/foo.rs matching api/foo.rs).
+        if c == t or c.endswith("/" + t):
             return True
         # Strip repo-prefix/ alias: "repo@branch/path" → "path"
         if "/" in c:
-            # Drop first segment if it looks like a repo prefix.
             parts = c.split("/", 1)
             if len(parts) == 2 and ("@" in parts[0] or parts[0] in ("irin", "xmcp")):
                 c2 = parts[1]
@@ -637,11 +640,21 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     repo_root = args.repo.expanduser().resolve()
+    findings_root = DEFAULT_FINDINGS_DIR.resolve()
     out_path = (
         args.out.expanduser().resolve()
         if args.out
-        else (DEFAULT_FINDINGS_DIR / f"merged-{_now_file_ts()}.jsonl").resolve()
+        else (findings_root / f"merged-{_now_file_ts()}.jsonl")
     )
+    # Keep generated findings under gitignored .irin-tools/findings/ only.
+    try:
+        out_path.relative_to(findings_root)
+    except ValueError:
+        print(
+            f"error: --out must stay under {findings_root} (got {out_path})",
+            file=sys.stderr,
+        )
+        return 2
 
     try:
         findings = parse_sarif(sarif_path, repo_root)

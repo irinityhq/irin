@@ -1,5 +1,6 @@
 //! UI fixtures for IRIN crypto dylints.
 //! Warnings are expected; clean helpers exist for contrast.
+#![allow(dead_code)]
 
 // --- no_debug_on_signing_key_types ---
 
