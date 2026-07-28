@@ -462,6 +462,12 @@ fn decode_json_string_token(token: &[u8]) -> Option<String> {
 mod finite_check;
 use finite_check::check_finite;
 
+// Selective Kani proofs for pure JCS guards (Phase 1D). Compiled only under
+// `cargo kani`; never enters normal `cargo test` / release builds.
+#[cfg(kani)]
+#[path = "jcs/kani_proofs.rs"]
+mod kani_proofs;
+
 #[cfg(test)]
 mod tests {
     use super::*;
