@@ -1,0 +1,120 @@
+# IRIN — B1 boundary contract: OpenResty Lua ↔ sidecar-rs.
+# Pins the Lua sidecar_post path set to the sidecar-rs route mounts and
+# asserts required JSON body keys on the hot paths. String/key pinning only —
+# sovereign-protocol remains the sole typed IDL (docs/cross-process-boundaries.md).
+#
+# Key rules fire on the call text itself, so they pin keys for call sites
+# that build the body inline. /route/decide builds its body in a local table
+# upstream of the call and is covered by the path allowlist only.
+rules:
+  - id: irin.lua.sidecar-path-allowlist
+    message: >-
+      sidecar_post path is not in the canonical sidecar-rs route set
+      (gateway/sidecar-rs/src/routes/mod.rs). A Lua path without a Rust mount
+      fails closed at runtime with no static signal. Either mount the route in
+      sidecar-rs and extend this allowlist, or remove the call.
+    severity: WARNING
+    languages: [lua]
+    metadata:
+      irin.surface: gateway-lua
+      irin.category: contract
+      irin.boundary: B1
+    patterns:
+      - pattern: sidecar_post("$PATH", ...)
+      - pattern-not: sidecar_post("/guard/input", ...)
+      - pattern-not: sidecar_post("/guard/sovereignty", ...)
+      - pattern-not: sidecar_post("/auth/check", ...)
+      - pattern-not: sidecar_post("/auth/ip-check", ...)
+      - pattern-not: sidecar_post("/ledger/record", ...)
+      - pattern-not: sidecar_post("/route/decide", ...)
+      - pattern-not: sidecar_post("/route/outcome", ...)
+      - pattern-not: sidecar_post("/budget/check", ...)
+      - pattern-not: sidecar_post("/budget/record", ...)
+      - pattern-not: sidecar_post("/policy/evaluate", ...)
+      - pattern-not: sidecar_post("/cache/check", ...)
+      - pattern-not: sidecar_post("/cache/store", ...)
+      - pattern-not: sidecar_post("/council/idempotency/peek", ...)
+      - pattern-not: sidecar_post("/council/idempotency/claim", ...)
+      - pattern-not: sidecar_post("/council/idempotency/store", ...)
+      - pattern-not: sidecar_post("/council/idempotency/fail", ...)
+      - pattern-not: sidecar_post("/council/lock", ...)
+      - pattern-not: sidecar_post("/council/unlock", ...)
+      - pattern-not: sidecar_post("/librarian/commit", ...)
+
+  - id: irin.lua.sidecar-auth-check-key-raw_key
+    message: >-
+      /auth/check body must include raw_key — required keys are raw_key and ip (sidecar auth::auth_check contract). Missing keys deserialize as a failed/closed auth decision.
+    severity: WARNING
+    languages: [lua]
+    metadata:
+      irin.surface: gateway-lua
+      irin.category: contract
+      irin.boundary: B1
+    patterns:
+      - pattern: sidecar_post("/auth/check", ...)
+      - pattern-not-regex: '\braw_key\s*='
+
+  - id: irin.lua.sidecar-auth-check-key-ip
+    message: >-
+      /auth/check body must include ip — required keys are raw_key and ip (sidecar auth::auth_check contract). Missing keys deserialize as a failed/closed auth decision.
+    severity: WARNING
+    languages: [lua]
+    metadata:
+      irin.surface: gateway-lua
+      irin.category: contract
+      irin.boundary: B1
+    patterns:
+      - pattern: sidecar_post("/auth/check", ...)
+      - pattern-not-regex: '\bip\s*='
+
+  - id: irin.lua.sidecar-guard-input-key-content
+    message: >-
+      /guard/input body must include content — required keys are content and source (sidecar guard::guard_input contract). Missing keys defeat the input scan.
+    severity: WARNING
+    languages: [lua]
+    metadata:
+      irin.surface: gateway-lua
+      irin.category: contract
+      irin.boundary: B1
+    patterns:
+      - pattern: sidecar_post("/guard/input", ...)
+      - pattern-not-regex: '\bcontent\s*='
+
+  - id: irin.lua.sidecar-guard-input-key-source
+    message: >-
+      /guard/input body must include source — required keys are content and source (sidecar guard::guard_input contract). Missing keys defeat the input scan.
+    severity: WARNING
+    languages: [lua]
+    metadata:
+      irin.surface: gateway-lua
+      irin.category: contract
+      irin.boundary: B1
+    patterns:
+      - pattern: sidecar_post("/guard/input", ...)
+      - pattern-not-regex: '\bsource\s*='
+
+  - id: irin.lua.sidecar-budget-check-key-budget_key
+    message: >-
+      /budget/check body must include budget_key — required keys are budget_key and estimated_cost (sidecar budget::budget_check contract). Missing keys break pre-flight cost gating.
+    severity: WARNING
+    languages: [lua]
+    metadata:
+      irin.surface: gateway-lua
+      irin.category: contract
+      irin.boundary: B1
+    patterns:
+      - pattern: sidecar_post("/budget/check", ...)
+      - pattern-not-regex: '\bbudget_key\s*='
+
+  - id: irin.lua.sidecar-budget-check-key-estimated_cost
+    message: >-
+      /budget/check body must include estimated_cost — required keys are budget_key and estimated_cost (sidecar budget::budget_check contract). Missing keys break pre-flight cost gating.
+    severity: WARNING
+    languages: [lua]
+    metadata:
+      irin.surface: gateway-lua
+      irin.category: contract
+      irin.boundary: B1
+    patterns:
+      - pattern: sidecar_post("/budget/check", ...)
+      - pattern-not-regex: '\bestimated_cost\s*='

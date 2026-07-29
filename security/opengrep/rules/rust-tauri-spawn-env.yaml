@@ -1,0 +1,80 @@
+# IRIN — B4 boundary contract: warroom-tauri → council `--serve` spawn env.
+# Pins the scrub-before-reinject invariant on
+# council-rs/warroom-tauri/src-tauri/src/sidecar.rs: inherited Gateway
+# credential/route vars must be empty-string overwritten (tauri-plugin-shell
+# has no env_remove) before any governed re-injection of Keychain-sourced
+# credentials. Behavior SSOT remains the unit tests in sidecar.rs; these
+# rules catch structural regressions.
+rules:
+  - id: irin.rust.tauri-governed-reinject-requires-scrub
+    message: >-
+      GW_API_KEY / GATEWAY_URL re-injection must follow, in the same function,
+      a GATEWAY_SCRUB_ENV_KEYS loop that empty-string overwrites every
+      inherited key — bare shape (loop then reinject) or the production shape
+      (if-wrapped loop then the via_gateway match that re-injects).
+      Re-injecting before or without an empty-write scrub lets login-shell
+      credentials leak into the council child process. Restructuring the
+      Some(true)/Some(false)/None match trips this pin on purpose: review the
+      rule when the spawn-env shape changes.
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: warroom-tauri
+      irin.category: contract
+      irin.boundary: B4
+    patterns:
+      - pattern: upsert_env(&mut $ENV, $KEY, ...)
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: '"(GW_API_KEY|GATEWAY_URL)"'
+      - pattern-not-inside: |
+          fn $F(...) {
+            ...
+            for $K in GATEWAY_SCRUB_ENV_KEYS {
+              ...
+              $P.push(($KV, String::new()));
+              ...
+            }
+            ...
+            upsert_env(&mut $ENV, $KEY, ...);
+            ...
+          }
+      - pattern-not-inside: |
+          fn $F(...) {
+            ...
+            if $C {
+              ...
+              for $K in GATEWAY_SCRUB_ENV_KEYS {
+                ...
+                $P.push(($KV, String::new()));
+                ...
+              }
+              ...
+            }
+            ...
+            match $M {
+              Some(true) => { ... }
+              Some(false) => { ... }
+              None => {}
+            }
+            ...
+          }
+
+  - id: irin.rust.tauri-governed-requires-creds-param
+    message: >-
+      Setting COUNCIL_VIA_GATEWAY=1 without a gateway_creds parameter in
+      scope spawns a governed child with no Keychain-sourced GW_API_KEY path.
+      Governed spawns must thread GatewayChildCredentials so the scrubbed
+      key can be re-injected from the Keychain.
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: warroom-tauri
+      irin.category: contract
+      irin.boundary: B4
+    patterns:
+      - pattern: upsert_env(&mut $ENV, "COUNCIL_VIA_GATEWAY", "1")
+      - pattern-not-inside: |
+          fn $F(..., gateway_creds: $T, ...) {
+            ...
+          }
