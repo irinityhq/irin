@@ -21,7 +21,25 @@ rules:
       irin.boundary: B1
     patterns:
       - pattern: sidecar_post("$PATH", ...)
-      - pattern-not-regex: '"/(guard/input|guard/sovereignty|auth/check|auth/ip-check|ledger/record|route/decide|route/outcome|budget/check|budget/record|policy/evaluate|cache/check|cache/store|council/idempotency/peek|council/idempotency/claim|council/idempotency/store|council/idempotency/fail|council/lock|council/unlock|librarian/commit)"'
+      - pattern-not: sidecar_post("/guard/input", ...)
+      - pattern-not: sidecar_post("/guard/sovereignty", ...)
+      - pattern-not: sidecar_post("/auth/check", ...)
+      - pattern-not: sidecar_post("/auth/ip-check", ...)
+      - pattern-not: sidecar_post("/ledger/record", ...)
+      - pattern-not: sidecar_post("/route/decide", ...)
+      - pattern-not: sidecar_post("/route/outcome", ...)
+      - pattern-not: sidecar_post("/budget/check", ...)
+      - pattern-not: sidecar_post("/budget/record", ...)
+      - pattern-not: sidecar_post("/policy/evaluate", ...)
+      - pattern-not: sidecar_post("/cache/check", ...)
+      - pattern-not: sidecar_post("/cache/store", ...)
+      - pattern-not: sidecar_post("/council/idempotency/peek", ...)
+      - pattern-not: sidecar_post("/council/idempotency/claim", ...)
+      - pattern-not: sidecar_post("/council/idempotency/store", ...)
+      - pattern-not: sidecar_post("/council/idempotency/fail", ...)
+      - pattern-not: sidecar_post("/council/lock", ...)
+      - pattern-not: sidecar_post("/council/unlock", ...)
+      - pattern-not: sidecar_post("/librarian/commit", ...)
 
   - id: irin.lua.sidecar-auth-check-key-raw_key
     message: >-

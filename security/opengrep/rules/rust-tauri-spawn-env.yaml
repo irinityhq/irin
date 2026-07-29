@@ -8,10 +8,13 @@
 rules:
   - id: irin.rust.tauri-governed-reinject-requires-scrub
     message: >-
-      GW_API_KEY / GATEWAY_URL re-injection must happen in a function that
-      first scrubs every GATEWAY_SCRUB_ENV_KEYS entry to empty. Re-injecting
-      without the scrub loop lets login-shell credentials leak into the
-      council child process.
+      GW_API_KEY / GATEWAY_URL re-injection must share a function with a
+      GATEWAY_SCRUB_ENV_KEYS loop that empty-string overwrites every inherited
+      key (bare or if-wrapped shape). Re-injecting without an empty-write
+      scrub in scope lets login-shell credentials leak into the council child
+      process. Scrub-before-reinject ordering is the behavior SSOT of the
+      compose_scrubs_gateway_vars_before_selective_inject unit test; nested
+      match-arm statement order is not statically expressible here.
     severity: WARNING
     languages: [rust]
     metadata:
@@ -19,13 +22,32 @@ rules:
       irin.category: contract
       irin.boundary: B4
     patterns:
-      - pattern-either:
-          - pattern: upsert_env(&mut $ENV, "GW_API_KEY", ...)
-          - pattern: upsert_env(&mut $ENV, "GATEWAY_URL", ...)
+      - pattern: upsert_env(&mut $ENV, $KEY, ...)
+      - metavariable-regex:
+          metavariable: $KEY
+          regex: '"(GW_API_KEY|GATEWAY_URL)"'
       - pattern-not-inside: |
           fn $F(...) {
             ...
             for $K in GATEWAY_SCRUB_ENV_KEYS {
+              ...
+              $P.push(($KV, String::new()));
+              ...
+            }
+            ...
+            upsert_env(&mut $ENV, $KEY, ...);
+            ...
+          }
+      - pattern-not-inside: |
+          fn $F(...) {
+            ...
+            if $C {
+              ...
+              for $K in GATEWAY_SCRUB_ENV_KEYS {
+                ...
+                $P.push(($KV, String::new()));
+                ...
+              }
               ...
             }
             ...
