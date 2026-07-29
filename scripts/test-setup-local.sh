@@ -204,7 +204,7 @@ PROVIDER_AFTER="$(shasum -a 256 "$HOME_DIR/.irin/.env" | awk '{print $1}')"
 grep -Fq 'UP    Council http://127.0.0.1:8765' <<<"$SETUP_OUTPUT"
 grep -Fq 'UP    Gateway http://127.0.0.1:18080' <<<"$SETUP_OUTPUT"
 grep -Fq 'War Room: http://127.0.0.1:3010' <<<"$SETUP_OUTPUT"
-grep -Fq 'Private iPhone access: controlled in installed IRIN.app Settings' <<<"$SETUP_OUTPUT"
+grep -Fq 'Private phone access: controlled in installed IRIN.app Settings' <<<"$SETUP_OUTPUT"
 grep -Fq 'Login recovery: enabled (opt out: ./scripts/irin-runtime.sh uninstall-login)' <<<"$SETUP_OUTPUT"
 grep -Fq 'Next action: Open Discover' <<<"$SETUP_OUTPUT"
 grep -Fq 'Provider discovery uses your login shell; IRIN does not copy provider credentials.' \
@@ -233,7 +233,7 @@ NO_PHONE_CLAIM="$(
   FAKE_ACTION_LOG="$ACTION_LOG" \
   /usr/bin/make -s -C "$ROOT" setup 2>&1
 )"
-grep -Fq 'Private iPhone access: controlled in installed IRIN.app Settings' <<<"$NO_PHONE_CLAIM"
+grep -Fq 'Private phone access: controlled in installed IRIN.app Settings' <<<"$NO_PHONE_CLAIM"
 if grep -Eqi 'PRIVATE_PHONE|Private phone: https://|tailscale serve' <<<"$NO_PHONE_CLAIM"; then
   printf 'setup claimed or mutated private phone publication\n%s\n' "$NO_PHONE_CLAIM" >&2
   exit 1

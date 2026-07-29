@@ -180,19 +180,20 @@ loop that uses them is disabled by default and is not operator-ready.
 
 ## Optional private access
 
-Private iPhone publication is owned exclusively by the installed IRIN.app
+Private phone publication is owned exclusively by the installed IRIN.app
 desktop Settings control. That surface configures classic Tailscale Serve on a
 dedicated HTTPS port (default `8443`, override with
 `IRIN_TAILSCALE_HTTPS_PORT`) so other Serve handlers on the same node — for
 example Hermes root on 443 — can coexist. The copyable origin is
 `https://<device>.<tailnet>.ts.net:8443` (port omitted only when the
-configured port is 443). Source-managed runtime (`make setup`,
+configured port is 443). Open that origin in a browser on the same tailnet;
+War Room is the same web surface (same-origin REST and WebSocket), not a
+separate native phone client. Source-managed runtime (`make setup`,
 `scripts/irin-runtime.sh`) starts local Council/Web/Gateway only and never
 applies, replaces, or disables Tailscale Serve. Tailscale Funnel (public
 internet exposure) is never configured by IRIN. Shared-tailnet operators may
-retain Council's token authentication as optional defense in depth; the
-default single-operator path does not require manually copying a token to the
-phone.
+retain Council's token authentication as optional defense in depth; when a
+token is required, set it in the browser Settings on the remote device.
 
 ## Source, configuration, and runtime boundaries
 

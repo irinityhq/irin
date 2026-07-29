@@ -23,10 +23,13 @@ The canonical root runtime serves War Room Web on `127.0.0.1:3010`, Council on
 `127.0.0.1:8765`, and Gateway on `127.0.0.1:18080`. The browser and desktop app
 share the same backend state and session files.
 
-The Tauri shell first probes the configured Council. If the canonical runtime
-already owns the port with the matching build identity, the app adopts it.
-Installed release builds require that runtime and never start a child backend.
-Debug desktop builds may start the configured `council` binary for development.
+The Tauri shell first probes the configured Council. If a Council with the
+matching build identity already owns the port, the app adopts it. Installed
+IRIN.app (the DMG product) normally starts and owns its bundled Council;
+source `make setup` is not a prerequisite for the installed app. When an
+exact-build Council is already healthy on the port, the app adopts that process
+instead of spawning the bundled one. Debug desktop builds may start the
+configured `council` binary for development.
 
 ## Run and build
 
@@ -36,19 +39,20 @@ Use the complete runtime from the repository root:
 make runtime-up
 ```
 
-For frontend development from the IRIN repository root:
+Browser development from the repository root:
+
+```bash
+make warroom
+```
+
+Internal native shell harness (component developers and CI; product install is
+the DMG):
 
 ```bash
 make -C council-rs warroom-dev
 ```
 
-For a native bundle:
-
-```bash
-make -C council-rs warroom-build
-```
-
-For browser-only development:
+For browser-only development without the root launcher:
 
 ```bash
 cargo build --release

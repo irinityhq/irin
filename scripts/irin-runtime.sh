@@ -699,8 +699,8 @@ runtime_status() {
     printf 'LOGIN %s missing — run: %s install-login\n' \
       "$LOGIN_LAUNCHD_LABEL" "$ROOT/scripts/irin-runtime.sh"
   fi
-  # Private iPhone publication is owned exclusively by installed IRIN.app
-  # Settings (Tailscale Serve). Source runtime never claims or mutates it.
+  # Private phone publication is owned exclusively by installed IRIN.app
+  # Settings (Tailscale Serve → browser). Source runtime never claims or mutates it.
   return "$identity_status"
 }
 

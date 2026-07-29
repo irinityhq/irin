@@ -14,9 +14,10 @@ make setup
 ```
 
 Setup reports the live service state and URLs, enables per-user login recovery,
-and ends with the next action: open **Discover**. The only optional second
-newcomer command is `make app-install`. Operators can opt out of login recovery
-with `./scripts/irin-runtime.sh uninstall-login`.
+and ends with the next action: open **Discover**. The macOS desktop product is
+the signed DMG from GitHub Releases; source development uses `make warroom` or
+the managed runtime. Operators can opt out of login recovery with
+`./scripts/irin-runtime.sh uninstall-login`.
 
 Default local surfaces:
 
@@ -96,22 +97,18 @@ Useful commands:
 
 The browser and Tauri app use the same Council API and WebSocket contract.
 
-Open the browser surface at `http://127.0.0.1:3010`. On macOS, the native app is
-also available:
-
-```bash
-make app-install
-```
+Open the browser surface at `http://127.0.0.1:3010`. On macOS, install the
+signed DMG for the native desktop product (`IRIN.app`).
 
 War Room includes deliberation, direct-fire prompts, session history, provider
 discovery, cabinet editing, Gateway outbox and Watch views, drift analysis,
 and optional Librarian integration. Configure API, WebSocket, Gateway,
 Librarian, and auth values in Settings.
 
-The Tauri app adopts the canonical Council started by `make setup`. Installed
-release builds do not start another Council backend; if the runtime is absent,
-restart it from the IRIN checkout. Debug desktop builds retain a developer-only
-sidecar path.
+The installed app adopts the canonical Council started by `make setup` when
+build identity matches. Installed release builds start their own bundled
+Council when no matching runtime is present. Debug desktop builds retain a
+developer-only sidecar path under `council-rs`.
 
 ## Authentication
 

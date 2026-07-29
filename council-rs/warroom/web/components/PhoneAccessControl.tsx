@@ -29,7 +29,7 @@ export default function PhoneAccessControl({
   const canRecoverOrDisable = enabled || interrupted;
   const stateLabel = status?.state.replaceAll("_", " ") ?? "checking…";
   const recoverLabel = "Clear interrupted setup";
-  const disableLabel = interrupted && !enabled ? recoverLabel : "Disable iPhone access";
+  const disableLabel = interrupted && !enabled ? recoverLabel : "Disable phone access";
 
   const copyAddress = async () => {
     const address = status?.tailnet_url;
@@ -41,9 +41,9 @@ export default function PhoneAccessControl({
       } else {
         await navigator.clipboard.writeText(address);
       }
-      notify("success", "iPhone address copied");
+      notify("success", "Phone address copied");
     } catch {
-      notify("error", "Could not copy the iPhone address");
+      notify("error", "Could not copy the phone address");
     }
   };
 
@@ -56,14 +56,15 @@ export default function PhoneAccessControl({
     >
       <div className="flex items-center gap-2 border-b border-border pb-3">
         <Smartphone className="w-3.5 h-3.5 text-fg-dim" />
-        <span className="label text-fg">Private iPhone access</span>
+        <span className="label text-fg">Private phone access</span>
       </div>
       <p className="text-[10px] font-mono text-fg-dim">
         Publishes this installed app on your private Tailscale network over one
         HTTPS address on port 8443 (other Serve apps on 443 can coexist). IRIN
-        uses Tailscale Serve only and never enables public Funnel access. Your
-        iPhone must be signed into the same tailnet; paste the full URL
-        including the port.
+        uses Tailscale Serve only and never enables public Funnel access. Any
+        device on the same tailnet that your Tailscale ACLs or grants allow can
+        open the full URL (including the port) in a browser; War Room uses
+        same-origin REST and WebSocket on that origin.
       </p>
       <div
         className="text-xs font-mono space-y-1"
@@ -81,7 +82,7 @@ export default function PhoneAccessControl({
             <button
               type="button"
               className="btn text-[10px]"
-              aria-label="Copy iPhone address"
+              aria-label="Copy phone address"
               data-testid="settings-phone-access-copy"
               onClick={() => void copyAddress()}
             >
@@ -99,14 +100,14 @@ export default function PhoneAccessControl({
         <button
           type="button"
           data-testid="settings-phone-access-enable"
-          aria-label={enabled ? "Refresh iPhone routes" : "Enable iPhone access"}
+          aria-label={enabled ? "Refresh phone routes" : "Enable phone access"}
           aria-busy={busy}
           className="btn btn-cyan text-xs"
           disabled={busy}
           onClick={() => void onEnable()}
         >
           {busy ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : null}
-          {enabled ? "Refresh iPhone routes" : "Enable iPhone access"}
+          {enabled ? "Refresh phone routes" : "Enable phone access"}
         </button>
         <button
           type="button"
@@ -121,9 +122,10 @@ export default function PhoneAccessControl({
         </button>
       </div>
       <p className="text-[10px] font-mono text-fg-dim">
-        In the War Room iPhone app, paste the address above and enter the Council
-        auth token in its secure Settings screen. The token stays in the iPhone
-        Keychain.
+        On the phone browser, open the address above. If Council requires auth,
+        set the same token under Settings → Auth token, then Test connection
+        (REST health and WebSocket upgrade). The token stays only in this
+        browser tab&apos;s session and is never written to durable localStorage.
       </p>
     </div>
   );

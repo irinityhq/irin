@@ -1,14 +1,11 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup setup-prepare app-install release-check worktree worktree-remove tools lint-crypto preflight check ship-check verify verify-down verify-formal runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom warroom-tauri warroom-tauri-build dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction worktree-gc lint-security opengrep lint-lua
+.PHONY: help setup setup-prepare release-check worktree worktree-remove tools lint-crypto preflight check ship-check verify verify-down verify-formal runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction worktree-gc lint-security opengrep lint-lua
 setup: ## macOS: prepare config, start the managed runtime, and enable login recovery
 	bash scripts/setup-local.sh
 
 setup-prepare: ## Prepare private local config and signing material without starting services
 	bash scripts/setup-local.sh --prepare-only
-
-app-install: ## Build, atomically install, and launch the IRIN app
-	bash scripts/install-macos-app.sh
 
 release-check: ## Verify product completeness and tree hygiene
 	bash scripts/check-release-tree.sh
@@ -79,14 +76,6 @@ warroom: ## macOS/Ubuntu: run Council + War Room Web in the foreground
 	COUNCIL_PORT="$${IRIN_COUNCIL_PORT:-8765}" WARROOM_WEB_PORT="$${IRIN_WEB_PORT:-3010}" \
 		$(MAKE) -C council-rs warroom-browser
 
-warroom-tauri: ## Open the War Room native desktop shell (Tauri)
-	@set -a; test ! -f .irin-worktree.env || . ./.irin-worktree.env; set +a; \
-	COUNCIL_PORT="$${IRIN_COUNCIL_PORT:-8765}" WARROOM_WEB_PORT="$${IRIN_WEB_PORT:-3010}" \
-		$(MAKE) -C council-rs warroom-dev
-
-warroom-tauri-build: ## Package the War Room native desktop shell (Tauri)
-	$(MAKE) -C council-rs warroom-build
-
 dmg-build: ## Build ad-hoc signed IRIN .app + .dmg (Apple silicon)
 	bash packaging/build-dmg.sh
 
@@ -123,10 +112,10 @@ release-transaction: ## Fail-closed release ladder (scripts/release-transaction.
 	bash scripts/release-transaction.sh $(ARGS)
 
 build: ## Build the full Rust workspace in release mode
-	cargo build --workspace --release
+	bash scripts/cargo-target-policy.sh run "$(CURDIR)" cargo build --workspace --release
 
 test: ## Run the full Rust workspace test suite
-	cargo test --workspace
+	bash scripts/cargo-target-policy.sh run "$(CURDIR)" cargo test --workspace
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Targets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)

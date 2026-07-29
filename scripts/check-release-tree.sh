@@ -37,10 +37,6 @@ required=(
   docs/troubleshooting.md
   council-rs/scripts/warroom-tauri-dev.sh
   council-rs/warroom/web/playwright.export.config.ts
-  council-rs/warroom-ios/README.md
-  council-rs/warroom-ios/WarRoomiOS/WarRoomiOSApp.swift
-  council-rs/warroom-ios/WarRoomiOS/WarRoomConfig.swift
-  council-rs/warroom-ios/WarRoomiOS.xcodeproj/project.pbxproj
   scripts/check-contract-surface-declaration.sh
   scripts/bootstrap-actionlint.sh
   scripts/bootstrap-dev-tools.sh
@@ -93,12 +89,16 @@ else
 fi
 
 for path in "${files[@]}"; do
+  # Skip index entries removed from the working tree (uncommitted deletions).
+  [[ -e "$path" || -L "$path" ]] || continue
   [[ "$path" == "build.rs" || "$path" == */build.rs ]] || continue
   grep -Fqx "/$path @iws17" .github/CODEOWNERS \
     || fail "build-time authority path lacks explicit CODEOWNERS ownership: $path"
 done
 
 for path in "${files[@]}"; do
+  # Skip index entries removed from the working tree (uncommitted deletions).
+  [[ -e "$path" || -L "$path" ]] || continue
   case "/$path/" in
     */CLAUDE.md/*|*/RTK.md/*|*/.docs-lab/*|*/.codex/*|*/.claude/*|*/.cursor/*|*/.grok/*|*/.gortex.yaml/*|*/.mcp.json/*|*/state/*|*/sessions/*|*/runs/*|*/librarian_chats/*|*/docs/media/*|*/docs/audits/*|*/docs/plans/*|*/docs/specs/*|*/eval/run-*|*/target/*|*/node_modules/*|*/.next/*|*/out/*|*/dist/*|*/build/*|*/coverage/*|*/.turbo/*|*/.vercel/*|*/warroom-web-dist/*|*/__pycache__/*|*.tsbuildinfo/*|*/playwright-report/*|*/test-results/*|*/xcuserdata/*|*.xcuserstate/*)
       fail "private or generated path included: $path"
@@ -112,40 +112,6 @@ for path in "${files[@]}"; do
     */AGENTS.md) fail "private or generated path included: $path" ;;
   esac
 
-  # War Room iOS is public product source. Allow only the known shell tree;
-  # do not admit arbitrary private/generated paths under warroom-ios/.
-  case "$path" in
-    council-rs/warroom-ios/*)
-      case "$path" in
-        council-rs/warroom-ios/README.md|\
-        council-rs/warroom-ios/tools/tailnet-smoke-proxy.mjs|\
-        council-rs/warroom-ios/tests/run-config-security-smoke.sh|\
-        council-rs/warroom-ios/tests/WarRoomConfigSecuritySmoke.swift|\
-        council-rs/warroom-ios/WarRoomiOS/BootstrapConfig.swift|\
-        council-rs/warroom-ios/WarRoomiOS/ConnectionTester.swift|\
-        council-rs/warroom-ios/WarRoomiOS/ContentView.swift|\
-        council-rs/warroom-ios/WarRoomiOS/DebugLog.swift|\
-        council-rs/warroom-ios/WarRoomiOS/KeychainStore.swift|\
-        council-rs/warroom-ios/WarRoomiOS/SettingsView.swift|\
-        council-rs/warroom-ios/WarRoomiOS/WarRoomConfig.swift|\
-        council-rs/warroom-ios/WarRoomiOS/WarRoomModel.swift|\
-        council-rs/warroom-ios/WarRoomiOS/WarRoomSettingsStore.swift|\
-        council-rs/warroom-ios/WarRoomiOS/WarRoomWebView.swift|\
-        council-rs/warroom-ios/WarRoomiOS/WarRoomiOSApp.swift|\
-        council-rs/warroom-ios/WarRoomiOS/Info.plist|\
-        council-rs/warroom-ios/WarRoomiOS/PrivacyInfo.xcprivacy|\
-        council-rs/warroom-ios/WarRoomiOS/Assets.xcassets/Contents.json|\
-        council-rs/warroom-ios/WarRoomiOS/Assets.xcassets/AccentColor.colorset/Contents.json|\
-        council-rs/warroom-ios/WarRoomiOS/Assets.xcassets/AppIcon.appiconset/Contents.json|\
-        council-rs/warroom-ios/WarRoomiOS/Assets.xcassets/AppIcon.appiconset/AppIcon.png|\
-        council-rs/warroom-ios/WarRoomiOS.xcodeproj/project.pbxproj|\
-        council-rs/warroom-ios/WarRoomiOS.xcodeproj/xcshareddata/xcschemes/WarRoomiOS.xcscheme)
-          ;;
-        *) fail "warroom-ios path requires release allowlist review: $path" ;;
-      esac
-      ;;
-  esac
-
   case "$path" in
     *.md)
       case "$path" in
@@ -154,7 +120,6 @@ for path in "${files[@]}"; do
         council-rs/docs/operator-guide.md|council-rs/docs/persistence.md|\
         council-rs/docs/providers.md|council-rs/docs/war-room.md|\
         council-rs/warroom-tauri/README.md|council-rs/warroom/docs/TAURI-AUTH.md|\
-        council-rs/warroom-ios/README.md|\
         docs/architecture.md|docs/cabinets.md|docs/ci-operating-model.md|docs/cross-process-boundaries.md|docs/development-workflow.md|docs/release-runbook.md|docs/security-claims-vs-reality.md|\
         docs/security-tooling.md|docs/surface-map.md|docs/troubleshooting.md|\
         packaging/gateway-pack/README.md|\
@@ -182,8 +147,7 @@ for path in "${files[@]}"; do
         assets/readme/chair-ruling.png|assets/readme/seat-stream.png|\
         assets/readme/sheldon-validation.png|assets/readme/warroom-deliberation.gif|\
         assets/readme/warroom-walkthrough.mp4|\
-        council-rs/warroom-tauri/src-tauri/icons/*|\
-        council-rs/warroom-ios/WarRoomiOS/Assets.xcassets/AppIcon.appiconset/AppIcon.png) ;;
+        council-rs/warroom-tauri/src-tauri/icons/*) ;;
         *) fail "media or packaged artifact requires release allowlist review: $path" ;;
       esac
       ;;
