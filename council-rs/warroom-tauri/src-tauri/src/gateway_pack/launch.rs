@@ -1,5 +1,6 @@
 //! Launch / resume decisions and Council child env for the shell.
 
+use super::cli_adapters::ensure_cli_adapters;
 use super::enable::{
     compose_up, lifecycle_stage, port_busy_by_foreign_gateway, wait_control_plane,
 };
@@ -14,6 +15,7 @@ use super::types::{GatewayPackState, GatewayPackStatus};
 use crate::docker_cli::{probe_docker_daemon, DockerDaemonState, DESKTOP_GATEWAY_URL};
 use crate::keychain::{gw_api_key_present, load_gw_api_key, KeychainSecretStore, SecretStore};
 use crate::private_config::load_or_create_private_config;
+use std::sync::{Mutex, OnceLock};
 
 #[allow(dead_code)]
 pub fn default_secret_store() -> KeychainSecretStore {
@@ -64,6 +66,41 @@ pub fn pack_auth_revalidated(store: &dyn SecretStore) -> bool {
     }
 }
 
+/// Pure resume work selection: avoid re-entering Keychain-heavy compose when
+/// the pack project is already running (promote retries must poll/wait, not
+/// force-recreate). Full start only when containers are down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumePackAction {
+    AlreadyReady,
+    /// Project up: wait for control-plane + auth only (no compose secret rebuild).
+    WaitOnly,
+    /// Project down: compose up + secret env + adapters.
+    FullStart,
+}
+
+/// Decide the resume path from revalidation + project liveness only.
+pub fn decide_resume_pack_action(pack_auth_ok: bool, project_running: bool) -> ResumePackAction {
+    if pack_auth_ok {
+        ResumePackAction::AlreadyReady
+    } else if project_running {
+        ResumePackAction::WaitOnly
+    } else {
+        ResumePackAction::FullStart
+    }
+}
+
+/// Pure promote policy: early attempts may enter [`resume_installed_pack`]
+/// (which itself chooses wait-only vs full-start). After the early window,
+/// only revalidation polls remain — no stacked compose/Keychain storms.
+pub fn promote_may_call_resume(attempt: u32, max_early_resume_attempts: u32, pack_auth_ok: bool) -> bool {
+    !pack_auth_ok && attempt < max_early_resume_attempts
+}
+
+fn resume_flight_lock() -> &'static Mutex<()> {
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+}
+
 /// Cold-launch / recovery resume: start the already-installed app-owned pack
 /// and wait bounded for control-plane health + Keychain key auth.
 ///
@@ -71,9 +108,28 @@ pub fn pack_auth_revalidated(store: &dyn SecretStore) -> bool {
 /// and does **not** claim Council is governed. Fail-closed: `Err` means the
 /// pack is not authenticated-ready (caller starts Council Direct and may
 /// schedule a later bounded promote).
+///
+/// Single-flight: concurrent promote + launch callers join one resume so
+/// compose/Keychain work cannot overlap and supersede authorization prompts.
 pub fn resume_installed_pack(store: &dyn SecretStore) -> Result<(), String> {
-    if pack_auth_revalidated(store) {
-        return Ok(());
+    let _flight = resume_flight_lock()
+        .lock()
+        .map_err(|_| "gateway pack resume lock poisoned".to_string())?;
+    resume_installed_pack_locked(store)
+}
+
+fn resume_installed_pack_locked(store: &dyn SecretStore) -> Result<(), String> {
+    let project_running = desktop_project_running();
+    match decide_resume_pack_action(pack_auth_revalidated(store), project_running) {
+        ResumePackAction::AlreadyReady => {
+            // Pack is governed-ready; still ensure host adapters after app relaunch.
+            let _ = ensure_cli_adapters(store);
+            return Ok(());
+        }
+        ResumePackAction::WaitOnly => {
+            return resume_wait_only(store);
+        }
+        ResumePackAction::FullStart => {}
     }
     match probe_docker_daemon() {
         DockerDaemonState::Ready => {}
@@ -90,6 +146,8 @@ pub fn resume_installed_pack(store: &dyn SecretStore) -> Result<(), String> {
     verify_images_present(&validated)?;
     let ledger = ensure_ledger_key()?;
     let _ = ensure_arm_keys_file();
+    // Resume host adapters so compose env can inject ready proxy endpoints.
+    let _ = ensure_cli_adapters(store);
     let existing_key_id = load_or_create_private_config()?.gateway_key_id;
     let env_path = write_public_compose_env(
         &pack_root,
@@ -131,6 +189,38 @@ pub fn resume_installed_pack(store: &dyn SecretStore) -> Result<(), String> {
     lifecycle_stage("resume_auth", "ok");
     if !pack_auth_revalidated(store) {
         return Err("pack resume completed but revalidation still false".to_string());
+    }
+    Ok(())
+}
+
+/// Project already running: do not rebuild compose secret env / force-recreate.
+/// Ensure host adapters, wait for control plane, re-check models auth.
+fn resume_wait_only(store: &dyn SecretStore) -> Result<(), String> {
+    match probe_docker_daemon() {
+        DockerDaemonState::Ready => {}
+        DockerDaemonState::CliMissing => {
+            return Err("Docker CLI missing; cannot resume Gateway Pack".to_string());
+        }
+        DockerDaemonState::DaemonDown => {
+            return Err("Docker daemon not ready; cannot resume Gateway Pack".to_string());
+        }
+    }
+    let _ = ensure_cli_adapters(store);
+    let key = load_gw_api_key(store)?.ok_or_else(|| {
+        "GW_API_KEY missing from Keychain; cannot resume governed route".to_string()
+    })?;
+    lifecycle_stage("resume_wait_only", "begin");
+    wait_control_plane().inspect_err(|_| {
+        lifecycle_stage("resume_wait_only", "error");
+    })?;
+    lifecycle_stage("resume_wait_only", "ok");
+    if !models_authenticated(&key) {
+        lifecycle_stage("resume_auth", "error");
+        return Err("Gateway client key failed /v1/models after pack resume wait".to_string());
+    }
+    lifecycle_stage("resume_auth", "ok");
+    if !pack_auth_revalidated(store) {
+        return Err("pack resume wait completed but revalidation still false".to_string());
     }
     Ok(())
 }

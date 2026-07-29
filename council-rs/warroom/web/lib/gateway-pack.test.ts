@@ -18,6 +18,9 @@ describe("packaged cold-launch single owner (source contract)", () => {
     );
     expect(src).toContain("nativeOwnsCouncilStartup");
     expect(src).toContain("scheduleBootHealthRetries");
+    expect(src).toContain("createBootHealthPoller");
+    // Discover recovery is owned by the same online readiness transition.
+    expect(src).toContain("notifyDiscoverBackendReady");
     // Frontend must check native ownership before starting Council.
     const ownsIdx = src.indexOf("nativeOwnsCouncilStartup");
     const startIdx = src.indexOf("startCouncilServer(");

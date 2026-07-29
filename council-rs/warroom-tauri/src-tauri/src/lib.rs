@@ -263,6 +263,9 @@ fn unix_kill_pid(_pid: u32, _sig: i32) {}
 fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>) {
     const ATTEMPTS: u32 = 12;
     const INTERVAL: Duration = Duration::from_secs(5);
+    /// Early window may call resume; resume is single-flight and wait-only when
+    /// the pack project is already up (no repeated force-recreate/Keychain rebuild).
+    const MAX_EARLY_RESUME_ATTEMPTS: u32 = 4;
     tauri::async_runtime::spawn_blocking(move || {
         for attempt in 0..ATTEMPTS {
             std::thread::sleep(INTERVAL);
@@ -276,9 +279,14 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
             if !persisted || owned == Some(true) || owned != Some(false) {
                 return;
             }
-            let pack_ok = if gateway_pack::pack_auth_revalidated(&store) {
+            let revalidated = gateway_pack::pack_auth_revalidated(&store);
+            let pack_ok = if revalidated {
                 true
-            } else if attempt < 4 {
+            } else if gateway_pack::promote_may_call_resume(
+                attempt,
+                MAX_EARLY_RESUME_ATTEMPTS,
+                revalidated,
+            ) {
                 match gateway_pack::resume_installed_pack(&store) {
                     Ok(()) => true,
                     Err(e) => {
@@ -293,6 +301,7 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
                     }
                 }
             } else {
+                // After early window: revalidation-only polls (first branch).
                 false
             };
             if !gateway_pack::may_promote_to_governed(persisted, owned, pack_ok) {
@@ -1490,10 +1499,14 @@ pub fn run() {
             }
             // One-time, non-destructive adoption of Keychain secrets stored by
             // the legacy "Council War Room" build (never deletes legacy items).
-            {
+            // Must not run on the AppKit main/setup thread: after an ad-hoc
+            // codesign identity change, SecItemCopyMatching can block for a
+            // long ACL approval wait and freeze cold launch before auto-start
+            // is even scheduled. Best-effort off-main; Enable re-provisions.
+            tauri::async_runtime::spawn_blocking(|| {
                 let store = KeychainSecretStore;
                 migrate_legacy_secrets(&store);
-            }
+            });
             // Host-authoritative status loop: ordered snapshots on desktop-status.
             status_authority::start_background_loop(app.handle().clone());
             let handle = app.handle().clone();
@@ -1584,6 +1597,9 @@ pub fn run() {
                             let store = KeychainSecretStore;
                             if gateway_pack::pack_auth_revalidated(&store) {
                                 launch_via_gateway = true;
+                                // Pack containers already healthy; still bring up
+                                // app-owned host adapters (Claude/Codex proxies).
+                                let _ = gateway_pack::ensure_cli_adapters(&store);
                                 let _ = auto_start_handle.emit(
                                     "council-log",
                                     "[system] auto-start: restoring governed route — Gateway Pack revalidated (Docker up, pack authenticated, Keychain key usable)",

@@ -1,5 +1,6 @@
 //! Pack lifecycle mutations: enable / disable / stop / uninstall.
 
+use super::cli_adapters::{ensure_cli_adapters, stop_cli_adapters};
 use super::env::{build_full_compose_env, teardown_compose_env, write_public_compose_env};
 use super::health::{
     admin_surface_ready, desktop_project_running, gateway_health_ok, models_authenticated,
@@ -136,6 +137,28 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         lifecycle_stage("arm_keys", "error");
     })?;
     lifecycle_stage("arm_keys", "ok");
+
+    // Host CLI adapters before compose env: mint Keychain tokens and start
+    // app-owned Claude/Codex listeners when CLIs are present+authenticated.
+    // Missing CLI leaves that route empty (fail-closed) and does not abort Enable.
+    let adapter_status = ensure_cli_adapters(store);
+    lifecycle_stage(
+        "cli_adapters",
+        &format!(
+            "claude={} codex={}",
+            if adapter_status.claude.is_ready() {
+                "ready"
+            } else {
+                adapter_status.claude_reason.as_str()
+            },
+            if adapter_status.codex.is_ready() {
+                "ready"
+            } else {
+                adapter_status.codex_reason.as_str()
+            }
+        ),
+    );
+
     let existing_key_id = load_or_create_private_config()?.gateway_key_id;
     let env_path = write_public_compose_env(
         &pack_root,
@@ -404,6 +427,10 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
         lifecycle_stage("stop_config", "already_direct");
     }
 
+    // Stop app-owned host adapters with the pack (idempotent).
+    stop_cli_adapters();
+    lifecycle_stage("cli_adapters_stop", "ok");
+
     if let Some(pack_root) = installed_pack_root() {
         let compose = compose_file(&pack_root);
         if compose.is_file() {
@@ -463,6 +490,9 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
     bump_pack_lifecycle_generation();
     invalidate_status_cache();
     crate::touch_id::clear_rehearsal_passed();
+
+    // Host adapters first so uninstall never leaves listeners after Keychain wipe.
+    stop_cli_adapters();
 
     let key_id = load_or_create_private_config()
         .ok()

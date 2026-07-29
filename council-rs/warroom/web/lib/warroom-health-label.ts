@@ -1,9 +1,11 @@
 /**
  * Header health label for the War Room shell.
  *
- * While the mount-time health retry window is in progress, the label stays
- * CONNECTING. OFFLINE is reserved for exhausted retries or a confirmed
- * backend failure (apiStatus error/online with no health payload after retries).
+ * While the readiness-driven cold-start poll is active (`bootRetryActive`),
+ * the label stays CONNECTING. OFFLINE is reserved for exhausted connecting
+ * budget or a confirmed backend failure (apiStatus error/online with no
+ * health payload after retries). Slow recovery after offline does not set
+ * bootRetryActive — permanent failure stays visible.
  */
 
 export type WarroomApiStatus = "loading" | "online" | "error";

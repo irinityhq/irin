@@ -79,3 +79,36 @@ fn later_promote_without_manual_reenable() {
     // Pack still not ready.
     assert!(!may_promote_to_governed(true, Some(false), false));
 }
+
+#[test]
+fn resume_action_avoids_full_start_when_project_running() {
+    assert_eq!(
+        decide_resume_pack_action(true, false),
+        ResumePackAction::AlreadyReady
+    );
+    assert_eq!(
+        decide_resume_pack_action(true, true),
+        ResumePackAction::AlreadyReady
+    );
+    // Running but not yet auth-ready → wait/poll only (no Keychain compose rebuild).
+    assert_eq!(
+        decide_resume_pack_action(false, true),
+        ResumePackAction::WaitOnly
+    );
+    // Down → full compose start once callers enter resume.
+    assert_eq!(
+        decide_resume_pack_action(false, false),
+        ResumePackAction::FullStart
+    );
+}
+
+#[test]
+fn promote_early_window_bounds_resume_calls() {
+    // Attempts 0..3 may resume; 4+ revalidate-only.
+    assert!(promote_may_call_resume(0, 4, false));
+    assert!(promote_may_call_resume(3, 4, false));
+    assert!(!promote_may_call_resume(4, 4, false));
+    assert!(!promote_may_call_resume(11, 4, false));
+    // Ready pack never re-enters resume.
+    assert!(!promote_may_call_resume(0, 4, true));
+}

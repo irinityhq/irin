@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -144,7 +144,10 @@ pub enum DockerDaemonState {
     Ready,
 }
 
-/// Run a process with a hard wall-clock timeout. On timeout the child is killed.
+/// Run a process with a hard wall-clock timeout. On timeout the child is killed
+/// and reaped. Stdin is closed (null). See [`run_command_timeout_input`] when
+/// the child must consume a prompt or body on stdin.
+///
 /// Never returns stdout/stderr to callers that need redaction — use
 /// [`format_cmd_failure`] which only emits fixed categories.
 ///
@@ -152,12 +155,27 @@ pub enum DockerDaemonState {
 /// immediately with **no** delayed signal and no join of a full-timeout sleeper
 /// (a prior sleeper+join pattern forced every successful `compose up --wait`
 /// to wait the full 180s before Enable could provision Keychain keys).
-pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
+pub fn run_command_timeout(cmd: Command, timeout: Duration) -> Result<Output, String> {
+    run_command_timeout_input(cmd, timeout, None)
+}
+
+/// Same kill/reap contract as [`run_command_timeout`], with optional stdin
+/// bytes written concurrently (so large prompts cannot deadlock against full
+/// stdout pipes). On timeout the child is killed and all helper threads are
+/// joined; no orphan processes.
+pub fn run_command_timeout_input(
+    mut cmd: Command,
+    timeout: Duration,
+    stdin: Option<&[u8]>,
+) -> Result<Output, String> {
     use std::time::Instant;
 
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    if stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd
         .spawn()
@@ -181,6 +199,20 @@ pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output
         buf
     });
 
+    // Write stdin on a helper thread so a slow consumer cannot block the wait
+    // loop past the deadline (kill still wins).
+    let in_handle = match (stdin, child.stdin.take()) {
+        (Some(bytes), Some(mut pipe)) => {
+            let owned = bytes.to_vec();
+            Some(thread::spawn(move || {
+                let _ = pipe.write_all(&owned);
+                // Close pipe so the child sees EOF.
+                drop(pipe);
+            }))
+        }
+        _ => None,
+    };
+
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -196,6 +228,9 @@ pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output
                     })?;
                     let _ = out_handle.join();
                     let _ = err_handle.join();
+                    if let Some(h) = in_handle {
+                        let _ = h.join();
+                    }
                     let _ = reaped;
                     return Err(DockerErrorKind::Timeout.as_str().to_string());
                 }
@@ -206,6 +241,9 @@ pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output
                 let _ = child.wait();
                 let _ = out_handle.join();
                 let _ = err_handle.join();
+                if let Some(h) = in_handle {
+                    let _ = h.join();
+                }
                 return Err(format!(
                     "{}: wait failed: {e}",
                     DockerErrorKind::SpawnFailed.as_str()
@@ -216,6 +254,9 @@ pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output
 
     let stdout = out_handle.join().unwrap_or_default();
     let stderr = err_handle.join().unwrap_or_default();
+    if let Some(h) = in_handle {
+        let _ = h.join();
+    }
     Ok(Output {
         status,
         stdout,
@@ -386,6 +427,12 @@ pub const AMBIENT_SCRUB_ENV_KEYS: &[&str] = &[
     // reach the pack sidecar — the only admissible value is the one the native
     // host mints into the Keychain for this app.
     "GW_ARM_PRINCIPALS",
+    // Host CLI adapters: only the app-owned spawn env may supply URL/token.
+    // Ambient parent values must never arm or re-point these routes.
+    "CLAUDE_PROXY_URL",
+    "CODEX_PROXY_URL",
+    "CLAUDE_PROXY_TOKEN",
+    "CODEX_PROXY_TOKEN",
 ];
 
 /// Watch/admin surfaces the desktop pack contract requires disarmed. Forced
@@ -624,6 +671,12 @@ pub const COMPOSE_ENV_KEY_ALLOWLIST: &[&str] = &[
     // Same class as IRIN_DESKTOP_LEDGER_KEY: a validated app-owned path, not an
     // arm-surface knob.
     "IRIN_DESKTOP_ARM_KEYS",
+    // Host CLI adapters (Claude/Codex): URL is non-secret but must still be
+    // forced from the validated pack env; tokens are Keychain-held secrets.
+    "CLAUDE_PROXY_URL",
+    "CODEX_PROXY_URL",
+    "CLAUDE_PROXY_TOKEN",
+    "CODEX_PROXY_TOKEN",
 ];
 
 const COMPOSE_SUBCOMMAND_ALLOWLIST: &[&str] = &[
@@ -738,10 +791,14 @@ fn match_secret_assignment(bytes: &[u8], i: usize) -> Option<(&'static str, usiz
         "OPENAI_API_KEY=",
         "ANTHROPIC_API_KEY=",
         "NVIDIA_API_KEY=",
+        "CLAUDE_PROXY_TOKEN=",
+        "CODEX_PROXY_TOKEN=",
         "admin_key=",
         "raw_key=",
         "Authorization: Bearer ",
         "Authorization:Bearer ",
+        "X-Proxy-Auth: Bearer ",
+        "X-Proxy-Auth:Bearer ",
     ];
     for key in KEYS {
         let kb = key.as_bytes();
@@ -891,6 +948,31 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "must not join a full-timeout sleeper after success"
+        );
+    }
+
+    #[test]
+    fn run_command_timeout_input_feeds_stdin_and_kills_on_timeout() {
+        use std::time::Instant;
+        // Deterministic: `cat` echoes stdin; no provider CLI.
+        let cat = Command::new("/bin/cat");
+        let out = run_command_timeout_input(cat, Duration::from_secs(2), Some(b"prompt-body"))
+            .expect("cat");
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"prompt-body");
+
+        let mut sleep = Command::new("/bin/sleep");
+        sleep.arg("30");
+        let start = Instant::now();
+        let err = run_command_timeout_input(sleep, Duration::from_millis(400), Some(b"x"))
+            .unwrap_err();
+        assert!(
+            err.contains(DockerErrorKind::Timeout.as_str()) || err.contains("timeout"),
+            "{err}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "timeout path must kill/reap promptly"
         );
     }
 

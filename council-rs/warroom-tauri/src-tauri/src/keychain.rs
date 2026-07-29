@@ -36,6 +36,12 @@ pub const AUTH_PEPPER_ACCOUNT: &str = "gateway-pack-auth-pepper";
 /// written to the public env file, never returned to the renderer, never
 /// logged.
 pub const ARM_PRINCIPAL_TOKEN_ACCOUNT: &str = "gateway-pack-arm-principal-token";
+/// Account label for the Claude host-adapter shared secret (`CLAUDE_PROXY_TOKEN`).
+/// Held only in the Keychain and the per-spawn Compose process env; never
+/// written to the public env file, never returned to the renderer, never logged.
+pub const CLAUDE_PROXY_TOKEN_ACCOUNT: &str = "gateway-pack-claude-proxy-token";
+/// Account label for the Codex host-adapter shared secret (`CODEX_PROXY_TOKEN`).
+pub const CODEX_PROXY_TOKEN_ACCOUNT: &str = "gateway-pack-codex-proxy-token";
 
 /// Fixed principal name for the single-operator desktop bridge. The token is
 /// the secret; the name is a stable, non-secret audit label that appears in
@@ -571,6 +577,49 @@ pub fn is_valid_arm_principal_token(token: &str) -> bool {
     b[4..].iter().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Host-adapter shared secret: 64 lowercase hex chars (32 random bytes).
+/// Same shape `setup-local.sh` mints for `CLAUDE_PROXY_TOKEN` / `CODEX_PROXY_TOKEN`.
+pub fn is_valid_proxy_token(token: &str) -> bool {
+    let b = token.as_bytes();
+    b.len() == 64 && b.iter().all(|c| c.is_ascii_hexdigit())
+}
+
+pub fn store_claude_proxy_token(store: &dyn SecretStore, token: &str) -> Result<(), String> {
+    let trimmed = token.trim();
+    if !is_valid_proxy_token(trimmed) {
+        return Err("refusing to store invalid CLAUDE_PROXY_TOKEN shape".to_string());
+    }
+    store.set_password(KEYCHAIN_SERVICE, CLAUDE_PROXY_TOKEN_ACCOUNT, trimmed)
+}
+
+pub fn load_claude_proxy_token(store: &dyn SecretStore) -> Result<Option<String>, String> {
+    Ok(store
+        .get_password(KEYCHAIN_SERVICE, CLAUDE_PROXY_TOKEN_ACCOUNT)?
+        .filter(|v| is_valid_proxy_token(v)))
+}
+
+pub fn delete_claude_proxy_token(store: &dyn SecretStore) -> Result<(), String> {
+    store.delete_password(KEYCHAIN_SERVICE, CLAUDE_PROXY_TOKEN_ACCOUNT)
+}
+
+pub fn store_codex_proxy_token(store: &dyn SecretStore, token: &str) -> Result<(), String> {
+    let trimmed = token.trim();
+    if !is_valid_proxy_token(trimmed) {
+        return Err("refusing to store invalid CODEX_PROXY_TOKEN shape".to_string());
+    }
+    store.set_password(KEYCHAIN_SERVICE, CODEX_PROXY_TOKEN_ACCOUNT, trimmed)
+}
+
+pub fn load_codex_proxy_token(store: &dyn SecretStore) -> Result<Option<String>, String> {
+    Ok(store
+        .get_password(KEYCHAIN_SERVICE, CODEX_PROXY_TOKEN_ACCOUNT)?
+        .filter(|v| is_valid_proxy_token(v)))
+}
+
+pub fn delete_codex_proxy_token(store: &dyn SecretStore) -> Result<(), String> {
+    store.delete_password(KEYCHAIN_SERVICE, CODEX_PROXY_TOKEN_ACCOUNT)
+}
+
 pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), String> {
     // Attempt every account even if one fails so a single ACL error cannot
     // leave the other secret behind while the caller thinks uninstall finished.
@@ -585,6 +634,14 @@ pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), St
     // exists must not leave a live custody-domain-1 credential behind.
     if let Err(e) = delete_arm_principal_token(store) {
         errors.push(format!("ARM_PRINCIPAL_TOKEN: {e}"));
+    }
+    // Host-adapter tokens are pack-scoped secrets: uninstall clears them so a
+    // later re-enable mints fresh values.
+    if let Err(e) = delete_claude_proxy_token(store) {
+        errors.push(format!("CLAUDE_PROXY_TOKEN: {e}"));
+    }
+    if let Err(e) = delete_codex_proxy_token(store) {
+        errors.push(format!("CODEX_PROXY_TOKEN: {e}"));
     }
     if errors.is_empty() {
         Ok(())
@@ -874,6 +931,41 @@ mod tests {
                 .unwrap(),
             Some(legacy_key)
         );
+    }
+
+    #[test]
+    fn proxy_token_shape_and_roundtrip() {
+        let store = MemorySecretStore::default();
+        assert!(!is_valid_proxy_token("short"));
+        assert!(!is_valid_proxy_token(&"GG".repeat(32)));
+        let tok = "ab".repeat(32);
+        let codex = "cd".repeat(32);
+        assert!(is_valid_proxy_token(&tok));
+        store_claude_proxy_token(&store, &tok).unwrap();
+        store_codex_proxy_token(&store, &codex).unwrap();
+        assert_eq!(
+            load_claude_proxy_token(&store).unwrap().as_deref(),
+            Some(tok.as_str())
+        );
+        assert_eq!(
+            load_codex_proxy_token(&store).unwrap().as_deref(),
+            Some(codex.as_str())
+        );
+        delete_claude_proxy_token(&store).unwrap();
+        assert!(load_claude_proxy_token(&store).unwrap().is_none());
+        assert!(store_claude_proxy_token(&store, "not-hex").is_err());
+    }
+
+    #[test]
+    fn delete_all_clears_proxy_tokens() {
+        let store = MemorySecretStore::default();
+        store_claude_proxy_token(&store, &"ab".repeat(32)).unwrap();
+        store_codex_proxy_token(&store, &"cd".repeat(32)).unwrap();
+        store_auth_pepper(&store, &"ef".repeat(32)).unwrap();
+        delete_all_gateway_pack_secrets(&store).unwrap();
+        assert!(load_claude_proxy_token(&store).unwrap().is_none());
+        assert!(load_codex_proxy_token(&store).unwrap().is_none());
+        assert!(load_auth_pepper(&store).unwrap().is_none());
     }
 }
 

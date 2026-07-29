@@ -1,99 +1,102 @@
-# PR 2 Execution Record — Ownership Only
+# PR 2 Execution Record — Collapse Runtime Ownership into the DMG
 
-Status: ready for implementation
+Status: consolidated checkpoint; installed-app acceptance pending
 
 Branch: `codex/collapse-runtime-ownership-v2`
 
 Base: `acc6237f3f6e5449990759916d704b74b2fa7f59`
 
-Authority: `docs/codebase-simplification-plan.md`, “PR 2 — Collapse runtime
-ownership into the DMG.”
+Authority: `docs/codebase-simplification-plan.md`, "PR 2 — Collapse runtime
+ownership into the DMG."
 
-## Mission
+## Consolidation note
 
-Collapse Council, War Room web, login recovery, and Settings ownership into the
-installed DMG without implementing or migrating governed Claude/Codex CLI
-transport.
+This branch previously attempted an ownership-only PR 2 that deferred governed
+Claude/Codex CLI transport to a "PR 2a" behind a temporary shell shim. That
+split was abandoned: the simplification plan makes governed CLI routing a
+blocking migration, not an accepted deletion, so the ownership collapse and the
+adapter migration ship as one PR 2. The native adapter and Keychain work from
+`codex/collapse-runtime-ownership` (`9cc237c`, plus the Keychain-prompt dedup
+fix `1cdb670`) is merged into this branch, and the shim
+(`scripts/governed-cli-proxies.sh`) is removed.
+
+## Objective
+
+Make the installed `IRIN.app` the sole owner of its bundled Council and optional
+Gateway Pack while preserving governed Claude and Codex CLI routing. Remove the
+source-managed runtime only after the installed route is proven.
 
 The packaged app must always own its bundled Council. Source development remains
 the foreground `make warroom` process tree. The product must no longer support
 MatchingBuild adoption, a source-managed installed runtime, or configurable
 Council source paths.
 
-## Required deletion
+## Implemented checkpoint
 
-- MatchingBuild and external-Council adoption.
-- External-runtime restart and reconciliation messaging.
-- User-facing `councilPath` and `councilRoot`.
-- Source-checkout Council path/base-directory overrides that become unreachable.
-- Source-managed Council and Next.js lifecycle.
-- Login LaunchAgent installation and recovery for that lifecycle.
-- Root `setup`, `setup-prepare`, and `runtime-*` product/operator surfaces that
-  exist for the retired lifecycle.
-- Obsolete tests, documentation, and release wiring for those paths.
-
-Delete complete reachable slices: implementation, tests, documentation, and
-entrypoint references together.
-
-## Temporary governed-CLI shim boundary
-
-If the existing Python Claude/Codex proxies must remain temporarily, extract
-only an optional launcher that owns those two proxy processes.
-
-The shim must not:
-
-- spawn, stop, inspect, or adopt Council;
-- spawn or manage Next.js;
-- install or use a login LaunchAgent;
-- perform MatchingBuild adoption;
-- expose or consume `councilPath` or `councilRoot`;
-- become required for installed-app cold start;
-- add Rust/native proxy adapters, proxy-token Keychain entries, or a second
-  adapter health/restart subsystem.
-
-If the shim needs a substantial fraction of `scripts/irin-runtime.sh`, stop and
-report that extraction failed. Do not preserve the old controller under a new
-name.
-
-## Explicitly deferred to PR 2a
-
-- Governed CLI architecture selection.
-- Native Claude/Codex adapter implementation.
-- Proxy-token Keychain migration.
-- Docker-to-host proxy redesign.
-- Live Claude/Codex provider acceptance.
-- macOS provider-CLI Keychain, codesigning, and TCC behavior.
-
-The parked branch `codex/collapse-runtime-ownership` at checkpoint `9cc237c`
-is reference material only. Do not cherry-pick its native adapter or Keychain
-work into this branch.
-
-## Proof
-
-- Reference search shows no supported source Council/Next/login/adoption
+- Native Claude and Codex CLI adapters are owned by the Tauri Gateway Pack
   lifecycle.
-- Root help advertises foreground `make warroom` and the DMG product path.
-- Packaged cold start owns bundled Council without a checkout or source runtime.
-- Closing the app terminates only its owned child.
-- Foreground browser development remains usable.
-- Tailscale publication remains app-owned, port-scoped, and never enables
-  Funnel or resets unrelated Serve configuration.
-- Any temporary governed-CLI shim is optional and owns only the existing proxy
-  pair.
-- Proportionate Tauri, War Room/export, Gateway Pack, release-tree, and packaged
-  smoke checks pass without live provider spend.
+- Proxy endpoints and tokens are injected through the app-owned path without
+  exposing secret values.
+- Governed routes fail closed; Direct CLI remains distinct and independently
+  selectable.
+- Native adapters retain the prior per-IP token-bucket behavior: burst 5,
+  sustained 10 requests per minute, with bounded cleanup and HTTP 429 on
+  exhaustion.
+- Gateway Pack resume/start work is single-flight and bounded.
+- Packaged War Room boot/discovery recovery is present.
+- Source-managed runtime retired: `scripts/setup-local.sh`,
+  `scripts/irin-runtime.sh`, their dedicated tests, root `setup` /
+  `setup-prepare` / `runtime-*` targets, login-recovery installation, and
+  MatchingBuild/external-Council adoption are deleted.
+- User-facing `councilPath` / `councilRoot` removed from the Settings/config
+  contract and Tauri command arguments; fixed test injection seams retained
+  only where automated tests require them.
+- Keychain proxy tokens are read once per enable flight and threaded through,
+  so a cold launch does not stack per-account authorization dialogs.
+
+## Verified at this checkpoint
+
+- Tauri library tests: 266 passed, 0 failed (at `9cc237c`; re-run required on
+  the consolidated tree).
+- `git diff --check`: clean.
+- Fresh DMG build completed on 2026-07-29 (pre-consolidation).
+
+These are source/build facts, not installed-app acceptance.
+
+## Known regressions under repair
+
+- War Room Outbox and Watch tabs return 503 in the installed app: the owned
+  Council child is spawned without its governance client configuration
+  (`GovernanceClient::from_env` fails, Council answers 503). These tabs worked
+  before the ownership collapse; the env handoff into the app-owned spawn must
+  be restored.
+- `grok_build` seat unavailable: Grok Build CLI detection fingerprints
+  `--version` output against a moving upstream format. Fingerprinting is being
+  removed in favor of plain binary resolution (`COUNCIL_GROK_CLI_BIN` override,
+  then PATH).
+
+## Completion still required
+
+- Restored governance env handoff; Outbox/Watch tabs live again in the
+  installed app.
+- Grok Build seat available without version fingerprinting.
+- Bounded Keychain authorization behavior on a fresh installed build (no more
+  than the five distinct first-launch items: Gateway client key, auth pepper,
+  arm-principal token, Claude proxy token, Codex proxy token).
+- One governed Claude request and one governed Codex request from the installed
+  app (explicit operator-approved acceptance; fail-closed proof that an
+  unavailable proxy route never silently downgrades to Direct).
+- Tauri, War Room, Gateway Pack, native/packaged smoke, DMG verification, and
+  one final `make ship-check` on the exact final tree.
+- Review, commit, push, and PR publication as separate operator-controlled
+  seams.
 
 ## Stop conditions
 
 Stop and report rather than expanding scope if:
 
-- ownership deletion requires new provider transport;
-- the proxy shim begins acquiring Council, web, login, adoption, or Settings
-  responsibilities;
 - a proposed replacement adds more lifecycle code than it deletes;
 - deterministic or packaged proof reveals loss of Direct CLI, War Room,
   Gateway Pack, or Tailscale behavior;
-- completing the task would require a live provider call.
-
-Do not commit, push, open a PR, install a release, or delete operator runtime
-state during the implementation dispatch.
+- completing a step would require a live provider call without explicit
+  operator approval.

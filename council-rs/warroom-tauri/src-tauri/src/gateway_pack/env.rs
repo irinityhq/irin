@@ -1,5 +1,9 @@
 //! Compose env construction: public pins, secret process env, teardown placeholders.
 
+use super::cli_adapters::{
+    apply_proxy_compose_env, current_status as cli_adapters_current_status, empty_proxy_compose_pairs,
+    ensure_proxy_tokens,
+};
 use super::install::load_validated_manifest;
 use super::keys::{random_hex, serialize_public_env, validate_env_value, write_atomic_0600};
 use super::manifest::{ImageRef, ValidatedManifest};
@@ -203,6 +207,15 @@ pub(crate) fn build_compose_secret_env(
         };
         env.insert(key.to_string(), safe);
     }
+
+    // Host CLI adapters (Claude/Codex): Keychain tokens + live health only.
+    // Never write these to the public env file. Unready adapters inject empty
+    // URL/token so Gateway readiness stays fail-closed — never a Direct fallthrough.
+    let (claude_tok, codex_tok) = ensure_proxy_tokens(store)
+        .map_err(|e| format!("keychain proxy tokens: {e}"))?;
+    let adapter_status = cli_adapters_current_status();
+    apply_proxy_compose_env(&mut env, &adapter_status, &claude_tok, &codex_tok)?;
+
     Ok(env)
 }
 
@@ -262,6 +275,10 @@ pub(crate) fn teardown_compose_env(pack_root: &Path, key_id: Option<&str>) -> Co
         "GW_ARM_PRINCIPALS",
     ] {
         env.insert(key.to_string(), String::new());
+    }
+    // Host CLI adapters: teardown never loads Keychain proxy tokens.
+    for (k, v) in empty_proxy_compose_pairs() {
+        env.insert(k, v);
     }
     // The bind-mount source and the in-container registry path are non-secret
     // pins Compose must still interpolate for `down`; fall back to the fixed

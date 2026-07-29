@@ -34,12 +34,15 @@ services:
       - VERTEX_GEMINI_MODEL=
       - "SIDECAR_ADDR=unix:/run/sidecar/sidecar.sock:"
       - SIDECAR_TIMEOUT_MS=200
-      # CLI proxies are not installed/authenticated by the DMG.
-      - CLAUDE_PROXY_URL=
-      - CODEX_PROXY_URL=
+      # Claude/Codex host adapters: native host injects host-reachable URL +
+      # Keychain token when app-owned adapters are healthy; empty keeps the
+      # provider fail-closed (never silent Direct fallthrough). Gemini remains
+      # unproductized (empty literals).
+      - CLAUDE_PROXY_URL=${CLAUDE_PROXY_URL:-}
+      - CODEX_PROXY_URL=${CODEX_PROXY_URL:-}
       - GEMINI_PROXY_URL=
-      - CLAUDE_PROXY_TOKEN=
-      - CODEX_PROXY_TOKEN=
+      - CLAUDE_PROXY_TOKEN=${CLAUDE_PROXY_TOKEN:-}
+      - CODEX_PROXY_TOKEN=${CODEX_PROXY_TOKEN:-}
       - GEMINI_PROXY_TOKEN=
       - GW_ENABLE_STREAMING=${GW_ENABLE_STREAMING:-0}
       - GW_ENABLE_BATCH=${GW_ENABLE_BATCH:-0}

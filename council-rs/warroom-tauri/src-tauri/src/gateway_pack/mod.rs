@@ -10,6 +10,7 @@
 
 pub mod manifest;
 
+mod cli_adapters;
 mod enable;
 mod env;
 mod health;
@@ -53,5 +54,15 @@ pub use launch::{
 };
 pub use launch::{
     default_secret_store, gateway_child_env_if_ready, may_promote_to_governed,
-    pack_auth_revalidated, resume_installed_pack, status_with_council_route, GatewayChildEnv,
+    pack_auth_revalidated, promote_may_call_resume, resume_installed_pack,
+    status_with_council_route, GatewayChildEnv,
+};
+
+#[cfg(test)]
+pub use launch::{decide_resume_pack_action, ResumePackAction};
+
+/// App-owned Claude/Codex host-adapter lifecycle (DMG path).
+pub use cli_adapters::{
+    current_status as cli_adapters_status, ensure_cli_adapters, restart_cli_adapters,
+    stop_cli_adapters, AdapterHealth, CliAdaptersStatus,
 };
