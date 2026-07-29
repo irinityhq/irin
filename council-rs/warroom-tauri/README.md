@@ -13,10 +13,10 @@ desktop builds retain a developer-only `council --serve` sidecar.
 ## Product install versus component development
 
 Product installation is owned by the root [IRIN README](../../README.md): the
-signed, notarized DMG from GitHub Releases is the product path, with root
-`make setup` and the optional root `make app-install` as the source
-development path. The commands below are component developer and packaging
-commands, not an alternate installation path.
+signed, notarized DMG from GitHub Releases is the product path. Root
+`make setup` and `make warroom` are source development paths. The commands
+below are internal component developer and packaging harnesses, not alternate
+operator installation targets.
 
 Development-only overrides:
 
@@ -32,7 +32,10 @@ direct health probe in Settings. The desktop connection still accepts only port
 bases, an optional Gateway health base, auth token, and optional council binary path. See
 `warroom/docs/TAURI-AUTH.md`.
 
-## Tauri development
+## Internal native development harness
+
+These targets live under `council-rs/` for desktop shell development and CI.
+They are not root public install aliases. Product operators use the DMG.
 
 From the IRIN repository root:
 
@@ -44,14 +47,8 @@ This starts Next dev on **3010** (`dev:local`) inside the webview. The debug
 Tauri host auto-starts `council --serve` when `target/release/council` exists
 (see Backend logs in the UI if the binary is missing).
 
-Production bundle (static export + Tauri):
-
-```bash
-make -C council-rs warroom-build
-# artifact under warroom-tauri/src-tauri/target/release/bundle/
-```
-
-Assets only (no full `tauri build`):
+Web static assets for the native shell (no product bundle; product install is
+the root DMG path):
 
 ```bash
 make -C council-rs warroom-export

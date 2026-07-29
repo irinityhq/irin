@@ -7,8 +7,10 @@ How the desktop shell and browser reference UI authenticate against
 
 ### Release (Tauri production build)
 
-1. Start the canonical runtime with root `make setup`. The installed app adopts
-   that Council and never starts its own backend.
+1. Installed IRIN.app (the DMG product) normally starts and owns its bundled
+   Council; source `make setup` is not required. If a Council with the identical
+   build identity is already healthy on the port, the app adopts that process
+   instead of spawning the bundled one.
 2. The default private template leaves `COUNCIL_AUTH_TOKEN` empty for the
    loopback-only single-operator runtime. If the operator explicitly configured
    a bearer token, set the same operator-managed value in **Settings → Auth
@@ -62,17 +64,26 @@ Changing Settings does not require re-running `npm run build:tauri`.
 Prefer loopback URLs (`127.0.0.1` / `localhost`) — Settings warns on non-loopback
 hosts because the auth token would be sent to remote machines if misconfigured.
 
+## Remote browser (private Tailscale Serve)
+
+When phone access is enabled in the installed app, open the served HTTPS
+origin (default port `8443`) in a browser on the same tailnet. Remote pages
+default to same-origin API, WebSocket, and Gateway bases. Set **Settings →
+Auth token** when Council requires one, then **Test connection** (REST health
+and WebSocket upgrade). The token is stored in browser runtime configuration
+for that origin — not a native Keychain or separate phone app.
+
 ## Manual release checklist
 
-1. From the IRIN root, run `make setup`, then `make app-install`.
-2. Launch app → **Settings** → set an auth token only if the canonical runtime
-   uses one → **Test connection** (Council API green).
-3. Confirm the app reports adoption of the canonical Council and does not own a
-   child backend.
+1. Install the signed DMG (or use an already-accepted local build), or run
+   `make setup` for the source managed runtime.
+2. Launch app → **Settings** → set an auth token only if the runtime uses one
+   → **Test connection** (Council API green).
+3. Confirm the app reports a healthy Council backend (adopted or app-owned).
 4. Open Watch and Outbox; both load through the Council API without a browser
    Gateway credential.
 5. Tray **Convene** focuses Deliberate view; if Council is unavailable, recover
-   it from the IRIN checkout rather than starting another backend.
+   it from the installed app lifecycle or the IRIN checkout.
 6. Run **Checklist Duo** (1 round) → synthesis → **Export PDF** → native OS save
    dialog; file lands where chosen.
 

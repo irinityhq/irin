@@ -29,25 +29,15 @@ is committed or read into agent context.
 
 ## Apple distribution boundary
 
-IRIN uses two separate Apple-supported development/distribution paths:
-
-- The macOS product is distributed directly as a Developer ID-signed,
-  Hardened Runtime, timestamped, notarized, and stapled DMG. Apple describes
-  notarization as an automated security scan, not App Review.
-- War Room on Dave's iPhone is a private registered-device development build.
-  It is not an App Store, TestFlight, Enterprise, or public IPA distribution.
-
-Before a signed iPhone build, use Xcode's current privacy report to audit the
-compiled app and linked SDKs, keep `PrivacyInfo.xcprivacy` limited to justified
-required-reason APIs, and confirm the phone is a trusted registered
-destination. A cable is needed once if trust/registration or wireless pairing
-is not already established.
+The macOS product is distributed directly as a Developer ID-signed, Hardened
+Runtime, timestamped, notarized, and stapled DMG. Apple describes notarization
+as an automated security scan, not App Review. Private phone access uses the
+same War Room web export over Tailscale Serve in a browser on the operator's
+tailnet — there is no separate iOS product surface.
 
 Primary references, checked 2026-07-24:
 
 - [Notarizing macOS software before distribution](https://developer.apple.com/documentation/security/notarizing-macos-software-before-distribution)
-- [Distributing to registered devices](https://developer.apple.com/documentation/xcode/distributing-your-app-to-registered-devices)
-- [Required-reason APIs](https://developer.apple.com/documentation/bundleresources/describing-use-of-required-reason-api)
 - [Apple Developer Program License Agreement](https://developer.apple.com/support/terms/apple-developer-program-license-agreement/)
 
 ## The transaction
@@ -98,11 +88,10 @@ Then the operator performs native acceptance on the notarized DMG (fresh
 install, first run + migration continuity, Keychain/Touch ID, real Direct
 deliberation, no-Docker behavior, Gateway Pack enable → governed deliberation
 → Watch/Outbox truthful and disarmed → explicit Touch ID arm/renew/disarm →
-private tailnet phone access → relaunch persistence → disable/re-enable →
-uninstall/reinstall), re-downloads the asset from the draft, compares the
-checksum, installs, launches — and only then publishes the release. The iPhone
-shell then gets its separate registered-device install and one zero-provider
-run against the accepted Mac build before a live-provider phone run.
+private tailnet phone access in a browser → relaunch persistence →
+disable/re-enable → uninstall/reinstall), re-downloads the asset from the
+draft, compares the checksum, installs, launches — and only then publishes the
+release.
 
 ## Rollback
 

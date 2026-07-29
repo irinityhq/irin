@@ -25,10 +25,10 @@ rejected IRIN-managed fields.
 On Ubuntu, install Rust, Node.js 20 or newer, Git, `make`, `curl`, and `lsof`,
 then use `make warroom`. Docker Engine plus the Compose and Buildx plugins are
 required for Gateway and `make verify`, but not for the browser-only Council
-launcher. `make setup`, `make runtime-*`, and `make app-install` deliberately
-stop on Ubuntu because they depend on `lockf`, `launchctl`, Docker Desktop, and
-the macOS application bundle. This is an installer boundary, not a claim that
-Council or War Room Web cannot run on Linux.
+launcher. `make setup` and `make runtime-*` deliberately stop on Ubuntu because
+they depend on `lockf`, `launchctl`, Docker Desktop, and macOS-only runtime
+recovery. This is an installer boundary, not a claim that Council or War Room
+Web cannot run on Linux.
 
 ## Docker
 
@@ -116,18 +116,19 @@ the variable is not only set in an interactive-only block of your profile).
 
 ## Private phone access (installed IRIN.app)
 
-Private iPhone access is controlled in the installed IRIN.app under Settings
-→ Private iPhone access. Source `make setup` / `scripts/irin-runtime.sh` only
+Private phone access is controlled in the installed IRIN.app under Settings
+→ Private phone access. Source `make setup` / `scripts/irin-runtime.sh` only
 start local loopback services and do not configure Tailscale Serve. Enable
 phone access after Council is ready: IRIN publishes on dedicated HTTPS port
 `8443` by default (`IRIN_TAILSCALE_HTTPS_PORT` overrides it) and does not claim
 port 443, so another Serve root on 443 can remain. The ready URL is
-`https://<MagicDNS>:8443` (include the port when pasting into the iPhone
-app). Every member or device permitted by the operator's tailnet policy may
-reach the served UI; Serve is private, not device-exclusive. Disable from the
-same Settings control — product code uses port-scoped `off` and never global
-`tailscale serve reset`. IRIN never configures Tailscale Funnel or any other
-public-internet exposure.
+`https://<MagicDNS>:8443` (include the port). Open that origin in a browser on
+any device on the same tailnet; War Room uses same-origin REST and WebSocket.
+If Council requires an auth token, set it under Settings → Auth token on that
+browser and use Test connection. Serve is private, not device-exclusive.
+Disable from the same Settings control — product code uses port-scoped `off`
+and never global `tailscale serve reset`. IRIN never configures Tailscale
+Funnel or any other public-internet exposure.
 
 ## Reboot and login recovery (macOS)
 
@@ -159,17 +160,15 @@ fire counts and a capped recent-fires list), not the full underlying ledger
 signed Outbox. If Council and Gateway both report healthy in `make
 runtime-status`, a quiet Watch tab is not itself a fault.
 
-## Tauri desktop app (macOS)
+## Desktop app (macOS)
 
-The installed release app owns and starts its bundled Council backend. When a
-matching healthy Council is already present it may adopt that process; a
-mismatched or unavailable backend is recovered through the desktop lifecycle.
-Source operators can still inspect the separate managed runtime with `make
-runtime-status`, but an installed DMG does not require `make setup` or `make
-warroom`. `make app-install` is the source-build alternative: it rebuilds,
-atomically replaces `/Applications/IRIN.app`, and relaunches it. If automatic
-launch fails after install, the script tells you the exact `open '...'` command
-to run by hand. See
+The installed release app (signed DMG) owns and starts its bundled Council
+backend. When a matching healthy Council is already present it may adopt that
+process; a mismatched or unavailable backend is recovered through the desktop
+lifecycle. Source operators can still inspect the separate managed runtime with
+`make runtime-status`, but an installed DMG does not require `make setup` or
+`make warroom`. Product installation is the DMG only — there is no supported
+source-built app installer. See
 [`council-rs/warroom/docs/TAURI-AUTH.md`](../council-rs/warroom/docs/TAURI-AUTH.md)
 for auth-token behavior across release and debug builds.
 

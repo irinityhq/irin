@@ -89,8 +89,8 @@ describe("Phone access control rendering", () => {
     expect(html).toContain('data-phone-access-state="ready"');
     expect(html).toContain("https://irin.example.ts.net:8443");
     expect(html).toContain("Gateway routes: included");
-    expect(html).toContain("Refresh iPhone routes");
-    expect(html).toContain('aria-label="Copy iPhone address"');
+    expect(html).toContain("Refresh phone routes");
+    expect(html).toContain('aria-label="Copy phone address"');
   });
 
   it("disables both actions while an operation is busy", () => {
@@ -111,7 +111,7 @@ describe("Phone access control rendering", () => {
     expect(html).toContain(`data-phone-access-state="${stateName}"`);
     expect(html).toContain(stateName.replaceAll("_", " "));
     expect(html).toContain(message);
-    expect(html).toContain("Enable iPhone access");
+    expect(html).toContain("Enable phone access");
   });
 
   it("does not render native-only or unexpected sensitive fields", () => {
@@ -165,7 +165,7 @@ describe("Phone access control actions", () => {
     });
     expect(html).toContain('data-phone-access-interrupted="true"');
     expect(html).toContain("Clear interrupted setup");
-    expect(html).not.toContain("Refresh iPhone routes");
+    expect(html).not.toContain("Refresh phone routes");
     const recover = findByTestId(interruptedTree, "settings-phone-access-disable");
     expect(recover.props.disabled).toBe(false);
     expect(recover.props["aria-label"]).toBe("Clear interrupted setup");
@@ -188,7 +188,7 @@ describe("Phone access control actions", () => {
     findByTestId(renderedTree, "settings-phone-access-copy").props.onClick?.();
     await vi.waitFor(() => {
       expect(copyText).toHaveBeenCalledWith("https://irin.example.ts.net:8443");
-      expect(notify).toHaveBeenCalledWith("success", "iPhone address copied");
+      expect(notify).toHaveBeenCalledWith("success", "Phone address copied");
     });
   });
 
@@ -208,8 +208,22 @@ describe("Phone access control actions", () => {
     await vi.waitFor(() => {
       expect(notify).toHaveBeenCalledWith(
         "error",
-        "Could not copy the iPhone address",
+        "Could not copy the phone address",
       );
     });
+  });
+
+  it("describes the browser same-origin flow without an iPhone app or Keychain", () => {
+    const html = render({
+      status: status({
+        state: "ready",
+        enabled: true,
+        tailnet_url: "https://irin.example.ts.net:8443",
+      }),
+    });
+    expect(html).toMatch(/same-origin REST and WebSocket/i);
+    expect(html).toMatch(/browser runtime configuration/i);
+    expect(html).not.toMatch(/iPhone app/i);
+    expect(html).not.toMatch(/Keychain/i);
   });
 });

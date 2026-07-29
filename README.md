@@ -95,15 +95,9 @@ by printing:
 - **Next action: Open Discover** — Discover is where you see which provider
   paths IRIN currently detects.
 
-The only optional second macOS command is the native desktop shell:
-
-```bash
-make app-install
-```
-
-This builds, atomically installs, and launches the macOS app. It uses the
-same Council and War Room runtime `make setup` already started and never
-starts a competing backend. Most operators take the signed DMG above instead.
+The macOS desktop product is the signed DMG from GitHub Releases (`IRIN.app`).
+Source development continues with `make warroom` (browser) or the managed
+runtime above; there is no separate source-built app installer.
 
 ### Ubuntu — browser War Room from source
 
@@ -131,8 +125,8 @@ engineering lane. See
 | War Room Web | `http://127.0.0.1:3010` |
 | Council API/WebSocket | `http://127.0.0.1:8765` |
 | Gateway | `http://127.0.0.1:18080` with macOS `make setup`, or when started separately on Ubuntu |
-| Desktop app | `IRIN.app` on macOS — the signed DMG starts and owns its bundled Council, adopting an already-running Council only when its build identity matches exactly; `make app-install` reuses the source-run stack above |
-| Private phone | Installed IRIN.app Settings only: `https://<your-device>.<tailnet>.ts.net:8443` via Tailscale Serve — never a public URL, never configured by `make setup` |
+| Desktop app | `IRIN.app` on macOS — the signed DMG starts and owns its bundled Council, adopting an already-running Council only when its build identity matches exactly |
+| Private phone | Installed IRIN.app Settings only: `https://<your-device>.<tailnet>.ts.net:8443` via Tailscale Serve — open in a browser on the same tailnet; never a public URL, never configured by `make setup` |
 
 ## Discover, then deliberate
 
