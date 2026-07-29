@@ -8,6 +8,7 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 }
 cd "$ROOT"
 
+original_args=("$@")
 mode=check
 dry_run="${IRIN_CHECK_DRY_RUN:-0}"
 if [[ "${1:-}" == "--ship" ]]; then mode=ship; shift; fi
@@ -20,25 +21,16 @@ if [[ -f "$ROOT/.irin-worktree.env" ]]; then
   set +a
 fi
 
+# Every real check owns the bounded shared Cargo target for its full lifetime.
+# Dry-runs remain side-effect free.
+if [[ "$dry_run" != 1 && "${IRIN_CARGO_POLICY_ACTIVE:-0}" != 1 ]]; then
+  exec "$ROOT/scripts/cargo-target-policy.sh" run "$ROOT" "$0" "${original_args[@]}"
+fi
+export CARGO_INCREMENTAL=0
+unset CARGO_TARGET_DIR
+
 if [[ "$mode" == "ship" || -f "$ROOT/.irin-worktree.env" ]]; then
   export IRIN_REQUIRE_GORTEX=1
-fi
-# Prefer a worktree-shared cargo target so each tree does not grow its own
-# multi-GB build. Use symlinks only — do not export CARGO_TARGET_DIR, or Tauri
-# and Playwright path discovery (./target, src-tauri/target) break.
-shared_cargo_target="${CARGO_TARGET_DIR:-}"
-if [[ -n "$shared_cargo_target" ]]; then
-  mkdir -p "$shared_cargo_target"
-  if [[ ! -e "$ROOT/target" ]]; then
-    ln -sfn "$shared_cargo_target" "$ROOT/target"
-  fi
-  tauri_target="$ROOT/council-rs/warroom-tauri/src-tauri/target"
-  if [[ ! -e "$tauri_target" ]]; then
-    mkdir -p "$(dirname "$tauri_target")"
-    ln -sfn "$shared_cargo_target" "$tauri_target"
-  fi
-  # Keep ambient cargo on the symlinked paths, not a detached target dir.
-  unset CARGO_TARGET_DIR
 fi
 # Product checks must not inherit worktree runtime ports into ambient Tauri
 # builds (build.rs requires matching TAURI_CONFIG CSP). Preflight and the native

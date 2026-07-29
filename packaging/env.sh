@@ -7,6 +7,8 @@ export IRIN_SRC="$ROOT"
 export TMPDIR="${IRIN_DMG_TMPDIR:-$ROOT/packaging/build/tmp}"
 export CARGO_HOME="${CARGO_HOME:-$ROOT/packaging/build/cargo-home}"
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT/packaging/build/cargo-target}"
+# Release packaging stays provenance-isolated but never retains incremental state.
+export CARGO_INCREMENTAL=0
 export npm_config_cache="${npm_config_cache:-$ROOT/packaging/build/npm-cache}"
 export npm_config_prefer_offline=true
 # Never force color into logs/receipts when selection or capture becomes data.

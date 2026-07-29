@@ -112,10 +112,10 @@ release-transaction: ## Fail-closed release ladder (scripts/release-transaction.
 	bash scripts/release-transaction.sh $(ARGS)
 
 build: ## Build the full Rust workspace in release mode
-	cargo build --workspace --release
+	bash scripts/cargo-target-policy.sh run "$(CURDIR)" cargo build --workspace --release
 
 test: ## Run the full Rust workspace test suite
-	cargo test --workspace
+	bash scripts/cargo-target-policy.sh run "$(CURDIR)" cargo test --workspace
 
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*##"; printf "Targets:\n"} /^[a-zA-Z0-9_.-]+:.*##/ { printf "  %-14s %s\n", $$1, $$2 }' $(MAKEFILE_LIST)

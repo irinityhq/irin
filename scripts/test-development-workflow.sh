@@ -8,6 +8,8 @@ scripts_to_parse=(
   scripts/gortex-worktree.sh
   scripts/dev-preflight.sh
   scripts/dev-check.sh
+  scripts/cargo-target-policy.sh
+  scripts/test-cargo-target-policy.sh
   scripts/bootstrap-dev-tools.sh
   scripts/bootstrap-actionlint.sh
   scripts/new-worktree.sh
@@ -19,6 +21,15 @@ scripts_to_parse=(
   council-rs/scripts/warroom-tauri-dev.sh
 )
 for script in "${scripts_to_parse[@]}"; do bash -n "$script"; done
+bash scripts/test-cargo-target-policy.sh
+# The workflow harness exercises command selection without touching the live cache.
+export IRIN_CARGO_POLICY_ACTIVE=1
+
+grep -Fq 'cargo-target-policy.sh" run' scripts/dev-check.sh
+grep -Fq 'export CARGO_INCREMENTAL=0' scripts/dev-check.sh
+grep -Fq 'cargo-target-policy.sh" link' scripts/new-worktree.sh
+grep -Fq 'cargo-target-policy.sh run' Makefile
+grep -Fq 'export CARGO_INCREMENTAL=0' packaging/env.sh
 
 web_scope="$(scripts/classify-ci-paths.sh council-rs/warroom/web/app/page.tsx)"
 [[ "$(sed -n 's/^warroom_web=//p' <<<"$web_scope")" == true ]]
