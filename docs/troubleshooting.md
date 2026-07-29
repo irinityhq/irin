@@ -123,9 +123,12 @@ phone access after Council is ready: IRIN publishes on dedicated HTTPS port
 `8443` by default (`IRIN_TAILSCALE_HTTPS_PORT` overrides it) and does not claim
 port 443, so another Serve root on 443 can remain. The ready URL is
 `https://<MagicDNS>:8443` (include the port). Open that origin in a browser on
-any device on the same tailnet; War Room uses same-origin REST and WebSocket.
-If Council requires an auth token, set it under Settings → Auth token on that
-browser and use Test connection. Serve is private, not device-exclusive.
+any device that is both on the same tailnet and allowed by the operator's
+Tailscale ACLs or grants; War Room uses same-origin REST and WebSocket. If
+Council requires an auth token, set it under Settings → Auth token on that
+browser and use Test connection. The token remains only for that browser tab's
+session and is not written to durable localStorage. Serve is private, not
+device-exclusive.
 Disable from the same Settings control — product code uses port-scoped `off`
 and never global `tailscale serve reset`. IRIN never configures Tailscale
 Funnel or any other public-internet exposure.

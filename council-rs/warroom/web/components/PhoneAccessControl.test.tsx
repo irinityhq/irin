@@ -222,7 +222,9 @@ describe("Phone access control actions", () => {
       }),
     });
     expect(html).toMatch(/same-origin REST and WebSocket/i);
-    expect(html).toMatch(/browser runtime configuration/i);
+    expect(html).toMatch(/Tailscale ACLs or grants/i);
+    expect(html).toMatch(/browser tab.*session/i);
+    expect(html).toMatch(/never written to durable localStorage/i);
     expect(html).not.toMatch(/iPhone app/i);
     expect(html).not.toMatch(/Keychain/i);
   });

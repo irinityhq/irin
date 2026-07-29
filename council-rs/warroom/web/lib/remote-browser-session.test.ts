@@ -54,13 +54,8 @@ class MockWebSocket {
   }
 }
 
-function installBrowser(
-  pageUrl: string,
-  initialStorage: Record<string, string> = {},
-): Map<string, string> {
-  const store = new Map(Object.entries(initialStorage));
-  const page = new URL(pageUrl);
-  vi.stubGlobal("localStorage", {
+function storageStub(store: Map<string, string>) {
+  return {
     getItem: (key: string) => store.get(key) ?? null,
     setItem: (key: string, value: string) => {
       store.set(key, value);
@@ -69,7 +64,18 @@ function installBrowser(
       store.delete(key);
     },
     clear: () => store.clear(),
-  });
+  };
+}
+
+function installBrowser(
+  pageUrl: string,
+  initialStorage: Record<string, string> = {},
+): { local: Map<string, string>; session: Map<string, string> } {
+  const local = new Map(Object.entries(initialStorage));
+  const session = new Map<string, string>();
+  const page = new URL(pageUrl);
+  vi.stubGlobal("localStorage", storageStub(local));
+  vi.stubGlobal("sessionStorage", storageStub(session));
   vi.stubGlobal("window", {
     location: {
       href: pageUrl,
@@ -82,7 +88,7 @@ function installBrowser(
     __WARROOM_NATIVE_CONFIG__: undefined,
   });
   vi.stubGlobal("WebSocket", MockWebSocket);
-  return store;
+  return { local, session };
 }
 
 async function loadSessionModules() {
@@ -109,7 +115,7 @@ describe("remote Tailscale-style same-origin browser session", () => {
   });
 
   it("authenticates via browser config and exercises REST plus WebSocket on same origin", async () => {
-    installBrowser(TAILNET_PAGE);
+    const storage = installBrowser(TAILNET_PAGE);
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -146,7 +152,7 @@ describe("remote Tailscale-style same-origin browser session", () => {
       probeWsUpgrade,
     } = await loadSessionModules();
 
-    // Browser configuration path: operator pastes token in Settings (localStorage).
+    // Browser configuration path: operator pastes a session-only token in Settings.
     const saved = await saveRuntimeConfig({ authToken: AUTH_TOKEN });
     expect(saved.apiBase).toBe(TAILNET_ORIGIN);
     expect(saved.wsBase).toBe("wss://macbook.example.ts.net:8443");
@@ -154,6 +160,10 @@ describe("remote Tailscale-style same-origin browser session", () => {
     expect(getApiBase()).toBe(TAILNET_ORIGIN);
     expect(getWsBase()).toBe("wss://macbook.example.ts.net:8443");
     expect(getAuthToken()).toBe(AUTH_TOKEN);
+    expect(storage.session.get("warroom.runtime-auth.v1")).toBe(AUTH_TOKEN);
+    expect(
+      JSON.parse(storage.local.get("warroom.runtime-config.v1") ?? "{}"),
+    ).not.toHaveProperty("authToken");
 
     const health = await api.health();
     expect(health.council_version).toBe("test");
@@ -172,6 +182,35 @@ describe("remote Tailscale-style same-origin browser session", () => {
       "council",
       `token.${AUTH_TOKEN}`,
     ]);
+  });
+
+  it("keeps the bearer for a tab reload without durable localStorage persistence", async () => {
+    const storage = installBrowser(TAILNET_PAGE);
+    const { saveRuntimeConfig } = await loadSessionModules();
+    await saveRuntimeConfig({ authToken: AUTH_TOKEN });
+
+    vi.resetModules();
+    const { getAuthToken } = await loadSessionModules();
+    expect(getAuthToken()).toBe(AUTH_TOKEN);
+    expect(storage.session.get("warroom.runtime-auth.v1")).toBe(AUTH_TOKEN);
+    expect(storage.local.get("warroom.runtime-config.v1") ?? "").not.toContain(
+      AUTH_TOKEN,
+    );
+  });
+
+  it("scrubs a bearer persisted by an older browser build", async () => {
+    const storage = installBrowser(TAILNET_PAGE, {
+      "warroom.runtime-config.v1": JSON.stringify({
+        apiBase: TAILNET_ORIGIN,
+        authToken: AUTH_TOKEN,
+      }),
+    });
+    const { getAuthToken } = await loadSessionModules();
+
+    expect(getAuthToken()).toBe("");
+    expect(
+      JSON.parse(storage.local.get("warroom.runtime-config.v1") ?? "{}"),
+    ).toEqual({ apiBase: TAILNET_ORIGIN });
   });
 
   it("fails closed for REST and WebSocket when auth is missing or invalid", async () => {

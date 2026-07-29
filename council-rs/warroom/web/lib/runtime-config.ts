@@ -1,6 +1,6 @@
 /**
  * Runtime configuration for War Room (browser + Tauri static export).
- * Persistence: localStorage (primary) → NEXT_PUBLIC_* build defaults.
+ * Persistence: non-secret localStorage + session-only auth → build defaults.
  */
 
 export type RuntimeConfigKey =
@@ -21,6 +21,7 @@ declare global {
 }
 
 const STORAGE_KEY = "warroom.runtime-config.v1";
+const SESSION_AUTH_KEY = "warroom.runtime-auth.v1";
 
 const DEFAULT_GATEWAY = "http://127.0.0.1:18080";
 
@@ -136,9 +137,40 @@ function readLocalStorage(): Partial<RuntimeConfig> {
     const raw = localStorage.getItem(STORAGE_KEY);
     if (!raw) return {};
     const parsed = JSON.parse(raw) as Partial<RuntimeConfig>;
-    return parsed && typeof parsed === "object" ? parsed : {};
+    if (!parsed || typeof parsed !== "object") return {};
+    // Migration: older browser builds persisted this bearer with endpoint
+    // overrides. Remove it from durable storage and never hydrate from it.
+    if (Object.prototype.hasOwnProperty.call(parsed, "authToken")) {
+      delete parsed.authToken;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+    }
+    return parsed;
   } catch {
     return {};
+  }
+}
+
+function readSessionAuthToken(): string {
+  if (!isBrowser()) return "";
+  try {
+    return sessionStorage.getItem(SESSION_AUTH_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function writeSessionAuthToken(authToken: string | undefined): void {
+  if (!isBrowser() || authToken === undefined) return;
+  try {
+    const trimmed = authToken.trim();
+    if (trimmed) {
+      sessionStorage.setItem(SESSION_AUTH_KEY, trimmed);
+    } else {
+      sessionStorage.removeItem(SESSION_AUTH_KEY);
+    }
+  } catch {
+    // Storage can be unavailable under restrictive browser policies. The
+    // caller still receives a config without durably persisting the bearer.
   }
 }
 
@@ -185,7 +217,10 @@ function mergedRuntimeConfig(): RuntimeConfig {
     BUILD_DEFAULTS,
     isBrowser() ? window.location.href : undefined,
   );
-  const local = dropRemoteLoopbackOverrides(readLocalStorage(), defaults);
+  const local = {
+    ...dropRemoteLoopbackOverrides(readLocalStorage(), defaults),
+    authToken: readSessionAuthToken(),
+  };
   return mergeConfigSources(
     mergeNativeAndLocalConfig(readNativeConfig(), local),
     defaults,
@@ -194,7 +229,9 @@ function mergedRuntimeConfig(): RuntimeConfig {
 
 function writeLocalStorage(partial: Partial<RuntimeConfig>): void {
   if (!isBrowser()) return;
-  const merged = { ...readLocalStorage(), ...partial };
+  const durablePartial = { ...partial };
+  delete durablePartial.authToken;
+  const merged = { ...readLocalStorage(), ...durablePartial };
   localStorage.setItem(STORAGE_KEY, JSON.stringify(merged));
 }
 
@@ -278,10 +315,11 @@ export function councilPortFromApiBase(apiBase: string): number {
   }
 }
 
-/** Persist overrides and refresh in-memory cache. */
+/** Persist non-secret overrides, retain auth for this tab, and refresh cache. */
 export async function saveRuntimeConfig(
   partial: Partial<RuntimeConfig>,
 ): Promise<RuntimeConfig> {
+  writeSessionAuthToken(partial.authToken);
   writeLocalStorage(partial);
   cache = mergedRuntimeConfig();
   loadPromise = Promise.resolve(cache);

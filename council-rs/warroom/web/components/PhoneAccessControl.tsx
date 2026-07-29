@@ -62,8 +62,9 @@ export default function PhoneAccessControl({
         Publishes this installed app on your private Tailscale network over one
         HTTPS address on port 8443 (other Serve apps on 443 can coexist). IRIN
         uses Tailscale Serve only and never enables public Funnel access. Any
-        device on the same tailnet opens the full URL (including the port) in a
-        browser; War Room uses same-origin REST and WebSocket on that origin.
+        device on the same tailnet that your Tailscale ACLs or grants allow can
+        open the full URL (including the port) in a browser; War Room uses
+        same-origin REST and WebSocket on that origin.
       </p>
       <div
         className="text-xs font-mono space-y-1"
@@ -123,8 +124,8 @@ export default function PhoneAccessControl({
       <p className="text-[10px] font-mono text-fg-dim">
         On the phone browser, open the address above. If Council requires auth,
         set the same token under Settings → Auth token, then Test connection
-        (REST health and WebSocket upgrade). The token stays in this origin&apos;s
-        browser runtime configuration.
+        (REST health and WebSocket upgrade). The token stays only in this
+        browser tab&apos;s session and is never written to durable localStorage.
       </p>
     </div>
   );
