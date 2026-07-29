@@ -8,13 +8,14 @@
 rules:
   - id: irin.rust.tauri-governed-reinject-requires-scrub
     message: >-
-      GW_API_KEY / GATEWAY_URL re-injection must share a function with a
-      GATEWAY_SCRUB_ENV_KEYS loop that empty-string overwrites every inherited
-      key (bare or if-wrapped shape). Re-injecting without an empty-write
-      scrub in scope lets login-shell credentials leak into the council child
-      process. Scrub-before-reinject ordering is the behavior SSOT of the
-      compose_scrubs_gateway_vars_before_selective_inject unit test; nested
-      match-arm statement order is not statically expressible here.
+      GW_API_KEY / GATEWAY_URL re-injection must follow, in the same function,
+      a GATEWAY_SCRUB_ENV_KEYS loop that empty-string overwrites every
+      inherited key — bare shape (loop then reinject) or the production shape
+      (if-wrapped loop then the via_gateway match that re-injects).
+      Re-injecting before or without an empty-write scrub lets login-shell
+      credentials leak into the council child process. Restructuring the
+      Some(true)/Some(false)/None match trips this pin on purpose: review the
+      rule when the spawn-env shape changes.
     severity: WARNING
     languages: [rust]
     metadata:
@@ -49,6 +50,12 @@ rules:
                 ...
               }
               ...
+            }
+            ...
+            match $M {
+              Some(true) => { ... }
+              Some(false) => { ... }
+              None => {}
             }
             ...
           }
