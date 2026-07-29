@@ -2,7 +2,8 @@
 # Run IRIN Opengrep rules on critical product-security surfaces (Phase 1A).
 #
 # Default paths: gateway/sidecar-rs/src, sentinel/sovereign-protocol/src,
-#                council-rs/src, gateway/lua
+#                council-rs/src, gateway/lua,
+#                council-rs/warroom-tauri/src-tauri/src
 # Rules:         security/opengrep/rules/
 # Artifacts:     .irin-tools/findings/opengrep-<ts>.{json,sarif} (gitignored)
 #
@@ -31,6 +32,7 @@ DEFAULT_PATHS=(
   sentinel/sovereign-protocol/src
   council-rs/src
   gateway/lua
+  council-rs/warroom-tauri/src-tauri/src
 )
 
 fail_hard=0

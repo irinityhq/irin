@@ -1,0 +1,119 @@
+# IRIN — B2 boundary contract: council-rs → Gateway governed provider POST.
+# Pins the required Council headers on the /v1/chat/completions call in
+# council-rs/src/provider/gateway.rs to the doc SSOT
+# (gateway/COUNCIL_GATEWAY_CONTRACT.md). Optional headers (X-Sovereign-Mode,
+# X-Parent-Request-Id) are intentionally not asserted — they are conditional
+# by design.
+rules:
+  - id: irin.rust.council-gateway-header-authorization
+    message: >-
+      Governed provider POST must set Authorization: Bearer. Required by
+      gateway/COUNCIL_GATEWAY_CONTRACT.md; dropping it breaks ingress auth on
+      /v1/chat/completions.
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: council-gateway
+      irin.category: contract
+      irin.boundary: B2
+    patterns:
+      - pattern: client().post(...)
+      - pattern-inside: |
+          fn send_request(...) {
+            ...
+          }
+      - pattern-not-inside: $R.header("Authorization", ...)
+
+  - id: irin.rust.council-gateway-header-council-depth
+    message: >-
+      Governed provider POST must set X-Council-Depth. The Gateway uses it to
+      refuse recursive council-in-council loops
+      (gateway/COUNCIL_GATEWAY_CONTRACT.md).
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: council-gateway
+      irin.category: contract
+      irin.boundary: B2
+    patterns:
+      - pattern: client().post(...)
+      - pattern-inside: |
+          fn send_request(...) {
+            ...
+          }
+      - pattern-not-inside: $R.header("X-Council-Depth", ...)
+
+  - id: irin.rust.council-gateway-header-transport-id
+    message: >-
+      Governed provider POST must set X-Council-Transport-ID. Transport
+      identity is fail-closed at the Gateway edge
+      (ERR_COUNCIL_TRANSPORT_*); dropping it breaks every governed call.
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: council-gateway
+      irin.category: contract
+      irin.boundary: B2
+    patterns:
+      - pattern: client().post(...)
+      - pattern-inside: |
+          fn send_request(...) {
+            ...
+          }
+      - pattern-not-inside: $R.header("X-Council-Transport-ID", ...)
+
+  - id: irin.rust.council-gateway-header-original-provider
+    message: >-
+      Governed provider POST must set X-Council-Original-Provider so the
+      Gateway can route to the intended upstream
+      (gateway/COUNCIL_GATEWAY_CONTRACT.md).
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: council-gateway
+      irin.category: contract
+      irin.boundary: B2
+    patterns:
+      - pattern: client().post(...)
+      - pattern-inside: |
+          fn send_request(...) {
+            ...
+          }
+      - pattern-not-inside: $R.header("X-Council-Original-Provider", ...)
+
+  - id: irin.rust.council-gateway-header-sensitivity-level
+    message: >-
+      Governed provider POST must set X-Sensitivity-Level so the Gateway
+      policy firewall can classify the call
+      (gateway/COUNCIL_GATEWAY_CONTRACT.md).
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: council-gateway
+      irin.category: contract
+      irin.boundary: B2
+    patterns:
+      - pattern: client().post(...)
+      - pattern-inside: |
+          fn send_request(...) {
+            ...
+          }
+      - pattern-not-inside: $R.header("X-Sensitivity-Level", ...)
+
+  - id: irin.rust.council-gateway-header-request-id
+    message: >-
+      Governed provider POST must set X-Council-Request-ID for ledger
+      attribution and idempotency (gateway/COUNCIL_GATEWAY_CONTRACT.md).
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: council-gateway
+      irin.category: contract
+      irin.boundary: B2
+    patterns:
+      - pattern: client().post(...)
+      - pattern-inside: |
+          fn send_request(...) {
+            ...
+          }
+      - pattern-not-inside: $R.header("X-Council-Request-ID", ...)

@@ -95,7 +95,10 @@ conversation; do not build a config-edge emitter on speculation.
 
 | Path | Content |
 | --- | --- |
-| `security/opengrep/rules/` | IRIN Opengrep YAML (crypto/arming/Lua) |
+| `security/opengrep/rules/` | IRIN Opengrep YAML (crypto/arming/Lua credential + B1/B2/B4 boundary contracts) |
+| `security/opengrep/rules/lua-sidecar-contract.yaml` | B1: Lua `sidecar_post` path allowlist ↔ sidecar-rs mounts; required body keys on `/auth/check`, `/guard/input`, `/budget/check` |
+| `security/opengrep/rules/rust-council-gateway-headers.yaml` | B2: required `X-Council-*` / `X-Sensitivity-Level` / `Authorization` headers on the governed POST in `council-rs/src/provider/gateway.rs` |
+| `security/opengrep/rules/rust-tauri-spawn-env.yaml` | B4: scrub-before-reinject and creds-param invariants on the tauri council spawn env |
 | `security/selene/std/openresty.yml` | OpenResty `ngx` std for Selene (`std = lua51+…`) |
 | `selene.toml` | Selene config (exclude + baseline rule severities) |
 | `tools/dylint/irin-crypto-lints/` | Custom dylint library (external workspace) |
