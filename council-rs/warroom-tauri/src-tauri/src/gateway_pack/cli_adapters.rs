@@ -199,6 +199,7 @@ impl TokenBucket {
     }
 
     /// Source defaults: capacity 5, rate 10/min.
+    #[cfg(test)]
     pub fn proxy_default(now_secs: f64) -> Self {
         Self::new(RATE_LIMIT_CAPACITY, RATE_LIMIT_RATE_PER_SEC, now_secs)
     }
@@ -216,10 +217,12 @@ impl TokenBucket {
         }
     }
 
+    #[cfg(test)]
     pub fn capacity(&self) -> f64 {
         self.capacity
     }
 
+    #[cfg(test)]
     pub fn rate(&self) -> f64 {
         self.rate
     }
@@ -256,10 +259,12 @@ impl IpRateLimitMap {
         )
     }
 
+    #[cfg(test)]
     pub fn len(&self) -> usize {
         self.buckets.len()
     }
 
+    #[cfg(test)]
     pub fn is_empty(&self) -> bool {
         self.buckets.is_empty()
     }
