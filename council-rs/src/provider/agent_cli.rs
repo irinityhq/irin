@@ -18,46 +18,15 @@ const USAGE_UNAVAILABLE: &str = "usage_unavailable";
 /// The local `grok` CLI does not tolerate concurrent invocations (empty stdout). Serialize by default.
 static GROK_CLI_LOCK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
-/// Resolved Grok Build CLI path (not npm/other PATH homonyms).
-static GROK_BUILD_CLI_BIN: std::sync::OnceLock<Option<std::path::PathBuf>> =
+/// Resolved Grok CLI path (first usable `grok` binary found).
+static GROK_CLI_BIN: std::sync::OnceLock<Option<std::path::PathBuf>> =
     std::sync::OnceLock::new();
 
-/// True when `--version` output matches **Grok Build CLI** (xAI product).
-///
-/// Rejects PATH homonyms such as the npm package `grok-dev` (often first via
-/// nvm), which can succeed with a bare semver or fail with `env: bun: ...`.
-/// Real Grok Build reports like: `grok 0.2.93 (f00f96316d4b) [stable]`.
-pub(crate) fn is_grok_build_cli_version_output(stdout: &[u8], stderr: &[u8]) -> bool {
-    let mut combined = String::with_capacity(stdout.len() + stderr.len());
-    combined.push_str(&String::from_utf8_lossy(stdout));
-    combined.push_str(&String::from_utf8_lossy(stderr));
-    let lower = combined.to_ascii_lowercase();
-    let has_channel = lower.contains("[stable]")
-        || lower.contains("[dev]")
-        || lower.contains("[beta]")
-        || lower.contains("[canary]");
-    let has_product_line = lower.lines().any(|line| {
-        let t = line.trim_start();
-        t.starts_with("grok ") && (t.contains('(') || has_channel)
-    });
-    has_channel && has_product_line
-}
-
-fn probe_grok_build_cli_candidate(path: &std::path::Path) -> bool {
-    if !path.is_file() {
-        return false;
-    }
-    match std::process::Command::new(path).arg("--version").output() {
-        Ok(o) if o.status.success() => is_grok_build_cli_version_output(&o.stdout, &o.stderr),
-        _ => false,
-    }
-}
-
-fn probe_grok_build_cli_binary() -> Option<std::path::PathBuf> {
+fn probe_grok_cli_binary() -> Option<std::path::PathBuf> {
     // Explicit override for operators / launchd with odd PATHs.
     if let Ok(raw) = std::env::var("COUNCIL_GROK_CLI_BIN") {
         let path = std::path::PathBuf::from(raw.trim());
-        if probe_grok_build_cli_candidate(&path) {
+        if path.is_file() {
             return Some(path);
         }
     }
@@ -77,23 +46,23 @@ fn probe_grok_build_cli_binary() -> Option<std::path::PathBuf> {
         }
     }
 
+    // No `--version` fingerprinting: upstream republishes the CLI daily and
+    // every format change used to take the seat down. First `grok` wins.
     let mut seen = std::collections::HashSet::new();
     for cand in candidates {
         if !seen.insert(cand.clone()) {
             continue;
         }
-        if probe_grok_build_cli_candidate(&cand) {
+        if cand.is_file() {
             return Some(cand);
         }
     }
     None
 }
 
-/// Absolute path to Grok Build CLI if a fingerprinted binary is found.
+/// Absolute path to the Grok CLI if a `grok` binary is found.
 pub fn resolve_grok_cli_binary() -> Option<std::path::PathBuf> {
-    GROK_BUILD_CLI_BIN
-        .get_or_init(probe_grok_build_cli_binary)
-        .clone()
+    GROK_CLI_BIN.get_or_init(probe_grok_cli_binary).clone()
 }
 
 /// Whether a real Grok Build CLI is available for `grok_cli` seats / health.
@@ -209,9 +178,8 @@ async fn ask_grok_impl_inner(
     let Some(grok_bin) = resolve_grok_cli_binary() else {
         return cli_error(
             "grok_cli",
-            "Grok Build CLI not found (no fingerprinted `grok` binary; \
-             install Grok Build or set COUNCIL_GROK_CLI_BIN to the real CLI path — \
-             bare PATH `grok` may be a different package such as npm grok-dev)",
+            "Grok CLI not found (no `grok` binary in ~/.local/bin, ~/.grok/bin, \
+             or on PATH; install Grok Build or set COUNCIL_GROK_CLI_BIN to the CLI path)",
             0,
         )
         .with_provider_provenance(readonly_provenance("grok_cli"));
@@ -737,22 +705,6 @@ mod tests {
     #[test]
     fn grok_cli_serialize_defaults_on() {
         assert!(super::grok_cli_serialize());
-    }
-
-    #[test]
-    fn fingerprint_accepts_grok_build_cli_version() {
-        let out = b"grok 0.2.93 (f00f96316d4b) [stable]\n";
-        assert!(super::is_grok_build_cli_version_output(out, b""));
-    }
-
-    #[test]
-    fn fingerprint_rejects_npm_grok_dev_style_version() {
-        // npm package `grok-dev` prints a bare semver when bun is present.
-        assert!(!super::is_grok_build_cli_version_output(b"1.1.5\n", b""));
-        assert!(!super::is_grok_build_cli_version_output(
-            b"",
-            b"env: bun: No such file or directory\n"
-        ));
     }
 
     #[test]

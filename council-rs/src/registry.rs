@@ -503,7 +503,7 @@ impl ProviderRegistry {
         if readiness.grok_build {
             self.insert_local_cli_provider("grok_build", "Grok Build", "grok-build");
             self.discovery_log
-                .push("✅ Grok Build CLI — fingerprinted binary detected".into());
+                .push("✅ Grok Build CLI — binary detected".into());
         }
         if readiness.hermes {
             self.insert_local_cli_provider("grok_hermes", "Grok via Hermes", "hermes");
