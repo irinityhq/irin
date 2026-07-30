@@ -225,3 +225,91 @@ fn pack_asset_integrity_restages_tampered_tree() {
     let _ = fs::remove_dir_all(&bundle);
     let _ = fs::remove_dir_all(&support);
 }
+
+/// App upgrade with an unchanged pack version: the installed tree still matches
+/// its install marker, but no longer matches the new bundle. The integrity pass
+/// must treat that drift like tamper and re-stage from the bundle.
+#[test]
+fn pack_asset_integrity_restages_bundle_drift() {
+    let _g = test_env_lock();
+    let prev_root = std::env::var("IRIN_GATEWAY_PACK_ROOT").ok();
+    let prev_support = std::env::var(crate::private_config::APP_SUPPORT_ROOT_ENV).ok();
+    let uniq = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let bundle = std::env::temp_dir().join(format!("gw-pack-bundle-drift-{uniq}"));
+    let support = std::env::temp_dir().join(format!("gw-pack-support-drift-{uniq}"));
+    let _ = fs::remove_dir_all(&bundle);
+    let _ = fs::remove_dir_all(&support);
+
+    fs::create_dir_all(bundle.join("conf")).unwrap();
+    fs::create_dir_all(bundle.join("lua")).unwrap();
+    fs::write(
+        bundle.join("docker-compose.yml"),
+        b"name: irin-desktop-gateway\n",
+    )
+    .unwrap();
+    fs::write(bundle.join("nginx.conf"), b"events {}\n").unwrap();
+    fs::write(bundle.join("conf").join("gateway.conf"), b"server {}\n").unwrap();
+    fs::write(bundle.join("lua").join("auth.lua"), b"-- auth\n").unwrap();
+    let manifest = crate::gateway_pack::manifest::ImageManifest {
+        schema_version: 1,
+        mode: "local-dev".into(),
+        pack_version: "0.1.0-test".into(),
+        images: crate::gateway_pack::manifest::PackImages {
+            gateway: format!("irin-desktop/gateway@sha256:{}", "d".repeat(64)),
+            sidecar: format!("irin-desktop/sidecar@sha256:{}", "d".repeat(64)),
+        },
+        third_party_pins: Default::default(),
+        watch_invariants: crate::gateway_pack::manifest::WatchInvariants {
+            watch_producer_enabled: false,
+            watch_dispatcher_enabled: false,
+        },
+        image_ids: Default::default(),
+        local_tags: Default::default(),
+        notes: None,
+        source_sha: None,
+        source_dirty: None,
+    };
+    fs::write(
+        bundle.join("image-manifest.json"),
+        serde_json::to_string_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    std::env::set_var("IRIN_GATEWAY_PACK_ROOT", &bundle);
+    std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, &support);
+
+    let pack_root = install_pack_files().expect("install fixture pack");
+    verify_pack_asset_integrity(&pack_root).expect("fresh install verifies");
+
+    // Simulate an app upgrade: the bundle's compose changes (same pack
+    // version), the installed tree is untouched and still matches its marker.
+    fs::write(
+        bundle.join("docker-compose.yml"),
+        b"name: irin-desktop-gateway\n# upgraded\n",
+    )
+    .unwrap();
+    assert!(verify_pack_asset_integrity(&pack_root).is_ok());
+    assert_eq!(
+        fs::read(pack_root.join("docker-compose.yml")).unwrap(),
+        b"name: irin-desktop-gateway\n# upgraded\n".to_vec(),
+        "stale installed compose must be re-staged from the upgraded bundle"
+    );
+
+    match prev_root {
+        Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_ROOT", v),
+        None => std::env::remove_var("IRIN_GATEWAY_PACK_ROOT"),
+    }
+    match prev_support {
+        Some(v) => std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, v),
+        None => std::env::remove_var(crate::private_config::APP_SUPPORT_ROOT_ENV),
+    }
+    let _ = fs::remove_dir_all(&bundle);
+    let _ = fs::remove_dir_all(&support);
+}

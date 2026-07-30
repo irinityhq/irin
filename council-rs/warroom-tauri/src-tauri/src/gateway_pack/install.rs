@@ -123,12 +123,20 @@ pub(crate) fn pack_asset_hashes(root: &Path) -> Result<serde_json::Value, String
     Ok(serde_json::Value::Object(out))
 }
 
-/// Re-verify the installed pack tree against the install marker's recorded
-/// hashes. On any mismatch, re-stage once from the bundled assets (the pack
-/// tree is user-writable; the bundle is the code-signed source of truth) and
-/// re-verify. Persistent mismatch fails closed: no secret-bearing spawn.
+/// Re-verify the installed pack tree against the bundled assets — the
+/// code-signed source of truth. Any mismatch (user-writable tamper OR an
+/// older tree left behind by an app upgrade with the same pack version)
+/// re-stages once from the bundle and re-verifies. When the bundle itself is
+/// unavailable, falls back to the install marker's recorded hashes so
+/// tampering is still caught. Persistent mismatch fails closed: no
+/// secret-bearing spawn.
 pub(crate) fn verify_pack_asset_integrity(pack_root: &Path) -> Result<(), String> {
     fn current_matches(root: &Path) -> Result<bool, String> {
+        if let Some(bundle) = bundled_pack_root() {
+            if bundle != root {
+                return Ok(pack_asset_hashes(root)? == pack_asset_hashes(&bundle)?);
+            }
+        }
         let raw = fs::read_to_string(installed_marker_path())
             .map_err(|e| format!("read install marker: {e}"))?;
         let marker: serde_json::Value =
@@ -141,7 +149,7 @@ pub(crate) fn verify_pack_asset_integrity(pack_root: &Path) -> Result<(), String
     if current_matches(pack_root)? {
         return Ok(());
     }
-    eprintln!("[gateway-pack] asset integrity mismatch; re-staging from bundle");
+    eprintln!("[gateway-pack] pack tree differs from bundle; re-staging from bundle");
     let staged = install_pack_files()?;
     if staged != pack_root {
         return Err("re-staged pack root does not match the compose path".to_string());
