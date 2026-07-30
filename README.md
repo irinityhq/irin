@@ -203,7 +203,6 @@ Gateway compose config for development:
 
 ```bash
 make gateway-prepare-config   # private gateway.env + ledger key only
-make cli-proxies-up           # temporary Claude/Codex proxy pair only (PR2a)
 ```
 
 ## Engineering verification

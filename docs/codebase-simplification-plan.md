@@ -1,12 +1,8 @@
 # IRIN Codebase Simplification Plan
 
-Status: execution plan
+Status: planning only
 
-Validated against: `origin/main` at `acc6237f3f6e5449990759916d704b74b2fa7f59`
-on 2026-07-29. PR 2 sequencing was corrected after the first implementation
-attempt showed that making governed CLI migration a deletion prerequisite
-created a second proxy lifecycle owner and coupled ownership cleanup to
-Keychain, Docker, codesigning, TCC, and live-provider acceptance.
+Validated against: `main` at `9f4768986bd2` on 2026-07-28
 
 ## Purpose
 
@@ -107,49 +103,30 @@ Completion evidence:
 
 ### PR 2 — Collapse runtime ownership into the DMG
 
-This PR is ownership-only. It must remove the competing Council, web, login,
-and adoption lifecycle without adding a second implementation of governed
-Claude/Codex proxy lifecycle.
+First move any still-required developer-only Gateway configuration helper under the Gateway development surface. Do not retain an entire product runtime controller merely to generate test configuration. Retire source-checkout login recovery and the managed Next.js listener in favor of the foreground web launcher. Direct Claude/Codex CLI transport remains available through the DMG’s login environment.
 
-1. Retire or rewrite the native smoke that starts and adopts an external
-   Council. Prefer the packaged full-app smoke, which already proves app-owned
-   spawn, shutdown, port-conflict isolation, and the embedded web surface; keep
-   a smaller native smoke only for behavior the packaged smoke does not cover.
-2. Make packaged Tauri startup own the bundled Council unconditionally.
-3. Remove matching-build adoption, external-runtime restart messaging, and the
-   branch that treats an unpackaged release shell as a supported runtime.
-4. Remove `councilPath` and `councilRoot` from the user-facing Settings/config
-   contract and Tauri command arguments. Keep fixed test injection seams only
-   where automated tests require them.
-5. Remove source-checkout Council path resolution and base-directory override
-   logic that becomes unreachable. Packaged writable state remains under
-   Application Support; source web development continues to use the checkout.
-6. Retire source-checkout login recovery and the managed Next.js listener in
-   favor of foreground `make warroom`.
-7. Remove the source controller’s Council, Next.js, login LaunchAgent,
-   MatchingBuild, and Settings ownership surfaces, along with their dedicated
-   tests, Makefile targets, and operator documentation.
-8. Move any still-required developer-only Gateway configuration helper under
-   the Gateway development surface. Do not retain an entire product runtime
-   controller merely to generate test configuration.
-9. Preserve the existing governed Claude/Codex route, if still required during
-   the transition, only as an explicitly temporary and optional proxy launcher.
-   The shim may start and stop the existing CLI proxies and nothing else.
-10. Simplify restart and stop ownership around the one app-owned Council child.
+Governed Claude/Codex CLI routing is a blocking migration, not an accepted deletion. Before removing the source controller:
 
-The optional governed-CLI shim is not a second runtime owner. It must not spawn
-Council or Next.js, install a login LaunchAgent, adopt a MatchingBuild process,
-or expose `councilPath`/`councilRoot`. If extracting it requires retaining a
-substantial fraction of `scripts/irin-runtime.sh`, the extraction has failed
-and must stop for redesign.
+1. Move proxy lifecycle ownership into the installed app: start, health-check, restart, and stop the Claude/Codex adapters with the DMG-owned runtime.
+2. Feed the Gateway Pack authenticated, validated proxy endpoints and tokens from app-owned storage without exposing values in logs or repository configuration.
+3. Preserve the existing fail-closed distinction between an unavailable proxy route and Direct CLI transport; never silently downgrade a governed seat to Direct.
+4. Add deterministic adapter/Gateway tests and an explicit operator-approved live acceptance proving one governed Claude route and one governed Codex route from the installed app.
+5. Delete the source proxy launch path only after the DMG-owned route passes those gates.
 
-Do not port the Python proxy implementation into Tauri in this PR. In
-particular, do not add a native adapter server, proxy-token Keychain migration,
-adapter health/restart subsystem, or live Claude/Codex acceptance gate.
+Then collapse the remaining runtime fork:
 
-This PR should materially reduce `try_start_council_server`, `restart_sidecar`,
-`sidecar.rs`, `paths.rs`, runtime-config fields, Settings components, and their
-tests—not merely delete shell wrappers or replace them with Rust.
+1. Retire or rewrite the native smoke that starts and adopts an external Council. Prefer the existing packaged full-app smoke, which already proves app-owned spawn, shutdown, port-conflict isolation, and the embedded web surface; keep a smaller native smoke only for behavior that the packaged smoke does not cover.
+2. Remove `setup`, `setup-prepare`, and `runtime-*` from the root Makefile.
+3. Delete `scripts/setup-local.sh`, `scripts/irin-runtime.sh`, and their dedicated tests.
+4. Remove login-recovery installation, runtime source-receipt, and worktree runtime-shutdown wiring that exists only for that controller.
+5. Rewrite product/operator documentation around foreground web development and DMG ownership.
+6. Make packaged Tauri startup own the bundled Council unconditionally.
+7. Remove matching-build adoption, external-runtime restart messaging, and the branch that treats an unpackaged release shell as a supported runtime.
+8. Remove `councilPath` and `councilRoot` from the user-facing Settings/config contract and from Tauri command arguments. Keep fixed test injection seams only where automated tests require them.
+9. Remove source-checkout path resolution and base-directory override logic that becomes unreachable. Packaged writable state continues under Application Support; source web development continues to use the checkout directly.
+10. Simplify restart/stop ownership and Gateway route proof around one app-owned child process.
+
+This PR should materially reduce `try_start_council_server`, `restart_sidecar`, `sidecar.rs`, `paths.rs`, runtime-config fields, Settings components, and their tests—not merely delete shell wrappers.
 
 Completion evidence:
 
@@ -158,44 +135,8 @@ Completion evidence:
 - Closing the app terminates only processes it owns.
 - Foreground `make warroom` remains usable for browser development.
 - Tailscale publication still serves the packaged War Room origin and never mutates unrelated Serve ports or Funnel.
-- Any retained governed-CLI shim owns only the two existing proxy processes and
-  is absent from installed-app Council lifecycle, source login recovery, and
-  product Settings.
-- Tauri Rust tests, War Room web/export tests, native or packaged smoke, Gateway
-  Pack tests, and a fresh local DMG build pass without a live provider call.
-
-### PR 2a — Decide and migrate governed CLI transport
-
-Treat governed Claude/Codex routing as a separate product migration with its
-own architecture decision and acceptance surface.
-
-1. Confirm whether the Docker-to-host HTTP proxy remains necessary or whether a
-   governed host transport can invoke the existing CLI path without the proxy
-   hop.
-2. Account explicitly for macOS responsible-process identity, Keychain access,
-   codesigning, and TCC behavior when an installed app launches provider CLIs.
-3. Prefer deleting synthetic proxy tokens and duplicate lifecycle over porting
-   them. Do not weaken authentication merely to avoid Keychain prompts.
-4. Preserve fail-closed governed routing and independently selectable Direct
-   mode. Never silently downgrade governed traffic to Direct.
-5. Add deterministic route, lifecycle, and failure tests before any live call.
-6. Perform one operator-approved installed-app acceptance with exactly one
-   governed Claude request and one governed Codex request. Stop on unexpected
-   Keychain repetition, TCC expansion, retry, or adapter instability.
-7. Delete the temporary source proxy shim only after the replacement passes
-   deterministic and live acceptance gates.
-
-Completion evidence:
-
-- One implementation owns governed CLI transport.
-- No duplicate Python/Rust proxy lifecycle remains.
-- Secret material is neither logged nor persisted outside its intended
-  operator-owned store.
-- Installed acceptance requires only the documented bounded authorization
-  sequence and requests no unrelated Documents, Music, or broad filesystem
-  access.
-- Exactly one governed Claude and one governed Codex request pass without
-  retry, downgrade, or adapter loss.
+- The installed app can route Claude and Codex CLI seats through Gateway with explicit governed status; unavailable proxy routes fail closed and Direct mode remains independently selectable.
+- Tauri Rust tests, War Room web/export tests, native smoke, Gateway Pack tests, deterministic proxy-route tests, and a fresh local DMG build pass.
 
 ### PR 3 — Make the DMG the sole production app factory
 

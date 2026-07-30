@@ -62,11 +62,8 @@ if [[ -n "$runtime_state_dir" ]]; then
   runtime_state_dir="$resolved_runtime_state_dir"
 fi
 
-# Source-managed runtime lifecycle is retired (PR2 ownership-only). Best-effort
-# stop of optional CLI proxies if the worktree still carries the temporary shim.
-if [[ -x "$destination/scripts/governed-cli-proxies.sh" ]]; then
-  bash "$destination/scripts/governed-cli-proxies.sh" stop >/dev/null 2>&1 || true
-fi
+# Source-managed runtime lifecycle is retired (PR2). Governed Claude/Codex
+# proxy ownership now lives in the installed app, not in checkout scripts.
 if [[ "${IRIN_REQUIRE_GORTEX:-0}" == 1 ]]; then
   command -v gortex >/dev/null 2>&1 || {
     printf 'ERROR: Gortex CLI is required to remove a managed worktree cleanly\n' >&2

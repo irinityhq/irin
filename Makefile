@@ -53,15 +53,6 @@ verify-formal: ## Selective Kani + Miri on sovereign-protocol JCS (advisory if t
 gateway-prepare-config: ## Developer-only: prepare private Gateway local config (no services)
 	bash gateway/tools/prepare-local-config.sh
 
-cli-proxies-up: ## Optional temporary Claude/Codex proxy launcher (not app lifecycle)
-	bash scripts/governed-cli-proxies.sh start
-
-cli-proxies-down: ## Stop optional Claude/Codex proxies
-	bash scripts/governed-cli-proxies.sh stop
-
-cli-proxies-status: ## Status of optional Claude/Codex proxies
-	bash scripts/governed-cli-proxies.sh status
-
 docker-cache-prune: ## Reclaim rebuildable Docker BuildKit cache (keeps images, containers, and volumes)
 	@docker info >/dev/null 2>&1 || (echo "The Docker daemon is not ready; start it before pruning the build cache."; exit 1)
 	docker builder prune --all --force

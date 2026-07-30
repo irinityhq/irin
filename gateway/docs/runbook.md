@@ -29,7 +29,6 @@ From the repository root:
 ```bash
 make gateway-prepare-config
 # start Gateway compose from gateway/ as documented below
-# optional: make cli-proxies-up
 ```
 
 The runtime controller builds Council, War Room Web, Gateway, and the Rust

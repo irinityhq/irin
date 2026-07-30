@@ -49,7 +49,6 @@ required=(
   scripts/remove-worktree.sh
   scripts/smoke-macos-tauri-app.sh
   scripts/test-development-workflow.sh
-  scripts/governed-cli-proxies.sh
   gateway/tools/prepare-local-config.sh
   council-rs/src/main.rs
   council-rs/warroom/web/package-lock.json

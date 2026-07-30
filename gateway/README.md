@@ -10,8 +10,6 @@ From the IRIN repository root, the canonical runtime starts Gateway on
 
 ```bash
 make gateway-prepare-config
-# optional temporary CLI proxies:
-make cli-proxies-up
 ```
 
 From that same root, the isolated no-key proof is:
