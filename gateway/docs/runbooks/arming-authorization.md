@@ -123,7 +123,7 @@ For Touch ID on macOS:
 
 ```bash
 gateway/bin/arm-enroll
-make runtime-restart
+relaunch IRIN.app or restart the Gateway Pack from Settings
 ```
 
 Enrollment writes only the public credential record to the durable sidecar

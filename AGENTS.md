@@ -44,9 +44,8 @@ neither should a change you make.
 From the repository root:
 
 ```bash
-make setup           # macOS full-stack config + managed runtime
 make warroom         # macOS/Ubuntu Council + browser War Room
-make runtime-status   # liveness and source-identity check
+make dmg-build        # ad-hoc signed IRIN.app + DMG
 make verify           # isolated $0 signed-directive proof, no provider keys
 make verify-down      # tear down the isolated verification stack
 make build            # cargo build --workspace --release
@@ -96,10 +95,10 @@ gates. Gortex never replaces source inspection or tests.
 
 `make verify` is the fastest way to prove a change did not break the
 Sentinel-to-signed-directive path without spending on a provider call.
-`make setup` and `make runtime-*` are macOS-only and start real local services
-(Docker, ports, launchd). `make warroom` is the macOS/Ubuntu browser-development
-path and starts Council plus Next.js in the foreground. Run none of them as a
-routine check during a documentation or source change.
+`make warroom` is the macOS/Ubuntu browser-development path and starts Council
+plus Next.js in the foreground. `make dmg-build` and packaged smokes exercise the
+installed-app path. Do not start live services as a routine check during a
+documentation or source change.
 
 ## Proportionate tests
 

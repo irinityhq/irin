@@ -38,14 +38,6 @@ regexes = [
   '''gw_invalid_key_12345''',
 ]
 
-# Setup regression: the fake curl shim returns a deterministic synthetic
-# Gateway key so the setup path can be tested without starting real services.
-[[allowlists]]
-description = "Setup script synthetic Gateway key fixture"
-condition = "AND"
-paths = ['''scripts/test-setup-local\.sh''']
-regexes = ['''gw_0123456789abcdef0123456789abcdef''']
-
 # Council: RFC 6455 canonical WebSocket nonce fixture.
 [[allowlists]]
 description = "Council RFC 6455 example WebSocket nonce"

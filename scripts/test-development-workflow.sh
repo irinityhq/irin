@@ -118,7 +118,7 @@ grep -Fq 'cargo build --release -p council-rs --bin council --locked' council-rs
 grep -Fq 'com.irinity.irin.smoke' scripts/smoke-macos-tauri-app.sh
 grep -Fq 'a non-default IRIN_COUNCIL_PORT requires TAURI_CONFIG with exact' \
   council-rs/warroom-tauri/src-tauri/build.rs
-grep -Fq 'native exact-build adoption proof: PASS' scripts/smoke-macos-tauri-app.sh
+grep -Fq 'native app-owned Council spawn proof: PASS' scripts/smoke-macos-tauri-app.sh
 grep -Fq 'native webview Council request proof: PASS' scripts/smoke-macos-tauri-app.sh
 grep -Fq 'WARROOM_SMOKE_SKIP_TAURI_TESTS' \
   council-rs/warroom-tauri/scripts/smoke-hybrid-build.sh
@@ -460,22 +460,22 @@ grep -Fq 'refusing unexpected runtime state path' <<<"$cleanup_escape_output"
 
 teardown_worktree="$tmp/teardown-worktree"
 git -C "$tmp/repo" worktree add -q -b feature/teardown "$teardown_worktree" main
+# Source runtime lifecycle is retired: remove-worktree must not require make
+# runtime-down (best-effort optional proxy stop only).
 fake_bin="$tmp/fake-bin"
 mkdir -p "$fake_bin"
 printf '%s\n' '#!/bin/sh' 'exit 23' >"$fake_bin/make"
 chmod +x "$fake_bin/make"
-set +e
 teardown_output="$(
   cd "$tmp/repo" &&
+    # Isolate from ship-check IRIN_REQUIRE_GORTEX=1; this case only proves
+    # remove-worktree no longer hard-depends on make runtime-down.
     PATH="$fake_bin:/usr/bin:/bin" \
+      IRIN_REQUIRE_GORTEX=0 \
       "$ROOT/scripts/remove-worktree.sh" "$teardown_worktree" 2>&1
 )"
-teardown_status=$?
-set -e
-[[ "$teardown_status" -ne 0 ]]
-grep -Fq 'runtime teardown failed; retaining worktree and runtime state' <<<"$teardown_output"
-[[ -d "$teardown_worktree" ]]
-git -C "$tmp/repo" worktree remove --force "$teardown_worktree"
+grep -Fq 'Removed worktree:' <<<"$teardown_output"
+[[ ! -d "$teardown_worktree" ]]
 
 printf 'dirty\n' >>"$tmp/repo/README.md"
 set +e

@@ -64,10 +64,9 @@ pub fn classify_council_lifecycle(input: CouncilLifecycleInput) -> SubsystemLife
         } else {
             SubsystemLifecycle::Starting
         }
-    } else if input.health_ready {
-        // Adopted external Council still counts as ready for the product surface.
-        SubsystemLifecycle::Ready
     } else {
+        // External Council on the port is not product ownership — only the
+        // app-owned child counts as ready.
         SubsystemLifecycle::Off
     }
 }
@@ -200,7 +199,7 @@ mod tests {
                 health_ready: true,
                 last_error: false,
             }),
-            SubsystemLifecycle::Ready
+            SubsystemLifecycle::Off
         );
     }
 

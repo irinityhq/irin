@@ -8,8 +8,6 @@ export type RuntimeConfigKey =
   | "wsBase"
   | "gatewayBase"
   | "authToken"
-  | "councilPath"
-  | "councilRoot"
   | "librarianBase";
 
 export type RuntimeConfig = Record<RuntimeConfigKey, string>;
@@ -33,8 +31,6 @@ const BUILD_DEFAULTS: RuntimeConfig = {
     process.env.GATEWAY_URL ||
     DEFAULT_GATEWAY,
   authToken: process.env.NEXT_PUBLIC_COUNCIL_AUTH_TOKEN || "",
-  councilPath: "",
-  councilRoot: "",
   librarianBase: process.env.LIBRARIAN_BASE_URL || "http://127.0.0.1:11435",
 };
 
@@ -125,8 +121,6 @@ export function mergeConfigSources(
       defaults.gatewayBase,
     ),
     authToken: pickConfigValue(local.authToken, defaults.authToken),
-    councilPath: pickConfigValue(local.councilPath, defaults.councilPath),
-    councilRoot: pickConfigValue(local.councilRoot, defaults.councilRoot),
     librarianBase: pickConfigValue(local.librarianBase, defaults.librarianBase),
   };
 }
@@ -142,6 +136,17 @@ function readLocalStorage(): Partial<RuntimeConfig> {
     // overrides. Remove it from durable storage and never hydrate from it.
     if (Object.prototype.hasOwnProperty.call(parsed, "authToken")) {
       delete parsed.authToken;
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
+    }
+    // Ownership-only: councilPath/councilRoot are no longer product settings.
+    let stripped = false;
+    for (const key of ["councilPath", "councilRoot"] as const) {
+      if (Object.prototype.hasOwnProperty.call(parsed, key)) {
+        delete (parsed as Record<string, unknown>)[key];
+        stripped = true;
+      }
+    }
+    if (stripped) {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(parsed));
     }
     return parsed;
@@ -279,15 +284,6 @@ export function getGatewayBase(): string {
 
 export function getAuthToken(): string {
   return getRuntimeConfig().authToken;
-}
-
-export function getCouncilPath(): string {
-  return getRuntimeConfig().councilPath;
-}
-
-/** Sidecar --base-dir override (feature contract) — empty means repo-root default. */
-export function getCouncilRoot(): string {
-  return getRuntimeConfig().councilRoot;
 }
 
 export function getLibrarianBase(): string {

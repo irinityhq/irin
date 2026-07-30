@@ -5,8 +5,6 @@
 import {
   getAuthToken,
   councilPortFromApiBase,
-  getCouncilPath,
-  getCouncilRoot,
   getLibrarianBase,
   getRuntimeConfig,
 } from "./runtime-config";
@@ -60,28 +58,17 @@ export async function onCouncilLog(
 }
 
 export async function startCouncilServer(
-  councilPath?: string,
   serverPort?: number,
   authToken?: string,
-  councilRoot?: string,
   librarianBase?: string,
 ): Promise<string> {
-  const path = councilPath ?? (getCouncilPath() || undefined);
   const token = authToken ?? getAuthToken();
-  // feature contract: councilRoot becomes the sidecar's `--base-dir` (cabinets/prompts/
-  // models.yaml root). It does NOT relocate the council binary — that stays
-  // pinned to the repo's target/release (COUNCIL_RS_DIR env is the knob for a
-  // fully different checkout). Tauri 2 maps camelCase → snake_case args;
-  // older shells without the council_root command arg simply ignore it.
-  const root = (councilRoot ?? getCouncilRoot()).trim();
   const libBase = (librarianBase ?? getLibrarianBase()).trim();
   const resolvedPort =
     serverPort ?? councilPortFromApiBase(getRuntimeConfig().apiBase);
   return invoke<string>("start_council_server", {
-    councilPath: path || null,
     serverPort: resolvedPort,
     authToken: token.trim() ? token.trim() : null,
-    councilRoot: root || null,
     librarianBase: libBase || null,
   });
 }
@@ -105,12 +92,10 @@ export async function stopCouncilServer(): Promise<string> {
  */
 export async function restartSidecar(
   viaGateway: boolean,
-  councilRoot?: string,
   librarianBase?: string,
 ): Promise<string> {
   return invoke<string>("restart_sidecar", {
     viaGateway,
-    councilRoot: councilRoot || null,
     librarianBase: librarianBase || null,
   });
 }
@@ -315,9 +300,4 @@ export async function pickFile(): Promise<string | null> {
 
 export async function pingCouncil(): Promise<string> {
   return invoke<string>("ping_council");
-}
-
-/** True when running inside Tauri and council path is unset. */
-export function needsCouncilPathFromSettings(): boolean {
-  return isTauri() && !getRuntimeConfig().councilPath.trim();
 }

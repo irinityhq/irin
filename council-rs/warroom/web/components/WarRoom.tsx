@@ -188,10 +188,8 @@ export default function WarRoom() {
             return;
           }
           void startCouncilServer(
-            cfg.councilPath || undefined,
             councilPortFromApiBase(cfg.apiBase),
             cfg.authToken,
-            cfg.councilRoot || undefined,
             cfg.librarianBase || undefined,
           )
             .then(() => {
@@ -206,10 +204,8 @@ export default function WarRoom() {
           // Command missing on older shells: keep source-dev start path.
           if (aborted) return;
           void startCouncilServer(
-            cfg.councilPath || undefined,
             councilPortFromApiBase(cfg.apiBase),
             cfg.authToken,
-            cfg.councilRoot || undefined,
             cfg.librarianBase || undefined,
           )
             .then(() => {

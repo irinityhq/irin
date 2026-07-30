@@ -9,13 +9,13 @@ repository.
 On macOS, use the managed repository-root runtime:
 
 ```bash
-make setup
-make runtime-status
+make warroom
+# optional Gateway: make gateway-prepare-config
 ```
 
 On Ubuntu, use `make warroom` for Council and the browser War Room. Use
 `make verify` for the isolated Sentinel-to-signed-directive proof; the managed
-`make setup`/`make runtime-*` controller is currently macOS-only.
+Installed-app product path is macOS; `make warroom` works on macOS/Ubuntu.
 
 The canonical runtime binds to loopback. Tailscale access is an optional private
 overlay controlled by the operator. Do not expose the services directly to a
@@ -73,7 +73,7 @@ records, generated indexes, logs, or Docker state.
 
 ## Claims
 
-State only what a command proves. `make runtime-status` proves liveness of the
+State only what a command proves. Council `/api/health` proves liveness of the
 configured local services. `make verify` proves the isolated signed-directive
 path. Neither proves a live provider call, an armed producer, or Worker
 execution.

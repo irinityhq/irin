@@ -1,41 +1,41 @@
 # Troubleshooting
 
 IRIN is local-first software for one operator. Council and War Room Web
-run on macOS and Ubuntu. The managed full-stack runtime (`make setup` and
-`make runtime-*`), login recovery, Tailscale Serve automation, and native app
+run on macOS and Ubuntu. Foreground `make warroom`, optional Gateway compose,
+Tailscale Serve (installed app only), and native app
 installation are currently macOS-only. On Ubuntu, `make warroom` runs the
 browser deliberation surface; Gateway and the isolated verification lane use
 their documented Docker paths. This page does not state measured build times or
 minimum machine resources the repository does not itself prove; expect a
-first macOS `make setup` to take noticeably longer than a subsequent one because
+first Gateway image build to take noticeably longer than a subsequent one because
 it compiles the Rust workspace, runs `npm ci`, and builds the Gateway/sidecar
 Docker images from source.
 
 ## Prerequisites
 
-On macOS, `make setup` checks for and tells you exactly what is missing: Docker
+On macOS, Gateway Pack enable and `make gateway-prepare-config` check for missing Docker
 Desktop (running, not just installed), Rust (`cargo`, `rustc`), Node.js 20
 or newer (`node`, `npm`), Git, `make`, `curl`, `jq`, OpenSSL, and the macOS
 `lockf`/`launchctl` commands. Tailscale is optional and only checked if you
 want private phone access. Fix the first reported missing command and rerun
-`make setup` — it is safe to rerun. It preserves valid operator-owned values
+`make gateway-prepare-config` — it is safe to rerun. It preserves valid operator-owned values
 and signing material while filling or migrating missing, placeholder, or
 rejected IRIN-managed fields.
 
 On Ubuntu, install Rust, Node.js 20 or newer, Git, `make`, `curl`, and `lsof`,
 then use `make warroom`. Docker Engine plus the Compose and Buildx plugins are
 required for Gateway and `make verify`, but not for the browser-only Council
-launcher. `make setup` and `make runtime-*` deliberately stop on Ubuntu because
+launcher. Installed-app and Gateway Pack paths are macOS-first because
 they depend on `lockf`, `launchctl`, Docker Desktop, and macOS-only runtime
 recovery. This is an installer boundary, not a claim that Council or War Room
 Web cannot run on Linux.
 
 ## Docker
 
-The macOS `make setup` path requires the Docker daemon to be running before it
+Gateway Pack enable requires the Docker daemon to be running before it
 starts — `docker info` must succeed or setup exits with an explicit instruction
 to open Docker Desktop. Open it, wait until it reports ready, then rerun setup.
-After installation, `make runtime-up` and the login-recovery controller can
+After installation, the optional CLI proxy launcher can
 open Docker Desktop and wait for the daemon (180 seconds by default,
 configurable with `IRIN_DOCKER_WAIT_SECS`).
 
@@ -66,7 +66,7 @@ the first two ports; Gateway is a separate component-level start there.
 | Claude CLI Gateway adapter (if `claude` CLI is present) | `9090` (host interfaces; token required) |
 | Codex CLI Gateway adapter (if `codex` CLI is present) | `9091` (host interfaces; token required) |
 
-If `make runtime-up` or `make setup` fails with a port already occupied
+If `make warroom` or the installed app fails with a port already occupied
 error, another process — often an old manual `council --serve`, `next
 start`, or a previous IRIN runtime that did not shut down cleanly — owns
 that port. Stop the desktop app or the old process, then retry. `make
@@ -105,7 +105,7 @@ profile, it will not take effect until:
 
 1. you open a new terminal (or `source` the profile) so the shell actually
    exports it, and
-2. you restart the canonical runtime with `make runtime-restart` so the
+2. you relaunch `make warroom` or IRIN.app so the
    already-running Council process picks it up.
 
 Run `./target/release/council --base-dir council-rs --discover` after that
@@ -117,7 +117,7 @@ the variable is not only set in an interactive-only block of your profile).
 ## Private phone access (installed IRIN.app)
 
 Private phone access is controlled in the installed IRIN.app under Settings
-→ Private phone access. Source `make setup` / `scripts/irin-runtime.sh` only
+→ Private phone access. Source development only
 start local loopback services and do not configure Tailscale Serve. Enable
 phone access after Council is ready: IRIN publishes on dedicated HTTPS port
 `8443` by default (`IRIN_TAILSCALE_HTTPS_PORT` overrides it) and does not claim
@@ -135,22 +135,15 @@ Funnel or any other public-internet exposure.
 
 ## Reboot and login recovery (macOS)
 
-`make setup` installs a per-user macOS LaunchAgent
-(`com.irinity.irin-runtime.login`) that runs at login and calls
-`scripts/irin-runtime.sh boot`. On boot it reuses an already-healthy stack
-whose build identity matches the checkout, or rebuilds and restarts if the
-stack is down or the running build has drifted from the checkout. Its output
-goes to `~/.local/state/irin/runtime/login-boot.log` — check that file first
-if IRIN did not come back up after a reboot. To stop IRIN from starting at
-login, run `./scripts/irin-runtime.sh uninstall-login`; manual `make
-runtime-up` still works afterward.
+Login recovery for a source-managed runtime is retired. The installed app
+owns its bundled Council; source development uses foreground `make warroom`.
 
-`make runtime-status` reports both the checkout's Git identity and the
+Packaged and source Council health endpoints report build identity; the
 identity embedded in the currently running Council and Gateway sidecar
 builds; a `RUNTIME_MISMATCH` line means the running services do not match
 the checkout on disk (dirty tree, unbuilt commit, or a source-receipt/
 build drift). Commit worktree changes and update the clean canonical checkout;
-then `make runtime-restart` rebuilds from that committed source.
+then rebuild and relaunch from that committed source.
 
 ## Watch looks empty or quiet
 
@@ -160,18 +153,16 @@ test Sentinel, and the watch dispatcher and producer are disabled by
 default. Watch's War Room view is also a bounded, sanitized snapshot (recent
 fire counts and a capped recent-fires list), not the full underlying ledger
 — see [`docs/architecture.md`](architecture.md) for how it relates to the
-signed Outbox. If Council and Gateway both report healthy in `make
-runtime-status`, a quiet Watch tab is not itself a fault.
+signed Outbox. If Council and Gateway both report healthy, a quiet Watch tab
+is not itself a fault.
 
 ## Desktop app (macOS)
 
-The installed release app (signed DMG) owns and starts its bundled Council
-backend. When a matching healthy Council is already present it may adopt that
-process; a mismatched or unavailable backend is recovered through the desktop
-lifecycle. Source operators can still inspect the separate managed runtime with
-`make runtime-status`, but an installed DMG does not require `make setup` or
-`make warroom`. Product installation is the DMG only — there is no supported
-source-built app installer. See
+The installed release app (signed DMG) always owns and starts its bundled
+Council backend. An occupied Council port is a startup conflict — the app does
+not adopt another process. An installed DMG does not require a source checkout
+or `make warroom`. Product installation is the DMG only — there is no
+supported source-built app installer. See
 [`council-rs/warroom/docs/TAURI-AUTH.md`](../council-rs/warroom/docs/TAURI-AUTH.md)
 for auth-token behavior across release and debug builds.
 
@@ -196,7 +187,7 @@ SSH-only hosts without a GUI session still cannot satisfy this proof.
 ## Teardown
 
 ```bash
-make runtime-down     # stop the canonical local product runtime
+Ctrl+C on make warroom  # stop foreground source development
 make verify-down      # tear down only the isolated verification stack
 ```
 

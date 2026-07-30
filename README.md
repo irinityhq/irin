@@ -60,44 +60,30 @@ supported.
 3. Open the DMG, drag **IRIN.app** to Applications, and launch it.
 
 The app starts and owns its bundled Council and serves War Room on loopback;
-no terminal command is involved. (One exception: if a Council with the
-identical build identity is already healthy on :8765 — for example from a
-source checkout — the app adopts that process instead of starting a second
-one, and stopping that external runtime then affects the app. A Council with
-a different source identity is refused, never killed.) Open **Discover** first to see which
-provider transports IRIN detects (see
+no terminal command is involved. An occupied Council port is a startup
+conflict — the app will not adopt or kill another process. Open **Discover**
+first to see which provider transports IRIN detects (see
 [Discover, then deliberate](#discover-then-deliberate)).
 
-### macOS — full stack from source (development)
+### macOS — browser War Room from source (development)
 
-This is the development path, not the product install. Install and start
-Docker Desktop, then install Rust, Node.js 20+, Git, `make`, `curl`, `jq`,
-and OpenSSL. Tailscale is optional.
+This is the development path, not the product install. Install Rust, Node.js
+20+, Git, `make`, `curl`, and OpenSSL. Docker Desktop is required only for
+Gateway Pack development or `make verify`.
 
 ```bash
 git clone https://github.com/irinityhq/irin.git
 cd irin
-make setup
+make warroom
 ```
 
-That is the whole macOS newcomer path. `make setup` prepares private local
-configuration, preserving valid operator-owned values and signing material
-while filling or migrating missing and placeholder IRIN-managed fields. It
-then builds and starts Council, War Room Web, and Gateway and enables
-per-user login recovery so the stack comes back after a reboot. It finishes
-by printing:
-
-- the live service URLs (War Room Web, Council, Gateway) and their health;
-- your private Tailscale phone URL if Tailscale is installed and connected,
-  or an explicit statement that access is local-only right now;
-- how login recovery is enabled and how to opt out
-  (`./scripts/irin-runtime.sh uninstall-login`); and
-- **Next action: Open Discover** — Discover is where you see which provider
-  paths IRIN currently detects.
+That starts Council plus War Room Web in the foreground. Open
+`http://127.0.0.1:3010` and stop with `Ctrl+C`. There is no source-managed
+login recovery and no `make setup` / `make runtime-*` product path — the
+installed app owns Council lifecycle; source development uses the foreground
+tree.
 
 The macOS desktop product is the signed DMG from GitHub Releases (`IRIN.app`).
-Source development continues with `make warroom` (browser) or the managed
-runtime above; there is no separate source-built app installer.
 
 ### Ubuntu — browser War Room from source
 
@@ -113,20 +99,20 @@ This builds and starts Council plus War Room Web in the foreground on the same
 loopback addresses shown below; open `http://127.0.0.1:3010` and stop the stack
 with `Ctrl+C`. Provider discovery uses the environment and authenticated CLIs
 of the shell that launched it. Ubuntu runs Council and the browser War Room;
-the native app and managed full-stack runtime are macOS paths. Install Docker
-Engine with Compose/Buildx when using Gateway or the isolated `make verify`
-engineering lane. See
-[`docs/troubleshooting.md`](docs/troubleshooting.md) for the platform boundary.
+the native app is a macOS product path. Install Docker Engine with
+Compose/Buildx when using Gateway or the isolated `make verify` engineering
+lane. See [`docs/troubleshooting.md`](docs/troubleshooting.md) for the
+platform boundary.
 
 ## What's running
 
 | Surface | Address |
 | --- | --- |
-| War Room Web | `http://127.0.0.1:3010` |
-| Council API/WebSocket | `http://127.0.0.1:8765` |
-| Gateway | `http://127.0.0.1:18080` with macOS `make setup`, or when started separately on Ubuntu |
-| Desktop app | `IRIN.app` on macOS — the signed DMG starts and owns its bundled Council, adopting an already-running Council only when its build identity matches exactly |
-| Private phone | Installed IRIN.app Settings only: `https://<your-device>.<tailnet>.ts.net:8443` via Tailscale Serve — open in a browser on the same tailnet; never a public URL, never configured by `make setup` |
+| War Room Web (source) | `http://127.0.0.1:3010` via `make warroom` |
+| Council API/WebSocket | `http://127.0.0.1:8765` (app-owned in the DMG; foreground in `make warroom`) |
+| Gateway | Optional: installed app Gateway Pack, or compose from `gateway/` for development |
+| Desktop app | `IRIN.app` on macOS — the signed DMG always starts and owns its bundled Council |
+| Private phone | Installed IRIN.app Settings only: `https://<your-device>.<tailnet>.ts.net:8443` via Tailscale Serve — open in a browser on the same tailnet; never a public URL |
 
 ## Discover, then deliberate
 
@@ -135,8 +121,8 @@ exported by your login shell, supported local CLI binaries, and reachable
 local model runtimes, then reports what it detected — names only, never key
 values, and no billable inference call. A detected CLI binary is not proof
 that its login is still valid; the first real seat call is. Add credentials
-to your shell profile, open a new terminal, then `make runtime-restart`
-(source runtime) or relaunch IRIN.app to pick them up. See
+to your shell profile, open a new terminal, then relaunch `make warroom` or
+IRIN.app to pick them up. See
 [`council-rs/docs/providers.md`](council-rs/docs/providers.md) for the full
 transport list.
 
@@ -212,13 +198,12 @@ operator-ready autonomous execution path. See
 
 ## Everyday commands
 
-These operate the source-run managed runtime from a checkout; they are not
-build or test commands, and the installed IRIN.app needs none of them.
+Installed IRIN.app needs none of these source-development commands. Optional
+Gateway compose config for development:
 
 ```bash
-make runtime-status    # liveness, source identity, Tailscale state
-make runtime-restart   # rebuild after config changes or committed source updates
-make runtime-down      # stop the local runtime
+make gateway-prepare-config   # private gateway.env + ledger key only
+make cli-proxies-up           # temporary Claude/Codex proxy pair only (PR2a)
 ```
 
 ## Engineering verification
@@ -238,19 +223,16 @@ images by default, so a published tag cannot silently lag this source tip.
 Details: [`gateway/docs/verify.md`](gateway/docs/verify.md).
 
 For development from the canonical `irinityhq/irin` clone, use one Git worktree
-per change so you never edit the canonical runtime checkout directly:
+per change:
 
 ```bash
 make worktree BRANCH=feature/example
 cd ../irin-wt-feature-example
-make runtime-up
+make warroom
 ```
 
-The worktree gets isolated ports, its own Docker project and volumes, its
-own runtime state, and no Tailscale route. The managed runtime enforces the
-canonical origin as a source-provenance boundary; fork contributors can run the
-build, test, and verification targets but cannot launch that managed runtime
-from the fork. See [`docs/troubleshooting.md`](docs/troubleshooting.md).
+The worktree gets isolated ports and its own Docker project name. See
+[`docs/troubleshooting.md`](docs/troubleshooting.md).
 
 ## Documentation
 
@@ -262,8 +244,8 @@ from the fork. See [`docs/troubleshooting.md`](docs/troubleshooting.md).
   Selene, config-key convention, optional Gortex layer map.
 - [`docs/cabinets.md`](docs/cabinets.md) — cabinet selection, customization,
   the optional NVIDIA starter, and model entitlement churn.
-- [`docs/troubleshooting.md`](docs/troubleshooting.md) — setup, Docker,
-  ports, login-shell discovery, Tailscale, reboot recovery, and teardown.
+- [`docs/troubleshooting.md`](docs/troubleshooting.md) — Docker, ports,
+  login-shell discovery, Tailscale, and teardown.
 - [`AGENTS.md`](AGENTS.md) — repository operating manual for coding agents.
 - Component docs: [`council-rs/README.md`](council-rs/README.md),
   [`gateway/README.md`](gateway/README.md),

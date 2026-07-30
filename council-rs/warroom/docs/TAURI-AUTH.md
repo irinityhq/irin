@@ -8,8 +8,8 @@ How the desktop shell and browser reference UI authenticate against
 ### Release (Tauri production build)
 
 1. Installed IRIN.app (the DMG product) normally starts and owns its bundled
-   Council; source `make setup` is not required. If a Council with the identical
-   build identity is already healthy on the port, the app adopts that process
+   Council; a source checkout is not required. If a Council with the identical
+   port is already occupied, the app reports a conflict and does not adopt
    instead of spawning the bundled one.
 2. The default private template leaves `COUNCIL_AUTH_TOKEN` empty for the
    loopback-only single-operator runtime. If the operator explicitly configured
@@ -79,10 +79,10 @@ Keychain, or a separate phone app.
 ## Manual release checklist
 
 1. Install the signed DMG (or use an already-accepted local build), or run
-   `make setup` for the source managed runtime.
+   `make warroom` for source browser development.
 2. Launch app → **Settings** → set an auth token only if the runtime uses one
    → **Test connection** (Council API green).
-3. Confirm the app reports a healthy Council backend (adopted or app-owned).
+3. Confirm the app reports a healthy app-owned Council backend.
 4. Open Watch and Outbox; both load through the Council API without a browser
    Gateway credential.
 5. Tray **Convene** focuses Deliberate view; if Council is unavailable, recover

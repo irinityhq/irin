@@ -17,7 +17,6 @@ export function useSidecarRestart(
     try {
       const msg = await restartSidecar(
         sidecarViaGateway,
-        form.councilRoot || undefined,
         form.librarianBase || undefined,
       );
       toast("success", msg);

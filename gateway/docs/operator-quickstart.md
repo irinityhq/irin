@@ -1,30 +1,29 @@
 # Gateway Operator Quickstart
 
-On macOS, Gateway is normally started with the complete IRIN runtime from the
-repository root:
+On macOS, the installed app can enable an optional Gateway Pack from Settings.
+For Gateway development from a checkout:
 
 ```bash
-make setup
-make runtime-status
+make gateway-prepare-config
+# then start compose from gateway/ as documented in runbook.md
 ```
 
 The default endpoint is `http://127.0.0.1:18080`. Do not bind Gateway directly
 to an untrusted network.
 
-Ubuntu runs Gateway through its Docker/component paths rather than the
-macOS-only root runtime controller. Start with [`verify.md`](verify.md) for the
-portable isolated lane and [`runbook.md`](runbook.md) for the canonical
-operator boundary; `make warroom` alone starts Council and War Room Web, not
-Gateway.
+Ubuntu runs Gateway through its Docker/component paths. Start with
+[`verify.md`](verify.md) for the portable isolated lane and
+[`runbook.md`](runbook.md) for the operator boundary; `make warroom` alone
+starts Council and War Room Web, not Gateway.
 
 ## Local Configuration
 
-The root setup creates:
+`make gateway-prepare-config` creates:
 
-- `~/.config/irin/gateway.env` for Gateway and runtime settings
+- `~/.config/irin/gateway.env` for Gateway development settings
 - `~/.irin/ledger_key.pem` for the local Ed25519 signing seed
 
-Configuration files and the signing seed are mode `0600`. Setup preserves
+Configuration files and the signing seed are mode `0600`. The helper preserves
 valid operator-owned values while adding or replacing missing, placeholder, or
 invalid IRIN-managed fields. Provider credentials remain in the login-shell
 environment and are never copied into Gateway configuration.
@@ -34,7 +33,7 @@ environment and are never copied into Gateway configuration.
 ```bash
 curl -fsS http://127.0.0.1:18080/health
 curl -fsS http://127.0.0.1:18080/metrics | head
-make runtime-status
+Gateway health probe / compose ps
 ```
 
 Gateway is fail-closed. A healthy service can still return `401` for protected
@@ -129,9 +128,9 @@ access is required and authenticated.
 From the repository root:
 
 ```bash
-make runtime-status
-make runtime-restart
-make runtime-down
+Gateway health probe / compose ps
+# restart Gateway compose as needed
+# stop Gateway compose
 make verify
 make verify-down
 ```

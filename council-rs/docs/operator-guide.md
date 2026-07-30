@@ -2,43 +2,32 @@
 
 Council is IRIN's multi-model deliberation engine. War Room is its local
 desktop and browser interface. Council and the browser War Room run on macOS
-and Ubuntu; the managed full-stack runtime and desktop installation are
-currently macOS-only.
+and Ubuntu; the desktop installation is currently macOS-only.
 
 ## Start the product
 
-On macOS, from the IRIN repository root:
+Product install: download the signed DMG and launch `IRIN.app`. The app owns
+its bundled Council.
+
+Source browser development, from the IRIN repository root (macOS or Ubuntu):
 
 ```bash
-make setup
+make warroom
 ```
 
-Setup reports the live service state and URLs, enables per-user login recovery,
-and ends with the next action: open **Discover**. The macOS desktop product is
-the signed DMG from GitHub Releases; source development uses `make warroom` or
-the managed runtime. Operators can opt out of login recovery with
-`./scripts/irin-runtime.sh uninstall-login`.
+Open `http://127.0.0.1:3010` and stop with `Ctrl+C`. Source development does
+not install login recovery.
 
 Default local surfaces:
 
 | Surface | Address |
 |---|---|
 | Council API and WebSocket | `http://127.0.0.1:8765` |
-| War Room Web | `http://127.0.0.1:3010` |
-| Gateway | `http://127.0.0.1:18080` |
+| War Room Web (source) | `http://127.0.0.1:3010` |
+| Gateway | optional app Gateway Pack, or compose from `gateway/` |
 
-The services bind to loopback. The root runtime controller can optionally
-publish selected routes through the operator's private Tailscale network.
-
-On Ubuntu, start Council and the browser War Room in the foreground:
-
-```bash
-make warroom
-```
-
-Open `http://127.0.0.1:3010` and stop both processes with `Ctrl+C`. This path
-does not start Gateway or install login recovery; use the Gateway component
-documentation when that governed path is needed.
+The services bind to loopback. Private phone publication is controlled only
+from installed IRIN.app Settings via Tailscale Serve.
 
 ## Configure providers
 
@@ -105,16 +94,16 @@ discovery, cabinet editing, Gateway outbox and Watch views, drift analysis,
 and optional Librarian integration. Configure API, WebSocket, Gateway,
 Librarian, and auth values in Settings.
 
-The installed app adopts the canonical Council started by `make setup` when
-build identity matches. Installed release builds start their own bundled
-Council when no matching runtime is present. Debug desktop builds retain a
+The installed app always owns its bundled Council. Foreground `make warroom`
+is a separate development process tree. An occupied Council port is a startup
+conflict, not a second ownership mode. Debug desktop builds retain a
 developer-only sidecar path under `council-rs`.
 
 ## Authentication
 
-The canonical runtime loads `COUNCIL_AUTH_TOKEN` and
-`COUNCIL_GATEWAY_TOKEN` from private local configuration. War Room stores its
-runtime endpoints and token in local app/browser state.
+Installed release builds manage pairing auth in private Application Support.
+War Room stores non-secret endpoints and a session-only auth token in browser
+state.
 
 Development can use `COUNCIL_DEV_NO_AUTH=1` on loopback. Do not use that flag
 for a network-accessible service. See
@@ -141,5 +130,5 @@ npm test
 The root `make verify` target proves the isolated Sentinel-to-signed-directive
 path without provider credentials or hardware arming.
 
-Use `make runtime-status` for liveness. Neither command proves that a paid
+Use Council `/api/health` for liveness. Neither command proves that a paid
 provider call or an armed action path has occurred.

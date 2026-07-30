@@ -32,7 +32,7 @@ On macOS, the canonical local runtime starts Council on `127.0.0.1:8765` and
 War Room Web on `127.0.0.1:3010`:
 
 ```bash
-make runtime-up
+make warroom
 ```
 
 On macOS or Ubuntu, the foreground browser-only path is:
@@ -42,7 +42,7 @@ make warroom
 ```
 
 Development and packaging targets are available under `make -C council-rs
-help`. The Tauri app uses the same backend and adopts an existing Council
+help`. The Tauri app uses the same backend and always owns its bundled Council
 process when one is healthy.
 
 ## Documentation

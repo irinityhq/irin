@@ -9,8 +9,9 @@ From the IRIN repository root, the canonical runtime starts Gateway on
 `127.0.0.1:18080`:
 
 ```bash
-make runtime-up
-make runtime-status
+make gateway-prepare-config
+# optional temporary CLI proxies:
+make cli-proxies-up
 ```
 
 From that same root, the isolated no-key proof is:

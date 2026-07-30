@@ -97,11 +97,11 @@ pub(crate) fn commit_status_cache(generation: u64, st: &GatewayPackStatus) {
 }
 
 /// Proven route of the Council child owned by this shell, recorded by lib.rs
-/// at every spawn/stop/adopt/terminate transition:
+/// at every spawn/stop/terminate transition:
 /// - `Some(true)` — owned child was spawned governed (`COUNCIL_VIA_GATEWAY=1`
 ///   with the Keychain-held client key)
 /// - `Some(false)` — owned child was spawned Direct
-/// - `None` — no owned Council child (stopped, died, adopted-external, or
+/// - `None` — no owned Council child (stopped, died, never started, or
 ///   never spawned)
 ///
 /// `council_governed` must be proven from this record plus live pack

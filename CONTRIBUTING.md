@@ -10,7 +10,7 @@ By contributing you agree your work is licensed under the repository's
 
 ## Before you start
 
-- Read the [README](README.md). On macOS, follow its `make setup` path; on
+- Read the [README](README.md). On macOS, follow its DMG or `make warroom` path; on
   Ubuntu, use `make warroom`. Then open Discover and Deliberate. `make verify`
   is an engineering regression for the separate signed-directive lane, not a
   product demo.
@@ -56,7 +56,7 @@ make verify-down
 
 For frontend development on macOS or Ubuntu, follow
 [`council-rs/docs/war-room.md`](council-rs/docs/war-room.md). Its standalone
-`make warroom` launcher and the macOS `make setup` runtime both use the
+`make warroom` launcher and the installed app both use the
 default Council port, so do not start both independently.
 
 Please make sure `make test` passes and the code is `cargo fmt`-clean before
@@ -92,7 +92,7 @@ for the complete contract.
 
 Fork contributors can run the build, test, lint, browser War Room, and isolated
 verification targets on macOS or Ubuntu. The managed macOS product runtime
-(`make setup`, `make runtime-up`)
+(`make warroom`, `make dmg-build`)
 intentionally accepts only the canonical `irinityhq/irin` origin so its source
 receipt cannot adopt an arbitrary fork. Maintainers who need a live development
 runtime use `make worktree BRANCH=...` from the canonical clone.
