@@ -508,9 +508,16 @@ pub fn current_status() -> CliAdaptersStatus {
 
 /// Start app-owned adapters when CLIs are present and authenticated.
 /// Missing CLI → NotReady (not an error). Never logs token values.
+///
+/// Loads proxy tokens from Keychain once via [`ensure_proxy_tokens`]. When the
+/// caller already holds those tokens (e.g. FullStart resume building compose
+/// env), use [`ensure_cli_adapters_with_tokens`] to avoid a second Keychain get
+/// per account — each get can surface a macOS authorization dialog.
 pub fn ensure_cli_adapters(store: &dyn SecretStore) -> CliAdaptersStatus {
-    let tokens = match ensure_proxy_tokens(store) {
-        Ok(t) => t,
+    match ensure_proxy_tokens(store) {
+        Ok((claude_tok, codex_tok)) => {
+            ensure_cli_adapters_with_tokens(&claude_tok, &codex_tok)
+        }
         Err(_) => {
             let status = CliAdaptersStatus {
                 claude: AdapterHealth::NotReady,
@@ -521,11 +528,17 @@ pub fn ensure_cli_adapters(store: &dyn SecretStore) -> CliAdaptersStatus {
             if let Ok(mut g) = adapter_state().lock() {
                 g.last_status = status;
             }
-            return status;
+            status
         }
-    };
-    let (claude_tok, codex_tok) = tokens;
+    }
+}
 
+/// Same as [`ensure_cli_adapters`] but uses already-loaded proxy tokens so the
+/// Keychain is not re-entered for Claude/Codex accounts on this call.
+pub fn ensure_cli_adapters_with_tokens(
+    claude_tok: &str,
+    codex_tok: &str,
+) -> CliAdaptersStatus {
     let mut status = CliAdaptersStatus::default();
     {
         let mut g = match adapter_state().lock() {
@@ -540,11 +553,11 @@ pub fn ensure_cli_adapters(store: &dyn SecretStore) -> CliAdaptersStatus {
         reap_dead(&mut g);
 
         let (c_health, c_reason) =
-            ensure_one(&mut g.claude, AdapterKind::Claude, &claude_tok);
+            ensure_one(&mut g.claude, AdapterKind::Claude, claude_tok);
         status.claude = c_health;
         status.claude_reason = c_reason;
 
-        let (x_health, x_reason) = ensure_one(&mut g.codex, AdapterKind::Codex, &codex_tok);
+        let (x_health, x_reason) = ensure_one(&mut g.codex, AdapterKind::Codex, codex_tok);
         status.codex = x_health;
         status.codex_reason = x_reason;
 

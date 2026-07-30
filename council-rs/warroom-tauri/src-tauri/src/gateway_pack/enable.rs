@@ -1,6 +1,8 @@
 //! Pack lifecycle mutations: enable / disable / stop / uninstall.
 
-use super::cli_adapters::{ensure_cli_adapters, stop_cli_adapters};
+use super::cli_adapters::{
+    ensure_cli_adapters_with_tokens, ensure_proxy_tokens, stop_cli_adapters,
+};
 use super::env::{build_full_compose_env, teardown_compose_env, write_public_compose_env};
 use super::health::{
     admin_surface_ready, desktop_project_running, gateway_health_ok, models_authenticated,
@@ -138,10 +140,16 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     })?;
     lifecycle_stage("arm_keys", "ok");
 
-    // Host CLI adapters before compose env: mint Keychain tokens and start
+    // Host CLI adapters before compose env: mint Keychain tokens once and start
     // app-owned Claude/Codex listeners when CLIs are present+authenticated.
+    // Tokens are reused for every compose secret env on this enable flight so
+    // each proxy account is read at most once (Keychain can prompt per get).
     // Missing CLI leaves that route empty (fail-closed) and does not abort Enable.
-    let adapter_status = ensure_cli_adapters(store);
+    let proxy_tokens = ensure_proxy_tokens(store).inspect_err(|_| {
+        lifecycle_stage("cli_adapters", "token_error");
+    })?;
+    let adapter_status =
+        ensure_cli_adapters_with_tokens(&proxy_tokens.0, &proxy_tokens.1);
     lifecycle_stage(
         "cli_adapters",
         &format!(
@@ -206,6 +214,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
                 &ledger,
                 &validated,
                 existing_key_id.as_deref(),
+                Some(proxy_tokens.clone()),
             )
             .inspect_err(|_| {
                 lifecycle_stage("secret_env", "error");
@@ -238,6 +247,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
             &ledger,
             &validated,
             existing_key_id.as_deref(),
+            Some(proxy_tokens.clone()),
         )
         .inspect_err(|e| {
             // Fixed non-secret categories only — never log the error body if it
@@ -270,11 +280,18 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         })?;
         lifecycle_stage("provision", "ok");
         // Blank bootstrap and recreate sidecar without it.
-        let spawn_env_blank =
-            build_full_compose_env(store, None, &pack_root, &ledger, &validated, Some(&kid))
-                .inspect_err(|_| {
-                    lifecycle_stage("secret_env_blank", "error");
-                })?;
+        let spawn_env_blank = build_full_compose_env(
+            store,
+            None,
+            &pack_root,
+            &ledger,
+            &validated,
+            Some(&kid),
+            Some(proxy_tokens.clone()),
+        )
+        .inspect_err(|_| {
+            lifecycle_stage("secret_env_blank", "error");
+        })?;
         write_public_compose_env(
             &pack_root,
             &ledger,

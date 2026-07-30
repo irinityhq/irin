@@ -235,6 +235,7 @@ fn full_compose_env_secrets_win_over_pin_defaults() {
         Path::new("/app/ledger"),
         &validated,
         None,
+        None,
     )
     .unwrap();
     // Secret env overrides the blank pin default for bootstrap.
@@ -344,13 +345,13 @@ fn arm_principals_come_from_the_keychain_and_never_the_env_file() {
 
     // No token stored: the registry string is empty, so the sidecar boots
     // with zero principals and every arm route 401s.
-    let env = build_compose_secret_env(&store, None).unwrap();
+    let env = build_compose_secret_env(&store, None, None).unwrap();
     assert_eq!(env.get("GW_ARM_PRINCIPALS").map(String::as_str), Some(""));
 
     // With a token: `<name>:<token>`, and the name is the audit label.
     let token = format!("tok_{:032x}", std::process::id());
     crate::keychain::store_arm_principal_token(&store, &token).unwrap();
-    let env = build_compose_secret_env(&store, None).unwrap();
+    let env = build_compose_secret_env(&store, None, None).unwrap();
     let registry = env.get("GW_ARM_PRINCIPALS").cloned().unwrap_or_default();
     assert_eq!(registry, format!("irin-desktop:{token}"));
     // No separator or injection byte can appear inside the value.

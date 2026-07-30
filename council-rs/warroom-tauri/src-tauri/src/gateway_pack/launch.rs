@@ -1,6 +1,8 @@
 //! Launch / resume decisions and Council child env for the shell.
 
-use super::cli_adapters::ensure_cli_adapters;
+use super::cli_adapters::{
+    ensure_cli_adapters, ensure_cli_adapters_with_tokens, ensure_proxy_tokens,
+};
 use super::enable::{
     compose_up, lifecycle_stage, port_busy_by_foreign_gateway, wait_control_plane,
 };
@@ -53,17 +55,27 @@ pub fn gateway_child_env_if_ready(
 ///
 /// This function starts nothing. When containers are stopped or Docker is
 /// still coming up, use [`resume_installed_pack`] for a bounded start+wait.
+///
+/// Loads the client key once from Keychain. When the caller already holds the
+/// key, use [`pack_auth_revalidated_with_key`] to avoid a repeated get (each
+/// get can surface a macOS Keychain authorization dialog).
 pub fn pack_auth_revalidated(store: &dyn SecretStore) -> bool {
+    match load_gw_api_key(store) {
+        Ok(Some(key)) => pack_auth_revalidated_with_key(&key),
+        _ => false,
+    }
+}
+
+/// Same proof as [`pack_auth_revalidated`] using an already-loaded client key
+/// (no Keychain re-entry for `GW_API_KEY` on this call).
+pub fn pack_auth_revalidated_with_key(key: &str) -> bool {
     if !matches!(probe_docker_daemon(), DockerDaemonState::Ready) {
         return false;
     }
     if installed_pack_root().is_none() || !desktop_project_running() || !gateway_health_ok() {
         return false;
     }
-    match load_gw_api_key(store) {
-        Ok(Some(key)) => models_authenticated(&key),
-        _ => false,
-    }
+    models_authenticated(key)
 }
 
 /// Pure resume work selection: avoid re-entering Keychain-heavy compose when
@@ -120,14 +132,21 @@ pub fn resume_installed_pack(store: &dyn SecretStore) -> Result<(), String> {
 
 fn resume_installed_pack_locked(store: &dyn SecretStore) -> Result<(), String> {
     let project_running = desktop_project_running();
-    match decide_resume_pack_action(pack_auth_revalidated(store), project_running) {
+    // One GW_API_KEY Keychain get for the whole resume flight. Prior path
+    // re-loaded the same account on revalidate, compose, and final proof —
+    // each get can surface a separate macOS authorization dialog.
+    let key_opt = load_gw_api_key(store).ok().flatten();
+    let pack_auth_ok = key_opt
+        .as_ref()
+        .is_some_and(|k| pack_auth_revalidated_with_key(k));
+    match decide_resume_pack_action(pack_auth_ok, project_running) {
         ResumePackAction::AlreadyReady => {
             // Pack is governed-ready; still ensure host adapters after app relaunch.
             let _ = ensure_cli_adapters(store);
             return Ok(());
         }
         ResumePackAction::WaitOnly => {
-            return resume_wait_only(store);
+            return resume_wait_only(store, key_opt);
         }
         ResumePackAction::FullStart => {}
     }
@@ -146,8 +165,10 @@ fn resume_installed_pack_locked(store: &dyn SecretStore) -> Result<(), String> {
     verify_images_present(&validated)?;
     let ledger = ensure_ledger_key()?;
     let _ = ensure_arm_keys_file();
-    // Resume host adapters so compose env can inject ready proxy endpoints.
-    let _ = ensure_cli_adapters(store);
+    // Single-pass Keychain for Claude/Codex: load tokens once, start adapters
+    // with those values, inject the same values into compose env (no second get).
+    let proxy_tokens = ensure_proxy_tokens(store)?;
+    let _ = ensure_cli_adapters_with_tokens(&proxy_tokens.0, &proxy_tokens.1);
     let existing_key_id = load_or_create_private_config()?.gateway_key_id;
     let env_path = write_public_compose_env(
         &pack_root,
@@ -162,7 +183,7 @@ fn resume_installed_pack_locked(store: &dyn SecretStore) -> Result<(), String> {
                 .to_string(),
         );
     }
-    let key = load_gw_api_key(store)?.ok_or_else(|| {
+    let key = key_opt.ok_or_else(|| {
         "GW_API_KEY missing from Keychain; cannot resume governed route".to_string()
     })?;
     let spawn_env = build_full_compose_env(
@@ -172,6 +193,7 @@ fn resume_installed_pack_locked(store: &dyn SecretStore) -> Result<(), String> {
         &ledger,
         &validated,
         existing_key_id.as_deref(),
+        Some(proxy_tokens),
     )?;
     lifecycle_stage("resume_compose_up", "begin");
     compose_up(&compose_file(&pack_root), &env_path, &spawn_env).inspect_err(|_| {
@@ -187,7 +209,7 @@ fn resume_installed_pack_locked(store: &dyn SecretStore) -> Result<(), String> {
         return Err("Gateway client key failed /v1/models after pack resume".to_string());
     }
     lifecycle_stage("resume_auth", "ok");
-    if !pack_auth_revalidated(store) {
+    if !pack_auth_revalidated_with_key(&key) {
         return Err("pack resume completed but revalidation still false".to_string());
     }
     Ok(())
@@ -195,7 +217,8 @@ fn resume_installed_pack_locked(store: &dyn SecretStore) -> Result<(), String> {
 
 /// Project already running: do not rebuild compose secret env / force-recreate.
 /// Ensure host adapters, wait for control plane, re-check models auth.
-fn resume_wait_only(store: &dyn SecretStore) -> Result<(), String> {
+/// `key_opt` is the GW_API_KEY already loaded for this resume flight (no re-get).
+fn resume_wait_only(store: &dyn SecretStore, key_opt: Option<String>) -> Result<(), String> {
     match probe_docker_daemon() {
         DockerDaemonState::Ready => {}
         DockerDaemonState::CliMissing => {
@@ -206,7 +229,7 @@ fn resume_wait_only(store: &dyn SecretStore) -> Result<(), String> {
         }
     }
     let _ = ensure_cli_adapters(store);
-    let key = load_gw_api_key(store)?.ok_or_else(|| {
+    let key = key_opt.ok_or_else(|| {
         "GW_API_KEY missing from Keychain; cannot resume governed route".to_string()
     })?;
     lifecycle_stage("resume_wait_only", "begin");
@@ -219,7 +242,7 @@ fn resume_wait_only(store: &dyn SecretStore) -> Result<(), String> {
         return Err("Gateway client key failed /v1/models after pack resume wait".to_string());
     }
     lifecycle_stage("resume_auth", "ok");
-    if !pack_auth_revalidated(store) {
+    if !pack_auth_revalidated_with_key(&key) {
         return Err("pack resume wait completed but revalidation still false".to_string());
     }
     Ok(())

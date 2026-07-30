@@ -133,9 +133,15 @@ pub(crate) fn build_pack_pin_env(
 }
 
 /// Build process env for compose: secrets + providers. Never written to disk.
+///
+/// `proxy_tokens`: when `Some`, use the already-loaded Claude/Codex tokens and
+/// do **not** re-enter Keychain for those accounts. Cold-launch FullStart resume
+/// loads tokens once for adapters then passes them here so each account is
+/// authorized at most once per flight (macOS can prompt on every get).
 pub(crate) fn build_compose_secret_env(
     store: &dyn SecretStore,
     bootstrap: Option<&str>,
+    proxy_tokens: Option<(String, String)>,
 ) -> Result<ComposeEnv, String> {
     let mut env = ComposeEnv::new();
     let pepper = match load_auth_pepper(store).map_err(|e| format!("keychain load pepper: {e}"))? {
@@ -211,8 +217,11 @@ pub(crate) fn build_compose_secret_env(
     // Host CLI adapters (Claude/Codex): Keychain tokens + live health only.
     // Never write these to the public env file. Unready adapters inject empty
     // URL/token so Gateway readiness stays fail-closed — never a Direct fallthrough.
-    let (claude_tok, codex_tok) = ensure_proxy_tokens(store)
-        .map_err(|e| format!("keychain proxy tokens: {e}"))?;
+    let (claude_tok, codex_tok) = match proxy_tokens {
+        Some(pair) => pair,
+        None => ensure_proxy_tokens(store)
+            .map_err(|e| format!("keychain proxy tokens: {e}"))?,
+    };
     let adapter_status = cli_adapters_current_status();
     apply_proxy_compose_env(&mut env, &adapter_status, &claude_tok, &codex_tok)?;
 
@@ -224,6 +233,9 @@ pub(crate) fn build_compose_secret_env(
 /// overlap). This is the only legitimate channel for compose-interpolated
 /// values; the docker_cli spawn path scrubs ambient copies first and forces
 /// disarmed Watch/admin surfaces last.
+///
+/// `proxy_tokens`: pass `Some` when the caller already loaded Claude/Codex
+/// tokens (single-pass resume/enable); `None` loads/mints inside.
 pub(crate) fn build_full_compose_env(
     store: &dyn SecretStore,
     bootstrap: Option<&str>,
@@ -231,6 +243,7 @@ pub(crate) fn build_full_compose_env(
     ledger: &Path,
     validated: &ValidatedManifest,
     key_id: Option<&str>,
+    proxy_tokens: Option<(String, String)>,
 ) -> Result<ComposeEnv, String> {
     let mut env = build_pack_pin_env(
         pack_root,
@@ -239,7 +252,7 @@ pub(crate) fn build_full_compose_env(
         &validated.sidecar,
         key_id,
     )?;
-    env.extend(build_compose_secret_env(store, bootstrap)?);
+    env.extend(build_compose_secret_env(store, bootstrap, proxy_tokens)?);
     Ok(env)
 }
 
