@@ -4,8 +4,11 @@
 # Image refs come from IRIN_GATEWAY_IMAGE / IRIN_SIDECAR_IMAGE (digest-pinned).
 # Pack root + ledger key paths are set only by the native allow-listed host.
 # Compose ranks process env above --env-file: every interpolated variable
-# below is forced by the native spawn env from validated sources, and
-# Watch/admin token surfaces are empty literals that accept no env input.
+# below is forced by the native spawn env from validated sources. Watch
+# producer/dispatcher and the Council-spend token stay empty literals that
+# accept no env input; the watch-admin read token is interpolated from the
+# validated native spawn env (ambient host values are scrubbed; the
+# Keychain-held value is never written to the public env file).
 
 name: irin-desktop-gateway
 
@@ -81,10 +84,11 @@ services:
       - GATEWAY_AUTH_FAIL_CLOSED=${GATEWAY_AUTH_FAIL_CLOSED:-true}
       - AUTH_PEPPER=${AUTH_PEPPER}
       - BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN:-}
-      # Watch/admin surfaces stay disarmed in the desktop pack: empty literal,
-      # never interpolated. The native spawn env force-empties it as well, so
-      # an ambient host token cannot re-arm Watch admin APIs.
-      - WATCH_ADMIN_TOKEN=
+      # Watch admin read surface: armed with a Keychain-held token interpolated
+      # from the validated native spawn env. Ambient host values are scrubbed
+      # before the spawn env is applied; the value never touches the public
+      # env file.
+      - WATCH_ADMIN_TOKEN=${WATCH_ADMIN_TOKEN:-}
       # Watch producer and dispatcher must remain disarmed in every pack path.
       - WATCH_DISPATCHER_ENABLED=false
       - WATCH_PRODUCER_ENABLED=false

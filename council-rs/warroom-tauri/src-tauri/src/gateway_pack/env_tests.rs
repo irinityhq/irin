@@ -396,6 +396,45 @@ fn arm_principals_come_from_the_keychain_and_never_the_env_file() {
     }
 }
 
+/// The watch-admin read token is minted once into the Keychain and reused on
+/// later Enable runs; it never becomes a public pin.
+#[test]
+fn watch_admin_token_minted_once_and_never_a_public_pin() {
+    let _g = test_env_lock();
+    let prev_skip = std::env::var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV").ok();
+    std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", "1");
+    let store = MemorySecretStore::default();
+
+    let first = build_compose_secret_env(&store, None, None).unwrap();
+    let minted = first.get("WATCH_ADMIN_TOKEN").cloned().unwrap_or_default();
+    assert!(crate::keychain::is_valid_watch_admin_token(&minted));
+
+    // A later Enable run reuses the Keychain item instead of rotating it.
+    let second = build_compose_secret_env(&store, None, None).unwrap();
+    assert_eq!(
+        second.get("WATCH_ADMIN_TOKEN").map(String::as_str),
+        Some(minted.as_str())
+    );
+
+    let pins = build_pack_pin_env(
+        Path::new("/app/pack"),
+        Path::new("/app/ledger"),
+        &test_image_ref("ghcr.io/irin/gateway", "e"),
+        &test_image_ref("ghcr.io/irin/sidecar", "f"),
+        None,
+    )
+    .unwrap();
+    assert!(
+        !pins.contains_key("WATCH_ADMIN_TOKEN"),
+        "the watch-admin read token is never a public pin"
+    );
+
+    match prev_skip {
+        Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", v),
+        None => std::env::remove_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV"),
+    }
+}
+
 /// Teardown never carries the arm-principal registry, and still pins the
 /// paths Compose must interpolate for `down`.
 #[test]
@@ -442,6 +481,8 @@ fn every_compose_interpolated_var_is_pinned_scrubbed_or_disarmed() {
         "NVIDIA_API_KEY",
         "AUTH_PEPPER",
         "BOOTSTRAP_TOKEN",
+        // Watch/Outbox admin read token: Keychain-held, supplied by the secret
+        // env layer and scrubbed from the ambient environment before it.
         "WATCH_ADMIN_TOKEN",
         "COUNCIL_GATEWAY_TOKEN",
         "WATCH_PRODUCER_ENABLED",

@@ -16,7 +16,9 @@ mod tailscale_cli;
 mod touch_id;
 
 use gateway_pack::{GatewayPackState, GatewayPackStatus};
-use keychain::{load_gw_api_key, migrate_legacy_secrets, KeychainSecretStore};
+use keychain::{
+    load_gw_api_key, load_watch_admin_token, migrate_legacy_secrets, KeychainSecretStore,
+};
 use status_authority::{DesktopStatusSnapshot, Freshness};
 use lifecycle::{
     classify_council_lifecycle, classify_gateway_lifecycle, classify_phone_lifecycle,
@@ -488,9 +490,22 @@ fn try_start_council_server(
                         ));
                     }
                 }
+                // Keychain-held Watch/Outbox read token for the governed
+                // child. A load failure must not fail governed deliberation —
+                // proceed without it (governance reads will 503).
+                let watch_admin_token = match load_watch_admin_token(&store) {
+                    Ok(tok) => tok,
+                    Err(_) => {
+                        eprintln!(
+                            "[council-runtime] watch admin token unavailable; governance reads will 503"
+                        );
+                        None
+                    }
+                };
                 Some(GatewayChildCredentials {
                     api_key,
                     gateway_url: docker_cli::DESKTOP_GATEWAY_URL.to_string(),
+                    watch_admin_token,
                 })
             }
             Ok(None) => {

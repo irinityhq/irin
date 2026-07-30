@@ -30,6 +30,11 @@ pub const LEGACY_KEYCHAIN_SERVICE: &str = "com.sovereign.council.warroom";
 pub const GW_API_KEY_ACCOUNT: &str = "gateway-client-gw-api-key";
 /// Account label for the long-lived auth pepper (never co-mingled with client key).
 pub const AUTH_PEPPER_ACCOUNT: &str = "gateway-pack-auth-pepper";
+/// Account label for the Watch/Outbox admin read token (`WATCH_ADMIN_TOKEN`).
+/// Held only in the Keychain and the per-spawn Compose/Council process env;
+/// never written to the public env file, never returned to the renderer,
+/// never logged.
+pub const WATCH_ADMIN_TOKEN_ACCOUNT: &str = "gateway-pack-watch-admin-token";
 /// Account label for the Touch ID bridge's arm-principal bearer token — the
 /// `GW_ARM_PRINCIPALS` custody-domain-1 credential for this installed app.
 /// Held only in the Keychain and the per-spawn Compose process env; never
@@ -539,6 +544,28 @@ pub fn delete_auth_pepper(store: &dyn SecretStore) -> Result<(), String> {
     store.delete_password(KEYCHAIN_SERVICE, AUTH_PEPPER_ACCOUNT)
 }
 
+/// Watch/Outbox admin read token: same hex shape as AUTH_PEPPER (32+ hex
+/// chars; we generate 64 hex = 32 bytes). Separate Keychain account.
+pub fn is_valid_watch_admin_token(token: &str) -> bool {
+    is_valid_auth_pepper(token)
+}
+
+pub fn store_watch_admin_token(store: &dyn SecretStore, token: &str) -> Result<(), String> {
+    let trimmed = token.trim();
+    if !is_valid_watch_admin_token(trimmed) {
+        return Err("refusing to store invalid WATCH_ADMIN_TOKEN shape".to_string());
+    }
+    store.set_password(KEYCHAIN_SERVICE, WATCH_ADMIN_TOKEN_ACCOUNT, trimmed)
+}
+
+pub fn load_watch_admin_token(store: &dyn SecretStore) -> Result<Option<String>, String> {
+    store.get_password(KEYCHAIN_SERVICE, WATCH_ADMIN_TOKEN_ACCOUNT)
+}
+
+pub fn delete_watch_admin_token(store: &dyn SecretStore) -> Result<(), String> {
+    store.delete_password(KEYCHAIN_SERVICE, WATCH_ADMIN_TOKEN_ACCOUNT)
+}
+
 /// Touch ID bridge: the arm-principal bearer token. Shape is the same
 /// `tok_` + 32 hex the sidecar's principal registry accepts as an opaque
 /// value; the strict shape check keeps a malformed/injected value (CR/LF, `:`
@@ -629,6 +656,11 @@ pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), St
     }
     if let Err(e) = delete_auth_pepper(store) {
         errors.push(format!("AUTH_PEPPER: {e}"));
+    }
+    // Uninstall removes the watch-admin read token too: a pack that no longer
+    // exists must not leave a live admin credential behind.
+    if let Err(e) = delete_watch_admin_token(store) {
+        errors.push(format!("WATCH_ADMIN_TOKEN: {e}"));
     }
     // Uninstall removes the arm-principal token too: a pack that no longer
     // exists must not leave a live custody-domain-1 credential behind.
@@ -784,6 +816,21 @@ mod tests {
         assert!(auth_pepper_present(&store).unwrap());
         delete_all_gateway_pack_secrets(&store).unwrap();
         assert!(load_auth_pepper(&store).unwrap().is_none());
+    }
+
+    #[test]
+    fn watch_admin_token_round_trip_and_delete_all() {
+        let store = MemorySecretStore::default();
+        let token = "ab".repeat(32);
+        store_watch_admin_token(&store, &token).unwrap();
+        assert_eq!(load_watch_admin_token(&store).unwrap().unwrap(), token);
+        // Separate account: pepper and client key stay empty.
+        assert!(load_auth_pepper(&store).unwrap().is_none());
+        assert!(load_gw_api_key(&store).unwrap().is_none());
+        assert!(store_watch_admin_token(&store, "short").is_err());
+        assert!(store_watch_admin_token(&store, "not-hex!!").is_err());
+        delete_all_gateway_pack_secrets(&store).unwrap();
+        assert!(load_watch_admin_token(&store).unwrap().is_none());
     }
 
     /// Store that fails delete for one account so we prove both deletes run.

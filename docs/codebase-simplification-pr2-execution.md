@@ -65,11 +65,15 @@ These are source/build facts, not installed-app acceptance.
 
 ## Known regressions under repair
 
-- War Room Outbox and Watch tabs return 503 in the installed app: the owned
-  Council child is spawned without its governance client configuration
-  (`GovernanceClient::from_env` fails, Council answers 503). These tabs worked
-  before the ownership collapse; the env handoff into the app-owned spawn must
-  be restored.
+- War Room Outbox and Watch tabs returned 503 in the installed app because the
+  owned Council child was spawned without its governance client configuration
+  (`GovernanceClient::from_env` fails, Council answers 503). The pack
+  watch-admin read surface is now re-armed: a Keychain-held `WATCH_ADMIN_TOKEN`
+  is minted at Gateway Pack Enable, admitted through the validated compose
+  secret env into the sidecar container, and re-injected into the governed
+  Council child after the gateway spawn scrub. The value is never written to
+  the public env file, and ambient host values stay scrubbed; Watch
+  producer/dispatcher and the Council-spend route remain force-disarmed.
 - `grok_build` seat unavailable: Grok Build CLI detection fingerprints
   `--version` output against a moving upstream format. Fingerprinting is being
   removed in favor of plain binary resolution (`COUNCIL_GROK_CLI_BIN` override,
@@ -81,8 +85,9 @@ These are source/build facts, not installed-app acceptance.
   installed app.
 - Grok Build seat available without version fingerprinting.
 - Bounded Keychain authorization behavior on a fresh installed build (no more
-  than the five distinct first-launch items: Gateway client key, auth pepper,
-  arm-principal token, Claude proxy token, Codex proxy token).
+  than the six distinct first-launch items: Gateway client key, auth pepper,
+  Watch admin token, arm-principal token, Claude proxy token, Codex proxy
+  token).
 - One governed Claude request and one governed Codex request from the installed
   app (explicit operator-approved acceptance; fail-closed proof that an
   unavailable proxy route never silently downgrades to Direct).

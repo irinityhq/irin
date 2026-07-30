@@ -13,7 +13,8 @@ use super::paths::{
 };
 use crate::docker_cli::{path_is_safe_argv, ComposeEnv};
 use crate::keychain::{
-    load_arm_principal_token, load_auth_pepper, store_auth_pepper, SecretStore, ARM_PRINCIPAL_NAME,
+    load_arm_principal_token, load_auth_pepper, load_watch_admin_token, store_auth_pepper,
+    store_watch_admin_token, SecretStore, ARM_PRINCIPAL_NAME,
 };
 use crate::private_config::gui_login_environment;
 use std::fs;
@@ -82,7 +83,9 @@ pub(crate) fn pack_pin_pairs(
         ("WATCH_CANARY_TENANT".into(), "canary".into()),
         ("DAILY_SPEND_CAP_USD".into(), "25".into()),
         ("WATCH_MAX_FANOUT_COST_USD".into(), "2.50".into()),
-        // Surfaces disabled — never generate WATCH_ADMIN_TOKEN / COUNCIL_GATEWAY_TOKEN.
+        // Council-spend route disabled — never generate COUNCIL_GATEWAY_TOKEN.
+        // WATCH_ADMIN_TOKEN is minted into the secret env (Keychain-held),
+        // never a public pin.
         ("BOOTSTRAP_TOKEN".into(), "".into()),
     ];
     if let Some(kid) = key_id {
@@ -154,6 +157,23 @@ pub(crate) fn build_compose_secret_env(
     };
     validate_env_value("AUTH_PEPPER", &pepper)?;
     env.insert("AUTH_PEPPER".into(), pepper);
+
+    // Watch/Outbox admin read surface: Keychain-held bearer, minted once at
+    // Enable with the same load-or-mint pattern as AUTH_PEPPER. Secret
+    // channel only — never the public env file, never the ambient parent env.
+    let watch_admin = match load_watch_admin_token(store)
+        .map_err(|e| format!("keychain load watch admin token: {e}"))?
+    {
+        Some(t) => t,
+        None => {
+            let t = random_hex(32)?;
+            store_watch_admin_token(store, &t)
+                .map_err(|e| format!("keychain store watch admin token: {e}"))?;
+            t
+        }
+    };
+    validate_env_value("WATCH_ADMIN_TOKEN", &watch_admin)?;
+    env.insert("WATCH_ADMIN_TOKEN".into(), watch_admin);
 
     if let Some(bs) = bootstrap {
         validate_env_value("BOOTSTRAP_TOKEN", bs)?;

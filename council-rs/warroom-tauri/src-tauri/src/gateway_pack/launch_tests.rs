@@ -4,9 +4,9 @@ use super::super::cli_adapters::{
 };
 use crate::keychain::{
     load_gw_api_key, store_arm_principal_token, store_auth_pepper, store_claude_proxy_token,
-    store_codex_proxy_token, store_gw_api_key, SecretStore, ARM_PRINCIPAL_TOKEN_ACCOUNT,
-    AUTH_PEPPER_ACCOUNT, CLAUDE_PROXY_TOKEN_ACCOUNT, CODEX_PROXY_TOKEN_ACCOUNT, GW_API_KEY_ACCOUNT,
-    KEYCHAIN_SERVICE,
+    store_codex_proxy_token, store_gw_api_key, store_watch_admin_token, SecretStore,
+    ARM_PRINCIPAL_TOKEN_ACCOUNT, AUTH_PEPPER_ACCOUNT, CLAUDE_PROXY_TOKEN_ACCOUNT,
+    CODEX_PROXY_TOKEN_ACCOUNT, GW_API_KEY_ACCOUNT, KEYCHAIN_SERVICE, WATCH_ADMIN_TOKEN_ACCOUNT,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -31,6 +31,7 @@ impl CountingSecretStore {
         // 64 hex chars required for proxy tokens.
         store_claude_proxy_token(&store, &format!("{:064x}", 4u128)).unwrap();
         store_codex_proxy_token(&store, &format!("{:064x}", 5u128)).unwrap();
+        store_watch_admin_token(&store, &format!("{:064x}", 6u128)).unwrap();
         // Clear set-side noise; only measure gets during the resume path under test.
         store.gets.lock().unwrap().clear();
         store
@@ -85,7 +86,7 @@ impl SecretStore for CountingSecretStore {
 
 /// Exercise the FullStart resume Keychain sequence without Docker/compose:
 /// one GW key load for the flight, one proxy-token pair load shared by
-/// adapters + compose secret env, plus pepper + arm principal.
+/// adapters + compose secret env, plus pepper + watch admin + arm principal.
 ///
 /// The pre-fix cold-launch path double-got GW + Claude + Codex (8 gets for
 /// 5 distinct accounts) and produced eight sequential authorization dialogs.
@@ -118,17 +119,18 @@ fn full_start_resume_keychain_gets_each_account_at_most_once() {
     let store = CountingSecretStore::with_seeded_pack_secrets();
     full_start_resume_keychain_sequence(&store).unwrap();
     let gets = store.get_accounts();
-    // Exactly the five expected distinct accounts, one get each.
+    // Exactly the six expected distinct accounts, one get each.
     assert_eq!(
         gets.len(),
-        5,
-        "expected 5 Keychain gets (one per account), got {gets:?}"
+        6,
+        "expected 6 Keychain gets (one per account), got {gets:?}"
     );
     for account in [
         GW_API_KEY_ACCOUNT,
         CLAUDE_PROXY_TOKEN_ACCOUNT,
         CODEX_PROXY_TOKEN_ACCOUNT,
         AUTH_PEPPER_ACCOUNT,
+        WATCH_ADMIN_TOKEN_ACCOUNT,
         ARM_PRINCIPAL_TOKEN_ACCOUNT,
     ] {
         assert_eq!(
@@ -141,7 +143,7 @@ fn full_start_resume_keychain_gets_each_account_at_most_once() {
 
 #[test]
 fn buggy_full_start_sequence_repeats_gw_and_proxy_accounts() {
-    // Regression anchor: prove the pre-fix call pattern exceeds 5 gets.
+    // Regression anchor: prove the pre-fix call pattern repeats accounts.
     let store = CountingSecretStore::with_seeded_pack_secrets();
     buggy_full_start_double_load_sequence(&store).unwrap();
     let gets = store.get_accounts();

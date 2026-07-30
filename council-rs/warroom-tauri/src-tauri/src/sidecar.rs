@@ -7,11 +7,15 @@ use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
 use std::time::{Duration, Instant};
 
-/// Optional Gateway child credentials (Keychain-sourced). Never log `api_key`.
+/// Optional Gateway child credentials (Keychain-sourced). Never log `api_key`
+/// or `watch_admin_token`.
 #[derive(Debug, Clone)]
 pub struct GatewayChildCredentials {
     pub api_key: String,
     pub gateway_url: String,
+    /// Watch/Outbox admin read token (Keychain-held). Re-injected on governed
+    /// spawns only; `None`/empty leaves governance reads 503.
+    pub watch_admin_token: Option<String>,
 }
 
 /// Gateway-related env keys that must never be inherited from the parent/login shell.
@@ -75,6 +79,15 @@ pub fn compose_sidecar_env(
                 let url = creds.gateway_url.trim();
                 if !url.is_empty() {
                     upsert_env(&mut env, "GATEWAY_URL", url);
+                }
+                if let Some(tok) = creds
+                    .watch_admin_token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    // Re-arm the Watch/Outbox read surface emptied by the scrub.
+                    upsert_env(&mut env, "WATCH_ADMIN_TOKEN", tok);
                 }
             }
         }
@@ -296,9 +309,11 @@ mod tests {
     #[test]
     fn compose_via_gateway_injects_keychain_creds_only_when_on() {
         let fake_key = format!("gw_{}", "a".repeat(32));
+        let watch_token = "cd".repeat(32);
         let creds = GatewayChildCredentials {
             api_key: fake_key.clone(),
             gateway_url: "http://127.0.0.1:18080".into(),
+            watch_admin_token: Some(watch_token.clone()),
         };
         let on = compose_sidecar_env("o", false, None, Some(true), None, Some(&creds));
         assert_eq!(env_value(&on, "COUNCIL_VIA_GATEWAY"), Some("1"));
@@ -307,12 +322,28 @@ mod tests {
             env_value(&on, "GATEWAY_URL"),
             Some("http://127.0.0.1:18080")
         );
+        // Governed spawns re-arm the Watch/Outbox read surface after the scrub.
+        assert_eq!(env_value(&on, "WATCH_ADMIN_TOKEN"), Some(watch_token.as_str()));
         let off = compose_sidecar_env("o", false, None, Some(false), None, Some(&creds));
         assert_eq!(env_value(&off, "COUNCIL_VIA_GATEWAY"), Some("0"));
         // Scrub sets empty string (not omit) so inherited parent values cannot win.
         assert_eq!(env_value(&off, "GW_API_KEY"), Some(""));
         assert_eq!(env_value(&off, "GATEWAY_URL"), Some(""));
         assert_eq!(env_value(&off, "COUNCIL_GATEWAY_TOKEN"), Some(""));
+        // Direct spawns get no watch-admin token even when creds carry one.
+        assert_eq!(env_value(&off, "WATCH_ADMIN_TOKEN"), Some(""));
+    }
+
+    #[test]
+    fn compose_via_gateway_without_watch_token_leaves_read_surface_scrubbed() {
+        let creds = GatewayChildCredentials {
+            api_key: format!("gw_{}", "b".repeat(32)),
+            gateway_url: "http://127.0.0.1:18080".into(),
+            watch_admin_token: None,
+        };
+        let on = compose_sidecar_env("o", false, None, Some(true), None, Some(&creds));
+        assert_eq!(env_value(&on, "COUNCIL_VIA_GATEWAY"), Some("1"));
+        assert_eq!(env_value(&on, "WATCH_ADMIN_TOKEN"), Some(""));
     }
 
     #[test]
