@@ -40,6 +40,8 @@ pub use paths::{
 
 pub use keys::{ensure_arm_keys_file, serialize_public_env, validate_env_value};
 
+pub(crate) use env::PACK_WATCH_CANARY_TENANT;
+
 pub use install::{install_pack_files, installed_pack_root};
 
 pub use enable::{

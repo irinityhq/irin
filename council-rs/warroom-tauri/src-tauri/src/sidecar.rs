@@ -27,6 +27,7 @@ pub const GATEWAY_SCRUB_ENV_KEYS: &[&str] = &[
     "COUNCIL_GATEWAY_TOKEN",
     "COUNCIL_GATEWAY_KEY_ID",
     "WATCH_ADMIN_TOKEN",
+    "WATCH_CANARY_TENANT",
     "BOOTSTRAP_TOKEN",
     "AUTH_PEPPER",
 ];
@@ -70,6 +71,13 @@ pub fn compose_sidecar_env(
     match via_gateway {
         Some(true) => {
             upsert_env(&mut env, "COUNCIL_VIA_GATEWAY", "1");
+            // The BFF tenant must match the desktop pack sidecar or every
+            // Watch/Outbox admin read 403s (non-secret, fixed pack contract).
+            upsert_env(
+                &mut env,
+                "WATCH_CANARY_TENANT",
+                crate::gateway_pack::PACK_WATCH_CANARY_TENANT,
+            );
             if let Some(creds) = gateway_creds {
                 let key = creds.api_key.trim();
                 if !key.is_empty() {
@@ -324,6 +332,8 @@ mod tests {
         );
         // Governed spawns re-arm the Watch/Outbox read surface after the scrub.
         assert_eq!(env_value(&on, "WATCH_ADMIN_TOKEN"), Some(watch_token.as_str()));
+        // Governed spawns pin the pack canary tenant so BFF admin reads do not 403.
+        assert_eq!(env_value(&on, "WATCH_CANARY_TENANT"), Some("canary"));
         let off = compose_sidecar_env("o", false, None, Some(false), None, Some(&creds));
         assert_eq!(env_value(&off, "COUNCIL_VIA_GATEWAY"), Some("0"));
         // Scrub sets empty string (not omit) so inherited parent values cannot win.
@@ -332,6 +342,8 @@ mod tests {
         assert_eq!(env_value(&off, "COUNCIL_GATEWAY_TOKEN"), Some(""));
         // Direct spawns get no watch-admin token even when creds carry one.
         assert_eq!(env_value(&off, "WATCH_ADMIN_TOKEN"), Some(""));
+        // Direct spawns keep no pack tenant; Council falls back to `sovereign`.
+        assert_eq!(env_value(&off, "WATCH_CANARY_TENANT"), Some(""));
     }
 
     #[test]

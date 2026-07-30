@@ -20,6 +20,11 @@ use crate::private_config::gui_login_environment;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+/// Canary tenant the desktop pack sidecar serves. The app-owned Council child
+/// must send the same tenant on governed spawns or every Watch/Outbox admin
+/// read 403s (source development keeps the `sovereign` default in Council).
+pub(crate) const PACK_WATCH_CANARY_TENANT: &str = "canary";
+
 /// Non-secret compose pins from validated sources only (manifest image refs,
 /// app-owned paths, fixed pack-contract values). Single source for both the
 /// public env file and the per-spawn forced env: Compose variable precedence
@@ -80,7 +85,10 @@ pub(crate) fn pack_pin_pairs(
         ("GATEWAY_BASE_URL".into(), "http://gateway:8080".into()),
         ("WATCH_PRODUCER_ENABLED".into(), "false".into()),
         ("WATCH_DISPATCHER_ENABLED".into(), "false".into()),
-        ("WATCH_CANARY_TENANT".into(), "canary".into()),
+        (
+            "WATCH_CANARY_TENANT".into(),
+            PACK_WATCH_CANARY_TENANT.into(),
+        ),
         ("DAILY_SPEND_CAP_USD".into(), "25".into()),
         ("WATCH_MAX_FANOUT_COST_USD".into(), "2.50".into()),
         // Council-spend route disabled — never generate COUNCIL_GATEWAY_TOKEN.
