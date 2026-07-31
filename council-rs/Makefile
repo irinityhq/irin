@@ -31,7 +31,7 @@ help:
 audit-rust:
 	@cargo audit --version >/dev/null 2>&1 || cargo install cargo-audit --locked
 	@echo "Auditing council-rs..."
-	@cargo audit -D warnings --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0221
+	@cargo audit -D warnings --ignore RUSTSEC-2024-0436
 
 .PHONY: audit-rust
 

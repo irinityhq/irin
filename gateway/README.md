@@ -5,12 +5,14 @@ accepts caller requests and communicates with the Rust sidecar over a Unix
 domain socket. The sidecar owns authentication, durable watch state, budget
 checks, the signed directive outbox, and arming controls.
 
-From the IRIN repository root, the canonical runtime starts Gateway on
-`127.0.0.1:18080`:
+From the IRIN repository root, prepare private development configuration:
 
 ```bash
 make gateway-prepare-config
 ```
+
+That command starts nothing. To start Gateway on `127.0.0.1:18080`, use the
+concrete Compose commands in the [operator quickstart](docs/operator-quickstart.md).
 
 From that same root, the isolated no-key proof is:
 

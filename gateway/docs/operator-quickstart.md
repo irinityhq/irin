@@ -5,7 +5,9 @@ For Gateway development from a checkout:
 
 ```bash
 make gateway-prepare-config
-# then start compose from gateway/ as documented in runbook.md
+docker compose -p gateway --env-file "$HOME/.config/irin/gateway.env" \
+  -f gateway/docker-compose.yml -f gateway/docker-compose.canary.yml \
+  up -d --build
 ```
 
 The default endpoint is `http://127.0.0.1:18080`. Do not bind Gateway directly
@@ -33,7 +35,8 @@ environment and are never copied into Gateway configuration.
 ```bash
 curl -fsS http://127.0.0.1:18080/health
 curl -fsS http://127.0.0.1:18080/metrics | head
-Gateway health probe / compose ps
+docker compose -p gateway --env-file "$HOME/.config/irin/gateway.env" \
+  -f gateway/docker-compose.yml -f gateway/docker-compose.canary.yml ps
 ```
 
 Gateway is fail-closed. A healthy service can still return `401` for protected
@@ -128,9 +131,12 @@ access is required and authenticated.
 From the repository root:
 
 ```bash
-Gateway health probe / compose ps
-# restart Gateway compose as needed
-# stop Gateway compose
+docker compose -p gateway --env-file "$HOME/.config/irin/gateway.env" \
+  -f gateway/docker-compose.yml -f gateway/docker-compose.canary.yml ps
+docker compose -p gateway --env-file "$HOME/.config/irin/gateway.env" \
+  -f gateway/docker-compose.yml -f gateway/docker-compose.canary.yml restart
+docker compose -p gateway --env-file "$HOME/.config/irin/gateway.env" \
+  -f gateway/docker-compose.yml -f gateway/docker-compose.canary.yml down
 make verify
 make verify-down
 ```

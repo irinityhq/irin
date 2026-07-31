@@ -90,12 +90,12 @@ for the complete contract.
    repository-and-author predicate. Do not add a required dependency on an
    operator service outside the documented CI runner contract.
 
-Fork contributors can run the build, test, lint, browser War Room, and isolated
-verification targets on macOS or Ubuntu. The managed macOS product runtime
-(`make warroom`, `make dmg-build`)
-intentionally accepts only the canonical `irinityhq/irin` origin so its source
-receipt cannot adopt an arbitrary fork. Maintainers who need a live development
-runtime use `make worktree BRANCH=...` from the canonical clone.
+Fork contributors can run the build, test, lint, foreground browser War Room,
+isolated verification, and packaging targets on their supported platforms.
+`make warroom` is the foreground source-development path, and `make dmg-build`
+builds the native product; neither is the retired managed runtime nor restricted
+to the canonical repository origin. Maintainers use `make worktree BRANCH=...`
+to isolate concurrent changes.
 
 ### Public PR language
 

@@ -53,6 +53,10 @@ pub const ADAPTER_BIND_HOST: &str = "0.0.0.0";
 const LOOPBACK_CLAUDE: &str = "http://127.0.0.1:9090";
 const LOOPBACK_CODEX: &str = "http://127.0.0.1:9091";
 const MAX_CONCURRENT_CLI: usize = 3;
+/// Bound sockets and request threads before request completion or auth. Slow
+/// clients must not turn the all-interface adapter into an unbounded thread/FD
+/// allocator.
+pub const MAX_PREAUTH_CONNECTIONS: usize = 16;
 /// Source proxy contract (`gateway/tools/proxy_limits.py`): 5-burst token bucket.
 pub const RATE_LIMIT_CAPACITY: f64 = 5.0;
 /// Source proxy contract: 10 requests per minute → tokens/sec.
@@ -482,6 +486,14 @@ struct RunningAdapter {
     join: Option<JoinHandle<()>>,
 }
 
+struct PreauthConnectionGuard(Arc<AtomicUsize>);
+
+impl Drop for PreauthConnectionGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 struct AdapterState {
     claude: Option<RunningAdapter>,
     codex: Option<RunningAdapter>,
@@ -645,16 +657,10 @@ fn ensure_one(
         stop_one(slot);
     }
 
-    // Healthy foreign or leftover listener with matching token → adopt as Ready
-    // without owning the process (we still inject env). Source runtime does this.
-    if port_open(kind.port()) {
-        if probe_adapter_ready(kind, token) {
-            return (AdapterHealth::Ready, AdapterNotReadyReason::None);
-        }
-        return (
-            AdapterHealth::NotReady,
-            AdapterNotReadyReason::PortBusyForeign,
-        );
+    // A listener not represented by our owned slot is foreign, regardless of
+    // what it returns. Never send the real proxy token to probe or adopt it.
+    if let Some(status) = occupied_port_status(kind.port()) {
+        return status;
     }
 
     match cli_preflight(kind) {
@@ -675,7 +681,7 @@ fn ensure_one(
             stop_one(slot);
             (AdapterHealth::NotReady, AdapterNotReadyReason::StartFailed)
         }
-        Err(_) => (AdapterHealth::NotReady, AdapterNotReadyReason::StartFailed),
+        Err(_) => classify_spawn_failure(kind.port()),
     }
 }
 
@@ -685,6 +691,21 @@ fn port_open(port: u16) -> bool {
         Duration::from_millis(150),
     )
     .is_ok()
+}
+
+fn occupied_port_status(port: u16) -> Option<(AdapterHealth, AdapterNotReadyReason)> {
+    port_open(port).then_some((
+        AdapterHealth::NotReady,
+        AdapterNotReadyReason::PortBusyForeign,
+    ))
+}
+
+/// Preserve the ownership rule across the check-then-bind race: if another
+/// process occupies the port after the initial check but before our bind, the
+/// failure is still a foreign-port conflict rather than a generic start error.
+fn classify_spawn_failure(port: u16) -> (AdapterHealth, AdapterNotReadyReason) {
+    occupied_port_status(port)
+        .unwrap_or((AdapterHealth::NotReady, AdapterNotReadyReason::StartFailed))
 }
 
 /// Probe GET /v1/models with X-Proxy-Auth. Deterministic, no provider spend.
@@ -790,6 +811,7 @@ fn spawn_adapter_server(kind: AdapterKind, token: &str) -> Result<RunningAdapter
     let shutdown_t = Arc::clone(&shutdown);
     let token_arc = Arc::new(token.to_string());
     let concurrent = Arc::new(AtomicUsize::new(0));
+    let preauth_connections = Arc::new(AtomicUsize::new(0));
     let rate_limiter = Arc::new(Mutex::new(IpRateLimitMap::proxy_default()));
     let join = thread::Builder::new()
         .name(format!("irin-{}-adapter", kind.service_name()))
@@ -800,6 +822,7 @@ fn spawn_adapter_server(kind: AdapterKind, token: &str) -> Result<RunningAdapter
                 token_arc,
                 shutdown_t,
                 concurrent,
+                preauth_connections,
                 rate_limiter,
             );
         })
@@ -817,6 +840,7 @@ fn accept_loop(
     token: Arc<String>,
     shutdown: Arc<AtomicBool>,
     concurrent: Arc<AtomicUsize>,
+    preauth_connections: Arc<AtomicUsize>,
     rate_limiter: Arc<Mutex<IpRateLimitMap>>,
 ) {
     // Wake periodically via short accept timeout so shutdown is observed.
@@ -827,17 +851,42 @@ fn accept_loop(
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
+                if preauth_connections
+                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
+                        (active < MAX_PREAUTH_CONNECTIONS).then_some(active + 1)
+                    })
+                    .is_err()
+                {
+                    let mut stream = stream;
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+                    let _ = write_json(
+                        &mut stream,
+                        503,
+                        &json!({"error":{"type":"busy","message":"connection limit"}}),
+                    );
+                    let _ = stream.shutdown(Shutdown::Both);
+                    continue;
+                }
                 let client_ip = peer.ip().to_string();
                 let tok = Arc::clone(&token);
                 let conc = Arc::clone(&concurrent);
                 let rl = Arc::clone(&rate_limiter);
-                let _ = thread::Builder::new()
+                let preauth = Arc::clone(&preauth_connections);
+                let spawned = thread::Builder::new()
                     .name(format!("irin-{}-req", kind.service_name()))
                     .spawn(move || {
+                        let _guard = PreauthConnectionGuard(preauth);
+                        // The listener is nonblocking for shutdown polling; on
+                        // platforms where accept inherits that flag, restore
+                        // blocking request reads under the bounded timeout.
+                        let _ = stream.set_nonblocking(false);
                         let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
                         handle_client(stream, kind, &tok, &conc, &rl, &client_ip);
                     });
+                if spawned.is_err() {
+                    preauth_connections.fetch_sub(1, Ordering::SeqCst);
+                }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));

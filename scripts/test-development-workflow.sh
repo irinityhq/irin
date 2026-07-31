@@ -16,6 +16,7 @@ scripts_to_parse=(
   scripts/remove-worktree.sh
   scripts/worktree-gc.sh
   scripts/smoke-macos-tauri-app.sh
+  scripts/test-gateway-prepare-config.sh
   scripts/with-test-ports.sh
   council-rs/scripts/warroom-browser-dev.sh
   council-rs/scripts/warroom-tauri-dev.sh
@@ -93,6 +94,15 @@ grep -Fq 'open -n -F -W' scripts/smoke-macos-tauri-app.sh
 grep -Fq 'binary_pattern="$(printf' scripts/smoke-macos-tauri-app.sh
 [[ "$(grep -Fc 'pgrep -f -x "$binary_pattern"' scripts/smoke-macos-tauri-app.sh)" == 3 ]]
 grep -Fq 'kill "$launcher_pid"' scripts/smoke-macos-tauri-app.sh
+! grep -Fq 'tell application "IRIN"' scripts/smoke-macos-tauri-app.sh
+# Packaged DMG smoke must not target IRIN by display name (wrong-app: can hit
+# /Applications/IRIN.app while proving an extracted test-apps copy).
+! grep -Fq 'tell application "IRIN"' packaging/smoke-full-app.sh
+grep -Fq 'activate_unix_pid' packaging/smoke-full-app.sh
+grep -Fq 'stop_unix_pid' packaging/smoke-full-app.sh
+grep -Fq 'stop_dest_app_hosts' packaging/smoke-full-app.sh
+grep -Fq 'Gateway local-config helper self-test' scripts/dev-check.sh
+grep -Fq 'scripts/test-gateway-prepare-config.sh' scripts/check-release-tree.sh
 
 if [[ "$(uname -s)" == Darwin ]]; then
   set +e
@@ -134,7 +144,7 @@ assert "npm run build:tauri\n          npm run test:export" not in workflow
 tauri_audit = workflow.split("      - name: Run Tauri cargo audit", 1)[1].split(
     "      - name: Run Tauri cargo deny", 1
 )[0]
-assert "--ignore RUSTSEC-2026-0221" in tauri_audit
+assert "--ignore RUSTSEC-2026-0221" not in tauri_audit
 web_job = workflow.split("  warroom-web:", 1)[1].split("\n  warroom-tauri:", 1)[0]
 assert "warroom-web-check" in web_job
 assert "warroom-check" not in web_job.replace("warroom-web-check", "")

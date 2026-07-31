@@ -42,8 +42,9 @@ make warroom
 ```
 
 Development and packaging targets are available under `make -C council-rs
-help`. The Tauri app uses the same backend and always owns its bundled Council
-process when one is healthy.
+help`. The Tauri app always attempts to start and own its bundled Council. An
+occupied Council port is reported as a conflict; the app never adopts that
+listener.
 
 ## Documentation
 

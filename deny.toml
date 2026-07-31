@@ -15,10 +15,6 @@ ignore = [
     # the native shell on macOS; Ubuntu uses War Room Web. Track until the GTK
     # stack permits glib >=0.20.
     "RUSTSEC-2024-0429",
-    # event-listener 5.4.1 unsoundness (StackSlot !Send tags). IRIN does not use
-    # the vulnerable API (no listener! macro, no Event::with_tag, no StackSlot);
-    # transitive via moka/redis. Defer to future dependency-bump PR.
-    "RUSTSEC-2026-0221",
 ]
 
 [licenses]

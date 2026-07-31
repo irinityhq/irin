@@ -280,6 +280,10 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
             lifecycle_stage("provision", "error");
         })?;
         lifecycle_stage("provision", "ok");
+        // Provisioning has stored the new client key. Fence the mutation now,
+        // before later compose/auth work can fail, so a background observation
+        // repopulated during provisioning cannot survive the credential change.
+        invalidate_auth_observation();
         // Blank bootstrap and recreate sidecar without it.
         let spawn_env_blank = build_full_compose_env(
             store,
@@ -323,6 +327,9 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         return Err("Gateway client key failed /v1/models after enable".to_string());
     }
     lifecycle_stage("models_auth", "ok");
+    // Final fence: downstream compose/auth work is also long enough for a
+    // background tick to repopulate after the immediate post-provision fence.
+    invalidate_auth_observation();
 
     let mut cfg = load_or_create_private_config()?;
     cfg.via_gateway_default = true;
@@ -557,6 +564,10 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
     // Compose is already down (best-effort above); continue removing app data
     // so a Keychain ACL failure does not leave a half-installed pack tree.
     let keychain_err = delete_all_gateway_pack_secrets(store).err();
+    // Teardown is long enough for a background tick to have observed the key
+    // before deletion. Invalidate again at the credential mutation boundary;
+    // do this even on error because cleanup may have deleted only some items.
+    invalidate_auth_observation();
     let dir = gateway_data_dir();
     if dir.is_dir() {
         fs::remove_dir_all(&dir).map_err(|e| format!("remove gateway data dir: {e}"))?;

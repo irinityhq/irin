@@ -270,7 +270,7 @@ jobs:
           "$RUNNER_TEMP/tools/cargo-deny" --version
 
       - name: Run workspace cargo audit
-        run: cargo-audit audit -D warnings --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0221
+        run: cargo-audit audit -D warnings --ignore RUSTSEC-2024-0436
 
       - name: Run workspace cargo deny
         run: cargo-deny check
@@ -308,8 +308,7 @@ jobs:
             --file council-rs/warroom-tauri/src-tauri/Cargo.lock \
             --ignore RUSTSEC-2026-0194 \
             --ignore RUSTSEC-2026-0195 \
-            --ignore RUSTSEC-2024-0429 \
-            --ignore RUSTSEC-2026-0221
+            --ignore RUSTSEC-2024-0429
 
       - name: Run Tauri cargo deny
         run: cargo-deny --manifest-path council-rs/warroom-tauri/src-tauri/Cargo.toml check --config deny.toml

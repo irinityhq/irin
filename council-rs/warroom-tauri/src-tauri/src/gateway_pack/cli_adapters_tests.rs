@@ -7,7 +7,8 @@ use serde_json::json;
 use std::io::{Cursor, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::Command;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::Duration;
 
@@ -83,6 +84,167 @@ fn spawn_adapter_server_requires_token_for_all_interfaces_bind() {
         Ok(_) => panic!("tokenless all-interfaces bind must fail closed"),
         Err(err) => assert!(err.contains("token"), "expected token refusal, got: {err}"),
     }
+}
+
+#[test]
+fn foreign_listener_is_never_adopted_or_sent_proxy_token() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let foreign = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(500)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        stream.read_to_end(&mut bytes).unwrap();
+        bytes
+    });
+
+    assert_eq!(
+        occupied_port_status(port),
+        Some((
+            AdapterHealth::NotReady,
+            AdapterNotReadyReason::PortBusyForeign
+        ))
+    );
+    assert!(
+        foreign.join().unwrap().is_empty(),
+        "ownership check must not send HTTP, token, or environment data"
+    );
+
+    let token = "aa".repeat(32);
+    let status = CliAdaptersStatus {
+        claude: AdapterHealth::NotReady,
+        codex: AdapterHealth::NotReady,
+        claude_reason: AdapterNotReadyReason::PortBusyForeign,
+        codex_reason: AdapterNotReadyReason::PortBusyForeign,
+    };
+    let env: std::collections::HashMap<_, _> = build_proxy_compose_pairs(&status, &token, &token)
+        .unwrap()
+        .into_iter()
+        .collect();
+    assert_eq!(env.get("CLAUDE_PROXY_URL").map(String::as_str), Some(""));
+    assert_eq!(env.get("CLAUDE_PROXY_TOKEN").map(String::as_str), Some(""));
+    assert_eq!(env.get("CODEX_PROXY_URL").map(String::as_str), Some(""));
+    assert_eq!(env.get("CODEX_PROXY_TOKEN").map(String::as_str), Some(""));
+}
+
+#[test]
+fn foreign_listener_is_not_recorded_as_owned_or_stopped() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let mut owned_slot = None;
+
+    assert_eq!(
+        occupied_port_status(addr.port()),
+        Some((
+            AdapterHealth::NotReady,
+            AdapterNotReadyReason::PortBusyForeign
+        ))
+    );
+    assert!(owned_slot.is_none(), "foreign listener entered owned slot");
+
+    // stop_gateway_pack and uninstall_gateway_pack both delegate adapter
+    // teardown to stop_one via stop_cli_adapters. An empty owned slot must be a
+    // no-op against the foreign listener.
+    stop_one(&mut owned_slot);
+    assert!(
+        TcpStream::connect_timeout(&addr, Duration::from_millis(200)).is_ok(),
+        "teardown primitive stopped a non-owned listener"
+    );
+}
+
+#[test]
+fn occupied_port_after_spawn_race_is_classified_as_foreign() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    assert_eq!(
+        classify_spawn_failure(listener.local_addr().unwrap().port()),
+        (
+            AdapterHealth::NotReady,
+            AdapterNotReadyReason::PortBusyForeign
+        )
+    );
+}
+
+#[test]
+fn slow_incomplete_clients_are_bounded_before_auth_threads() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_server = Arc::clone(&shutdown);
+    let preauth_connections = Arc::new(AtomicUsize::new(0));
+    let preauth_server = Arc::clone(&preauth_connections);
+    let server = thread::spawn(move || {
+        accept_loop(
+            listener,
+            AdapterKind::Claude,
+            Arc::new("bb".repeat(32)),
+            shutdown_server,
+            Arc::new(AtomicUsize::new(0)),
+            preauth_server,
+            Arc::new(Mutex::new(IpRateLimitMap::proxy_default())),
+        );
+    });
+
+    let mut slow = Vec::new();
+    for _ in 0..MAX_PREAUTH_CONNECTIONS {
+        let mut stream = TcpStream::connect(addr).unwrap();
+        stream.write_all(b"G").unwrap();
+        slow.push(stream);
+    }
+    for _ in 0..100 {
+        if preauth_connections.load(Ordering::SeqCst) == MAX_PREAUTH_CONNECTIONS {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        preauth_connections.load(Ordering::SeqCst),
+        MAX_PREAUTH_CONNECTIONS,
+        "server did not account for all slow clients"
+    );
+
+    let mut rejected = TcpStream::connect(addr).unwrap();
+    rejected
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    rejected
+        .write_all(b"GET /v1/models HTTP/1.1\r\nHost: test\r\n\r\n")
+        .unwrap();
+    let mut response = String::new();
+    rejected.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 503 "), "{response}");
+    assert!(response.contains("connection limit"), "{response}");
+
+    drop(slow);
+    for _ in 0..100 {
+        if preauth_connections.load(Ordering::SeqCst) == 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(preauth_connections.load(Ordering::SeqCst), 0);
+
+    let mut valid = TcpStream::connect(addr).unwrap();
+    valid
+        .set_read_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    valid
+        .write_all(
+            format!(
+                "GET /v1/models HTTP/1.1\r\nHost: test\r\nX-Proxy-Auth: Bearer {}\r\n\r\n",
+                "bb".repeat(32)
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    let mut response = String::new();
+    valid.read_to_string(&mut response).unwrap();
+    assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+
+    shutdown.store(true, Ordering::SeqCst);
+    let _ = TcpStream::connect(addr);
+    server.join().unwrap();
 }
 
 #[test]

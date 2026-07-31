@@ -1,7 +1,8 @@
 //! Launch / resume decisions and Council child env for the shell.
 
 use super::cli_adapters::{
-    ensure_cli_adapters, ensure_cli_adapters_with_tokens, ensure_proxy_tokens,
+    current_status as current_adapter_status, ensure_cli_adapters_with_tokens, ensure_proxy_tokens,
+    CliAdaptersStatus,
 };
 use super::enable::{
     compose_up, lifecycle_stage, port_busy_by_foreign_gateway, wait_control_plane,
@@ -27,6 +28,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 static WATCH_TOKEN_RECONCILIATION_ATTEMPTED: AtomicBool = AtomicBool::new(false);
+static ADAPTER_RECONCILE_PENDING: AtomicBool = AtomicBool::new(false);
 
 #[allow(dead_code)]
 pub fn default_secret_store() -> KeychainSecretStore {
@@ -248,8 +250,10 @@ fn resume_installed_pack_locked(
     }
     match decide_resume_pack_action(pack_auth_ok, project_running) {
         ResumePackAction::AlreadyReady if !reconcile_watch_token => {
-            // Pack is governed-ready; still ensure host adapters after app relaunch.
-            ensure_launch_adapters(store, launch_secrets);
+            // Pack is governed-ready; ensure host adapters after app relaunch.
+            // A NotReady→Ready transition also force-recreates the running
+            // containers so their proxy URL/token environment becomes current.
+            ensure_and_reconcile_launch_adapters(store, launch_secrets)?;
             return Ok(());
         }
         ResumePackAction::WaitOnly => {
@@ -352,20 +356,96 @@ fn resume_installed_pack_locked(
     Ok(())
 }
 
-fn ensure_launch_adapters(store: &dyn SecretStore, launch_secrets: Option<&LaunchSecrets>) {
-    match launch_secrets {
-        Some(secrets) => {
-            let _ =
-                ensure_cli_adapters_with_tokens(&secrets.proxy_tokens.0, &secrets.proxy_tokens.1);
-        }
-        None => {
-            let _ = ensure_cli_adapters(store);
-        }
-    }
+fn adapter_became_ready(before: CliAdaptersStatus, after: CliAdaptersStatus) -> bool {
+    (!before.claude.is_ready() && after.claude.is_ready())
+        || (!before.codex.is_ready() && after.codex.is_ready())
 }
 
-/// Project already running: do not rebuild compose secret env / force-recreate.
-/// Ensure host adapters, wait for control plane, re-check models auth.
+fn adapter_reconcile_required(
+    before: CliAdaptersStatus,
+    after: CliAdaptersStatus,
+    retry_pending: bool,
+) -> bool {
+    retry_pending || adapter_became_ready(before, after)
+}
+
+fn ensure_and_reconcile_launch_adapters(
+    store: &dyn SecretStore,
+    launch_secrets: Option<&LaunchSecrets>,
+) -> Result<(), String> {
+    let before = current_adapter_status();
+    let proxy_tokens = match launch_secrets {
+        Some(secrets) => secrets.proxy_tokens.clone(),
+        // Adapter availability is optional to the governed pack. Preserve the
+        // existing best-effort launch contract if Keychain token access fails;
+        // status refresh will project TokenMissing separately.
+        None => match ensure_proxy_tokens(store) {
+            Ok(tokens) => tokens,
+            Err(_) => return Ok(()),
+        },
+    };
+    let after = ensure_cli_adapters_with_tokens(&proxy_tokens.0, &proxy_tokens.1);
+    let became_ready = adapter_became_ready(before, after);
+    if became_ready {
+        // Set before any fallible reconciliation work. A failure leaves this
+        // sticky so a later resume retries even though adapter status is now
+        // Ready→Ready.
+        ADAPTER_RECONCILE_PENDING.store(true, Ordering::SeqCst);
+    }
+    if !adapter_reconcile_required(
+        before,
+        after,
+        ADAPTER_RECONCILE_PENDING.load(Ordering::SeqCst),
+    ) {
+        return Ok(());
+    }
+
+    let pack_root = installed_pack_root().ok_or_else(|| {
+        "Gateway Pack is not installed; cannot reconcile CLI adapters".to_string()
+    })?;
+    let validated = load_validated_manifest(&pack_root)?;
+    verify_images_present(&validated)?;
+    let ledger = ensure_ledger_key()?;
+    let existing_key_id = load_or_create_private_config()?.gateway_key_id;
+    let env_path = write_public_compose_env(
+        &pack_root,
+        &ledger,
+        &validated.gateway,
+        &validated.sidecar,
+        existing_key_id.as_deref(),
+    )?;
+    let spawn_env = match launch_secrets {
+        Some(secrets) => build_full_compose_env_with_launch_secrets(
+            None,
+            &pack_root,
+            &ledger,
+            &validated,
+            existing_key_id.as_deref(),
+            secrets,
+        )?,
+        None => build_full_compose_env(
+            store,
+            None,
+            &pack_root,
+            &ledger,
+            &validated,
+            existing_key_id.as_deref(),
+            Some(proxy_tokens),
+        )?,
+    };
+    lifecycle_stage("resume_adapter_reconcile", "begin");
+    compose_up(&compose_file(&pack_root), &env_path, &spawn_env).inspect_err(|_| {
+        lifecycle_stage("resume_adapter_reconcile", "error");
+    })?;
+    wait_control_plane()?;
+    ADAPTER_RECONCILE_PENDING.store(false, Ordering::SeqCst);
+    lifecycle_stage("resume_adapter_reconcile", "ok");
+    Ok(())
+}
+
+/// Project already running: wait rather than unconditionally rebuilding. A CLI
+/// adapter readiness transition performs one bounded env reconcile/recreate.
+/// Then wait for control plane and re-check models auth.
 /// `key_opt` is the GW_API_KEY already loaded for this resume flight (no re-get).
 fn resume_wait_only(
     store: &dyn SecretStore,
@@ -381,7 +461,7 @@ fn resume_wait_only(
             return Err("Docker daemon not ready; cannot resume Gateway Pack".to_string());
         }
     }
-    ensure_launch_adapters(store, launch_secrets);
+    ensure_and_reconcile_launch_adapters(store, launch_secrets)?;
     let key = key_opt.ok_or_else(|| {
         "GW_API_KEY missing from Keychain; cannot resume governed route".to_string()
     })?;

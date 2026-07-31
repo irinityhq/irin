@@ -128,37 +128,74 @@ is_our_packaged_listener() {
   return 1
 }
 
+# Stop one unix process by PID only. Never targets by display name (which would
+# also hit /Applications/IRIN.app when an isolated DMG copy is under test).
+stop_unix_pid() {
+  local p="${1:-}"
+  [[ -n "$p" ]] || return 0
+  kill -0 "$p" 2>/dev/null || return 0
+  kill -TERM "$p" 2>/dev/null || true
+  local i
+  for i in $(seq 1 40); do
+    if ! kill -0 "$p" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  if kill -0 "$p" 2>/dev/null; then
+    kill -KILL "$p" 2>/dev/null || true
+  fi
+}
+
+# Bring the exact packaged host window forward by unix PID (System Events).
+# Display-name "tell application \"IRIN\"" is forbidden — it can activate the
+# installed /Applications copy instead of the extracted DMG test app.
+activate_unix_pid() {
+  local p="${1:-}"
+  [[ -n "$p" ]] || return 0
+  kill -0 "$p" 2>/dev/null || return 0
+  osascript >/dev/null 2>&1 <<EOF || true
+tell application "System Events"
+  set matched to every process whose unix id is ${p}
+  if (count of matched) > 0 then
+    set frontmost of item 1 of matched to true
+  end if
+end tell
+delay 1
+EOF
+}
+
+# Stop host processes whose argv is the exact packaged test-app host binary.
+stop_dest_app_hosts() {
+  local host_bin="$DEST_APP/Contents/MacOS/council-warroom-tauri"
+  [[ -x "$host_bin" ]] || return 0
+  local pattern pid
+  pattern="$(printf '%s\n' "$host_bin" | sed 's/[][\\.^$*+?{}()|]/\\&/g')"
+  while read -r pid; do
+    [[ -n "$pid" ]] || continue
+    stop_unix_pid "$pid"
+  done < <(pgrep -f -x "$pattern" 2>/dev/null || true)
+}
+
 # Gracefully stop the packaged host and any sidecar it left behind on :8765.
 stop_packaged_host() {
-  osascript -e 'tell application "IRIN" to quit' >/dev/null 2>&1 || true
+  local p=""
   if [[ -f "$PIDFILE" ]]; then
-    local p
     p="$(cat "$PIDFILE" 2>/dev/null || true)"
-    if [[ -n "$p" ]]; then
-      kill -TERM "$p" 2>/dev/null || true
-      # Give Tauri Exit handlers time to stop the tracked sidecar.
-      local i
-      for i in $(seq 1 40); do
-        if ! kill -0 "$p" 2>/dev/null; then
-          break
-        fi
-        sleep 0.25
-      done
-      kill -KILL "$p" 2>/dev/null || true
-    fi
-    rm -f "$PIDFILE"
   fi
+  if [[ -z "$p" && -n "${HOST_PID:-}" ]]; then
+    p="$HOST_PID"
+  fi
+  # TERM the exact host PID first so Tauri Exit can reclaim the owned sidecar.
+  stop_unix_pid "$p"
+  rm -f "$PIDFILE"
   # Reclaim :8765 only if it is still held by our packaged path (never foreign).
   local i pid
   for i in $(seq 1 40); do
     pid="$(listen_pid 8765)"
     [[ -z "$pid" ]] && return 0
     if is_our_packaged_listener 8765; then
-      kill -TERM "$pid" 2>/dev/null || true
-      sleep 0.25
-      if kill -0 "$pid" 2>/dev/null; then
-        kill -KILL "$pid" 2>/dev/null || true
-      fi
+      stop_unix_pid "$pid"
     else
       # Foreign listener — do not kill.
       return 1
@@ -238,7 +275,9 @@ if [[ -n "$FOREIGN_8765" ]]; then
     die "foreign Council PID changed ($BEFORE -> $AFTER) — isolation violated"
   fi
   log "port_conflict_ok=true (foreign listener unchanged)"
-  osascript -e 'tell application "IRIN" to quit' >/dev/null 2>&1 || true
+  # Quit only hosts whose binary path is the isolated DEST_APP — never by
+  # display name, which would address /Applications/IRIN.app.
+  stop_dest_app_hosts
   sleep 1
 
   if [[ "$PROMOTION" == "1" ]]; then
@@ -481,11 +520,9 @@ WEBVIEW_HELPER="$ROOT/packaging/webview-evidence.swift"
 command -v swift >/dev/null 2>&1 || die "swift required for webview evidence"
 # Ensure the host we started is still the GUI process.
 kill -0 "$HOST_PID" 2>/dev/null || die "packaged host pid $HOST_PID not running for webview capture"
-# Best-effort activate so the window is on-screen (capture still keys off PID).
-osascript >/dev/null 2>&1 <<'APPLESCRIPT' || true
-tell application "IRIN" to activate
-delay 1
-APPLESCRIPT
+# Best-effort activate the exact packaged host PID so the window is on-screen
+# (capture still keys off PID; never activate by display name).
+activate_unix_pid "$HOST_PID"
 rm -f "$WEBVIEW_SHOT"
 # Capture + marker verify. stdout is machine-readable receipt lines only (no free OCR dump).
 if ! swift "$WEBVIEW_HELPER" capture --pid "$HOST_PID" --out "$WEBVIEW_SHOT" 2>"$ROOT/packaging/build/webview-evidence.err" \

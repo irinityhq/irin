@@ -6,16 +6,15 @@ repository.
 
 ## Start Safely
 
-On macOS, use the managed repository-root runtime:
+On macOS or Ubuntu, use the foreground source-development path:
 
 ```bash
 make warroom
-# optional Gateway: make gateway-prepare-config
+# optional Gateway config only (starts nothing): make gateway-prepare-config
 ```
 
-On Ubuntu, use `make warroom` for Council and the browser War Room. Use
-`make verify` for the isolated Sentinel-to-signed-directive proof; the managed
-Installed-app product path is macOS; `make warroom` works on macOS/Ubuntu.
+Use `make verify` for the isolated Sentinel-to-signed-directive proof. The
+installed-app product path is macOS; `make warroom` works on macOS and Ubuntu.
 
 The canonical runtime binds to loopback. Tailscale access is an optional private
 overlay controlled by the operator. Do not expose the services directly to a

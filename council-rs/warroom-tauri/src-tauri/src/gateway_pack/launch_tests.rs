@@ -278,6 +278,29 @@ fn resume_action_avoids_full_start_when_project_running() {
 }
 
 #[test]
+fn adapter_reconcile_is_bounded_to_readiness_transition_or_failed_retry() {
+    let not_ready = CliAdaptersStatus::default();
+    let mut claude_ready = not_ready;
+    claude_ready.claude = super::super::cli_adapters::AdapterHealth::Ready;
+    claude_ready.claude_reason = super::super::cli_adapters::AdapterNotReadyReason::None;
+    let mut codex_ready = not_ready;
+    codex_ready.codex = super::super::cli_adapters::AdapterHealth::Ready;
+    codex_ready.codex_reason = super::super::cli_adapters::AdapterNotReadyReason::None;
+
+    assert!(adapter_became_ready(not_ready, claude_ready));
+    assert!(adapter_became_ready(not_ready, codex_ready));
+    assert!(!adapter_became_ready(claude_ready, claude_ready));
+    assert!(!adapter_became_ready(claude_ready, not_ready));
+    assert!(!adapter_reconcile_required(
+        claude_ready,
+        claude_ready,
+        false
+    ));
+    assert!(!adapter_reconcile_required(not_ready, not_ready, false));
+    assert!(adapter_reconcile_required(claude_ready, claude_ready, true));
+}
+
+#[test]
 fn watch_token_upgrade_reconciles_once_and_requires_both_admin_surfaces() {
     assert!(governed_launch_after_watch_reconciliation(true, true));
     assert!(!governed_launch_after_watch_reconciliation(true, false));

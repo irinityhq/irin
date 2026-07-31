@@ -307,6 +307,8 @@ pub struct TouchIdInputs {
     pub enclave_key_present: bool,
     /// An app-owned enrollment record was read successfully.
     pub enrollment_record_present: bool,
+    /// The app-owned registry still hashes to the enrollment record.
+    pub local_registry_matches_enrollment: bool,
     /// The Gateway Pack is authenticated and running.
     pub gateway_ready: bool,
     /// The arm-principal bearer token is in the Keychain.
@@ -472,6 +474,14 @@ pub fn derive_status(inp: &TouchIdInputs) -> TouchIdStatus {
         let mut st = TouchIdStatus::of(
             TouchIdState::ReenrollRequired,
             Some(TouchIdReason::EnclaveKeyMissing),
+        );
+        st.can_enroll = inp.gateway_ready;
+        return st;
+    }
+    if !inp.local_registry_matches_enrollment {
+        let mut st = TouchIdStatus::of(
+            TouchIdState::ReenrollRequired,
+            Some(TouchIdReason::RegistryMismatch),
         );
         st.can_enroll = inp.gateway_ready;
         return st;
@@ -1008,6 +1018,11 @@ fn gather_inputs_with_mode(
             .map(|got| got == rec.helper_sha256)
             .unwrap_or(false);
     }
+    if let Some(rec) = record.as_ref() {
+        inp.local_registry_matches_enrollment = registry_keyset_hash(&read_registry())
+            .map(|digest| digest == rec.keyset_hash)
+            .unwrap_or(false);
+    }
 
     let (present, token) = resolve_arm_principal(store, mode);
     inp.arm_principal_present = present;
@@ -1083,17 +1098,42 @@ fn project_background_status(
         return touch_id_status_from_inputs(inputs);
     }
 
+    let mut status = touch_id_status_from_inputs(inputs.clone());
     let Some(previous) = previous else {
         // No authenticated Watch projection exists yet. Stay fail-closed, but
         // do not claim the intentionally skipped request was unreachable.
-        let mut status = touch_id_status_from_inputs(inputs);
         if status.reason == Some(TouchIdReason::WatchSurfaceUnreachable) {
             status.reason = None;
         }
         return status;
     };
 
-    let mut status = previous.clone();
+    // Local custody and Gateway inputs were gathered fresh and outrank the
+    // deferred Watch projection. Do not let a prior Ready/Armed sample hide a
+    // removed registry, changed helper, missing enclave key, or hard-down pack.
+    let local_prerequisites_hold = inputs.helper_present
+        && inputs.enrollment_record_present
+        && inputs.helper_identity_matches
+        && inputs.enclave_key_present
+        && inputs.local_registry_matches_enrollment
+        && inputs.gateway_ready
+        && inputs.arm_principal_present;
+    if !local_prerequisites_hold {
+        return status;
+    }
+
+    // Preserve only fields derived from the skipped authenticated Watch
+    // response. Local `can_enroll` and rehearsal projection remain fresh.
+    status.state = previous.state;
+    status.reason = previous.reason;
+    status.armed_exp_at_ms = previous.armed_exp_at_ms;
+    status.armed_expires_in_ms = previous.armed_expires_in_ms;
+    status.stage_expires_in_ms = previous.stage_expires_in_ms;
+    status.enrolled = previous.enrolled;
+    status.allow_real_arm = previous.allow_real_arm;
+    status.can_arm = previous.can_arm;
+    status.can_renew = previous.can_renew;
+    status.can_disarm = previous.can_disarm;
     if let Some(deadline) = status.armed_exp_at_ms {
         let remaining = deadline.saturating_sub(now_ms).max(0) as u64;
         status.armed_expires_in_ms = Some(remaining);
@@ -1541,6 +1581,7 @@ mod tests {
             helper_identity_matches: true,
             enclave_key_present: true,
             enrollment_record_present: true,
+            local_registry_matches_enrollment: true,
             gateway_ready: true,
             arm_principal_present: true,
             watch_reachable: true,
@@ -1784,6 +1825,51 @@ mod tests {
         assert_eq!(first.state, TouchIdState::Ready);
         assert_eq!(first.reason, None);
         assert_eq!(second, first);
+    }
+
+    #[test]
+    fn deferred_watch_probe_does_not_hide_fresh_enrollment_record_removal() {
+        let previous = derive_status(&enrolled_inputs());
+        let mut deferred = enrolled_inputs();
+        deferred.enrollment_record_present = false;
+        deferred.watch_reachable = false;
+        deferred.watch_probe_deferred = true;
+
+        let current = project_background_status(deferred, Some(&previous), 1_000);
+        assert_eq!(current.state, TouchIdState::ReenrollRequired);
+        assert_eq!(current.reason, Some(TouchIdReason::EnrollmentMissing));
+        assert!(!current.enrolled);
+        assert!(!current.can_arm);
+    }
+
+    #[test]
+    fn deferred_watch_probe_does_not_hide_fresh_local_registry_drift() {
+        let previous = derive_status(&enrolled_inputs());
+        let mut deferred = enrolled_inputs();
+        deferred.local_registry_matches_enrollment = false;
+        deferred.watch_reachable = false;
+        deferred.watch_probe_deferred = true;
+
+        let current = project_background_status(deferred, Some(&previous), 1_000);
+        assert_eq!(current.state, TouchIdState::ReenrollRequired);
+        assert_eq!(current.reason, Some(TouchIdReason::RegistryMismatch));
+        assert!(!current.enrolled);
+        assert!(!current.can_arm);
+    }
+
+    #[test]
+    fn deferred_watch_probe_does_not_hide_fresh_enclave_key_removal() {
+        let previous = derive_status(&enrolled_inputs());
+        let mut deferred = enrolled_inputs();
+        deferred.enclave_key_present = false;
+        deferred.watch_reachable = false;
+        deferred.watch_probe_deferred = true;
+
+        let current = project_background_status(deferred, Some(&previous), 1_000);
+        assert_eq!(current.state, TouchIdState::ReenrollRequired);
+        assert_eq!(current.reason, Some(TouchIdReason::EnclaveKeyMissing));
+        assert!(!current.enrolled);
+        assert!(!current.can_arm);
     }
 
     #[test]

@@ -90,7 +90,18 @@ async function doFetch(): Promise<DiscoverResponse> {
  * not open a second poller or timer.
  */
 export function notifyDiscoverBackendReady(): void {
-  if (inFlight) return;
+  if (inFlight) {
+    const shared = inFlight;
+    void shared.catch(() => {
+      // This readiness pulse arrived while an older request was still running.
+      // Re-drive after that shared failure settles; the boot poller will not
+      // emit another pulse merely because discovery failed.
+      if (inFlight === null && (cache === null || lastError !== null)) {
+        void doFetch().catch(() => {});
+      }
+    });
+    return;
+  }
   if (cache !== null && lastError === null) return;
   void doFetch().catch(() => {
     // Sticky error already published to listeners; manual Rescan remains.

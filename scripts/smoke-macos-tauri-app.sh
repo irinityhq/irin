@@ -93,10 +93,11 @@ stop_app_host() {
   local host_pid="${1:-}"
   local bundle_id="com.irinity.irin.smoke${IRIN_COUNCIL_PORT}"
   osascript -e "tell application id \"$bundle_id\" to quit" >/dev/null 2>&1 || true
-  osascript -e 'tell application "IRIN" to quit' >/dev/null 2>&1 || true
   if [[ -n "$host_pid" ]] && kill -0 "$host_pid" 2>/dev/null; then
-    kill -TERM "$host_pid" 2>/dev/null || true
     local i
+    # Give the application-targeted quit time to run Tauri's Exit handler
+    # before falling back to TERM. Sending TERM immediately races and can
+    # orphan the app-owned Council child.
     for i in $(seq 1 40); do
       if ! kill -0 "$host_pid" 2>/dev/null; then
         break
@@ -104,7 +105,16 @@ stop_app_host() {
       sleep 0.25
     done
     if kill -0 "$host_pid" 2>/dev/null; then
-      kill -KILL "$host_pid" 2>/dev/null || true
+      kill -TERM "$host_pid" 2>/dev/null || true
+      for i in $(seq 1 40); do
+        if ! kill -0 "$host_pid" 2>/dev/null; then
+          break
+        fi
+        sleep 0.25
+      done
+      if kill -0 "$host_pid" 2>/dev/null; then
+        kill -KILL "$host_pid" 2>/dev/null || true
+      fi
     fi
   fi
   # Give Exit handlers time to reclaim the owned sidecar after host death.

@@ -48,6 +48,7 @@ required=(
   scripts/new-worktree.sh
   scripts/remove-worktree.sh
   scripts/smoke-macos-tauri-app.sh
+  scripts/test-gateway-prepare-config.sh
   scripts/test-development-workflow.sh
   gateway/tools/prepare-local-config.sh
   council-rs/src/main.rs

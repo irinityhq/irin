@@ -86,8 +86,8 @@ test -f .next-tauri/index.html
 2. Confirm the debug sidecar serves `/api/health`, cabinets, and the
    Outbox/Librarian tabs.
 3. Release: follow the root README's product installation path.
-4. Confirm the installed app starts and owns its bundled Council (never adopts a
-   running Council with the identical build identity) and that Discover
+4. Confirm the installed app starts and owns its bundled Council (an occupied
+   port is a conflict, never an adoption path) and that Discover
    matches the browser War Room.
 
 Use `COUNCIL_WS_SMOKE_ONLY=1` on the backend for WebSocket proof without provider spend:
@@ -97,7 +97,7 @@ COUNCIL_WS_SMOKE_ONLY=1 COUNCIL_DEV_NO_AUTH=1 ./target/release/council --serve -
 ```
 
 **Auth:** Debug desktop builds set `COUNCIL_DEV_NO_AUTH=1` only on their debug
-sidecar. Release bundles do not own Council auth. If an external Council has
-an operator-configured `COUNCIL_AUTH_TOKEN`, set the same operator-managed value
-in War Room Settings; the app sends it only to the loopback Council and does not
+sidecar. Release bundles own their bundled Council. If that child is configured
+with an operator-managed `COUNCIL_AUTH_TOKEN`, enter the same value in War Room
+Settings; the app sends it only to the app-owned loopback child and does not
 print it.

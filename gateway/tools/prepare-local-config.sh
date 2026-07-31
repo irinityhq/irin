@@ -59,19 +59,21 @@ else
   printf 'Keeping existing %s\n' "$GATEWAY_ENV"
 fi
 
-for proxy_key in WATCH_ADMIN_TOKEN CLAUDE_PROXY_TOKEN CODEX_PROXY_TOKEN; do
-  proxy_value="$(sed -n "s/^${proxy_key}=//p" "$GATEWAY_ENV" | sed -n '1p')"
-  if [[ -z "$proxy_value" || "$proxy_value" == __GENERATED_*__ ]]; then
-    proxy_secret="$(openssl rand -hex 32)"
-    proxy_tmp="$(mktemp "$(dirname "$GATEWAY_ENV")/.gateway.env.XXXXXX")"
-    awk -v key="$proxy_key" -v value="$proxy_secret" '
+for managed_key in \
+  AUTH_PEPPER BOOTSTRAP_TOKEN WATCH_ADMIN_TOKEN COUNCIL_GATEWAY_TOKEN \
+  CLAUDE_PROXY_TOKEN CODEX_PROXY_TOKEN; do
+  managed_value="$(sed -n "s/^${managed_key}=//p" "$GATEWAY_ENV" | sed -n '1p')"
+  if [[ -z "$managed_value" || "$managed_value" == __GENERATED_*__ ]]; then
+    managed_secret="$(openssl rand -hex 32)"
+    managed_tmp="$(mktemp "$(dirname "$GATEWAY_ENV")/.gateway.env.XXXXXX")"
+    awk -v key="$managed_key" -v value="$managed_secret" '
       BEGIN { written = 0 }
       $0 ~ "^" key "=" { if (!written) print key "=" value; written = 1; next }
       { print }
       END { if (!written) print key "=" value }
-    ' "$GATEWAY_ENV" > "$proxy_tmp"
-    chmod 600 "$proxy_tmp"
-    mv "$proxy_tmp" "$GATEWAY_ENV"
+    ' "$GATEWAY_ENV" > "$managed_tmp"
+    chmod 600 "$managed_tmp"
+    mv "$managed_tmp" "$GATEWAY_ENV"
   fi
 done
 

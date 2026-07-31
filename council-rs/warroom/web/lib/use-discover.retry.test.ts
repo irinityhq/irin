@@ -278,6 +278,39 @@ describe("notifyDiscoverBackendReady (boot-health ownership)", () => {
     expect(__getDiscoverSnapshotForTests().error).toBeNull();
   });
 
+  it("re-drives when readiness arrives during an in-flight request that fails", async () => {
+    let calls = 0;
+    let rejectFirst!: (reason: Error) => void;
+    const first = new Promise<DiscoverResponse>((_resolve, reject) => {
+      rejectFirst = reject;
+    });
+
+    __resetDiscoverForTests({
+      fetchOnce: async () => {
+        calls += 1;
+        if (calls === 1) return first;
+        return okPayload("ready-after-shared-failure");
+      },
+      retry: { sleep: async () => {}, maxAttempts: 1 },
+    });
+
+    const load = __loadDiscoverForTests();
+    notifyDiscoverBackendReady();
+    expect(calls).toBe(1);
+    rejectFirst(new TypeError("Load failed"));
+    await expect(load).rejects.toThrow(/Load failed/);
+
+    await vi.waitFor(() => {
+      const snapshot = __getDiscoverSnapshotForTests();
+      expect(snapshot.loading).toBe(false);
+      expect(snapshot.error).toBeNull();
+      expect(snapshot.data?.providers[0]?.name).toBe(
+        "ready-after-shared-failure",
+      );
+    });
+    expect(calls).toBe(2);
+  });
+
   it("recovers after a later readiness signal when a prior readiness re-drive failed", async () => {
     const sleep = vi.fn(async () => {});
     let calls = 0;

@@ -4,6 +4,8 @@
 use crate::provider::agy_route;
 use crate::provider::grok_route;
 use crate::types::{ProviderProvenance, ProviderResponse};
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -25,7 +27,7 @@ fn probe_grok_cli_binary() -> Option<std::path::PathBuf> {
     // Explicit override for operators / launchd with odd PATHs.
     if let Ok(raw) = std::env::var("COUNCIL_GROK_CLI_BIN") {
         let path = std::path::PathBuf::from(raw.trim());
-        if path.is_file() {
+        if is_executable_file(&path) {
             return Some(path);
         }
     }
@@ -52,11 +54,28 @@ fn probe_grok_cli_binary() -> Option<std::path::PathBuf> {
         if !seen.insert(cand.clone()) {
             continue;
         }
-        if cand.is_file() {
+        if is_executable_file(&cand) {
             return Some(cand);
         }
     }
     None
+}
+
+fn is_executable_file(path: &std::path::Path) -> bool {
+    let Ok(metadata) = path.metadata() else {
+        return false;
+    };
+    if !metadata.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
 }
 
 /// Absolute path to the Grok CLI if a `grok` binary is found.
@@ -704,6 +723,20 @@ mod tests {
     #[test]
     fn grok_cli_serialize_defaults_on() {
         assert!(super::grok_cli_serialize());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn grok_candidate_must_have_an_executable_mode_bit() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o600)).unwrap();
+        assert!(!is_executable_file(file.path()));
+        std::fs::set_permissions(file.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(is_executable_file(file.path()));
+        assert!(
+            !is_executable_file(file.path().parent().unwrap()),
+            "an executable/searchable directory is not a CLI binary"
+        );
     }
 
     #[test]

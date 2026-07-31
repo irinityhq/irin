@@ -148,6 +148,10 @@ run() {
   [[ "$dry_run" == "1" ]] || "$@"
 }
 
+if [[ -x scripts/test-gateway-prepare-config.sh ]]; then
+  run "Gateway local-config helper self-test" scripts/test-gateway-prepare-config.sh
+fi
+
 any_rust=false
 rust_packages=()
 if [[ "$(lane gateway_rust)" == true ]]; then
@@ -230,7 +234,7 @@ if [[ "$(lane workspace_supply_chain)" == true || "$(lane tauri_supply_chain)" =
 fi
 
 if [[ "$(lane workspace_supply_chain)" == true ]]; then
-  run "Workspace dependency audit" cargo audit -D warnings --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0221
+  run "Workspace dependency audit" cargo audit -D warnings --ignore RUSTSEC-2024-0436
   run "Workspace dependency policy" "$deny_bin" check
 fi
 if [[ "$(lane tauri_supply_chain)" == true ]]; then
@@ -238,8 +242,7 @@ if [[ "$(lane tauri_supply_chain)" == true ]]; then
     --file council-rs/warroom-tauri/src-tauri/Cargo.lock \
     --ignore RUSTSEC-2026-0194 \
     --ignore RUSTSEC-2026-0195 \
-    --ignore RUSTSEC-2024-0429 \
-    --ignore RUSTSEC-2026-0221
+    --ignore RUSTSEC-2024-0429
   run "Tauri dependency policy" "$deny_bin" --manifest-path council-rs/warroom-tauri/src-tauri/Cargo.toml check --config deny.toml
 fi
 

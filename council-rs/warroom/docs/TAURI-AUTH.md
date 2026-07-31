@@ -7,10 +7,9 @@ How the desktop shell and browser reference UI authenticate against
 
 ### Release (Tauri production build)
 
-1. Installed IRIN.app (the DMG product) normally starts and owns its bundled
-   Council; a source checkout is not required. If a Council with the identical
-   port is already occupied, the app reports a conflict and does not adopt
-   instead of spawning the bundled one.
+1. Installed IRIN.app (the DMG product) starts and owns its bundled Council; a
+   source checkout is not required. If the configured Council port is already
+   occupied, the app reports a conflict and does not adopt the listener.
 2. The default private template leaves `COUNCIL_AUTH_TOKEN` empty for the
    loopback-only single-operator runtime. If the operator explicitly configured
    a bearer token, set the same operator-managed value in **Settings → Auth

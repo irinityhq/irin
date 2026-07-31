@@ -13,14 +13,12 @@ Docker images from source.
 
 ## Prerequisites
 
-On macOS, Gateway Pack enable and `make gateway-prepare-config` check for missing Docker
-Desktop (running, not just installed), Rust (`cargo`, `rustc`), Node.js 20
-or newer (`node`, `npm`), Git, `make`, `curl`, `jq`, OpenSSL, and the macOS
-`lockf`/`launchctl` commands. Tailscale is optional and only checked if you
-want private phone access. Fix the first reported missing command and rerun
-`make gateway-prepare-config` — it is safe to rerun. It preserves valid operator-owned values
-and signing material while filling or migrating missing, placeholder, or
-rejected IRIN-managed fields.
+On macOS, `make gateway-prepare-config` requires OpenSSL and prepares only the
+private Gateway environment and ledger key; it does not check Docker, Rust,
+Node.js, Git, `jq`, `lockf`, or `launchctl`, and it starts no services. It is
+safe to rerun: valid operator-owned values and signing material are preserved
+while missing or placeholder IRIN-managed fields are filled. Gateway Pack
+enable separately requires Docker Desktop to be running.
 
 On Ubuntu, install Rust, Node.js 20 or newer, Git, `make`, `curl`, and `lsof`,
 then use `make warroom`. Docker Engine plus the Compose and Buildx plugins are

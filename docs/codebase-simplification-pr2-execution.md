@@ -1,6 +1,6 @@
 # PR 2 Execution Record — Collapse Runtime Ownership into the DMG
 
-Status: consolidated checkpoint; installed-app acceptance pending
+Status: installed-app acceptance completed; PR review recovery in progress
 
 Branch: `codex/collapse-runtime-ownership-v2`
 
@@ -54,20 +54,23 @@ Council source paths.
 - Keychain proxy tokens are read once per enable flight and threaded through,
   so a cold launch does not stack per-account authorization dialogs.
 
-## Verified at this checkpoint
+## Verified installed acceptance before review recovery
 
-- Tauri library tests: 274 passed, 0 failed on the exact auth-observation-cache
-  working tree on 2026-07-30. The run exposed one test-only helper as dead code
-  in production; it is now gated to test builds and must be rechecked by the
-  final Clippy/ship gate.
-- `git diff --check`: clean before this execution-record refresh; re-check with
-  the final exact-tree gates below.
-- Fresh DMG build completed on 2026-07-29 (pre-consolidation); a fresh exact-tree
-  build and verification remain required.
+- Exact installed-app Watch and Outbox projections returned HTTP 200 after the
+  governed child received its private watch-admin configuration.
+- Grok Build resolved as an available local executable without a provider call.
+- The six first-launch Keychain accounts were observed with no repeated prompts
+  across subsequent status ticks.
+- One governed Claude request and one governed Codex request completed with
+  persisted Gateway provenance; an unavailable adapter route failed closed
+  without a Direct fallback.
+- A fresh exact-tree DMG build/verification and `make ship-check` completed on
+  2026-07-31 before the current review recovery began.
 
-These are source/build facts, not installed-app acceptance.
+Those results closed installed acceptance for the pre-review tree. They do not
+cover the uncommitted recovery changes now required by PR review.
 
-## Known regressions under repair
+## Installed regressions resolved
 
 - War Room Outbox and Watch tabs returned 503 in the installed app because the
   owned Council child was spawned without its governance client configuration
@@ -78,10 +81,8 @@ These are source/build facts, not installed-app acceptance.
   Council child after the gateway spawn scrub. The value is never written to
   the public env file, and ambient host values stay scrubbed; Watch
   producer/dispatcher and the Council-spend route remain force-disarmed.
-- `grok_build` seat unavailable: Grok Build CLI detection fingerprints
-  `--version` output against a moving upstream format. Fingerprinting is being
-  removed in favor of plain binary resolution (`COUNCIL_GROK_CLI_BIN` override,
-  then PATH).
+- `grok_build` seat availability now uses executable binary resolution without
+  a moving `--version` fingerprint (`COUNCIL_GROK_CLI_BIN` override, then PATH).
 
 ## Auth-observation cache (status-loop Keychain bounding)
 
@@ -134,26 +135,21 @@ path ignores a warm cached-true observation, background reads stay constant
 across 20 calls until explicit invalidation, a stale generation cannot
 repopulate the observation after invalidation, and absent or unreadable
 Keychain authority samples both fail closed despite a warm cached-true
-observation. Crate tests are source proof; the installed-app prompt observation
-(≤6 distinct, no repeats over several ticks) remains the acceptance gate.
+observation. Crate tests remain the source proof; the installed-app observation
+of six distinct accounts with no repeats closed the acceptance gate above.
 
-## Completion still required
+## Review recovery verification
 
-- Restored governance env handoff; Outbox/Watch tabs live again in the
-  installed app.
-- Grok Build seat available without version fingerprinting.
-- Bounded Keychain authorization behavior on a fresh installed build (no more
-  than the six distinct first-launch items: Gateway client key, auth pepper,
-  Watch admin token, arm-principal token, Claude proxy token, Codex proxy
-  token). **Source-complete** (see Auth-observation cache above); closing the
-  checkbox still requires the installed-app observation.
-- One governed Claude request and one governed Codex request from the installed
-  app (explicit operator-approved acceptance; fail-closed proof that an
-  unavailable proxy route never silently downgrades to Direct).
-- Tauri, War Room, Gateway Pack, native/packaged smoke, DMG verification, and
-  one final `make ship-check` on the exact final tree.
-- Review, commit, push, and PR publication as separate operator-controlled
-  seams.
+- Every inline review finding has a code, regression-test, or exact
+  documentation disposition, including foreign-listener ownership and bounded
+  pre-auth admission.
+- The `event-listener` advisory is removed from all applicable lockfiles and
+  local audit parity passes without its former suppression.
+- The full local `make check` matrix and an independent blocking-only review
+  pass after the recovery changes. The current ship receipt remains the final
+  merge-readiness authority.
+- The resulting diff remains uncommitted for operator review. This recovery
+  record does not authorize commit, push, PR replies, or merge.
 
 ## Stop conditions
 
