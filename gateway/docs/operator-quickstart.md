@@ -118,13 +118,14 @@ make -C gateway smoke-phase3
 ## CLI Provider Proxies
 
 Gateway includes optional host-side proxies for authenticated Claude, Codex,
-and Gemini CLIs under `tools/`. The canonical IRIN runtime automatically starts
-the Claude and Codex proxies when their CLIs are present. They bind all host
-interfaces so Docker Desktop can reach them, and refuse that bind unless setup's
-distinct shared proxy token is available. Do not forward these ports or expose
-them outside a trusted private host/network boundary. Standalone operators who
-launch a proxy manually should keep its default loopback bind unless container
-access is required and authenticated.
+and Gemini CLIs under `tools/`. The installed app owns Claude and Codex adapter
+lifecycle when Gateway Pack is enabled; development Compose does not start those
+adapters automatically. Adapter listeners bind all host interfaces so Docker
+Desktop can reach them, and refuse that bind unless a distinct shared proxy
+token is available. Do not forward these ports or expose them outside a trusted
+private host/network boundary. Standalone operators who launch a proxy manually
+should keep its default loopback bind unless container access is required and
+authenticated.
 
 ## Day-2 Commands
 

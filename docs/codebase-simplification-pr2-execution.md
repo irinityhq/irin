@@ -1,6 +1,6 @@
 # PR 2 Execution Record — Collapse Runtime Ownership into the DMG
 
-Status: installed-app acceptance completed; PR review recovery in progress
+Status: completed — installed-app acceptance and PR review recovery landed on tip
 
 Branch: `codex/collapse-runtime-ownership-v2`
 
@@ -54,7 +54,7 @@ Council source paths.
 - Keychain proxy tokens are read once per enable flight and threaded through,
   so a cold launch does not stack per-account authorization dialogs.
 
-## Verified installed acceptance before review recovery
+## Verified installed acceptance
 
 - Exact installed-app Watch and Outbox projections returned HTTP 200 after the
   governed child received its private watch-admin configuration.
@@ -65,10 +65,12 @@ Council source paths.
   persisted Gateway provenance; an unavailable adapter route failed closed
   without a Direct fallback.
 - A fresh exact-tree DMG build/verification and `make ship-check` completed on
-  2026-07-31 before the current review recovery began.
+  2026-07-31.
 
-Those results closed installed acceptance for the pre-review tree. They do not
-cover the uncommitted recovery changes now required by PR review.
+Those results closed installed acceptance. Review recovery for foreign-listener
+ownership, bounded pre-auth admission, discovery continuity, auth-observation
+fences, prepare-config coverage, and documentation landed in `f2ad8e8` and
+`55cef34`.
 
 ## Installed regressions resolved
 
@@ -146,10 +148,11 @@ of six distinct accounts with no repeats closed the acceptance gate above.
 - The `event-listener` advisory is removed from all applicable lockfiles and
   local audit parity passes without its former suppression.
 - The full local `make check` matrix and an independent blocking-only review
-  pass after the recovery changes. The current ship receipt remains the final
-  merge-readiness authority.
-- The resulting diff remains uncommitted for operator review. This recovery
-  record does not authorize commit, push, PR replies, or merge.
+  pass after the recovery changes. Ship receipts remain the verification
+  authority for the pre-merge tree (`ship-20260731T092753-0500.txt`,
+  `ship-20260731T113024-0500.txt`).
+- Recovery commits on tip: `f2ad8e8` (adapters, docs, prepare-config coverage,
+  discovery, Touch ID projection) and `55cef34` (per-IP pre-auth admission).
 
 ## Stop conditions
 
