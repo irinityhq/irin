@@ -520,9 +520,7 @@ pub fn current_status() -> CliAdaptersStatus {
 /// per account — each get can surface a macOS authorization dialog.
 pub fn ensure_cli_adapters(store: &dyn SecretStore) -> CliAdaptersStatus {
     match ensure_proxy_tokens(store) {
-        Ok((claude_tok, codex_tok)) => {
-            ensure_cli_adapters_with_tokens(&claude_tok, &codex_tok)
-        }
+        Ok((claude_tok, codex_tok)) => ensure_cli_adapters_with_tokens(&claude_tok, &codex_tok),
         Err(_) => {
             let status = CliAdaptersStatus {
                 claude: AdapterHealth::NotReady,
@@ -540,10 +538,7 @@ pub fn ensure_cli_adapters(store: &dyn SecretStore) -> CliAdaptersStatus {
 
 /// Same as [`ensure_cli_adapters`] but uses already-loaded proxy tokens so the
 /// Keychain is not re-entered for Claude/Codex accounts on this call.
-pub fn ensure_cli_adapters_with_tokens(
-    claude_tok: &str,
-    codex_tok: &str,
-) -> CliAdaptersStatus {
+pub fn ensure_cli_adapters_with_tokens(claude_tok: &str, codex_tok: &str) -> CliAdaptersStatus {
     let mut status = CliAdaptersStatus::default();
     {
         let mut g = match adapter_state().lock() {
@@ -557,8 +552,7 @@ pub fn ensure_cli_adapters_with_tokens(
         // Drop dead children before re-evaluating.
         reap_dead(&mut g);
 
-        let (c_health, c_reason) =
-            ensure_one(&mut g.claude, AdapterKind::Claude, claude_tok);
+        let (c_health, c_reason) = ensure_one(&mut g.claude, AdapterKind::Claude, claude_tok);
         status.claude = c_health;
         status.claude_reason = c_reason;
 
@@ -873,10 +867,7 @@ fn handle_client(
         }
     };
 
-    let auth_ok = check_proxy_auth(
-        token,
-        req.headers.get("x-proxy-auth").map(String::as_str),
-    );
+    let auth_ok = check_proxy_auth(token, req.headers.get("x-proxy-auth").map(String::as_str));
 
     match (req.method.as_str(), req.path.as_str()) {
         ("GET", "/health") => {
@@ -953,9 +944,7 @@ fn handle_client(
                 }
             };
             concurrent.fetch_sub(1, Ordering::SeqCst);
-            let code = if result
-                .pointer("/error/type")
-                .and_then(|t| t.as_str())
+            let code = if result.pointer("/error/type").and_then(|t| t.as_str())
                 == Some("invalid_request_error")
             {
                 400
@@ -1062,9 +1051,7 @@ pub fn read_complete_http_request<R: Read>(
     let len_str = headers
         .get("content-length")
         .ok_or(RequestReadError::MissingContentLength)?;
-    let content_len: usize = len_str
-        .parse()
-        .map_err(|_| RequestReadError::Malformed)?;
+    let content_len: usize = len_str.parse().map_err(|_| RequestReadError::Malformed)?;
     if content_len > MAX_REQUEST_BODY_BYTES {
         return Err(RequestReadError::BodyTooLarge);
     }
@@ -1182,10 +1169,7 @@ fn dispatch_chat(kind: AdapterKind, body: &Value) -> Value {
 
 /// Extract prompt/system/model from OpenAI or Anthropic-shaped bodies.
 pub fn extract_claude_prompt(body: &Value) -> (String, Option<String>, Option<&'static str>) {
-    let model_str = body
-        .get("model")
-        .and_then(|m| m.as_str())
-        .unwrap_or("opus");
+    let model_str = body.get("model").and_then(|m| m.as_str()).unwrap_or("opus");
     let model = resolve_claude_model(model_str);
 
     let mut system = String::new();

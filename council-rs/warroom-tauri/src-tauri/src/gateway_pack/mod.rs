@@ -25,12 +25,13 @@ mod types;
 
 pub use types::{GatewayPackState, GatewayPackStatus, SUPPORT_MATRIX_SUMMARY};
 
+pub(crate) use status::seed_auth_observation_from_preloaded_key;
 #[cfg(test)]
 pub use status::status_cache_generation_for_test;
 pub use status::{
     bump_pack_lifecycle_generation, gateway_pack_status, gateway_pack_status_fresh,
-    invalidate_status_cache, owned_council_route, pack_lifecycle_generation,
-    record_owned_council_route,
+    gateway_pack_status_fresh_with_key, invalidate_auth_observation, invalidate_status_cache,
+    owned_council_route, pack_lifecycle_generation, record_owned_council_route,
 };
 
 pub use paths::{
@@ -41,6 +42,7 @@ pub use paths::{
 pub use keys::{ensure_arm_keys_file, serialize_public_env, validate_env_value};
 
 pub(crate) use env::PACK_WATCH_CANARY_TENANT;
+pub use env::{load_launch_secrets, LaunchSecrets};
 
 pub use install::{install_pack_files, installed_pack_root};
 
@@ -55,9 +57,10 @@ pub use launch::{
     frontend_may_start_council, LaunchResumeOutcome,
 };
 pub use launch::{
-    default_secret_store, gateway_child_env_if_ready, may_promote_to_governed,
-    pack_auth_revalidated, promote_may_call_resume, resume_installed_pack,
-    status_with_council_route, GatewayChildEnv,
+    default_secret_store, gateway_child_env_if_ready, governed_launch_after_watch_reconciliation,
+    may_promote_to_governed, pack_auth_revalidated, pack_auth_revalidated_with_key,
+    promote_may_call_resume, resume_installed_pack, resume_installed_pack_with_key,
+    status_with_council_route, watch_admin_surfaces_authenticated, GatewayChildEnv,
 };
 
 #[cfg(test)]

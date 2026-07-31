@@ -153,15 +153,16 @@ pub fn recompute(app: &AppHandle, freshness: Freshness) -> DesktopStatusSnapshot
     // Single-flight for Background: if another gather is in progress, wait for
     // it and return the committed sample (or re-run if marked dirty).
     // Action always waits for exclusive access, then gathers fresh.
-    let mut guard = auth
-        .state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut guard = auth.state.lock().unwrap_or_else(|e| e.into_inner());
     while guard.computing {
         guard = auth.cv.wait(guard).unwrap_or_else(|e| e.into_inner());
     }
     guard.computing = true;
     guard.dirty = false;
+    let previous_touch_id = guard
+        .last
+        .as_ref()
+        .map(|snapshot| snapshot.touch_id.clone());
     drop(guard);
 
     // --- gather (serialized by computing flag + re-lock at commit) ---
@@ -173,19 +174,18 @@ pub fn recompute(app: &AppHandle, freshness: Freshness) -> DesktopStatusSnapshot
         Freshness::Background => project_gateway_ready(pack.governed_ready, pack.hard_down),
         Freshness::Action => pack.governed_ready,
     };
-    let touch_id = touch_id::touch_id_status(&store, gateway_ready);
+    let touch_id = match freshness {
+        Freshness::Background => {
+            touch_id::touch_id_status_background(&store, gateway_ready, previous_touch_id.as_ref())
+        }
+        Freshness::Action => touch_id::touch_id_status(&store, gateway_ready),
+    };
     let council_ready = council_backend_ready_for_status(app);
-    let phone = phone_access::phone_access_status(
-        &LiveTailscaleRunner,
-        pack.enabled,
-        council_ready,
-    );
+    let phone =
+        phone_access::phone_access_status(&LiveTailscaleRunner, pack.enabled, council_ready);
 
     // --- commit under lock ---
-    let mut guard = auth
-        .state
-        .lock()
-        .unwrap_or_else(|e| e.into_inner());
+    let mut guard = auth.state.lock().unwrap_or_else(|e| e.into_inner());
     guard.seq = guard.seq.saturating_add(1);
     let snap = DesktopStatusSnapshot {
         authority_epoch: auth.epoch.clone(),
@@ -454,7 +454,10 @@ mod tests {
         };
         let mut b = a.clone();
         b.seq = 99;
-        assert!(a.content_eq(&b), "seq alone must not count as content change");
+        assert!(
+            a.content_eq(&b),
+            "seq alone must not count as content change"
+        );
         b.touch_id.state = TouchIdState::Armed;
         assert!(!a.content_eq(&b));
         a.touch_id.reason = Some(TouchIdReason::LeaseExpired);

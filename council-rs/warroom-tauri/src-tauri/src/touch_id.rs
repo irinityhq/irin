@@ -35,8 +35,8 @@ use crate::docker_cli::{run_command_timeout, DESKTOP_GATEWAY_URL};
 use crate::gateway_pack::ARM_KEYS_CONTAINER_PATH;
 use crate::gateway_pack::{arm_keys_path, gateway_data_dir};
 use crate::keychain::{
-    is_valid_arm_principal_token, load_arm_principal_token, store_arm_principal_token, SecretStore,
-    ARM_PRINCIPAL_NAME,
+    is_valid_arm_principal_token, load_arm_principal_token, resolve_arm_principal,
+    store_arm_principal_token, ArmPrincipalProbeMode, SecretStore, ARM_PRINCIPAL_NAME,
 };
 use crate::paths::executable_dir;
 
@@ -313,6 +313,10 @@ pub struct TouchIdInputs {
     pub arm_principal_present: bool,
     /// The sidecar answered the status route.
     pub watch_reachable: bool,
+    /// A background tick intentionally skipped the Watch request because the
+    /// lifecycle presence cache held no bearer. This is not a reachability
+    /// failure; status authority may retain its last authenticated projection.
+    pub watch_probe_deferred: bool,
     /// The sidecar loaded a usable enrollment registry.
     pub registry_loaded: bool,
     /// The sidecar's keyset digest equals the digest of OUR registry file.
@@ -964,8 +968,30 @@ fn read_registry() -> Vec<CredentialRecord> {
 }
 
 /// Gather every input the state machine needs. All IO lives here; the decision
-/// itself is [`derive_status`].
+/// itself is [`derive_status`]. Authority callers load the bearer live; the
+/// background loop uses a lifecycle-scoped presence observation.
 pub fn gather_inputs(store: &dyn SecretStore, gateway_ready: bool) -> TouchIdInputs {
+    let held = load_arm_principal_token(store).ok().flatten();
+    gather_inputs_with_mode(
+        store,
+        gateway_ready,
+        ArmPrincipalProbeMode::AuthorityLive(held.as_deref()),
+    )
+}
+
+pub fn gather_inputs_background(store: &dyn SecretStore, gateway_ready: bool) -> TouchIdInputs {
+    gather_inputs_with_mode(
+        store,
+        gateway_ready,
+        ArmPrincipalProbeMode::BackgroundCached,
+    )
+}
+
+fn gather_inputs_with_mode(
+    store: &dyn SecretStore,
+    gateway_ready: bool,
+    mode: ArmPrincipalProbeMode<'_>,
+) -> TouchIdInputs {
     let mut inp = TouchIdInputs {
         gateway_ready,
         ..Default::default()
@@ -983,8 +1009,9 @@ pub fn gather_inputs(store: &dyn SecretStore, gateway_ready: bool) -> TouchIdInp
             .unwrap_or(false);
     }
 
-    let token = load_arm_principal_token(store).ok().flatten();
-    inp.arm_principal_present = token.is_some();
+    let (present, token) = resolve_arm_principal(store, mode);
+    inp.arm_principal_present = present;
+    inp.watch_probe_deferred = present && token.is_none() && gateway_ready;
 
     // The Watch surface is only probed once the local prerequisites hold: a
     // status poll must not fire an HTTP request on every render while Gateway
@@ -1028,7 +1055,61 @@ pub fn gather_inputs(store: &dyn SecretStore, gateway_ready: bool) -> TouchIdInp
 
 /// Full status for the renderer.
 pub fn touch_id_status(store: &dyn SecretStore, gateway_ready: bool) -> TouchIdStatus {
-    let mut st = derive_status(&gather_inputs(store, gateway_ready));
+    touch_id_status_from_inputs(gather_inputs(store, gateway_ready))
+}
+
+pub fn touch_id_status_background(
+    store: &dyn SecretStore,
+    gateway_ready: bool,
+    previous: Option<&TouchIdStatus>,
+) -> TouchIdStatus {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(i64::MAX as u128) as i64)
+        .unwrap_or(0);
+    project_background_status(
+        gather_inputs_background(store, gateway_ready),
+        previous,
+        now_ms,
+    )
+}
+
+fn project_background_status(
+    inputs: TouchIdInputs,
+    previous: Option<&TouchIdStatus>,
+    now_ms: i64,
+) -> TouchIdStatus {
+    if !inputs.watch_probe_deferred {
+        return touch_id_status_from_inputs(inputs);
+    }
+
+    let Some(previous) = previous else {
+        // No authenticated Watch projection exists yet. Stay fail-closed, but
+        // do not claim the intentionally skipped request was unreachable.
+        let mut status = touch_id_status_from_inputs(inputs);
+        if status.reason == Some(TouchIdReason::WatchSurfaceUnreachable) {
+            status.reason = None;
+        }
+        return status;
+    };
+
+    let mut status = previous.clone();
+    if let Some(deadline) = status.armed_exp_at_ms {
+        let remaining = deadline.saturating_sub(now_ms).max(0) as u64;
+        status.armed_expires_in_ms = Some(remaining);
+        if status.state == TouchIdState::Armed && remaining == 0 {
+            status.state = TouchIdState::Ready;
+            status.reason = Some(TouchIdReason::LeaseExpired);
+            status.can_arm = true;
+            status.can_renew = false;
+            status.can_disarm = true;
+        }
+    }
+    status
+}
+
+fn touch_id_status_from_inputs(inputs: TouchIdInputs) -> TouchIdStatus {
+    let mut st = derive_status(&inputs);
     // Real armed leases always clear the rehearsal sticky; otherwise surface it
     // only while the control is in a ready/blocked post-ceremony state.
     if st.state == TouchIdState::Armed {
@@ -1171,12 +1252,10 @@ pub fn arm(store: &dyn SecretStore) -> Result<TouchIdStatus, String> {
                     .and_then(|value| value.as_bool())
                     .unwrap_or(false);
                 match classify_pending_stage(host_rehearsal, stage_rehearsal) {
-                    PendingStageDisposition::RefuseRealStageOnDirtyHost => {
-                        return Err(
-                            "A real-arm stage is already open. Use Disarm to clear it before running this rehearsal build."
-                                .to_string(),
-                        );
-                    }
+                    PendingStageDisposition::RefuseRealStageOnDirtyHost => Err(
+                        "A real-arm stage is already open. Use Disarm to clear it before running this rehearsal build."
+                            .to_string(),
+                    ),
                     PendingStageDisposition::StageFresh => {
                         // Clean host refuses to resume a rehearsal stage; the
                         // sidecar stage op atomically replaces the pending row.
@@ -1510,7 +1589,8 @@ mod tests {
     fn can_enroll_is_uniformly_gateway_ready_on_all_reenroll_arms() {
         // Every re-enroll / setup arm that offers can_enroll must follow one law:
         // can_enroll == gateway_ready. Cover all reasons that set the flag.
-        let reenroll_cases: &[(&str, fn(&mut TouchIdInputs))] = &[
+        type ReenrollCase = (&'static str, fn(&mut TouchIdInputs));
+        let reenroll_cases: &[ReenrollCase] = &[
             ("enrollment_missing_setup", |i| {
                 i.enrollment_record_present = false;
                 i.enclave_key_present = false;
@@ -1689,6 +1769,40 @@ mod tests {
         assert_eq!(st.reason, None);
         assert!(st.enrolled && st.can_arm);
         assert!(!st.can_renew && !st.can_disarm);
+    }
+
+    #[test]
+    fn repeated_background_cache_ticks_preserve_last_watch_projection() {
+        let previous = derive_status(&enrolled_inputs());
+        let mut deferred = enrolled_inputs();
+        deferred.watch_reachable = false;
+        deferred.watch_probe_deferred = true;
+
+        let first = project_background_status(deferred.clone(), Some(&previous), 1_000);
+        let second = project_background_status(deferred, Some(&first), 2_000);
+
+        assert_eq!(first.state, TouchIdState::Ready);
+        assert_eq!(first.reason, None);
+        assert_eq!(second, first);
+    }
+
+    #[test]
+    fn deferred_background_tick_expires_cached_armed_lease_without_watch_probe() {
+        let mut armed = enrolled_inputs();
+        armed.armed = true;
+        armed.armed_exp_at_ms = Some(10_000);
+        armed.armed_expires_in_ms = Some(5_000);
+        let previous = derive_status(&armed);
+
+        let mut deferred = enrolled_inputs();
+        deferred.watch_reachable = false;
+        deferred.watch_probe_deferred = true;
+        let expired = project_background_status(deferred, Some(&previous), 10_000);
+
+        assert_eq!(expired.state, TouchIdState::Ready);
+        assert_eq!(expired.reason, Some(TouchIdReason::LeaseExpired));
+        assert_eq!(expired.armed_expires_in_ms, Some(0));
+        assert!(expired.can_arm && expired.can_disarm);
     }
 
     #[test]

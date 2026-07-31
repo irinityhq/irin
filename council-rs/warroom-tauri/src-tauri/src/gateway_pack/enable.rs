@@ -15,7 +15,8 @@ use super::install::{
 use super::keys::{ensure_arm_keys_file, ensure_ledger_key, random_hex};
 use super::paths::{gateway_data_dir, public_env_path, PACK_DIR_NAME};
 use super::status::{
-    bump_pack_lifecycle_generation, gateway_pack_status_fresh, invalidate_status_cache,
+    bump_pack_lifecycle_generation, gateway_pack_status_fresh, gateway_pack_status_fresh_with_key,
+    invalidate_auth_observation, invalidate_status_cache,
 };
 use super::types::{GatewayPackState, GatewayPackStatus};
 use crate::docker_cli::{
@@ -98,6 +99,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
     bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    invalidate_auth_observation();
     // A pack identity change invalidates any prior rehearsal presentation.
     crate::touch_id::clear_rehearsal_passed();
     lifecycle_stage("enable_begin", "ok");
@@ -148,8 +150,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     let proxy_tokens = ensure_proxy_tokens(store).inspect_err(|_| {
         lifecycle_stage("cli_adapters", "token_error");
     })?;
-    let adapter_status =
-        ensure_cli_adapters_with_tokens(&proxy_tokens.0, &proxy_tokens.1);
+    let adapter_status = ensure_cli_adapters_with_tokens(&proxy_tokens.0, &proxy_tokens.1);
     lifecycle_stage(
         "cli_adapters",
         &format!(
@@ -331,7 +332,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     assert_private_json_has_no_raw_key()?;
     lifecycle_stage("enable_complete", "authenticated");
 
-    let mut st = gateway_pack_status_fresh(store);
+    let mut st = gateway_pack_status_fresh_with_key(store, Some(&key));
     // Not fully ready until Council restart succeeds — lib marks the proven
     // governed child. Pack auth alone is spawn-capable but not governed-ready.
     if st.authenticated && st.enabled {
@@ -398,6 +399,7 @@ pub fn disable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
     bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    invalidate_auth_observation();
     crate::touch_id::clear_rehearsal_passed();
     let mut cfg = load_or_create_private_config()?;
     cfg.via_gateway_default = false;
@@ -420,6 +422,7 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
     };
     bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    invalidate_auth_observation();
     crate::touch_id::clear_rehearsal_passed();
     lifecycle_stage("stop_lock", "ok");
 
@@ -506,6 +509,7 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
     bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    invalidate_auth_observation();
     crate::touch_id::clear_rehearsal_passed();
 
     // Host adapters first so uninstall never leaves listeners after Keychain wipe.

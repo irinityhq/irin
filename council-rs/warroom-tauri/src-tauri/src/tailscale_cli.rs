@@ -321,9 +321,8 @@ pub fn parse_serve_status_json(raw: &str) -> Result<ServeStatusView, String> {
 
 /// Parse Serve status JSON scoped to one HTTPS port.
 pub fn parse_serve_status_json_for_port(raw: &str, port: u16) -> Result<ServeStatusView, String> {
-    let v: Value = serde_json::from_str(raw).map_err(|_| {
-        classify_non_json_stdout("serve status json", raw, None, None)
-    })?;
+    let v: Value = serde_json::from_str(raw)
+        .map_err(|_| classify_non_json_stdout("serve status json", raw, None, None))?;
     let funnel_present = detect_funnel_for_port(&v, port);
     let unsupported_surfaces_present = tcp_has_unsupported_for_port(&v, port);
     let mut handlers = Vec::new();

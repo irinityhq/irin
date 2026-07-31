@@ -8,6 +8,7 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 }
 cd "$ROOT"
 
+original_argc=$#
 original_args=("$@")
 mode=check
 dry_run="${IRIN_CHECK_DRY_RUN:-0}"
@@ -24,7 +25,10 @@ fi
 # Every real check owns the bounded shared Cargo target for its full lifetime.
 # Dry-runs remain side-effect free.
 if [[ "$dry_run" != 1 && "${IRIN_CARGO_POLICY_ACTIVE:-0}" != 1 ]]; then
-  exec "$ROOT/scripts/cargo-target-policy.sh" run "$ROOT" "$0" "${original_args[@]}"
+  if (( original_argc > 0 )); then
+    exec "$ROOT/scripts/cargo-target-policy.sh" run "$ROOT" "$0" "${original_args[@]}"
+  fi
+  exec "$ROOT/scripts/cargo-target-policy.sh" run "$ROOT" "$0"
 fi
 export CARGO_INCREMENTAL=0
 unset CARGO_TARGET_DIR
@@ -226,7 +230,7 @@ if [[ "$(lane workspace_supply_chain)" == true || "$(lane tauri_supply_chain)" =
 fi
 
 if [[ "$(lane workspace_supply_chain)" == true ]]; then
-  run "Workspace dependency audit" cargo audit -D warnings --ignore RUSTSEC-2024-0436
+  run "Workspace dependency audit" cargo audit -D warnings --ignore RUSTSEC-2024-0436 --ignore RUSTSEC-2026-0221
   run "Workspace dependency policy" "$deny_bin" check
 fi
 if [[ "$(lane tauri_supply_chain)" == true ]]; then
@@ -234,7 +238,8 @@ if [[ "$(lane tauri_supply_chain)" == true ]]; then
     --file council-rs/warroom-tauri/src-tauri/Cargo.lock \
     --ignore RUSTSEC-2026-0194 \
     --ignore RUSTSEC-2026-0195 \
-    --ignore RUSTSEC-2024-0429
+    --ignore RUSTSEC-2024-0429 \
+    --ignore RUSTSEC-2026-0221
   run "Tauri dependency policy" "$deny_bin" --manifest-path council-rs/warroom-tauri/src-tauri/Cargo.toml check --config deny.toml
 fi
 

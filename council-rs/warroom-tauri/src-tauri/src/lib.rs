@@ -17,9 +17,9 @@ mod touch_id;
 
 use gateway_pack::{GatewayPackState, GatewayPackStatus};
 use keychain::{
-    load_gw_api_key, load_watch_admin_token, migrate_legacy_secrets, KeychainSecretStore,
+    load_gw_api_key, load_watch_admin_token, migrate_legacy_secrets_with_values,
+    seed_arm_principal_observation, KeychainSecretStore,
 };
-use status_authority::{DesktopStatusSnapshot, Freshness};
 use lifecycle::{
     classify_council_lifecycle, classify_gateway_lifecycle, classify_phone_lifecycle,
     compose_app_lifecycle, AppLifecycleStatus, CouncilLifecycleInput,
@@ -33,9 +33,10 @@ use private_config::{
     ensure_writable_base_overlay, gui_login_environment, load_or_create_private_config,
 };
 use sidecar::{
-    compose_sidecar_args, compose_sidecar_env, probe_council_server,
-    wait_for_port_release, CouncilServerProbe, GatewayChildCredentials,
+    compose_sidecar_args, compose_sidecar_env, probe_council_server, wait_for_port_release,
+    CouncilServerProbe, GatewayChildCredentials,
 };
+use status_authority::{DesktopStatusSnapshot, Freshness};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
@@ -283,7 +284,19 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
             }
             let revalidated = gateway_pack::pack_auth_revalidated(&store);
             let pack_ok = if revalidated {
-                true
+                match gateway_pack::resume_installed_pack(&store) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        let _ = app.emit(
+                            "council-log",
+                            format!(
+                                "[system] governed-promote attempt {}: Watch/Outbox auth not ready ({e})",
+                                attempt + 1
+                            ),
+                        );
+                        false
+                    }
+                }
             } else if gateway_pack::promote_may_call_resume(
                 attempt,
                 MAX_EARLY_RESUME_ATTEMPTS,
@@ -334,10 +347,7 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
                 config.librarian_base.as_deref(),
             ) {
                 Ok(msg) => {
-                    let _ = app.emit(
-                        "council-log",
-                        format!("[system] governed-promote: {msg}"),
-                    );
+                    let _ = app.emit("council-log", format!("[system] governed-promote: {msg}"));
                     let _ = gateway_pack::status_with_council_route(&store, true, false);
                     let _ = status_authority::recompute(&app, Freshness::Action);
                     return;
@@ -383,6 +393,24 @@ fn try_start_council_server(
     auth_token: Option<&str>,
     via_gateway: Option<bool>,
     librarian_base: Option<&str>,
+) -> Result<String, String> {
+    try_start_council_server_with_credentials(
+        app,
+        server_port,
+        auth_token,
+        via_gateway,
+        librarian_base,
+        None,
+    )
+}
+
+fn try_start_council_server_with_credentials(
+    app: &AppHandle,
+    server_port: Option<u16>,
+    auth_token: Option<&str>,
+    via_gateway: Option<bool>,
+    librarian_base: Option<&str>,
+    preloaded_gateway_creds: Option<&GatewayChildCredentials>,
 ) -> Result<String, String> {
     let state = app.state::<CouncilServer>();
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -478,44 +506,71 @@ fn try_start_council_server(
     // Keychain-sourced GW_API_KEY for governed mode only. Never from login shell.
     let gateway_creds: Option<GatewayChildCredentials> = if via_gateway == Some(true) {
         let store = KeychainSecretStore;
-        match load_gw_api_key(&store) {
-            Ok(Some(api_key)) => {
-                if packaged {
-                    let st = gateway_pack::gateway_pack_status_fresh(&store);
-                    if !st.spawn_capable {
-                        return Err(format!(
-                            "Gateway is not authenticated-ready ({}). {}",
-                            st.state.as_str(),
-                            st.message
-                        ));
-                    }
-                }
-                // Keychain-held Watch/Outbox read token for the governed
-                // child. A load failure must not fail governed deliberation —
-                // proceed without it (governance reads will 503).
-                let watch_admin_token = match load_watch_admin_token(&store) {
-                    Ok(tok) => tok,
-                    Err(_) => {
-                        eprintln!(
-                            "[council-runtime] watch admin token unavailable; governance reads will 503"
-                        );
-                        None
-                    }
-                };
-                Some(GatewayChildCredentials {
-                    api_key,
-                    gateway_url: docker_cli::DESKTOP_GATEWAY_URL.to_string(),
-                    watch_admin_token,
-                })
-            }
-            Ok(None) => {
-                return Err(
-                    "GW_API_KEY is not in the macOS Keychain. Use Settings → Enable Gateway \
-                     (installed release) or provision a client key before enabling governed mode."
-                        .to_string(),
+        if let Some(credentials) = preloaded_gateway_creds {
+            if packaged {
+                let st = gateway_pack::gateway_pack_status_fresh_with_key(
+                    &store,
+                    Some(&credentials.api_key),
                 );
+                if !st.spawn_capable
+                    || !credentials
+                        .watch_admin_token
+                        .as_deref()
+                        .is_some_and(gateway_pack::watch_admin_surfaces_authenticated)
+                {
+                    return Err(format!(
+                        "Gateway models and Watch/Outbox auth are not ready ({}). {}",
+                        st.state.as_str(),
+                        st.message
+                    ));
+                }
             }
-            Err(e) => return Err(format!("Keychain read failed: {e}")),
+            Some(credentials.clone())
+        } else {
+            match load_gw_api_key(&store) {
+                Ok(Some(api_key)) => {
+                    if packaged {
+                        // Thread the already-loaded key: the fresh auth probe runs
+                        // /v1/models live without a redundant GW_API_KEY Keychain get.
+                        let st = gateway_pack::gateway_pack_status_fresh_with_key(
+                            &store,
+                            Some(&api_key),
+                        );
+                        if !st.spawn_capable {
+                            return Err(format!(
+                                "Gateway is not authenticated-ready ({}). {}",
+                                st.state.as_str(),
+                                st.message
+                            ));
+                        }
+                    }
+                    let watch_admin_token = load_watch_admin_token(&store)
+                        .map_err(|e| format!("Watch/Outbox admin Keychain read failed: {e}"))?;
+                    if packaged
+                        && !watch_admin_token
+                            .as_deref()
+                            .is_some_and(gateway_pack::watch_admin_surfaces_authenticated)
+                    {
+                        return Err(
+                            "Gateway models auth passed but Watch/Outbox admin auth is not ready"
+                                .to_string(),
+                        );
+                    }
+                    Some(GatewayChildCredentials {
+                        api_key,
+                        gateway_url: docker_cli::DESKTOP_GATEWAY_URL.to_string(),
+                        watch_admin_token,
+                    })
+                }
+                Ok(None) => {
+                    return Err(
+                        "GW_API_KEY is not in the macOS Keychain. Use Settings → Enable Gateway \
+                     (installed release) or provision a client key before enabling governed mode."
+                            .to_string(),
+                    );
+                }
+                Err(e) => return Err(format!("Keychain read failed: {e}")),
+            }
         }
     } else {
         None
@@ -1330,11 +1385,7 @@ fn council_backend_ready(app: &AppHandle) -> bool {
 fn council_backend_ready_probe(app: &AppHandle) -> bool {
     let owned = {
         let state = app.state::<CouncilServer>();
-        state
-            .0
-            .lock()
-            .map(|g| g.child.is_some())
-            .unwrap_or(false)
+        state.0.lock().map(|g| g.child.is_some()).unwrap_or(false)
     };
     if !owned {
         return false;
@@ -1512,18 +1563,6 @@ pub fn run() {
             unsafe {
                 let _ = libc::atexit(atexit_kill_owned_council);
             }
-            // One-time, non-destructive adoption of Keychain secrets stored by
-            // the legacy "Council War Room" build (never deletes legacy items).
-            // Must not run on the AppKit main/setup thread: after an ad-hoc
-            // codesign identity change, SecItemCopyMatching can block for a
-            // long ACL approval wait and freeze cold launch before auto-start
-            // is even scheduled. Best-effort off-main; Enable re-provisions.
-            tauri::async_runtime::spawn_blocking(|| {
-                let store = KeychainSecretStore;
-                migrate_legacy_secrets(&store);
-            });
-            // Host-authoritative status loop: ordered snapshots on desktop-status.
-            status_authority::start_background_loop(app.handle().clone());
             let handle = app.handle().clone();
             let menu = Menu::with_items(
                 app,
@@ -1567,6 +1606,31 @@ pub fn run() {
                 let auto_start_handle = app.handle().clone();
                 let packaged = is_packaged_install();
                 tauri::async_runtime::spawn(async move {
+                    // One cold-launch Keychain flight. Legacy migration returns
+                    // the GW/pepper values it already read; the remaining four
+                    // accounts are loaded once here and threaded through resume
+                    // and governed Council spawn.
+                    let (launch_key, launch_secrets) = if packaged {
+                        let store = KeychainSecretStore;
+                        let migrated = migrate_legacy_secrets_with_values(&store);
+                        gateway_pack::invalidate_auth_observation();
+                        match gateway_pack::load_launch_secrets(&store, migrated.auth_pepper) {
+                            Ok(secrets) => {
+                                seed_arm_principal_observation(
+                                    secrets.arm_principal_token.is_some(),
+                                );
+                                (migrated.gw_api_key, Some(secrets))
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "[council-runtime] cold-launch secret preload failed: {error}"
+                                );
+                                (migrated.gw_api_key, None)
+                            }
+                        }
+                    } else {
+                        (None, None)
+                    };
                     let mut persisted_via_gateway = false;
                     let auth_token = if packaged {
                         match load_or_create_private_config() {
@@ -1608,23 +1672,70 @@ pub fn run() {
                         // Direct. via_gateway_default stays true so a later
                         // promote can succeed without manual re-enable.
                         let mut launch_via_gateway = false;
+                        let preloaded_gateway_creds = match (
+                            launch_key.as_ref(),
+                            launch_secrets.as_ref(),
+                        ) {
+                            (Some(api_key), Some(secrets)) => Some(GatewayChildCredentials {
+                                api_key: api_key.clone(),
+                                gateway_url: docker_cli::DESKTOP_GATEWAY_URL.to_string(),
+                                watch_admin_token: Some(secrets.watch_admin_token.clone()),
+                            }),
+                            _ => None,
+                        };
                         if packaged && persisted_via_gateway {
                             let store = KeychainSecretStore;
-                            if gateway_pack::pack_auth_revalidated(&store) {
-                                launch_via_gateway = true;
+                            let preloaded = launch_key
+                                .as_ref()
+                                .zip(launch_secrets.as_ref());
+                            if preloaded
+                                .is_some_and(|(key, _)| gateway_pack::pack_auth_revalidated_with_key(key))
+                            {
                                 // Pack containers already healthy; still bring up
-                                // app-owned host adapters (Claude/Codex proxies).
-                                let _ = gateway_pack::ensure_cli_adapters(&store);
-                                let _ = auto_start_handle.emit(
-                                    "council-log",
-                                    "[system] auto-start: restoring governed route — Gateway Pack revalidated (Docker up, pack authenticated, Keychain key usable)",
-                                );
+                                // app-owned host adapters and reconcile the
+                                // Watch-token contract before governed spawn.
+                                let reconciliation = match preloaded {
+                                    Some((key, secrets)) => {
+                                        gateway_pack::resume_installed_pack_with_key(
+                                            &store, key, secrets,
+                                        )
+                                    }
+                                    None => {
+                                        Err("cold-launch Keychain preload unavailable".to_string())
+                                    }
+                                };
+                                launch_via_gateway =
+                                    gateway_pack::governed_launch_after_watch_reconciliation(
+                                        true,
+                                        reconciliation.is_ok(),
+                                    );
+                                if launch_via_gateway {
+                                    let _ = auto_start_handle.emit(
+                                        "council-log",
+                                        "[system] auto-start: restoring governed route — Gateway Pack and Watch/Outbox auth revalidated",
+                                    );
+                                } else if let Err(e) = reconciliation {
+                                    let _ = auto_start_handle.emit(
+                                        "council-log",
+                                        format!(
+                                            "[system] auto-start: Watch-token reconciliation failed ({e}); starting Council in Direct mode"
+                                        ),
+                                    );
+                                }
                             } else {
                                 let _ = auto_start_handle.emit(
                                     "council-log",
                                     "[system] auto-start: pack not immediately ready — attempting bounded resume (compose up + health/auth wait)",
                                 );
-                                match gateway_pack::resume_installed_pack(&store) {
+                                let resume = match preloaded {
+                                    Some((key, secrets)) => gateway_pack::resume_installed_pack_with_key(
+                                        &store, key, secrets,
+                                    ),
+                                    None => Err(
+                                        "cold-launch Keychain preload unavailable".to_string(),
+                                    ),
+                                };
+                                match resume {
                                     Ok(()) => {
                                         launch_via_gateway = true;
                                         let _ = auto_start_handle.emit(
@@ -1646,12 +1757,17 @@ pub fn run() {
                         let mut first_attempt = true;
                         let mut route = launch_via_gateway;
                         loop {
-                            match try_start_council_server(
+                            match try_start_council_server_with_credentials(
                                 &auto_start_handle,
                                 None,
                                 token_ref,
                                 Some(route),
                                 None,
+                                if route {
+                                    preloaded_gateway_creds.as_ref()
+                                } else {
+                                    None
+                                },
                             ) {
                                 Ok(msg) => {
                                     let _ = auto_start_handle.emit(
@@ -1701,6 +1817,13 @@ pub fn run() {
                             );
                         }
                     }
+                    gateway_pack::seed_auth_observation_from_preloaded_key(
+                        launch_key.as_deref(),
+                    );
+                    // Start presentation polling only after cold launch has
+                    // seeded both presence caches. Background ticks perform
+                    // zero Keychain reads.
+                    status_authority::start_background_loop(auto_start_handle.clone());
                 });
             }
 

@@ -81,6 +81,94 @@ pub fn invalidate_status_cache() {
     }
 }
 
+/// Derived Keychain-key auth observation for the *presentation* status path.
+///
+/// The status background loop ticks every 5s and `STATUS_CACHE` TTL is 2s, so
+/// without this guard `load_gw_api_key` would re-enter Keychain ~12×/min while
+/// the app is open — each read can surface a macOS authorization dialog under
+/// the signed DMG's ACL policy. This cache memoizes the *derived* observation
+/// `{ key_present, authenticated }`, never the raw key value.
+///
+/// Lifecycle-invalidated only (no TTL): once committed, the observation
+/// persists until [`invalidate_auth_observation`] fires at a credential or
+/// pack-lifecycle mutation. This bounds Keychain reads to one per
+/// first-access, then zero until enable/disable/uninstall — the presentation
+/// path never re-reads on its own. Authority paths bypass this cache entirely
+/// via [`gateway_pack_status_fresh`] / [`gateway_pack_status_fresh_with_key`]
+/// (see [`AuthProbeMode`]).
+///
+/// Generation-guarded: a probe that read an older generation cannot commit a
+/// stale observation back over a fresher cache (the key may have been rotated
+/// by enable/uninstall between read and commit). Concurrency is handled by the
+/// outer `STATUS_CACHE` single-flight, which serializes callers of
+/// `gateway_pack_status_uncached`; this cache is a plain guarded read/write.
+static AUTH_OBSERVATION_GENERATION: AtomicU64 = AtomicU64::new(1);
+static AUTH_OBSERVATION: Mutex<Option<AuthObservation>> = Mutex::new(None);
+
+struct AuthObservation {
+    #[allow(dead_code)]
+    generation: u64,
+    key_present: bool,
+    authenticated: bool,
+}
+
+/// Invalidate the auth observation cache. Call only at genuine credential or
+/// pack-lifecycle mutations (enable/disable/stop/uninstall, post-migration) —
+/// not on every fresh status sample or route transition, which fire far more
+/// often than the key actually changes.
+pub fn invalidate_auth_observation() {
+    AUTH_OBSERVATION_GENERATION.fetch_add(1, Ordering::SeqCst);
+    if let Ok(mut guard) = AUTH_OBSERVATION.lock() {
+        *guard = None;
+    }
+}
+
+/// Present-cached auth observation if one has been committed and not yet
+/// invalidated. Lifecycle-scoped — no TTL expiry.
+fn cached_auth_observation() -> Option<(bool, bool)> {
+    let guard = AUTH_OBSERVATION.lock().ok()?;
+    let obs = guard.as_ref()?;
+    Some((obs.key_present, obs.authenticated))
+}
+
+/// Commit a fresh observation iff the generation still matches the one read at
+/// probe start (the key cannot have been rotated mid-probe without us seeing a
+/// newer generation). Returns true if committed, false if a concurrent
+/// invalidation advanced the generation mid-probe.
+fn commit_auth_observation(generation: u64, key_present: bool, authenticated: bool) -> bool {
+    if let Ok(mut guard) = AUTH_OBSERVATION.lock() {
+        let current = AUTH_OBSERVATION_GENERATION.load(Ordering::SeqCst);
+        if current != generation {
+            return false;
+        }
+        *guard = Some(AuthObservation {
+            generation,
+            key_present,
+            authenticated,
+        });
+        true
+    } else {
+        false
+    }
+}
+
+/// Seed the background presentation cache from the GW key already owned by a
+/// cold-launch flight. This performs a live Gateway probe but never re-enters
+/// Keychain.
+pub(crate) fn seed_auth_observation_from_preloaded_key(key: Option<&str>) {
+    let generation = AUTH_OBSERVATION_GENERATION.load(Ordering::SeqCst);
+    let authenticated = key.map(models_authenticated).unwrap_or(false);
+    let _ = commit_auth_observation(generation, key.is_some(), authenticated);
+}
+
+#[cfg(test)]
+fn auth_observation_present_for_test() -> bool {
+    AUTH_OBSERVATION
+        .lock()
+        .map(|g| g.is_some())
+        .unwrap_or(false)
+}
+
 /// Test-only: presentation cache generation counter (for Action vs Background
 /// freshness proofs). Not a pack lifecycle generation.
 #[cfg(test)]
@@ -128,17 +216,64 @@ pub fn owned_council_route() -> Option<bool> {
 }
 
 pub fn gateway_pack_status(store: &dyn SecretStore) -> GatewayPackStatus {
-    gateway_pack_status_cached(store, probe_live_status)
+    gateway_pack_status_cached(store, |s| {
+        probe_live_status(s, AuthProbeMode::BackgroundCached)
+    })
 }
 
-/// Uncached sample that also refreshes the presentation cache when the current
-/// generation still matches. Used by enroll/arm, governed spawn/restart, phone
-/// publication, and post-lifecycle checks.
+/// Uncached, **live-auth** sample. Used by authority paths: enroll/arm, governed
+/// spawn/restart, phone publication, and post-lifecycle checks. Never serves
+/// from the auth-observation cache — the Touch ID arm/renew ceremony and the
+/// governed-spawn gate must see the real `/v1/models` result at decision time.
+///
+/// Loads `GW_API_KEY` once from Keychain and threads it through the probe. When
+/// the caller already holds the key (governed spawn, resume flight), use
+/// [`gateway_pack_status_fresh_with_key`] to avoid the redundant Keychain get.
+///
+/// A missing or failed Keychain read produces `AuthorityLive(None)`, which
+/// returns unauthenticated without consulting the cache — a cached
+/// `authenticated=true` from a prior background probe must never authorize a
+/// ceremony after the key is gone.
 pub fn gateway_pack_status_fresh(store: &dyn SecretStore) -> GatewayPackStatus {
+    with_loaded_authority_mode(store, |mode| {
+        gateway_pack_status_fresh_with_mode(store, mode)
+    })
+}
+
+/// Load the authority key exactly once, convert absent/unreadable results to
+/// the fail-closed authority mode, and keep the owned key alive for the probe.
+/// Tests use this same seam to prove real Keychain failures cannot fall back to
+/// the background auth-observation cache.
+fn with_loaded_authority_mode<R>(
+    store: &dyn SecretStore,
+    probe: impl FnOnce(AuthProbeMode<'_>) -> R,
+) -> R {
+    let held = load_gw_api_key(store).ok().flatten();
+    probe(AuthProbeMode::AuthorityLive(held.as_deref()))
+}
+
+/// Fresh sample using a caller-held client key (no Keychain re-entry for
+/// `GW_API_KEY`). Mirrors the `pack_auth_revalidated` / `_with_key` pair: when
+/// the spawn or resume flight already loaded the key, pass `Some(key)` so the
+/// fresh auth probe skips a redundant Keychain get.
+///
+/// Authority path: always performs live `/v1/models` authentication — never
+/// the auth-observation cache.
+pub fn gateway_pack_status_fresh_with_key(
+    store: &dyn SecretStore,
+    held_key: Option<&str>,
+) -> GatewayPackStatus {
+    gateway_pack_status_fresh_with_mode(store, AuthProbeMode::AuthorityLive(held_key))
+}
+
+fn gateway_pack_status_fresh_with_mode(
+    store: &dyn SecretStore,
+    mode: AuthProbeMode<'_>,
+) -> GatewayPackStatus {
     // Bump generation first so any probe begun before this call cannot commit.
     invalidate_status_cache();
     let generation = STATUS_CACHE.lock().map(|g| g.generation).unwrap_or(0);
-    let st = probe_live_status(store);
+    let st = probe_live_status(store, mode);
     commit_status_cache(generation, &st);
     st
 }
@@ -227,12 +362,12 @@ pub(crate) fn gateway_pack_status_cached(
     }
 }
 
-pub(crate) fn probe_live_status(store: &dyn SecretStore) -> GatewayPackStatus {
+pub(crate) fn probe_live_status(store: &dyn SecretStore, mode: AuthProbeMode) -> GatewayPackStatus {
     #[cfg(test)]
     if let Some(st) = test_status_probe_override() {
         return st;
     }
-    gateway_pack_status_uncached(store)
+    gateway_pack_status_uncached_with_key(store, mode)
 }
 
 #[cfg(test)]
@@ -290,7 +425,76 @@ pub(crate) fn with_test_status_probe<R>(
     }
 }
 
+#[allow(dead_code)] // retained for status-loop test probes with no held key
 pub(crate) fn gateway_pack_status_uncached(store: &dyn SecretStore) -> GatewayPackStatus {
+    gateway_pack_status_uncached_with_key(store, AuthProbeMode::BackgroundCached)
+}
+
+/// How the status gather should resolve `{ key_present, authenticated }`.
+///
+/// The distinction is load-bearing: the **background** presentation path may
+/// serve from the lifecycle-scoped auth-observation cache; the **authority**
+/// path (Touch ID arm/renew, governed spawn, post-lifecycle checks) must
+/// always run `/v1/models` live and must **never** fall back to cached auth —
+/// a cached `true` must not authorize a ceremony after the key disappears or
+/// becomes unreadable.
+///
+/// `AuthorityLive(None)` explicitly means "the authority path tried to load
+/// the key and it was absent or unreadable" — it returns unauthenticated
+/// without consulting the cache, unlike `BackgroundCached`.
+pub(crate) enum AuthProbeMode<'a> {
+    /// Background presentation path: consult the lifecycle cache first, probe
+    /// once on a miss, and commit the result.
+    BackgroundCached,
+    /// Authority path: run `/v1/models` live with a caller-held key (no
+    /// Keychain get). `None` means absent/unreadable — return unauthenticated,
+    /// never the cache.
+    AuthorityLive(Option<&'a str>),
+}
+
+/// Resolve `{ key_present, authenticated }` for the status gather.
+///
+/// See [`AuthProbeMode`] for the authority/background contract.
+pub(crate) fn resolve_auth_observation(
+    store: &dyn SecretStore,
+    mode: AuthProbeMode,
+) -> (bool, bool) {
+    let auth_generation = AUTH_OBSERVATION_GENERATION.load(Ordering::SeqCst);
+    match mode {
+        AuthProbeMode::AuthorityLive(Some(k)) => (true, models_authenticated(k)),
+        AuthProbeMode::AuthorityLive(None) => {
+            // Key absent or Keychain read failed on the authority path.
+            // Must NOT consult the cache — return unauthenticated. A cached
+            // authenticated=true from a prior background probe must never
+            // authorize a ceremony after the key is gone.
+            (false, false)
+        }
+        AuthProbeMode::BackgroundCached => match cached_auth_observation() {
+            Some(cached) => cached,
+            None => {
+                let key = load_gw_api_key(store).ok().flatten();
+                let present = key.is_some();
+                let authed = key
+                    .as_ref()
+                    .map(|k| models_authenticated(k))
+                    .unwrap_or(false);
+                commit_auth_observation(auth_generation, present, authed);
+                (present, authed)
+            }
+        },
+    }
+}
+
+/// Uncached pack-status gather.
+///
+/// `mode`: authority paths pass [`AuthProbeMode::AuthorityLive`] so the auth
+/// probe always runs `/v1/models` live (never the observation cache). The
+/// background path passes [`AuthProbeMode::BackgroundCached`] to consult the
+/// lifecycle cache first. See [`AuthProbeMode`] for the contract.
+pub(crate) fn gateway_pack_status_uncached_with_key(
+    store: &dyn SecretStore,
+    mode: AuthProbeMode,
+) -> GatewayPackStatus {
     let mut st = GatewayPackStatus::base(
         GatewayPackState::NotInstalled,
         "Gateway Pack is not installed. Core War Room works in Direct mode without Docker.",
@@ -347,11 +551,7 @@ pub(crate) fn gateway_pack_status_uncached(store: &dyn SecretStore) -> GatewayPa
     let running = desktop_project_running();
     let health = gateway_health_ok();
 
-    let key = load_gw_api_key(store).ok().flatten();
-    let authenticated = key
-        .as_ref()
-        .map(|k| models_authenticated(k))
-        .unwrap_or(false);
+    let (key_present, authenticated) = resolve_auth_observation(store, mode);
     st.authenticated = authenticated;
 
     // Council governed is proven from the owned child's recorded spawn route,
@@ -406,7 +606,7 @@ pub(crate) fn gateway_pack_status_uncached(store: &dyn SecretStore) -> GatewayPa
         st.message =
             "Gateway is up with a stored key, but governed mode is disabled (Direct).".into();
         st.council_governed = false;
-    } else if key.is_some() {
+    } else if key_present {
         st.state = GatewayPackState::Degraded;
         st.message = "Gateway is up but the stored client key failed /v1/models. Re-run Enable Gateway to re-provision.".into();
         st.council_governed = false;

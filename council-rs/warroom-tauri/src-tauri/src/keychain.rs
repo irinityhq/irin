@@ -17,7 +17,6 @@
 
 #[cfg(test)]
 use std::collections::HashMap;
-#[cfg(test)]
 use std::sync::Mutex;
 
 /// Stable app identity — must match tauri.conf.json `identifier`.
@@ -575,7 +574,9 @@ pub fn store_arm_principal_token(store: &dyn SecretStore, token: &str) -> Result
     if !is_valid_arm_principal_token(trimmed) {
         return Err("refusing to store invalid arm-principal token shape".to_string());
     }
-    store.set_password(KEYCHAIN_SERVICE, ARM_PRINCIPAL_TOKEN_ACCOUNT, trimmed)
+    store.set_password(KEYCHAIN_SERVICE, ARM_PRINCIPAL_TOKEN_ACCOUNT, trimmed)?;
+    seed_arm_principal_observation(true);
+    Ok(())
 }
 
 pub fn load_arm_principal_token(store: &dyn SecretStore) -> Result<Option<String>, String> {
@@ -588,7 +589,54 @@ pub fn load_arm_principal_token(store: &dyn SecretStore) -> Result<Option<String
 }
 
 pub fn delete_arm_principal_token(store: &dyn SecretStore) -> Result<(), String> {
-    store.delete_password(KEYCHAIN_SERVICE, ARM_PRINCIPAL_TOKEN_ACCOUNT)
+    store.delete_password(KEYCHAIN_SERVICE, ARM_PRINCIPAL_TOKEN_ACCOUNT)?;
+    seed_arm_principal_observation(false);
+    Ok(())
+}
+
+/// Lifecycle-scoped, presence-only observation for the background status loop.
+/// The raw bearer is never cached. Authority callers pass a live token and
+/// bypass this observation entirely.
+static ARM_PRINCIPAL_OBSERVATION: Mutex<Option<bool>> = Mutex::new(None);
+
+pub enum ArmPrincipalProbeMode<'a> {
+    BackgroundCached,
+    AuthorityLive(Option<&'a str>),
+}
+
+pub fn seed_arm_principal_observation(present: bool) {
+    if let Ok(mut observation) = ARM_PRINCIPAL_OBSERVATION.lock() {
+        *observation = Some(present);
+    }
+}
+
+#[cfg(test)]
+pub fn invalidate_arm_principal_observation() {
+    if let Ok(mut observation) = ARM_PRINCIPAL_OBSERVATION.lock() {
+        *observation = None;
+    }
+}
+
+/// Returns presence plus a live token only when this call actually loaded or
+/// was handed one. A background cache hit deliberately returns no token, so it
+/// cannot accidentally become an authorization path.
+pub fn resolve_arm_principal(
+    store: &dyn SecretStore,
+    mode: ArmPrincipalProbeMode<'_>,
+) -> (bool, Option<String>) {
+    match mode {
+        ArmPrincipalProbeMode::AuthorityLive(token) => (token.is_some(), token.map(str::to_string)),
+        ArmPrincipalProbeMode::BackgroundCached => {
+            if let Ok(observation) = ARM_PRINCIPAL_OBSERVATION.lock() {
+                if let Some(present) = *observation {
+                    return (present, None);
+                }
+            }
+            let token = load_arm_principal_token(store).ok().flatten();
+            seed_arm_principal_observation(token.is_some());
+            (token.is_some(), token)
+        }
+    }
 }
 
 /// `tok_` + 32 hex. Rejects every `GW_ARM_PRINCIPALS` separator and every
@@ -685,6 +733,15 @@ pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), St
     }
 }
 
+/// Values observed while checking the two legacy-migration accounts. Returning
+/// them lets cold launch reuse the same Keychain reads instead of immediately
+/// prompting for those accounts again.
+#[derive(Debug, Default)]
+pub struct MigratedLegacySecrets {
+    pub gw_api_key: Option<String>,
+    pub auth_pepper: Option<String>,
+}
+
 /// One-time, non-destructive adoption of secrets stored by the legacy
 /// "Council War Room" build under `LEGACY_KEYCHAIN_SERVICE`.
 ///
@@ -694,10 +751,11 @@ pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), St
 /// never overwrites an existing new item. Per-item errors are tolerated with
 /// a secret-free warning: Gateway Pack Enable re-provisions the secret
 /// anyway. Called once at app startup.
-pub fn migrate_legacy_secrets(store: &impl SecretStore) {
+pub fn migrate_legacy_secrets_with_values(store: &dyn SecretStore) -> MigratedLegacySecrets {
+    let mut migrated = MigratedLegacySecrets::default();
     for account in [GW_API_KEY_ACCOUNT, AUTH_PEPPER_ACCOUNT] {
-        let already_present = match store.get_password(KEYCHAIN_SERVICE, account) {
-            Ok(value) => value.is_some(),
+        let value = match store.get_password(KEYCHAIN_SERVICE, account) {
+            Ok(value) => value,
             Err(e) => {
                 eprintln!(
                     "legacy keychain migration: cannot probe {account} under new service ({e}); skipping"
@@ -705,25 +763,41 @@ pub fn migrate_legacy_secrets(store: &impl SecretStore) {
                 continue;
             }
         };
-        if already_present {
-            continue;
-        }
-        match store.get_password(LEGACY_KEYCHAIN_SERVICE, account) {
-            Ok(Some(value)) => {
-                if let Err(e) = store.set_password(KEYCHAIN_SERVICE, account, &value) {
-                    eprintln!(
+        let value = if value.is_some() {
+            value
+        } else {
+            match store.get_password(LEGACY_KEYCHAIN_SERVICE, account) {
+                Ok(Some(value)) => {
+                    if let Err(e) = store.set_password(KEYCHAIN_SERVICE, account, &value) {
+                        eprintln!(
                         "legacy keychain migration: cannot write {account} under new service ({e}); skipping"
                     );
+                        None
+                    } else {
+                        Some(value)
+                    }
                 }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!(
+                Ok(None) => None,
+                Err(e) => {
+                    eprintln!(
                     "legacy keychain migration: cannot read {account} under legacy service ({e}); skipping"
                 );
+                    None
+                }
             }
+        };
+        match account {
+            GW_API_KEY_ACCOUNT => migrated.gw_api_key = value,
+            AUTH_PEPPER_ACCOUNT => migrated.auth_pepper = value,
+            _ => unreachable!(),
         }
     }
+    migrated
+}
+
+#[cfg(test)]
+pub fn migrate_legacy_secrets(store: &dyn SecretStore) {
+    let _ = migrate_legacy_secrets_with_values(store);
 }
 
 /// Gateway client keys are `gw_` + 32 hex chars (see sidecar auth.rs).
@@ -744,8 +818,9 @@ pub fn is_valid_auth_pepper(pepper: &str) -> bool {
     b.len() >= 32 && b.len() <= 128 && b.iter().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Presence-only probe: returns whether the Keychain item exists without
-/// returning the secret value (for receipts).
+/// Presence-only test probe: returns whether the in-memory Keychain item exists
+/// without returning the secret value.
+#[cfg(test)]
 pub fn gw_api_key_present(store: &dyn SecretStore) -> Result<bool, String> {
     Ok(load_gw_api_key(store)?.is_some())
 }
@@ -777,9 +852,92 @@ pub fn redact_secret(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     fn fake_gateway_key(nibble: char) -> String {
         format!("gw_{}", nibble.to_string().repeat(32))
+    }
+
+    struct CountingArmStore {
+        inner: MemorySecretStore,
+        gets: AtomicUsize,
+    }
+
+    impl CountingArmStore {
+        fn new() -> Self {
+            Self {
+                inner: MemorySecretStore::default(),
+                gets: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl SecretStore for CountingArmStore {
+        fn set_password(&self, service: &str, account: &str, password: &str) -> Result<(), String> {
+            self.inner.set_password(service, account, password)
+        }
+
+        fn get_password(&self, service: &str, account: &str) -> Result<Option<String>, String> {
+            if service == KEYCHAIN_SERVICE && account == ARM_PRINCIPAL_TOKEN_ACCOUNT {
+                self.gets.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            self.inner.get_password(service, account)
+        }
+
+        fn delete_password(&self, service: &str, account: &str) -> Result<(), String> {
+            self.inner.delete_password(service, account)
+        }
+    }
+
+    #[test]
+    fn arm_principal_background_cache_hit_avoids_store_read() {
+        let _lock = crate::private_config::test_env_lock();
+        let store = CountingArmStore::new();
+        store
+            .inner
+            .set_password(
+                KEYCHAIN_SERVICE,
+                ARM_PRINCIPAL_TOKEN_ACCOUNT,
+                &format!("tok_{:032x}", 1u128),
+            )
+            .unwrap();
+        invalidate_arm_principal_observation();
+
+        let (present, token) =
+            resolve_arm_principal(&store, ArmPrincipalProbeMode::BackgroundCached);
+        assert!(present && token.is_some());
+        assert_eq!(store.gets.load(AtomicOrdering::SeqCst), 1);
+        let (present, token) =
+            resolve_arm_principal(&store, ArmPrincipalProbeMode::BackgroundCached);
+        assert!(present && token.is_none());
+        assert_eq!(store.gets.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn arm_principal_store_delete_update_cached_presence() {
+        let _lock = crate::private_config::test_env_lock();
+        let store = CountingArmStore::new();
+        invalidate_arm_principal_observation();
+        store_arm_principal_token(&store, &format!("tok_{:032x}", 2u128)).unwrap();
+        let (present, _) = resolve_arm_principal(&store, ArmPrincipalProbeMode::BackgroundCached);
+        assert!(present);
+        assert_eq!(store.gets.load(AtomicOrdering::SeqCst), 0);
+
+        delete_arm_principal_token(&store).unwrap();
+        let (present, _) = resolve_arm_principal(&store, ArmPrincipalProbeMode::BackgroundCached);
+        assert!(!present);
+        assert_eq!(store.gets.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn arm_principal_authority_none_bypasses_cached_presence() {
+        let _lock = crate::private_config::test_env_lock();
+        let store = CountingArmStore::new();
+        seed_arm_principal_observation(true);
+        let (present, token) =
+            resolve_arm_principal(&store, ArmPrincipalProbeMode::AuthorityLive(None));
+        assert!(!present && token.is_none());
+        assert_eq!(store.gets.load(AtomicOrdering::SeqCst), 0);
     }
 
     #[test]

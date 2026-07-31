@@ -1,12 +1,13 @@
-use super::*;
 use super::super::cli_adapters::{
     ensure_cli_adapters, ensure_cli_adapters_with_tokens, ensure_proxy_tokens,
 };
+use super::*;
 use crate::keychain::{
-    load_gw_api_key, store_arm_principal_token, store_auth_pepper, store_claude_proxy_token,
-    store_codex_proxy_token, store_gw_api_key, store_watch_admin_token, SecretStore,
-    ARM_PRINCIPAL_TOKEN_ACCOUNT, AUTH_PEPPER_ACCOUNT, CLAUDE_PROXY_TOKEN_ACCOUNT,
-    CODEX_PROXY_TOKEN_ACCOUNT, GW_API_KEY_ACCOUNT, KEYCHAIN_SERVICE, WATCH_ADMIN_TOKEN_ACCOUNT,
+    load_gw_api_key, migrate_legacy_secrets_with_values, store_arm_principal_token,
+    store_auth_pepper, store_claude_proxy_token, store_codex_proxy_token, store_gw_api_key,
+    store_watch_admin_token, SecretStore, ARM_PRINCIPAL_TOKEN_ACCOUNT, AUTH_PEPPER_ACCOUNT,
+    CLAUDE_PROXY_TOKEN_ACCOUNT, CODEX_PROXY_TOKEN_ACCOUNT, GW_API_KEY_ACCOUNT, KEYCHAIN_SERVICE,
+    WATCH_ADMIN_TOKEN_ACCOUNT,
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
@@ -56,7 +57,10 @@ impl SecretStore for CountingSecretStore {
         self.inner
             .lock()
             .map_err(|_| "lock poisoned".to_string())?
-            .insert((service.to_string(), account.to_string()), password.to_string());
+            .insert(
+                (service.to_string(), account.to_string()),
+                password.to_string(),
+            );
         Ok(())
     }
 
@@ -91,14 +95,20 @@ impl SecretStore for CountingSecretStore {
 /// The pre-fix cold-launch path double-got GW + Claude + Codex (8 gets for
 /// 5 distinct accounts) and produced eight sequential authorization dialogs.
 fn full_start_resume_keychain_sequence(store: &dyn SecretStore) -> Result<(), String> {
-    // Resume flight: single GW get for decide + later auth proof.
-    let key = load_gw_api_key(store)?
+    // Migration returns the GW/pepper values from its one account read each.
+    let migrated = migrate_legacy_secrets_with_values(store);
+    let key = migrated
+        .gw_api_key
         .ok_or_else(|| "GW_API_KEY missing".to_string())?;
+    // Remaining four accounts are loaded exactly once for the launch flight.
+    let launch_secrets = super::super::env::load_launch_secrets(store, migrated.auth_pepper)?;
     let _ = pack_auth_revalidated_with_key(&key); // no Keychain re-entry
-    // Single proxy-token load shared by adapters and compose env.
-    let proxy_tokens = ensure_proxy_tokens(store)?;
-    let _ = ensure_cli_adapters_with_tokens(&proxy_tokens.0, &proxy_tokens.1);
-    let _env = super::super::env::build_compose_secret_env(store, None, Some(proxy_tokens))?;
+    let _ = ensure_cli_adapters_with_tokens(
+        &launch_secrets.proxy_tokens.0,
+        &launch_secrets.proxy_tokens.1,
+    );
+    let _env =
+        super::super::env::build_compose_secret_env_with_launch_secrets(None, &launch_secrets)?;
     // Final proof reuses held key (no GW re-get).
     let _ = pack_auth_revalidated_with_key(&key);
     Ok(())
@@ -265,6 +275,60 @@ fn resume_action_avoids_full_start_when_project_running() {
         decide_resume_pack_action(false, false),
         ResumePackAction::FullStart
     );
+}
+
+#[test]
+fn watch_token_upgrade_reconciles_once_and_requires_both_admin_surfaces() {
+    assert!(governed_launch_after_watch_reconciliation(true, true));
+    assert!(!governed_launch_after_watch_reconciliation(true, false));
+    assert!(!governed_launch_after_watch_reconciliation(false, true));
+    assert!(watch_admin_surfaces_ready(Some(200), Some(200)));
+    assert!(!watch_admin_surfaces_ready(Some(200), Some(403)));
+    assert!(!watch_admin_surfaces_ready(Some(503), Some(200)));
+    assert!(!watch_admin_surfaces_ready(None, Some(200)));
+
+    assert!(decide_watch_token_reconciliation(
+        true,
+        Some(401),
+        Some(401),
+        false
+    ));
+    assert!(decide_watch_token_reconciliation(
+        true,
+        Some(200),
+        Some(401),
+        false
+    ));
+    assert!(decide_watch_token_reconciliation(
+        true,
+        Some(401),
+        Some(200),
+        false
+    ));
+    assert!(!decide_watch_token_reconciliation(
+        true,
+        Some(200),
+        Some(200),
+        false
+    ));
+    assert!(!decide_watch_token_reconciliation(
+        true,
+        Some(503),
+        None,
+        false
+    ));
+    assert!(!decide_watch_token_reconciliation(
+        false,
+        Some(401),
+        Some(401),
+        false
+    ));
+    assert!(!decide_watch_token_reconciliation(
+        true,
+        Some(401),
+        Some(401),
+        true
+    ));
 }
 
 #[test]

@@ -19,8 +19,7 @@ const USAGE_UNAVAILABLE: &str = "usage_unavailable";
 static GROK_CLI_LOCK: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
 /// Resolved Grok CLI path (first usable `grok` binary found).
-static GROK_CLI_BIN: std::sync::OnceLock<Option<std::path::PathBuf>> =
-    std::sync::OnceLock::new();
+static GROK_CLI_BIN: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();
 
 fn probe_grok_cli_binary() -> Option<std::path::PathBuf> {
     // Explicit override for operators / launchd with odd PATHs.

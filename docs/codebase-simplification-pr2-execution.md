@@ -56,10 +56,14 @@ Council source paths.
 
 ## Verified at this checkpoint
 
-- Tauri library tests: 266 passed, 0 failed (at `9cc237c`; re-run required on
-  the consolidated tree).
-- `git diff --check`: clean.
-- Fresh DMG build completed on 2026-07-29 (pre-consolidation).
+- Tauri library tests: 274 passed, 0 failed on the exact auth-observation-cache
+  working tree on 2026-07-30. The run exposed one test-only helper as dead code
+  in production; it is now gated to test builds and must be rechecked by the
+  final Clippy/ship gate.
+- `git diff --check`: clean before this execution-record refresh; re-check with
+  the final exact-tree gates below.
+- Fresh DMG build completed on 2026-07-29 (pre-consolidation); a fresh exact-tree
+  build and verification remain required.
 
 These are source/build facts, not installed-app acceptance.
 
@@ -79,6 +83,60 @@ These are source/build facts, not installed-app acceptance.
   removed in favor of plain binary resolution (`COUNCIL_GROK_CLI_BIN` override,
   then PATH).
 
+## Auth-observation cache (status-loop Keychain bounding)
+
+The enable/resume flight was closed to one Keychain get per account by the
+`b3afad6` work (proven by `full_start_resume_keychain_gets_each_account_at_most_once`).
+Two repeat sources remained:
+
+1. **Status background loop** — `gateway_pack_status_uncached` called
+   `load_gw_api_key` on every probe. The background tick is 5s and the
+   presentation `STATUS_CACHE` TTL is 2s, so the keychain was re-read ~12×/min
+   indefinitely while the app was open. Under the signed DMG's ACL policy each
+   read can surface a macOS authorization dialog.
+2. **Governed-spawn double read** — `lib.rs` loaded `GW_API_KEY` for the child
+   credentials, then called `gateway_pack_status_fresh` which re-read the same
+   account — one redundant get within a single spawn flight.
+
+### Fix
+
+- A **derived auth-observation cache** (`AUTH_OBSERVATION`, lifecycle-invalidated,
+  generation-guarded) memoizes `{ key_present, authenticated }` — never the raw
+  key value. The background presentation path (`gateway_pack_status`) serves from
+  cache on a hit; on a miss it probes once (one Keychain get + one `/v1/models`).
+  Once committed, the observation persists **indefinitely** until
+  `invalidate_auth_observation()` fires — no TTL. This bounds background reads to
+  one per first-access, then zero until enable/disable/uninstall.
+- **Authority paths bypass the cache entirely.** `gateway_pack_status_fresh`
+  loads `GW_API_KEY` once itself and threads it through the probe, so Touch ID
+  arm/renew (`gateway_ready_for_arm`), governed spawn, and post-lifecycle checks
+  always run `/v1/models` live — a cached `true` can never permit the ceremony
+  after auth has failed, and a cached `false` can never reject a recovered
+  Gateway. `gateway_pack_status_fresh_with_key` lets a caller that already holds
+  the key (governed spawn at `lib.rs:484`, enable at `enable.rs:336`) thread it
+  without a redundant get.
+- **Dedicated invalidation.** `invalidate_auth_observation()` is called only at
+  genuine credential/lifecycle mutations (enable/disable/stop/uninstall in
+  `enable.rs`, post-`migrate_legacy_secrets` at startup) — not on every fresh
+  status sample or route transition, which fire far more often than the key
+  actually changes.
+- **Generation guard.** A probe that read an older generation cannot commit a
+  stale observation over a newer one (the key may have been rotated
+  mid-probe by an interleaving lifecycle mutation).
+
+### Tests (source proof only)
+
+Eleven auth-observation tests in `status_tests.rs` prove the contract boundary:
+cache-hit avoids a second read, cached absence is not re-probed, invalidation
+forces a re-read, the held-key path skips Keychain entirely, stale-generation
+commit is rejected, concurrent generations cannot double-write, the authority
+path ignores a warm cached-true observation, background reads stay constant
+across 20 calls until explicit invalidation, a stale generation cannot
+repopulate the observation after invalidation, and absent or unreadable
+Keychain authority samples both fail closed despite a warm cached-true
+observation. Crate tests are source proof; the installed-app prompt observation
+(≤6 distinct, no repeats over several ticks) remains the acceptance gate.
+
 ## Completion still required
 
 - Restored governance env handoff; Outbox/Watch tabs live again in the
@@ -87,7 +145,8 @@ These are source/build facts, not installed-app acceptance.
 - Bounded Keychain authorization behavior on a fresh installed build (no more
   than the six distinct first-launch items: Gateway client key, auth pepper,
   Watch admin token, arm-principal token, Claude proxy token, Codex proxy
-  token).
+  token). **Source-complete** (see Auth-observation cache above); closing the
+  checkbox still requires the installed-app observation.
 - One governed Claude request and one governed Codex request from the installed
   app (explicit operator-approved acceptance; fail-closed proof that an
   unavailable proxy route never silently downgrades to Direct).

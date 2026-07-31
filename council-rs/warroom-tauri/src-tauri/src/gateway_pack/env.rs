@@ -1,8 +1,8 @@
 //! Compose env construction: public pins, secret process env, teardown placeholders.
 
 use super::cli_adapters::{
-    apply_proxy_compose_env, current_status as cli_adapters_current_status, empty_proxy_compose_pairs,
-    ensure_proxy_tokens,
+    apply_proxy_compose_env, current_status as cli_adapters_current_status,
+    empty_proxy_compose_pairs, ensure_proxy_tokens,
 };
 use super::install::load_validated_manifest;
 use super::keys::{random_hex, serialize_public_env, validate_env_value, write_atomic_0600};
@@ -24,6 +24,56 @@ use std::path::{Path, PathBuf};
 /// must send the same tenant on governed spawns or every Watch/Outbox admin
 /// read 403s (source development keeps the `sovereign` default in Council).
 pub(crate) const PACK_WATCH_CANARY_TENANT: &str = "canary";
+
+/// Keychain material held for one cold-launch flight. Values stay native-only
+/// and are dropped after compose/Council spawn; this prevents repeated account
+/// reads without persisting another copy of any secret.
+#[derive(Clone)]
+pub struct LaunchSecrets {
+    pub auth_pepper: String,
+    pub watch_admin_token: String,
+    pub arm_principal_token: Option<String>,
+    pub proxy_tokens: (String, String),
+}
+
+pub fn load_or_create_watch_admin_token(store: &dyn SecretStore) -> Result<String, String> {
+    match load_watch_admin_token(store)
+        .map_err(|e| format!("keychain load watch admin token: {e}"))?
+    {
+        Some(value) => Ok(value),
+        None => {
+            let value = random_hex(32)?;
+            store_watch_admin_token(store, &value)
+                .map_err(|e| format!("keychain store watch admin token: {e}"))?;
+            Ok(value)
+        }
+    }
+}
+
+pub fn load_launch_secrets(
+    store: &dyn SecretStore,
+    preloaded_pepper: Option<String>,
+) -> Result<LaunchSecrets, String> {
+    let auth_pepper = match preloaded_pepper {
+        Some(value) => value,
+        None => {
+            let value = random_hex(32)?;
+            store_auth_pepper(store, &value).map_err(|e| format!("keychain store pepper: {e}"))?;
+            value
+        }
+    };
+    let watch_admin_token = load_or_create_watch_admin_token(store)?;
+    let arm_principal_token =
+        load_arm_principal_token(store).map_err(|e| format!("keychain load arm principal: {e}"))?;
+    let proxy_tokens =
+        ensure_proxy_tokens(store).map_err(|e| format!("keychain proxy tokens: {e}"))?;
+    Ok(LaunchSecrets {
+        auth_pepper,
+        watch_admin_token,
+        arm_principal_token,
+        proxy_tokens,
+    })
+}
 
 /// Non-secret compose pins from validated sources only (manifest image refs,
 /// app-owned paths, fixed pack-contract values). Single source for both the
@@ -247,12 +297,72 @@ pub(crate) fn build_compose_secret_env(
     // URL/token so Gateway readiness stays fail-closed — never a Direct fallthrough.
     let (claude_tok, codex_tok) = match proxy_tokens {
         Some(pair) => pair,
-        None => ensure_proxy_tokens(store)
-            .map_err(|e| format!("keychain proxy tokens: {e}"))?,
+        None => ensure_proxy_tokens(store).map_err(|e| format!("keychain proxy tokens: {e}"))?,
     };
     let adapter_status = cli_adapters_current_status();
     apply_proxy_compose_env(&mut env, &adapter_status, &claude_tok, &codex_tok)?;
 
+    Ok(env)
+}
+
+/// Compose secrets from the values already loaded for this cold-launch flight.
+/// Unlike [`build_compose_secret_env`], this performs no Keychain reads.
+pub(crate) fn build_compose_secret_env_with_launch_secrets(
+    bootstrap: Option<&str>,
+    secrets: &LaunchSecrets,
+) -> Result<ComposeEnv, String> {
+    let mut env = ComposeEnv::new();
+    validate_env_value("AUTH_PEPPER", &secrets.auth_pepper)?;
+    env.insert("AUTH_PEPPER".into(), secrets.auth_pepper.clone());
+    validate_env_value("WATCH_ADMIN_TOKEN", &secrets.watch_admin_token)?;
+    env.insert(
+        "WATCH_ADMIN_TOKEN".into(),
+        secrets.watch_admin_token.clone(),
+    );
+    env.insert(
+        "BOOTSTRAP_TOKEN".into(),
+        bootstrap.unwrap_or_default().to_string(),
+    );
+    let principals = secrets
+        .arm_principal_token
+        .as_ref()
+        .map(|token| format!("{ARM_PRINCIPAL_NAME}:{token}"))
+        .unwrap_or_default();
+    validate_env_value("GW_ARM_PRINCIPALS", &principals)?;
+    env.insert("GW_ARM_PRINCIPALS".into(), principals);
+
+    let login = if std::env::var_os("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV").is_some() {
+        Vec::new()
+    } else {
+        gui_login_environment()
+    };
+    for key in [
+        "XAI_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "NVIDIA_API_KEY",
+    ] {
+        let value = std::env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                login
+                    .iter()
+                    .find(|(candidate, _)| candidate == key)
+                    .map(|(_, value)| value.clone())
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .filter(|value| validate_env_value(key, value).is_ok())
+            .unwrap_or_default();
+        env.insert(key.to_string(), value);
+    }
+    let adapter_status = cli_adapters_current_status();
+    apply_proxy_compose_env(
+        &mut env,
+        &adapter_status,
+        &secrets.proxy_tokens.0,
+        &secrets.proxy_tokens.1,
+    )?;
     Ok(env)
 }
 
@@ -281,6 +391,27 @@ pub(crate) fn build_full_compose_env(
         key_id,
     )?;
     env.extend(build_compose_secret_env(store, bootstrap, proxy_tokens)?);
+    Ok(env)
+}
+
+pub(crate) fn build_full_compose_env_with_launch_secrets(
+    bootstrap: Option<&str>,
+    pack_root: &Path,
+    ledger: &Path,
+    validated: &ValidatedManifest,
+    key_id: Option<&str>,
+    secrets: &LaunchSecrets,
+) -> Result<ComposeEnv, String> {
+    let mut env = build_pack_pin_env(
+        pack_root,
+        ledger,
+        &validated.gateway,
+        &validated.sidecar,
+        key_id,
+    )?;
+    env.extend(build_compose_secret_env_with_launch_secrets(
+        bootstrap, secrets,
+    )?);
     Ok(env)
 }
 

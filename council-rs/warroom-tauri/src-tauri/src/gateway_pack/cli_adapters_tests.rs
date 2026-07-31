@@ -21,7 +21,10 @@ fn decide_proxy_injection_requires_ready_and_token() {
 
 #[test]
 fn claude_model_allowlist_is_exact_only() {
-    assert_eq!(resolve_claude_model("claude-opus-4-8"), Some("claude-opus-4-8"));
+    assert_eq!(
+        resolve_claude_model("claude-opus-4-8"),
+        Some("claude-opus-4-8")
+    );
     assert_eq!(resolve_claude_model("opus"), Some("opus"));
     assert_eq!(resolve_claude_model("sonnet"), Some("sonnet"));
     // Fuzzy/evil IDs must not map silently.
@@ -92,8 +95,14 @@ fn ensure_proxy_tokens_mints_once_and_reuses() {
     let (a2, b2) = ensure_proxy_tokens(&store).unwrap();
     assert_eq!(a1, a2);
     assert_eq!(b1, b2);
-    assert_eq!(load_claude_proxy_token(&store).unwrap().as_deref(), Some(a1.as_str()));
-    assert_eq!(load_codex_proxy_token(&store).unwrap().as_deref(), Some(b1.as_str()));
+    assert_eq!(
+        load_claude_proxy_token(&store).unwrap().as_deref(),
+        Some(a1.as_str())
+    );
+    assert_eq!(
+        load_codex_proxy_token(&store).unwrap().as_deref(),
+        Some(b1.as_str())
+    );
 }
 
 #[test]
@@ -344,9 +353,7 @@ fn read_complete_http_request_socket_fragmented_body() {
 #[test]
 fn read_complete_http_request_rejects_oversized_and_missing_length() {
     let huge_len = MAX_REQUEST_BODY_BYTES + 1;
-    let head = format!(
-        "POST /v1/chat/completions HTTP/1.1\r\nContent-Length: {huge_len}\r\n\r\n"
-    );
+    let head = format!("POST /v1/chat/completions HTTP/1.1\r\nContent-Length: {huge_len}\r\n\r\n");
     let mut cur = Cursor::new(head.into_bytes());
     assert_eq!(
         read_complete_http_request(&mut cur).unwrap_err(),

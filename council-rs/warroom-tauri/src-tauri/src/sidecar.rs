@@ -331,7 +331,10 @@ mod tests {
             Some("http://127.0.0.1:18080")
         );
         // Governed spawns re-arm the Watch/Outbox read surface after the scrub.
-        assert_eq!(env_value(&on, "WATCH_ADMIN_TOKEN"), Some(watch_token.as_str()));
+        assert_eq!(
+            env_value(&on, "WATCH_ADMIN_TOKEN"),
+            Some(watch_token.as_str())
+        );
         // Governed spawns pin the pack canary tenant so BFF admin reads do not 403.
         assert_eq!(env_value(&on, "WATCH_CANARY_TENANT"), Some("canary"));
         let off = compose_sidecar_env("o", false, None, Some(false), None, Some(&creds));

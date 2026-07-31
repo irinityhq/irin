@@ -972,8 +972,8 @@ mod tests {
         let mut sleep = Command::new("/bin/sleep");
         sleep.arg("30");
         let start = Instant::now();
-        let err = run_command_timeout_input(sleep, Duration::from_millis(400), Some(b"x"))
-            .unwrap_err();
+        let err =
+            run_command_timeout_input(sleep, Duration::from_millis(400), Some(b"x")).unwrap_err();
         assert!(
             err.contains(DockerErrorKind::Timeout.as_str()) || err.contains("timeout"),
             "{err}"

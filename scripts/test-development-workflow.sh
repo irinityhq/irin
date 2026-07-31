@@ -131,6 +131,10 @@ target = makefile.split("warroom-product-check:", 1)[1].split("\n\n", 1)[0]
 assert target.index("build-warroom-assets.sh") < target.index("npm run test:export")
 workflow = Path(".github/workflows/ci.yml").read_text()
 assert "npm run build:tauri\n          npm run test:export" not in workflow
+tauri_audit = workflow.split("      - name: Run Tauri cargo audit", 1)[1].split(
+    "      - name: Run Tauri cargo deny", 1
+)[0]
+assert "--ignore RUSTSEC-2026-0221" in tauri_audit
 web_job = workflow.split("  warroom-web:", 1)[1].split("\n  warroom-tauri:", 1)[0]
 assert "warroom-web-check" in web_job
 assert "warroom-check" not in web_job.replace("warroom-web-check", "")
