@@ -53,10 +53,17 @@ pub const ADAPTER_BIND_HOST: &str = "0.0.0.0";
 const LOOPBACK_CLAUDE: &str = "http://127.0.0.1:9090";
 const LOOPBACK_CODEX: &str = "http://127.0.0.1:9091";
 const MAX_CONCURRENT_CLI: usize = 3;
-/// Bound sockets and request threads before request completion or auth. Slow
-/// clients must not turn the all-interface adapter into an unbounded thread/FD
-/// allocator.
+/// Global bound on sockets/threads while a request is still being read.
+/// Slow clients must not turn the all-interface adapter into an unbounded
+/// thread/FD allocator.
 pub const MAX_PREAUTH_CONNECTIONS: usize = 16;
+/// One peer cannot fill [`MAX_PREAUTH_CONNECTIONS`]. Docker Gateway traffic
+/// typically arrives as a single host-gateway IP; unauthenticated peers are
+/// capped so they cannot starve that path for the full pre-auth read window.
+pub const MAX_PREAUTH_PER_IP: usize = 2;
+/// Incomplete / pre-auth request read budget. After the full HTTP request is
+/// buffered the pre-auth slot is released; CLI work uses [`MAX_CONCURRENT_CLI`].
+pub const PREAUTH_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Source proxy contract (`gateway/tools/proxy_limits.py`): 5-burst token bucket.
 pub const RATE_LIMIT_CAPACITY: f64 = 5.0;
 /// Source proxy contract: 10 requests per minute → tokens/sec.
@@ -486,11 +493,94 @@ struct RunningAdapter {
     join: Option<JoinHandle<()>>,
 }
 
-struct PreauthConnectionGuard(Arc<AtomicUsize>);
+/// Why a new connection was refused before request threads ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PreauthReject {
+    /// Shared global pre-auth pool is full.
+    GlobalLimit,
+    /// This client IP already holds [`MAX_PREAUTH_PER_IP`] pre-auth slots.
+    PerIpLimit,
+}
+
+impl PreauthReject {
+    pub fn message(self) -> &'static str {
+        match self {
+            Self::GlobalLimit => "connection limit",
+            Self::PerIpLimit => "per-ip connection limit",
+        }
+    }
+}
+
+/// Tracks global + per-IP pre-auth occupancy until the full request is buffered.
+struct PreauthPool {
+    global: AtomicUsize,
+    per_ip: Mutex<HashMap<String, usize>>,
+}
+
+impl PreauthPool {
+    fn new() -> Self {
+        Self {
+            global: AtomicUsize::new(0),
+            per_ip: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Reserve one pre-auth slot for `client_ip`, or explain why not.
+    fn try_acquire(self: &Arc<Self>, client_ip: &str) -> Result<PreauthConnectionGuard, PreauthReject> {
+        let mut map = self.per_ip.lock().unwrap_or_else(|e| e.into_inner());
+        let ip_count = map.get(client_ip).copied().unwrap_or(0);
+        if ip_count >= MAX_PREAUTH_PER_IP {
+            return Err(PreauthReject::PerIpLimit);
+        }
+        match self.global.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
+            (active < MAX_PREAUTH_CONNECTIONS).then_some(active + 1)
+        }) {
+            Ok(_) => {
+                *map.entry(client_ip.to_string()).or_insert(0) += 1;
+                Ok(PreauthConnectionGuard {
+                    pool: Arc::clone(self),
+                    client_ip: client_ip.to_string(),
+                })
+            }
+            Err(_) => Err(PreauthReject::GlobalLimit),
+        }
+    }
+
+    fn release(&self, client_ip: &str) {
+        self.global.fetch_sub(1, Ordering::SeqCst);
+        let mut map = self.per_ip.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(count) = map.get_mut(client_ip) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                map.remove(client_ip);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn global_active(&self) -> usize {
+        self.global.load(Ordering::SeqCst)
+    }
+
+    #[cfg(test)]
+    fn ip_active(&self, client_ip: &str) -> usize {
+        self.per_ip
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(client_ip)
+            .copied()
+            .unwrap_or(0)
+    }
+}
+
+struct PreauthConnectionGuard {
+    pool: Arc<PreauthPool>,
+    client_ip: String,
+}
 
 impl Drop for PreauthConnectionGuard {
     fn drop(&mut self) {
-        self.0.fetch_sub(1, Ordering::SeqCst);
+        self.pool.release(&self.client_ip);
     }
 }
 
@@ -811,7 +901,7 @@ fn spawn_adapter_server(kind: AdapterKind, token: &str) -> Result<RunningAdapter
     let shutdown_t = Arc::clone(&shutdown);
     let token_arc = Arc::new(token.to_string());
     let concurrent = Arc::new(AtomicUsize::new(0));
-    let preauth_connections = Arc::new(AtomicUsize::new(0));
+    let preauth_pool = Arc::new(PreauthPool::new());
     let rate_limiter = Arc::new(Mutex::new(IpRateLimitMap::proxy_default()));
     let join = thread::Builder::new()
         .name(format!("irin-{}-adapter", kind.service_name()))
@@ -822,7 +912,7 @@ fn spawn_adapter_server(kind: AdapterKind, token: &str) -> Result<RunningAdapter
                 token_arc,
                 shutdown_t,
                 concurrent,
-                preauth_connections,
+                preauth_pool,
                 rate_limiter,
             );
         })
@@ -840,7 +930,7 @@ fn accept_loop(
     token: Arc<String>,
     shutdown: Arc<AtomicBool>,
     concurrent: Arc<AtomicUsize>,
-    preauth_connections: Arc<AtomicUsize>,
+    preauth_pool: Arc<PreauthPool>,
     rate_limiter: Arc<Mutex<IpRateLimitMap>>,
 ) {
     // Wake periodically via short accept timeout so shutdown is observed.
@@ -851,42 +941,37 @@ fn accept_loop(
                 if shutdown.load(Ordering::SeqCst) {
                     break;
                 }
-                if preauth_connections
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |active| {
-                        (active < MAX_PREAUTH_CONNECTIONS).then_some(active + 1)
-                    })
-                    .is_err()
-                {
-                    let mut stream = stream;
-                    let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
-                    let _ = write_json(
-                        &mut stream,
-                        503,
-                        &json!({"error":{"type":"busy","message":"connection limit"}}),
-                    );
-                    let _ = stream.shutdown(Shutdown::Both);
-                    continue;
-                }
                 let client_ip = peer.ip().to_string();
+                let guard = match preauth_pool.try_acquire(&client_ip) {
+                    Ok(g) => g,
+                    Err(reject) => {
+                        let mut stream = stream;
+                        let _ = stream.set_write_timeout(Some(Duration::from_millis(100)));
+                        let _ = write_json(
+                            &mut stream,
+                            503,
+                            &json!({"error":{"type":"busy","message":reject.message()}}),
+                        );
+                        let _ = stream.shutdown(Shutdown::Both);
+                        continue;
+                    }
+                };
                 let tok = Arc::clone(&token);
                 let conc = Arc::clone(&concurrent);
                 let rl = Arc::clone(&rate_limiter);
-                let preauth = Arc::clone(&preauth_connections);
-                let spawned = thread::Builder::new()
+                // On spawn failure the moved guard drops with the closure and
+                // releases the reserved pre-auth slot.
+                let _ = thread::Builder::new()
                     .name(format!("irin-{}-req", kind.service_name()))
                     .spawn(move || {
-                        let _guard = PreauthConnectionGuard(preauth);
                         // The listener is nonblocking for shutdown polling; on
                         // platforms where accept inherits that flag, restore
-                        // blocking request reads under the bounded timeout.
+                        // blocking request reads under the bounded pre-auth timeout.
                         let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_read_timeout(Some(Duration::from_secs(30)));
+                        let _ = stream.set_read_timeout(Some(PREAUTH_READ_TIMEOUT));
                         let _ = stream.set_write_timeout(Some(Duration::from_secs(30)));
-                        handle_client(stream, kind, &tok, &conc, &rl, &client_ip);
+                        handle_client(stream, kind, &tok, &conc, &rl, &client_ip, guard);
                     });
-                if spawned.is_err() {
-                    preauth_connections.fetch_sub(1, Ordering::SeqCst);
-                }
             }
             Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                 thread::sleep(Duration::from_millis(50));
@@ -905,6 +990,7 @@ fn handle_client(
     concurrent: &AtomicUsize,
     rate_limiter: &Mutex<IpRateLimitMap>,
     client_ip: &str,
+    preauth: PreauthConnectionGuard,
 ) {
     let req = match read_complete_http_request(&mut stream) {
         Ok(v) => v,
@@ -915,6 +1001,9 @@ fn handle_client(
             return;
         }
     };
+    // Full request is buffered — free the pre-auth slot before auth/rate-limit/
+    // CLI work so incomplete peers cannot pin capacity for the CLI duration.
+    drop(preauth);
 
     let auth_ok = check_proxy_auth(token, req.headers.get("x-proxy-auth").map(String::as_str));
 

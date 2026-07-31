@@ -167,13 +167,55 @@ fn occupied_port_after_spawn_race_is_classified_as_foreign() {
 }
 
 #[test]
-fn slow_incomplete_clients_are_bounded_before_auth_threads() {
+fn preauth_pool_enforces_per_ip_and_global_caps() {
+    let pool = Arc::new(PreauthPool::new());
+    // One IP may only hold MAX_PREAUTH_PER_IP incomplete slots.
+    let mut held = Vec::new();
+    for _ in 0..MAX_PREAUTH_PER_IP {
+        held.push(pool.try_acquire("10.0.0.1").expect("per-ip slot"));
+    }
+    assert_eq!(pool.ip_active("10.0.0.1"), MAX_PREAUTH_PER_IP);
+    assert_eq!(
+        pool.try_acquire("10.0.0.1").err(),
+        Some(PreauthReject::PerIpLimit)
+    );
+    // A different IP still gets service while the first is pinned.
+    let other = pool.try_acquire("10.0.0.2").expect("other ip");
+    assert_eq!(pool.global_active(), MAX_PREAUTH_PER_IP + 1);
+    drop(other);
+    drop(held);
+    assert_eq!(pool.global_active(), 0);
+    assert_eq!(pool.ip_active("10.0.0.1"), 0);
+
+    // Fill the global pool with distinct IPs (2 slots each).
+    let mut global_held = Vec::new();
+    let ips_needed = MAX_PREAUTH_CONNECTIONS.div_ceil(MAX_PREAUTH_PER_IP);
+    for i in 0..ips_needed {
+        let ip = format!("10.1.0.{i}");
+        for _ in 0..MAX_PREAUTH_PER_IP {
+            if global_held.len() >= MAX_PREAUTH_CONNECTIONS {
+                break;
+            }
+            global_held.push(pool.try_acquire(&ip).expect("global fill"));
+        }
+    }
+    assert_eq!(pool.global_active(), MAX_PREAUTH_CONNECTIONS);
+    assert_eq!(
+        pool.try_acquire("10.9.9.9").err(),
+        Some(PreauthReject::GlobalLimit)
+    );
+    drop(global_held);
+    assert_eq!(pool.global_active(), 0);
+}
+
+#[test]
+fn slow_incomplete_clients_are_bounded_per_ip_before_auth() {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let addr = listener.local_addr().unwrap();
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_server = Arc::clone(&shutdown);
-    let preauth_connections = Arc::new(AtomicUsize::new(0));
-    let preauth_server = Arc::clone(&preauth_connections);
+    let preauth_pool = Arc::new(PreauthPool::new());
+    let preauth_server = Arc::clone(&preauth_pool);
     let server = thread::spawn(move || {
         accept_loop(
             listener,
@@ -186,22 +228,23 @@ fn slow_incomplete_clients_are_bounded_before_auth_threads() {
         );
     });
 
+    // Loopback shares one IP — one peer can pin at most MAX_PREAUTH_PER_IP.
     let mut slow = Vec::new();
-    for _ in 0..MAX_PREAUTH_CONNECTIONS {
+    for _ in 0..MAX_PREAUTH_PER_IP {
         let mut stream = TcpStream::connect(addr).unwrap();
         stream.write_all(b"G").unwrap();
         slow.push(stream);
     }
     for _ in 0..100 {
-        if preauth_connections.load(Ordering::SeqCst) == MAX_PREAUTH_CONNECTIONS {
+        if preauth_pool.global_active() == MAX_PREAUTH_PER_IP {
             break;
         }
         thread::sleep(Duration::from_millis(10));
     }
     assert_eq!(
-        preauth_connections.load(Ordering::SeqCst),
-        MAX_PREAUTH_CONNECTIONS,
-        "server did not account for all slow clients"
+        preauth_pool.global_active(),
+        MAX_PREAUTH_PER_IP,
+        "server did not account for slow same-IP clients"
     );
 
     let mut rejected = TcpStream::connect(addr).unwrap();
@@ -214,16 +257,23 @@ fn slow_incomplete_clients_are_bounded_before_auth_threads() {
     let mut response = String::new();
     rejected.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 503 "), "{response}");
-    assert!(response.contains("connection limit"), "{response}");
+    assert!(
+        response.contains("per-ip connection limit"),
+        "{response}"
+    );
 
     drop(slow);
     for _ in 0..100 {
-        if preauth_connections.load(Ordering::SeqCst) == 0 {
+        if preauth_pool.global_active() == 0 {
             break;
         }
         thread::sleep(Duration::from_millis(10));
     }
-    assert_eq!(preauth_connections.load(Ordering::SeqCst), 0);
+    // Incomplete clients release within PREAUTH_READ_TIMEOUT; force wait if needed.
+    if preauth_pool.global_active() != 0 {
+        thread::sleep(PREAUTH_READ_TIMEOUT + Duration::from_millis(200));
+    }
+    assert_eq!(preauth_pool.global_active(), 0);
 
     let mut valid = TcpStream::connect(addr).unwrap();
     valid
@@ -241,6 +291,18 @@ fn slow_incomplete_clients_are_bounded_before_auth_threads() {
     let mut response = String::new();
     valid.read_to_string(&mut response).unwrap();
     assert!(response.starts_with("HTTP/1.1 200 "), "{response}");
+    // Pre-auth slot must not remain held after the full request is buffered.
+    for _ in 0..50 {
+        if preauth_pool.global_active() == 0 {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        preauth_pool.global_active(),
+        0,
+        "pre-auth slot leaked after complete request"
+    );
 
     shutdown.store(true, Ordering::SeqCst);
     let _ = TcpStream::connect(addr);
