@@ -139,9 +139,8 @@ pub(crate) fn prefer_grok_cli() -> bool {
 }
 
 pub(crate) fn is_grok_cli_available() -> bool {
-    // Prefer home install paths + fingerprint Grok Build CLI output so PATH
-    // homonyms (e.g. nvm npm `grok-dev`) cannot mark the seat available/unavailable
-    // incorrectly or get spawned for cabinet work.
+    // Resolves the first usable `grok` binary (home install paths before PATH);
+    // no version-output fingerprinting, which broke on every upstream republish.
     agent_cli::is_grok_cli_available()
 }
 
@@ -707,7 +706,7 @@ pub fn check_providers_with_gateway(gw: bool) -> Vec<(&'static str, bool)> {
             crate::provider::agent_cli::is_agy_cli_available(),
         ),
         ("gemini_vertex", gw || gemini::is_vertex_available()),
-        // Same resolver used for seat spawn (home paths + version fingerprint).
+        // Same resolver used for seat spawn (home paths before PATH).
         ("grok_cli", gw || is_grok_cli_available()),
         (
             "gemini_cli",

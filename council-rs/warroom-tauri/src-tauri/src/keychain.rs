@@ -17,7 +17,6 @@
 
 #[cfg(test)]
 use std::collections::HashMap;
-#[cfg(test)]
 use std::sync::Mutex;
 
 /// Stable app identity — must match tauri.conf.json `identifier`.
@@ -30,12 +29,23 @@ pub const LEGACY_KEYCHAIN_SERVICE: &str = "com.sovereign.council.warroom";
 pub const GW_API_KEY_ACCOUNT: &str = "gateway-client-gw-api-key";
 /// Account label for the long-lived auth pepper (never co-mingled with client key).
 pub const AUTH_PEPPER_ACCOUNT: &str = "gateway-pack-auth-pepper";
+/// Account label for the Watch/Outbox admin read token (`WATCH_ADMIN_TOKEN`).
+/// Held only in the Keychain and the per-spawn Compose/Council process env;
+/// never written to the public env file, never returned to the renderer,
+/// never logged.
+pub const WATCH_ADMIN_TOKEN_ACCOUNT: &str = "gateway-pack-watch-admin-token";
 /// Account label for the Touch ID bridge's arm-principal bearer token — the
 /// `GW_ARM_PRINCIPALS` custody-domain-1 credential for this installed app.
 /// Held only in the Keychain and the per-spawn Compose process env; never
 /// written to the public env file, never returned to the renderer, never
 /// logged.
 pub const ARM_PRINCIPAL_TOKEN_ACCOUNT: &str = "gateway-pack-arm-principal-token";
+/// Account label for the Claude host-adapter shared secret (`CLAUDE_PROXY_TOKEN`).
+/// Held only in the Keychain and the per-spawn Compose process env; never
+/// written to the public env file, never returned to the renderer, never logged.
+pub const CLAUDE_PROXY_TOKEN_ACCOUNT: &str = "gateway-pack-claude-proxy-token";
+/// Account label for the Codex host-adapter shared secret (`CODEX_PROXY_TOKEN`).
+pub const CODEX_PROXY_TOKEN_ACCOUNT: &str = "gateway-pack-codex-proxy-token";
 
 /// Fixed principal name for the single-operator desktop bridge. The token is
 /// the secret; the name is a stable, non-secret audit label that appears in
@@ -533,6 +543,28 @@ pub fn delete_auth_pepper(store: &dyn SecretStore) -> Result<(), String> {
     store.delete_password(KEYCHAIN_SERVICE, AUTH_PEPPER_ACCOUNT)
 }
 
+/// Watch/Outbox admin read token: same hex shape as AUTH_PEPPER (32+ hex
+/// chars; we generate 64 hex = 32 bytes). Separate Keychain account.
+pub fn is_valid_watch_admin_token(token: &str) -> bool {
+    is_valid_auth_pepper(token)
+}
+
+pub fn store_watch_admin_token(store: &dyn SecretStore, token: &str) -> Result<(), String> {
+    let trimmed = token.trim();
+    if !is_valid_watch_admin_token(trimmed) {
+        return Err("refusing to store invalid WATCH_ADMIN_TOKEN shape".to_string());
+    }
+    store.set_password(KEYCHAIN_SERVICE, WATCH_ADMIN_TOKEN_ACCOUNT, trimmed)
+}
+
+pub fn load_watch_admin_token(store: &dyn SecretStore) -> Result<Option<String>, String> {
+    store.get_password(KEYCHAIN_SERVICE, WATCH_ADMIN_TOKEN_ACCOUNT)
+}
+
+pub fn delete_watch_admin_token(store: &dyn SecretStore) -> Result<(), String> {
+    store.delete_password(KEYCHAIN_SERVICE, WATCH_ADMIN_TOKEN_ACCOUNT)
+}
+
 /// Touch ID bridge: the arm-principal bearer token. Shape is the same
 /// `tok_` + 32 hex the sidecar's principal registry accepts as an opaque
 /// value; the strict shape check keeps a malformed/injected value (CR/LF, `:`
@@ -542,7 +574,9 @@ pub fn store_arm_principal_token(store: &dyn SecretStore, token: &str) -> Result
     if !is_valid_arm_principal_token(trimmed) {
         return Err("refusing to store invalid arm-principal token shape".to_string());
     }
-    store.set_password(KEYCHAIN_SERVICE, ARM_PRINCIPAL_TOKEN_ACCOUNT, trimmed)
+    store.set_password(KEYCHAIN_SERVICE, ARM_PRINCIPAL_TOKEN_ACCOUNT, trimmed)?;
+    seed_arm_principal_observation(true);
+    Ok(())
 }
 
 pub fn load_arm_principal_token(store: &dyn SecretStore) -> Result<Option<String>, String> {
@@ -555,7 +589,54 @@ pub fn load_arm_principal_token(store: &dyn SecretStore) -> Result<Option<String
 }
 
 pub fn delete_arm_principal_token(store: &dyn SecretStore) -> Result<(), String> {
-    store.delete_password(KEYCHAIN_SERVICE, ARM_PRINCIPAL_TOKEN_ACCOUNT)
+    store.delete_password(KEYCHAIN_SERVICE, ARM_PRINCIPAL_TOKEN_ACCOUNT)?;
+    seed_arm_principal_observation(false);
+    Ok(())
+}
+
+/// Lifecycle-scoped, presence-only observation for the background status loop.
+/// The raw bearer is never cached. Authority callers pass a live token and
+/// bypass this observation entirely.
+static ARM_PRINCIPAL_OBSERVATION: Mutex<Option<bool>> = Mutex::new(None);
+
+pub enum ArmPrincipalProbeMode<'a> {
+    BackgroundCached,
+    AuthorityLive(Option<&'a str>),
+}
+
+pub fn seed_arm_principal_observation(present: bool) {
+    if let Ok(mut observation) = ARM_PRINCIPAL_OBSERVATION.lock() {
+        *observation = Some(present);
+    }
+}
+
+#[cfg(test)]
+pub fn invalidate_arm_principal_observation() {
+    if let Ok(mut observation) = ARM_PRINCIPAL_OBSERVATION.lock() {
+        *observation = None;
+    }
+}
+
+/// Returns presence plus a live token only when this call actually loaded or
+/// was handed one. A background cache hit deliberately returns no token, so it
+/// cannot accidentally become an authorization path.
+pub fn resolve_arm_principal(
+    store: &dyn SecretStore,
+    mode: ArmPrincipalProbeMode<'_>,
+) -> (bool, Option<String>) {
+    match mode {
+        ArmPrincipalProbeMode::AuthorityLive(token) => (token.is_some(), token.map(str::to_string)),
+        ArmPrincipalProbeMode::BackgroundCached => {
+            if let Ok(observation) = ARM_PRINCIPAL_OBSERVATION.lock() {
+                if let Some(present) = *observation {
+                    return (present, None);
+                }
+            }
+            let token = load_arm_principal_token(store).ok().flatten();
+            seed_arm_principal_observation(token.is_some());
+            (token.is_some(), token)
+        }
+    }
 }
 
 /// `tok_` + 32 hex. Rejects every `GW_ARM_PRINCIPALS` separator and every
@@ -571,6 +652,49 @@ pub fn is_valid_arm_principal_token(token: &str) -> bool {
     b[4..].iter().all(|c| c.is_ascii_hexdigit())
 }
 
+/// Host-adapter shared secret: 64 lowercase hex chars (32 random bytes).
+/// Same shape `setup-local.sh` mints for `CLAUDE_PROXY_TOKEN` / `CODEX_PROXY_TOKEN`.
+pub fn is_valid_proxy_token(token: &str) -> bool {
+    let b = token.as_bytes();
+    b.len() == 64 && b.iter().all(|c| c.is_ascii_hexdigit())
+}
+
+pub fn store_claude_proxy_token(store: &dyn SecretStore, token: &str) -> Result<(), String> {
+    let trimmed = token.trim();
+    if !is_valid_proxy_token(trimmed) {
+        return Err("refusing to store invalid CLAUDE_PROXY_TOKEN shape".to_string());
+    }
+    store.set_password(KEYCHAIN_SERVICE, CLAUDE_PROXY_TOKEN_ACCOUNT, trimmed)
+}
+
+pub fn load_claude_proxy_token(store: &dyn SecretStore) -> Result<Option<String>, String> {
+    Ok(store
+        .get_password(KEYCHAIN_SERVICE, CLAUDE_PROXY_TOKEN_ACCOUNT)?
+        .filter(|v| is_valid_proxy_token(v)))
+}
+
+pub fn delete_claude_proxy_token(store: &dyn SecretStore) -> Result<(), String> {
+    store.delete_password(KEYCHAIN_SERVICE, CLAUDE_PROXY_TOKEN_ACCOUNT)
+}
+
+pub fn store_codex_proxy_token(store: &dyn SecretStore, token: &str) -> Result<(), String> {
+    let trimmed = token.trim();
+    if !is_valid_proxy_token(trimmed) {
+        return Err("refusing to store invalid CODEX_PROXY_TOKEN shape".to_string());
+    }
+    store.set_password(KEYCHAIN_SERVICE, CODEX_PROXY_TOKEN_ACCOUNT, trimmed)
+}
+
+pub fn load_codex_proxy_token(store: &dyn SecretStore) -> Result<Option<String>, String> {
+    Ok(store
+        .get_password(KEYCHAIN_SERVICE, CODEX_PROXY_TOKEN_ACCOUNT)?
+        .filter(|v| is_valid_proxy_token(v)))
+}
+
+pub fn delete_codex_proxy_token(store: &dyn SecretStore) -> Result<(), String> {
+    store.delete_password(KEYCHAIN_SERVICE, CODEX_PROXY_TOKEN_ACCOUNT)
+}
+
 pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), String> {
     // Attempt every account even if one fails so a single ACL error cannot
     // leave the other secret behind while the caller thinks uninstall finished.
@@ -581,10 +705,23 @@ pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), St
     if let Err(e) = delete_auth_pepper(store) {
         errors.push(format!("AUTH_PEPPER: {e}"));
     }
+    // Uninstall removes the watch-admin read token too: a pack that no longer
+    // exists must not leave a live admin credential behind.
+    if let Err(e) = delete_watch_admin_token(store) {
+        errors.push(format!("WATCH_ADMIN_TOKEN: {e}"));
+    }
     // Uninstall removes the arm-principal token too: a pack that no longer
     // exists must not leave a live custody-domain-1 credential behind.
     if let Err(e) = delete_arm_principal_token(store) {
         errors.push(format!("ARM_PRINCIPAL_TOKEN: {e}"));
+    }
+    // Host-adapter tokens are pack-scoped secrets: uninstall clears them so a
+    // later re-enable mints fresh values.
+    if let Err(e) = delete_claude_proxy_token(store) {
+        errors.push(format!("CLAUDE_PROXY_TOKEN: {e}"));
+    }
+    if let Err(e) = delete_codex_proxy_token(store) {
+        errors.push(format!("CODEX_PROXY_TOKEN: {e}"));
     }
     if errors.is_empty() {
         Ok(())
@@ -596,6 +733,15 @@ pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), St
     }
 }
 
+/// Values observed while checking the two legacy-migration accounts. Returning
+/// them lets cold launch reuse the same Keychain reads instead of immediately
+/// prompting for those accounts again.
+#[derive(Debug, Default)]
+pub struct MigratedLegacySecrets {
+    pub gw_api_key: Option<String>,
+    pub auth_pepper: Option<String>,
+}
+
 /// One-time, non-destructive adoption of secrets stored by the legacy
 /// "Council War Room" build under `LEGACY_KEYCHAIN_SERVICE`.
 ///
@@ -605,10 +751,11 @@ pub fn delete_all_gateway_pack_secrets(store: &dyn SecretStore) -> Result<(), St
 /// never overwrites an existing new item. Per-item errors are tolerated with
 /// a secret-free warning: Gateway Pack Enable re-provisions the secret
 /// anyway. Called once at app startup.
-pub fn migrate_legacy_secrets(store: &impl SecretStore) {
+pub fn migrate_legacy_secrets_with_values(store: &dyn SecretStore) -> MigratedLegacySecrets {
+    let mut migrated = MigratedLegacySecrets::default();
     for account in [GW_API_KEY_ACCOUNT, AUTH_PEPPER_ACCOUNT] {
-        let already_present = match store.get_password(KEYCHAIN_SERVICE, account) {
-            Ok(value) => value.is_some(),
+        let value = match store.get_password(KEYCHAIN_SERVICE, account) {
+            Ok(value) => value,
             Err(e) => {
                 eprintln!(
                     "legacy keychain migration: cannot probe {account} under new service ({e}); skipping"
@@ -616,25 +763,41 @@ pub fn migrate_legacy_secrets(store: &impl SecretStore) {
                 continue;
             }
         };
-        if already_present {
-            continue;
-        }
-        match store.get_password(LEGACY_KEYCHAIN_SERVICE, account) {
-            Ok(Some(value)) => {
-                if let Err(e) = store.set_password(KEYCHAIN_SERVICE, account, &value) {
-                    eprintln!(
+        let value = if value.is_some() {
+            value
+        } else {
+            match store.get_password(LEGACY_KEYCHAIN_SERVICE, account) {
+                Ok(Some(value)) => {
+                    if let Err(e) = store.set_password(KEYCHAIN_SERVICE, account, &value) {
+                        eprintln!(
                         "legacy keychain migration: cannot write {account} under new service ({e}); skipping"
                     );
+                        None
+                    } else {
+                        Some(value)
+                    }
                 }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                eprintln!(
+                Ok(None) => None,
+                Err(e) => {
+                    eprintln!(
                     "legacy keychain migration: cannot read {account} under legacy service ({e}); skipping"
                 );
+                    None
+                }
             }
+        };
+        match account {
+            GW_API_KEY_ACCOUNT => migrated.gw_api_key = value,
+            AUTH_PEPPER_ACCOUNT => migrated.auth_pepper = value,
+            _ => unreachable!(),
         }
     }
+    migrated
+}
+
+#[cfg(test)]
+pub fn migrate_legacy_secrets(store: &dyn SecretStore) {
+    let _ = migrate_legacy_secrets_with_values(store);
 }
 
 /// Gateway client keys are `gw_` + 32 hex chars (see sidecar auth.rs).
@@ -655,8 +818,9 @@ pub fn is_valid_auth_pepper(pepper: &str) -> bool {
     b.len() >= 32 && b.len() <= 128 && b.iter().all(|c| c.is_ascii_hexdigit())
 }
 
-/// Presence-only probe: returns whether the Keychain item exists without
-/// returning the secret value (for receipts).
+/// Presence-only test probe: returns whether the in-memory Keychain item exists
+/// without returning the secret value.
+#[cfg(test)]
 pub fn gw_api_key_present(store: &dyn SecretStore) -> Result<bool, String> {
     Ok(load_gw_api_key(store)?.is_some())
 }
@@ -688,9 +852,92 @@ pub fn redact_secret(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     fn fake_gateway_key(nibble: char) -> String {
         format!("gw_{}", nibble.to_string().repeat(32))
+    }
+
+    struct CountingArmStore {
+        inner: MemorySecretStore,
+        gets: AtomicUsize,
+    }
+
+    impl CountingArmStore {
+        fn new() -> Self {
+            Self {
+                inner: MemorySecretStore::default(),
+                gets: AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl SecretStore for CountingArmStore {
+        fn set_password(&self, service: &str, account: &str, password: &str) -> Result<(), String> {
+            self.inner.set_password(service, account, password)
+        }
+
+        fn get_password(&self, service: &str, account: &str) -> Result<Option<String>, String> {
+            if service == KEYCHAIN_SERVICE && account == ARM_PRINCIPAL_TOKEN_ACCOUNT {
+                self.gets.fetch_add(1, AtomicOrdering::SeqCst);
+            }
+            self.inner.get_password(service, account)
+        }
+
+        fn delete_password(&self, service: &str, account: &str) -> Result<(), String> {
+            self.inner.delete_password(service, account)
+        }
+    }
+
+    #[test]
+    fn arm_principal_background_cache_hit_avoids_store_read() {
+        let _lock = crate::private_config::test_env_lock();
+        let store = CountingArmStore::new();
+        store
+            .inner
+            .set_password(
+                KEYCHAIN_SERVICE,
+                ARM_PRINCIPAL_TOKEN_ACCOUNT,
+                &format!("tok_{:032x}", 1u128),
+            )
+            .unwrap();
+        invalidate_arm_principal_observation();
+
+        let (present, token) =
+            resolve_arm_principal(&store, ArmPrincipalProbeMode::BackgroundCached);
+        assert!(present && token.is_some());
+        assert_eq!(store.gets.load(AtomicOrdering::SeqCst), 1);
+        let (present, token) =
+            resolve_arm_principal(&store, ArmPrincipalProbeMode::BackgroundCached);
+        assert!(present && token.is_none());
+        assert_eq!(store.gets.load(AtomicOrdering::SeqCst), 1);
+    }
+
+    #[test]
+    fn arm_principal_store_delete_update_cached_presence() {
+        let _lock = crate::private_config::test_env_lock();
+        let store = CountingArmStore::new();
+        invalidate_arm_principal_observation();
+        store_arm_principal_token(&store, &format!("tok_{:032x}", 2u128)).unwrap();
+        let (present, _) = resolve_arm_principal(&store, ArmPrincipalProbeMode::BackgroundCached);
+        assert!(present);
+        assert_eq!(store.gets.load(AtomicOrdering::SeqCst), 0);
+
+        delete_arm_principal_token(&store).unwrap();
+        let (present, _) = resolve_arm_principal(&store, ArmPrincipalProbeMode::BackgroundCached);
+        assert!(!present);
+        assert_eq!(store.gets.load(AtomicOrdering::SeqCst), 0);
+    }
+
+    #[test]
+    fn arm_principal_authority_none_bypasses_cached_presence() {
+        let _lock = crate::private_config::test_env_lock();
+        let store = CountingArmStore::new();
+        seed_arm_principal_observation(true);
+        let (present, token) =
+            resolve_arm_principal(&store, ArmPrincipalProbeMode::AuthorityLive(None));
+        assert!(!present && token.is_none());
+        assert_eq!(store.gets.load(AtomicOrdering::SeqCst), 0);
     }
 
     #[test]
@@ -727,6 +974,21 @@ mod tests {
         assert!(auth_pepper_present(&store).unwrap());
         delete_all_gateway_pack_secrets(&store).unwrap();
         assert!(load_auth_pepper(&store).unwrap().is_none());
+    }
+
+    #[test]
+    fn watch_admin_token_round_trip_and_delete_all() {
+        let store = MemorySecretStore::default();
+        let token = "ab".repeat(32);
+        store_watch_admin_token(&store, &token).unwrap();
+        assert_eq!(load_watch_admin_token(&store).unwrap().unwrap(), token);
+        // Separate account: pepper and client key stay empty.
+        assert!(load_auth_pepper(&store).unwrap().is_none());
+        assert!(load_gw_api_key(&store).unwrap().is_none());
+        assert!(store_watch_admin_token(&store, "short").is_err());
+        assert!(store_watch_admin_token(&store, "not-hex!!").is_err());
+        delete_all_gateway_pack_secrets(&store).unwrap();
+        assert!(load_watch_admin_token(&store).unwrap().is_none());
     }
 
     /// Store that fails delete for one account so we prove both deletes run.
@@ -874,6 +1136,41 @@ mod tests {
                 .unwrap(),
             Some(legacy_key)
         );
+    }
+
+    #[test]
+    fn proxy_token_shape_and_roundtrip() {
+        let store = MemorySecretStore::default();
+        assert!(!is_valid_proxy_token("short"));
+        assert!(!is_valid_proxy_token(&"GG".repeat(32)));
+        let tok = "ab".repeat(32);
+        let codex = "cd".repeat(32);
+        assert!(is_valid_proxy_token(&tok));
+        store_claude_proxy_token(&store, &tok).unwrap();
+        store_codex_proxy_token(&store, &codex).unwrap();
+        assert_eq!(
+            load_claude_proxy_token(&store).unwrap().as_deref(),
+            Some(tok.as_str())
+        );
+        assert_eq!(
+            load_codex_proxy_token(&store).unwrap().as_deref(),
+            Some(codex.as_str())
+        );
+        delete_claude_proxy_token(&store).unwrap();
+        assert!(load_claude_proxy_token(&store).unwrap().is_none());
+        assert!(store_claude_proxy_token(&store, "not-hex").is_err());
+    }
+
+    #[test]
+    fn delete_all_clears_proxy_tokens() {
+        let store = MemorySecretStore::default();
+        store_claude_proxy_token(&store, &"ab".repeat(32)).unwrap();
+        store_codex_proxy_token(&store, &"cd".repeat(32)).unwrap();
+        store_auth_pepper(&store, &"ef".repeat(32)).unwrap();
+        delete_all_gateway_pack_secrets(&store).unwrap();
+        assert!(load_claude_proxy_token(&store).unwrap().is_none());
+        assert!(load_codex_proxy_token(&store).unwrap().is_none());
+        assert!(load_auth_pepper(&store).unwrap().is_none());
     }
 }
 

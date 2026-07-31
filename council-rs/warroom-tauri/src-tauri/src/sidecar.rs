@@ -5,14 +5,17 @@
 
 use std::io::{Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-/// Optional Gateway child credentials (Keychain-sourced). Never log `api_key`.
+/// Optional Gateway child credentials (Keychain-sourced). Never log `api_key`
+/// or `watch_admin_token`.
 #[derive(Debug, Clone)]
 pub struct GatewayChildCredentials {
     pub api_key: String,
     pub gateway_url: String,
+    /// Watch/Outbox admin read token (Keychain-held). Re-injected on governed
+    /// spawns only; `None`/empty leaves governance reads 503.
+    pub watch_admin_token: Option<String>,
 }
 
 /// Gateway-related env keys that must never be inherited from the parent/login shell.
@@ -24,6 +27,7 @@ pub const GATEWAY_SCRUB_ENV_KEYS: &[&str] = &[
     "COUNCIL_GATEWAY_TOKEN",
     "COUNCIL_GATEWAY_KEY_ID",
     "WATCH_ADMIN_TOKEN",
+    "WATCH_CANARY_TENANT",
     "BOOTSTRAP_TOKEN",
     "AUTH_PEPPER",
 ];
@@ -67,6 +71,13 @@ pub fn compose_sidecar_env(
     match via_gateway {
         Some(true) => {
             upsert_env(&mut env, "COUNCIL_VIA_GATEWAY", "1");
+            // The BFF tenant must match the desktop pack sidecar or every
+            // Watch/Outbox admin read 403s (non-secret, fixed pack contract).
+            upsert_env(
+                &mut env,
+                "WATCH_CANARY_TENANT",
+                crate::gateway_pack::PACK_WATCH_CANARY_TENANT,
+            );
             if let Some(creds) = gateway_creds {
                 let key = creds.api_key.trim();
                 if !key.is_empty() {
@@ -76,6 +87,15 @@ pub fn compose_sidecar_env(
                 let url = creds.gateway_url.trim();
                 if !url.is_empty() {
                     upsert_env(&mut env, "GATEWAY_URL", url);
+                }
+                if let Some(tok) = creds
+                    .watch_admin_token
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|t| !t.is_empty())
+                {
+                    // Re-arm the Watch/Outbox read surface emptied by the scrub.
+                    upsert_env(&mut env, "WATCH_ADMIN_TOKEN", tok);
                 }
             }
         }
@@ -103,28 +123,16 @@ fn upsert_env(env: &mut Vec<(String, String)>, key: &str, value: &str) {
 
 /// Compose the CLI args for a `council --serve` sidecar spawn.
 ///
-/// `council_root` (Settings "councilRoot") overrides the `--base-dir` value when
-/// non-blank; otherwise the resolved council-rs repo root is used. Only the
-/// `--base-dir` arg moves — binary resolution and the spawn cwd stay pinned to
-/// the repo root (`--base-dir` is authoritative for cabinets/prompts/models.yaml
-/// per the council CLI; `COUNCIL_RS_DIR` is the knob for relocating the whole
-/// checkout including the binary).
+/// `base_dir` is the resolved writable base (packaged Application Support
+/// overlay or council-rs repo root). Binary resolution and the spawn cwd are
+/// independent; `--base-dir` is authoritative for cabinets/prompts/models.yaml.
 ///
 /// `web_dist` is the packaged War Room static export (`--web-dist`). Development
 /// builds pass `None` so behavior stays unchanged (no permanent :3010 server).
 /// When set (non-blank), Council serves the export on the same loopback origin
 /// for private phone access; the Tauri webview still uses its embedded
 /// `frontendDist`.
-pub fn compose_sidecar_args(
-    council_rs_dir: &str,
-    port: u16,
-    council_root: Option<&str>,
-    web_dist: Option<&str>,
-) -> Vec<String> {
-    let base_dir = council_root
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(council_rs_dir);
+pub fn compose_sidecar_args(base_dir: &str, port: u16, web_dist: Option<&str>) -> Vec<String> {
     let mut args = vec![
         "--base-dir".to_string(),
         base_dir.to_string(),
@@ -137,41 +145,6 @@ pub fn compose_sidecar_args(
         args.push(dist.to_string());
     }
     args
-}
-
-/// Validate a user-supplied council root before it becomes `--base-dir`.
-///
-/// Rejects up front instead of spawning a doomed sidecar: council exits at
-/// startup when the base dir lacks `cabinets/` (Config::load scans
-/// `<base_dir>/cabinets`), and that failure would only surface via the log
-/// pump while the spawn itself reports Ok. `~` is rejected because nothing in
-/// the spawn path expands it.
-pub fn validate_council_root(root: &str) -> Result<PathBuf, String> {
-    let trimmed = root.trim();
-    if trimmed.is_empty() {
-        return Err("council root is empty".to_string());
-    }
-    if trimmed.starts_with('~') {
-        return Err(format!(
-            "council root must be an absolute path; `~` is not expanded (got {trimmed})"
-        ));
-    }
-    let path = Path::new(trimmed);
-    if path.is_relative() {
-        return Err(format!(
-            "council root must be an absolute path (got {trimmed})"
-        ));
-    }
-    if !path.is_dir() {
-        return Err(format!("council root is not a directory: {trimmed}"));
-    }
-    if !path.join("cabinets").is_dir() {
-        return Err(format!(
-            "council root has no cabinets/ subdirectory — not a council base dir: {trimmed}"
-        ));
-    }
-    path.canonicalize()
-        .map_err(|e| format!("failed to canonicalize council root {trimmed}: {e}"))
 }
 
 /// Wait (bounded) for a TCP port to become bindable on 127.0.0.1.
@@ -273,16 +246,10 @@ pub fn probe_council_server(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
     use std::thread;
 
     fn env_value<'a>(env: &'a [(String, String)], key: &str) -> Option<&'a str> {
         env.iter().find(|(k, _)| k == key).map(|(_, v)| v.as_str())
-    }
-
-    /// Minimal council base dir: `{root}/cabinets/` (the validator's sanity check).
-    fn write_council_root_at(root: &Path) {
-        fs::create_dir_all(root.join("cabinets")).unwrap();
     }
 
     #[test]
@@ -350,9 +317,11 @@ mod tests {
     #[test]
     fn compose_via_gateway_injects_keychain_creds_only_when_on() {
         let fake_key = format!("gw_{}", "a".repeat(32));
+        let watch_token = "cd".repeat(32);
         let creds = GatewayChildCredentials {
             api_key: fake_key.clone(),
             gateway_url: "http://127.0.0.1:18080".into(),
+            watch_admin_token: Some(watch_token.clone()),
         };
         let on = compose_sidecar_env("o", false, None, Some(true), None, Some(&creds));
         assert_eq!(env_value(&on, "COUNCIL_VIA_GATEWAY"), Some("1"));
@@ -361,12 +330,35 @@ mod tests {
             env_value(&on, "GATEWAY_URL"),
             Some("http://127.0.0.1:18080")
         );
+        // Governed spawns re-arm the Watch/Outbox read surface after the scrub.
+        assert_eq!(
+            env_value(&on, "WATCH_ADMIN_TOKEN"),
+            Some(watch_token.as_str())
+        );
+        // Governed spawns pin the pack canary tenant so BFF admin reads do not 403.
+        assert_eq!(env_value(&on, "WATCH_CANARY_TENANT"), Some("canary"));
         let off = compose_sidecar_env("o", false, None, Some(false), None, Some(&creds));
         assert_eq!(env_value(&off, "COUNCIL_VIA_GATEWAY"), Some("0"));
         // Scrub sets empty string (not omit) so inherited parent values cannot win.
         assert_eq!(env_value(&off, "GW_API_KEY"), Some(""));
         assert_eq!(env_value(&off, "GATEWAY_URL"), Some(""));
         assert_eq!(env_value(&off, "COUNCIL_GATEWAY_TOKEN"), Some(""));
+        // Direct spawns get no watch-admin token even when creds carry one.
+        assert_eq!(env_value(&off, "WATCH_ADMIN_TOKEN"), Some(""));
+        // Direct spawns keep no pack tenant; Council falls back to `sovereign`.
+        assert_eq!(env_value(&off, "WATCH_CANARY_TENANT"), Some(""));
+    }
+
+    #[test]
+    fn compose_via_gateway_without_watch_token_leaves_read_surface_scrubbed() {
+        let creds = GatewayChildCredentials {
+            api_key: format!("gw_{}", "b".repeat(32)),
+            gateway_url: "http://127.0.0.1:18080".into(),
+            watch_admin_token: None,
+        };
+        let on = compose_sidecar_env("o", false, None, Some(true), None, Some(&creds));
+        assert_eq!(env_value(&on, "COUNCIL_VIA_GATEWAY"), Some("1"));
+        assert_eq!(env_value(&on, "WATCH_ADMIN_TOKEN"), Some(""));
     }
 
     #[test]
@@ -385,7 +377,7 @@ mod tests {
 
     #[test]
     fn compose_args_default_base_dir_pins_full_arg_order() {
-        let args = compose_sidecar_args("/repo/council-rs", 8765, None, None);
+        let args = compose_sidecar_args("/repo/council-rs", 8765, None);
         assert_eq!(
             args,
             vec![
@@ -399,8 +391,8 @@ mod tests {
     }
 
     #[test]
-    fn compose_args_council_root_overrides_base_dir_only() {
-        let args = compose_sidecar_args("/repo/council-rs", 8765, Some("/elsewhere/base"), None);
+    fn compose_args_sets_base_dir_and_port() {
+        let args = compose_sidecar_args("/elsewhere/base", 8765, None);
         assert_eq!(
             args,
             vec!["--base-dir", "/elsewhere/base", "--serve", "--port", "8765"]
@@ -408,18 +400,9 @@ mod tests {
     }
 
     #[test]
-    fn compose_args_blank_council_root_falls_back_to_repo_root() {
-        for root in [Some(""), Some("   "), None] {
-            let args = compose_sidecar_args("/repo/council-rs", 8765, root, None);
-            assert_eq!(args[1], "/repo/council-rs", "{root:?}");
-        }
-    }
-
-    #[test]
-    fn compose_args_council_root_combines_with_via_gateway_env() {
-        // councilRoot travels in ARGS, via_gateway/auth in ENV — both optional,
-        // both set here; neither channel leaks into the other.
-        let args = compose_sidecar_args("/repo", 8765, Some("/custom"), None);
+    fn compose_args_and_env_are_independent_channels() {
+        // base-dir travels in ARGS, via_gateway/auth in ENV — independent channels.
+        let args = compose_sidecar_args("/custom", 8765, None);
         let env = compose_sidecar_env("o", false, Some("tok"), Some(true), None, None);
         assert_eq!(args[1], "/custom");
         assert_eq!(env_value(&env, "COUNCIL_VIA_GATEWAY"), Some("1"));
@@ -433,7 +416,6 @@ mod tests {
         let args = compose_sidecar_args(
             "/app/support/council-base",
             8765,
-            Some("/app/support/council-base"),
             Some("/App/Contents/Resources/warroom-web"),
         );
         assert_eq!(
@@ -452,67 +434,15 @@ mod tests {
 
     #[test]
     fn compose_args_development_omits_web_dist() {
-        let args = compose_sidecar_args("/repo/council-rs", 8765, None, None);
+        let args = compose_sidecar_args("/repo/council-rs", 8765, None);
         assert!(!args.iter().any(|a| a == "--web-dist"));
         // Blank/whitespace web_dist is treated as absent (dev unchanged).
         for dist in [Some(""), Some("   ")] {
-            let args = compose_sidecar_args("/repo/council-rs", 8765, None, dist);
+            let args = compose_sidecar_args("/repo/council-rs", 8765, dist);
             assert!(
                 !args.iter().any(|a| a == "--web-dist"),
                 "blank web_dist should not append: {dist:?}"
             );
-        }
-    }
-
-    #[test]
-    fn validate_council_root_accepts_dir_with_cabinets() {
-        let tmp = std::env::temp_dir().join(format!("council-root-ok-{}", std::process::id()));
-        write_council_root_at(&tmp);
-        let got = validate_council_root(tmp.to_str().unwrap()).unwrap();
-        assert_eq!(got, tmp.canonicalize().unwrap());
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn validate_council_root_trims_whitespace() {
-        let tmp = std::env::temp_dir().join(format!("council-root-trim-{}", std::process::id()));
-        write_council_root_at(&tmp);
-        let padded = format!("  {}  ", tmp.display());
-        let got = validate_council_root(&padded).unwrap();
-        assert_eq!(got, tmp.canonicalize().unwrap());
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn validate_council_root_rejects_missing_dir() {
-        let tmp = std::env::temp_dir().join(format!("council-root-missing-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
-        let err = validate_council_root(tmp.to_str().unwrap()).unwrap_err();
-        assert!(err.contains("not a directory"), "{err}");
-    }
-
-    #[test]
-    fn validate_council_root_rejects_dir_without_cabinets() {
-        let tmp = std::env::temp_dir().join(format!("council-root-nocab-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&tmp);
-        fs::create_dir_all(&tmp).unwrap();
-        let err = validate_council_root(tmp.to_str().unwrap()).unwrap_err();
-        assert!(err.contains("cabinets"), "{err}");
-        let _ = fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn validate_council_root_rejects_relative_and_tilde() {
-        for bad in ["relative/path", "./here", "~/irin"] {
-            let err = validate_council_root(bad).unwrap_err();
-            assert!(err.contains("absolute"), "{bad}: {err}");
-        }
-    }
-
-    #[test]
-    fn validate_council_root_rejects_empty_and_whitespace() {
-        for bad in ["", "   "] {
-            assert!(validate_council_root(bad).is_err(), "{bad:?}");
         }
     }
 

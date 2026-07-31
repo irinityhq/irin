@@ -6,7 +6,7 @@ Librarian, and Drift). Installed release builds start and own their bundled
 Council on **8765** and serve War Room same-origin on loopback; no
 source-development command is needed. If a Council with the identical build
 identity is already healthy on 8765 (for example from a source runtime), the
-installed build adopts that process rather than spawning its bundled one; a
+installed build treats that as a port conflict rather than adopting; a
 Council with a different source identity is refused, never killed. Debug
 desktop builds retain a developer-only `council --serve` sidecar.
 
@@ -14,7 +14,7 @@ desktop builds retain a developer-only `council --serve` sidecar.
 
 Product installation is owned by the root [IRIN README](../../README.md): the
 signed, notarized DMG from GitHub Releases is the product path. Root
-`make setup` and `make warroom` are source development paths. The commands
+`make warroom` is the source browser development path. The commands
 below are internal component developer and packaging harnesses, not alternate
 operator installation targets.
 
@@ -86,8 +86,8 @@ test -f .next-tauri/index.html
 2. Confirm the debug sidecar serves `/api/health`, cabinets, and the
    Outbox/Librarian tabs.
 3. Release: follow the root README's product installation path.
-4. Confirm the installed app starts and owns its bundled Council (or adopts a
-   running Council with the identical build identity) and that Discover
+4. Confirm the installed app starts and owns its bundled Council (an occupied
+   port is a conflict, never an adoption path) and that Discover
    matches the browser War Room.
 
 Use `COUNCIL_WS_SMOKE_ONLY=1` on the backend for WebSocket proof without provider spend:
@@ -97,7 +97,7 @@ COUNCIL_WS_SMOKE_ONLY=1 COUNCIL_DEV_NO_AUTH=1 ./target/release/council --serve -
 ```
 
 **Auth:** Debug desktop builds set `COUNCIL_DEV_NO_AUTH=1` only on their debug
-sidecar. Release bundles do not own Council auth. If the canonical runtime has
-an operator-configured `COUNCIL_AUTH_TOKEN`, set the same operator-managed value
-in War Room Settings; the app sends it only to the loopback Council and does not
+sidecar. Release bundles own their bundled Council. If that child is configured
+with an operator-managed `COUNCIL_AUTH_TOKEN`, enter the same value in War Room
+Settings; the app sends it only to the app-owned loopback child and does not
 print it.

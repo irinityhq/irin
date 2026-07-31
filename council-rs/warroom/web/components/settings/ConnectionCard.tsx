@@ -1,9 +1,8 @@
 "use client";
 
 import { useMemo } from "react";
-import { AlertTriangle, FolderOpen, Loader2, Server } from "lucide-react";
+import { AlertTriangle, Loader2, Server } from "lucide-react";
 import { isLoopbackUrl, type RuntimeConfig } from "@/lib/runtime-config";
-import { pickFile } from "@/lib/tauri";
 import { Field } from "./Field";
 import { StatusLine, type ProbeStatus } from "./StatusLine";
 
@@ -44,11 +43,6 @@ export function ConnectionCard({
     ];
     return urls.filter((u) => u.value.trim() && !isLoopbackUrl(u.value));
   }, [form.apiBase, form.wsBase, form.gatewayBase]);
-
-  const pickCouncilBinary = async () => {
-    const path = await pickFile();
-    if (path) onUpdate("councilPath", path);
-  };
 
   return (
     <div className="border border-border bg-bg-elevated p-5 space-y-4">
@@ -109,39 +103,10 @@ export function ConnectionCard({
         placeholder="Bearer token for council --serve"
         hint={
           inTauri
-            ? "Authenticates the canonical loopback Council when configured. Installed releases adopt that runtime; debug builds may pass the token to their development sidecar."
+            ? "Authenticates the app-owned loopback Council when configured. The installed app owns its bundled Council; debug builds may pass the token to their development sidecar."
             : "Must match COUNCIL_AUTH_TOKEN on the backend, or use COUNCIL_DEV_NO_AUTH=1 for local dev."
         }
       />
-      {debugSidecarAvailable && (
-        <div>
-          <span className="label">Council binary path (debug sidecar only)</span>
-          <div className="flex gap-2 mt-1.5">
-            <input
-              className="input flex-1 font-mono text-xs"
-              value={form.councilPath}
-              onChange={(e) => onUpdate("councilPath", e.target.value)}
-              placeholder="Default: target/release/council"
-            />
-            <button type="button" onClick={pickCouncilBinary} className="btn">
-              <FolderOpen className="w-4 h-4" />
-            </button>
-          </div>
-        </div>
-      )}
-      {debugSidecarAvailable && <div data-testid="settings-council-root">
-        <span className="label">Council root (--base-dir)</span>
-        <input
-          className="input mt-1.5 w-full font-mono text-xs"
-          value={form.councilRoot}
-          onChange={(e) => onUpdate("councilRoot", e.target.value)}
-          placeholder="Default: council-rs repo root"
-        />
-        <p className="text-[10px] text-fg-dim mt-1">
-          Debug desktop sidecar only: passed as --base-dir on Connect / start
-          debug server. Use absolute paths (no ~).
-        </p>
-      </div>}
       {debugSidecarAvailable && <div data-testid="settings-librarian-base">
         <span className="label">Librarian base (RAG service)</span>
         <input

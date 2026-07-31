@@ -15,8 +15,6 @@ describe("runtime-config merge", () => {
     wsBase: "ws://127.0.0.1:8765",
     gatewayBase: "http://127.0.0.1:18080",
     authToken: "",
-    councilPath: "",
-    councilRoot: "",
     librarianBase: "http://127.0.0.1:11435",
   };
 
@@ -101,13 +99,6 @@ describe("runtime-config merge", () => {
     );
   });
 
-  it("merges councilRoot (feature contract) and defaults it empty", () => {
-    expect(mergeConfigSources({}, defaults).councilRoot).toBe("");
-    expect(
-      mergeConfigSources({ councilRoot: " /tmp/council-base " }, defaults)
-        .councilRoot,
-    ).toBe("/tmp/council-base");
-  });
 
   it("uses one origin when the browser is served remotely", () => {
     expect(defaultsForPage(defaults, "https://warroom.example.test/")).toEqual({

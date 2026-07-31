@@ -250,9 +250,9 @@ export default function SettingsPanel() {
           <code className="text-cyan">GW_API_KEY</code> and a reachable gateway
           — the sidecar exits at startup otherwise (check the log panel below).
           In-flight deliberations and librarian WS streams are dropped on restart.
-          Changing librarianBase or councilRoot here will also take effect on restart.
-          Installed releases adopt the canonical runtime; change its environment and
-          use <code>make runtime-restart</code> from the IRIN checkout instead.
+          Changing librarianBase here will also take effect on restart.
+          Installed releases own the bundled Council; change its environment and
+          restart the app-owned Council from Settings or relaunch the desktop app.
         </p>
         <label className="flex items-center gap-2 text-xs font-mono cursor-pointer">
           <input

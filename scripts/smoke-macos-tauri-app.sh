@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# Build and launch the exact native bundle; optionally prove visible core text.
+# Build and launch the exact native bundle; prove app-owned Council spawn.
+# Prefer packaging/smoke-full-app.sh for full packaged ownership proof; this
+# harness covers the native warroom-build path without MatchingBuild adoption.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,7 +46,6 @@ fi
 
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/irin-native-smoke.XXXXXX")"
 pid=""
-council_pid=""
 launcher_pid=""
 binary_pattern=""
 port_is_free() {
@@ -72,6 +73,75 @@ wait_for_port_release() {
   done
   return 1
 }
+listen_pid() {
+  lsof -nP -iTCP:"$IRIN_COUNCIL_PORT" -sTCP:LISTEN -t 2>/dev/null | head -1 || true
+}
+# True when the isolated port is held by this smoke's bundled Council sidecar.
+# Compare against the realpath app root (worktree target may be a symlink into
+# the shared cargo cache while the process argv shows the realpath).
+is_our_bundled_council_listener() {
+  local listen_pid path
+  listen_pid="$(listen_pid)"
+  [[ -n "$listen_pid" && -n "$app_real" ]] || return 1
+  path="$(ps -p "$listen_pid" -o args= 2>/dev/null || true)"
+  [[ "$path" == *"$app_real"*"/Contents/MacOS/council"* ]]
+}
+# Graceful host stop so Tauri RunEvent::Exit can kill the tracked Council child.
+# Smoke builds use a unique bundle id (com.irinity.irin.smoke$PORT); quit by id.
+# Does not kill the sidecar — ownership proof requires the host to reclaim it.
+stop_app_host() {
+  local host_pid="${1:-}"
+  local bundle_id="com.irinity.irin.smoke${IRIN_COUNCIL_PORT}"
+  osascript -e "tell application id \"$bundle_id\" to quit" >/dev/null 2>&1 || true
+  if [[ -n "$host_pid" ]] && kill -0 "$host_pid" 2>/dev/null; then
+    local i
+    # Give the application-targeted quit time to run Tauri's Exit handler
+    # before falling back to TERM. Sending TERM immediately races and can
+    # orphan the app-owned Council child.
+    for i in $(seq 1 40); do
+      if ! kill -0 "$host_pid" 2>/dev/null; then
+        break
+      fi
+      sleep 0.25
+    done
+    if kill -0 "$host_pid" 2>/dev/null; then
+      kill -TERM "$host_pid" 2>/dev/null || true
+      for i in $(seq 1 40); do
+        if ! kill -0 "$host_pid" 2>/dev/null; then
+          break
+        fi
+        sleep 0.25
+      done
+      if kill -0 "$host_pid" 2>/dev/null; then
+        kill -KILL "$host_pid" 2>/dev/null || true
+      fi
+    fi
+  fi
+  # Give Exit handlers time to reclaim the owned sidecar after host death.
+  sleep 0.5
+  wait_for_port_release
+}
+# Harness-only reclaim of this smoke's bundled council on the isolated port.
+reclaim_our_bundled_council() {
+  local i sidecar_pid
+  for i in $(seq 1 20); do
+    port_is_released && return 0
+    if is_our_bundled_council_listener; then
+      sidecar_pid="$(listen_pid)"
+      kill -TERM "$sidecar_pid" 2>/dev/null || true
+      sleep 0.25
+      if kill -0 "$sidecar_pid" 2>/dev/null; then
+        kill -KILL "$sidecar_pid" 2>/dev/null || true
+      fi
+    else
+      return 1
+    fi
+    sleep 0.2
+  done
+  port_is_released
+}
+app=""
+app_real=""
 cleanup() {
   status=$?
   trap - EXIT INT TERM
@@ -82,14 +152,9 @@ cleanup() {
   if [[ -z "$pid" && -n "$binary_pattern" ]]; then
     pid="$(pgrep -f -x "$binary_pattern" | head -n 1 || true)"
   fi
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    kill "$pid" 2>/dev/null || true
-    wait "$pid" 2>/dev/null || true
-  fi
-  if [[ -n "$council_pid" ]] && kill -0 "$council_pid" 2>/dev/null; then
-    kill "$council_pid" 2>/dev/null || true
-    wait "$council_pid" 2>/dev/null || true
-  fi
+  stop_app_host "${pid:-}" || true
+  pid=""
+  reclaim_our_bundled_council || true
   if ! wait_for_port_release; then
     printf 'ERROR: isolated Council port remained occupied after harness cleanup: %s\n' \
       "$IRIN_COUNCIL_PORT" >&2
@@ -99,7 +164,6 @@ cleanup() {
     mkdir -p "$ROOT/.irin-receipts"
     receipt_prefix="$ROOT/.irin-receipts/native-smoke-failure-$(date '+%Y%m%dT%H%M%S')"
     [[ ! -f "$tmp/app.log" ]] || cp "$tmp/app.log" "${receipt_prefix}-app.log"
-    [[ ! -f "$tmp/council.log" ]] || cp "$tmp/council.log" "${receipt_prefix}-council.log"
     printf 'native smoke failure logs: %s-*.log\n' "$receipt_prefix" >&2
   fi
   rm -rf "$tmp"
@@ -148,9 +212,17 @@ binary="$app/Contents/MacOS/council-warroom-tauri"
 # Resolve through worktree target symlinks so pgrep matches the LaunchServices
 # process path (realpath under the shared cargo cache).
 binary="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$binary")"
+app_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$app")"
 [[ -x "$binary" ]] || { printf 'ERROR: resolved native app binary missing: %s\n' "$binary" >&2; exit 1; }
 binary_pattern="$(printf '%s\n' "$binary" | sed 's/[][\\.^$*+?{}()|]/\\&/g')"
 codesign --verify --deep --strict "$app"
+
+# Packaged ownership requires the staged bundled Council binary.
+bundled_council="$app/Contents/MacOS/council"
+[[ -x "$bundled_council" ]] || {
+  printf 'ERROR: packaged Council sidecar missing from bundle: %s\n' "$bundled_council" >&2
+  exit 1
+}
 
 mkdir -p "$tmp/home" "$ROOT/.irin-receipts"
 
@@ -158,70 +230,20 @@ port_is_free || {
   printf 'ERROR: isolated Council port is already occupied: %s\n' "$IRIN_COUNCIL_PORT" >&2
   exit 1
 }
-expected_sha="$(git -C "$ROOT" rev-parse HEAD)"
-if [[ -n "$(git -C "$ROOT" status --porcelain --untracked-files=normal)" ]]; then
-  expected_dirty=true
-else
-  expected_dirty=false
-fi
-council_binary="$ROOT/target/release/council"
-[[ -x "$council_binary" ]] || {
-  printf 'ERROR: exact Council release binary missing: %s\n' "$council_binary" >&2
-  exit 1
-}
-env \
-  -u ANTHROPIC_API_KEY -u DEEPSEEK_API_KEY -u GEMINI_API_KEY -u GOOGLE_API_KEY \
-  -u GROQ_API_KEY -u MISTRAL_API_KEY -u NVIDIA_API_KEY -u NOUS_API_KEY \
-  -u OPENAI_API_KEY -u OPENROUTER_API_KEY -u TOGETHER_API_KEY -u XAI_API_KEY \
-  PATH=/usr/bin:/bin COUNCIL_DEV_NO_AUTH=1 COUNCIL_WS_SMOKE_ONLY=1 \
-  "$council_binary" \
-    --base-dir "$ROOT/council-rs" --serve --port "$IRIN_COUNCIL_PORT" \
-    >"$tmp/council.log" 2>&1 &
-council_pid=$!
-
-health=""
-for _ in $(seq 1 "${IRIN_NATIVE_HEALTH_CHECKS:-60}"); do
-  health="$(curl -fsS --max-time 2 \
-    "http://127.0.0.1:${IRIN_COUNCIL_PORT}/api/health" 2>/dev/null || true)"
-  [[ -n "$health" ]] && break
-  sleep 0.5
-done
-[[ -n "$health" ]] || {
-  printf 'ERROR: native Council did not become healthy on isolated port %s\n' \
-    "$IRIN_COUNCIL_PORT" >&2
-  tail -n 40 "$tmp/council.log" >&2 || true
-  exit 1
-}
-python3 -c '
-import json, sys
-health = json.loads(sys.argv[1])
-expected_sha = sys.argv[2]
-expected_dirty = sys.argv[3] == "true"
-assert health.get("council_version"), health
-assert health.get("stream_version"), health
-assert health.get("ws_smoke_only") is True, health
-assert health.get("build_sha") == expected_sha, health
-assert health.get("build_dirty") is expected_dirty, health
-' "$health" "$expected_sha" "$expected_dirty"
-printf 'native Council exact-build health: PASS (port %s, sha %s, dirty=%s)\n' \
-  "$IRIN_COUNCIL_PORT" "$expected_sha" "$expected_dirty"
 
 if pgrep -f -x "$binary_pattern" >/dev/null 2>&1; then
   printf 'ERROR: exact native app is already running: %s\n' "$binary" >&2
   exit 1
 fi
 
-# Launch the bundle through LaunchServices. Executing the Mach-O directly from
-# a background shell keeps the process alive but can leave its initial window
-# unordered and invisible, producing a false native-product proof.
+# Launch the bundle through LaunchServices. The packaged app must own and spawn
+# its bundled Council; MatchingBuild adoption is not supported.
 env \
   -u ANTHROPIC_API_KEY -u DEEPSEEK_API_KEY -u GEMINI_API_KEY -u GOOGLE_API_KEY \
   -u GROQ_API_KEY -u MISTRAL_API_KEY -u NVIDIA_API_KEY -u NOUS_API_KEY \
   -u OPENAI_API_KEY -u OPENROUTER_API_KEY -u TOGETHER_API_KEY -u XAI_API_KEY \
   open -n -F -W -o "$tmp/app.log" --stderr "$tmp/app.log" \
     --env "HOME=$tmp/home" \
-    --env "COUNCIL_RS_DIR=$ROOT/council-rs" \
-    --env COUNCIL_DEV_NO_AUTH=1 \
     --env COUNCIL_WS_SMOKE_ONLY=1 \
     "$app" &
 launcher_pid=$!
@@ -259,21 +281,36 @@ done
 }
 printf 'native runtime hydration proof: PASS (port %s)\n' "$IRIN_COUNCIL_PORT"
 
-adopted=0
+owned=0
 for _ in $(seq 1 120); do
-  if grep -Fq "[council-runtime] adopted exact build on :$IRIN_COUNCIL_PORT" \
-    "$tmp/app.log"; then
-    adopted=1
+  if grep -Fq "council --serve started on :$IRIN_COUNCIL_PORT" "$tmp/app.log"; then
+    owned=1
     break
   fi
   sleep 0.25
 done
-[[ "$adopted" == 1 ]] || {
-  printf 'ERROR: native app did not adopt the exact-build Council process\n' >&2
+[[ "$owned" == 1 ]] || {
+  printf 'ERROR: native app did not spawn an app-owned Council process\n' >&2
+  tail -n 80 "$tmp/app.log" >&2 || true
+  exit 1
+}
+printf 'native app-owned Council spawn proof: PASS (port %s)\n' "$IRIN_COUNCIL_PORT"
+
+# Council health must answer on the isolated port from the app-owned child.
+health=""
+for _ in $(seq 1 "${IRIN_NATIVE_HEALTH_CHECKS:-60}"); do
+  health="$(curl -fsS --max-time 2 \
+    "http://127.0.0.1:${IRIN_COUNCIL_PORT}/api/health" 2>/dev/null || true)"
+  [[ -n "$health" ]] && break
+  sleep 0.5
+done
+[[ -n "$health" ]] || {
+  printf 'ERROR: app-owned Council did not become healthy on isolated port %s\n' \
+    "$IRIN_COUNCIL_PORT" >&2
   tail -n 40 "$tmp/app.log" >&2 || true
   exit 1
 }
-printf 'native exact-build adoption proof: PASS (port %s)\n' "$IRIN_COUNCIL_PORT"
+printf 'native Council health proof: PASS (port %s)\n' "$IRIN_COUNCIL_PORT"
 
 webview_ready=0
 for _ in $(seq 1 120); do
@@ -316,25 +353,17 @@ else
   printf 'native visual proof: SKIPPED (headless CI process lane)\n'
 fi
 
-# This smoke starts Council itself, so the desktop app adopts rather than owns
-# that process. Closing the app must leave the adopted Council healthy.
-kill "$pid"
-wait "$pid" 2>/dev/null || true
-pid=""
-kill -0 "$council_pid" 2>/dev/null || {
-  printf 'ERROR: desktop app stopped the harness-owned Council process\n' >&2
-  exit 1
-}
-curl -fsS --max-time 2 \
-  "http://127.0.0.1:${IRIN_COUNCIL_PORT}/api/health" >/dev/null
-printf 'adopted Council ownership proof: PASS\n'
-
-kill "$council_pid"
-wait "$council_pid" 2>/dev/null || true
-council_pid=""
-wait_for_port_release || {
-  printf 'ERROR: isolated Council port did not release after harness teardown: %s\n' \
+# Closing the app must terminate only its owned Council child and free the port.
+# Use graceful quit so Tauri RunEvent::Exit runs stop_tracked_council_server
+# (bare SIGKILL/fast TERM can reparent the sidecar under launchd/PID 1).
+# Ownership proof does not harness-kill the sidecar — port release must come
+# from the app's Exit path.
+host_pid_for_stop="$pid"
+if ! stop_app_host "$host_pid_for_stop"; then
+  printf 'ERROR: app-owned Council port did not release after app exit: %s\n' \
     "$IRIN_COUNCIL_PORT" >&2
   exit 1
-}
-printf 'harness teardown proof: PASS (port %s released)\n' "$IRIN_COUNCIL_PORT"
+fi
+pid=""
+printf 'app-owned Council shutdown proof: PASS (port %s released)\n' "$IRIN_COUNCIL_PORT"
+printf 'harness teardown proof: PASS\n'

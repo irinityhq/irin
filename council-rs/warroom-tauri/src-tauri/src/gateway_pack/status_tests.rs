@@ -3,11 +3,14 @@ use crate::docker_cli::DESKTOP_COMPOSE_PROJECT;
 use crate::gateway_pack::health::compose_ls_reports_running;
 use crate::gateway_pack::launch::gateway_child_env_if_ready;
 use crate::gateway_pack::types::{GatewayPackState, GatewayPackStatus};
-use crate::keychain::{MemorySecretStore, SecretStore};
+use crate::keychain::{
+    store_gw_api_key, MemorySecretStore, SecretStore, GW_API_KEY_ACCOUNT, KEYCHAIN_SERVICE,
+};
 use crate::private_config::test_env_lock;
+use std::collections::HashMap;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 #[test]
@@ -626,4 +629,465 @@ fn owned_council_route_proof_records_and_clears() {
     // Child stop/death clears the proof again.
     record_owned_council_route(None);
     assert_eq!(owned_council_route(), None);
+}
+
+// ---------------------------------------------------------------------------
+// Auth-observation cache: the status background loop must not re-read
+// GW_API_KEY from Keychain every 5s tick. These tests exercise the cache via
+// `resolve_auth_observation` directly (with_test_status_probe short-circuits
+// before gateway_pack_status_uncached, so it cannot observe Keychain reads).
+// `models_authenticated` returns false in the test env (no Docker/gateway),
+// which is fine — these tests prove *read-count* behavior, not auth results.
+// ---------------------------------------------------------------------------
+
+/// Records Keychain get order without logging secret values. Mirrors the
+/// pattern in launch_tests.rs so status-loop read counts are observable.
+struct CountingKeychainStore {
+    inner: Mutex<HashMap<(String, String), String>>,
+    gets: Arc<AtomicUsize>,
+}
+
+impl CountingKeychainStore {
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+            gets: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    fn with_gw_key() -> Self {
+        let store = Self::new();
+        store_gw_api_key(&store, &format!("gw_{:032x}", 1u128)).unwrap();
+        store.gets.store(0, AtomicOrdering::SeqCst);
+        store
+    }
+
+    fn get_count(&self) -> usize {
+        self.gets.load(AtomicOrdering::SeqCst)
+    }
+}
+
+impl SecretStore for CountingKeychainStore {
+    fn set_password(&self, service: &str, account: &str, password: &str) -> Result<(), String> {
+        self.inner
+            .lock()
+            .map_err(|_| "lock poisoned".to_string())?
+            .insert(
+                (service.to_string(), account.to_string()),
+                password.to_string(),
+            );
+        Ok(())
+    }
+
+    fn get_password(&self, service: &str, account: &str) -> Result<Option<String>, String> {
+        if service == KEYCHAIN_SERVICE && account == GW_API_KEY_ACCOUNT {
+            self.gets.fetch_add(1, AtomicOrdering::SeqCst);
+        }
+        Ok(self
+            .inner
+            .lock()
+            .map_err(|_| "lock poisoned".to_string())?
+            .get(&(service.to_string(), account.to_string()))
+            .cloned())
+    }
+
+    fn delete_password(&self, service: &str, account: &str) -> Result<(), String> {
+        self.inner
+            .lock()
+            .map_err(|_| "lock poisoned".to_string())?
+            .remove(&(service.to_string(), account.to_string()));
+        Ok(())
+    }
+}
+
+#[test]
+fn auth_observation_cache_hit_avoids_second_keychain_read() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::with_gw_key();
+
+    // First call: cache miss → one Keychain get.
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    assert_eq!(store.get_count(), 1, "first call should read Keychain once");
+
+    // Second call: cache hit → no Keychain get.
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    assert_eq!(store.get_count(), 1, "second call should serve from cache");
+}
+
+#[test]
+fn auth_observation_cached_absence_is_not_re_probed() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::new(); // no key seeded
+
+    // Absence is cached just like presence.
+    let (present, _) = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    assert!(!present, "empty store => key absent");
+    assert_eq!(store.get_count(), 1, "first call probes once");
+
+    // Cached absence: no re-probe on the next tick.
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    assert_eq!(
+        store.get_count(),
+        1,
+        "absence must be cached, not re-probed"
+    );
+}
+
+#[test]
+fn auth_observation_invalidation_forces_re_read() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::with_gw_key();
+
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    assert_eq!(store.get_count(), 1);
+
+    // Invalidate drops the cache; next call re-probes.
+    invalidate_auth_observation();
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    assert_eq!(store.get_count(), 2, "post-invalidation must re-read");
+}
+
+#[test]
+fn auth_observation_held_key_skips_keychain_entirely() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::with_gw_key();
+
+    // Authority path: caller holds the key → zero Keychain gets.
+    let (present, _) =
+        resolve_auth_observation(&store, AuthProbeMode::AuthorityLive(Some("gw_deadbeef")));
+    assert!(present, "held key => key_present is true");
+    assert_eq!(
+        store.get_count(),
+        0,
+        "held-key path must not touch Keychain"
+    );
+}
+
+#[test]
+fn cold_launch_seed_makes_first_background_tick_keychain_free() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::with_gw_key();
+
+    seed_auth_observation_from_preloaded_key(Some("gw_deadbeef"));
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+
+    assert_eq!(
+        store.get_count(),
+        0,
+        "preloaded cold-launch key must seed the first background tick"
+    );
+}
+
+#[test]
+fn cold_launch_absence_seed_makes_first_background_tick_keychain_free() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::new();
+
+    seed_auth_observation_from_preloaded_key(None);
+    let (present, _) = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+
+    assert!(!present);
+    assert_eq!(
+        store.get_count(),
+        0,
+        "known cold-launch absence must seed the first background tick"
+    );
+}
+
+#[test]
+fn auth_observation_stale_generation_rejected_at_commit() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+
+    // Simulate the generation advancing between read and commit: read the
+    // generation, then invalidate (bump it) before committing.
+    let gen_before = AUTH_OBSERVATION_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    invalidate_auth_observation(); // advances generation
+    let gen_after = AUTH_OBSERVATION_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    assert_ne!(
+        gen_before, gen_after,
+        "invalidation must advance generation"
+    );
+
+    // A commit with the stale generation is rejected.
+    let committed = commit_auth_observation(gen_before, true, true);
+    assert!(!committed, "stale-generation commit must be rejected");
+    assert!(
+        !auth_observation_present_for_test(),
+        "rejected commit must not populate the cache"
+    );
+
+    // A commit with the current generation succeeds.
+    let committed = commit_auth_observation(gen_after, true, false);
+    assert!(committed, "current-generation commit must succeed");
+    assert!(auth_observation_present_for_test());
+}
+
+#[test]
+fn auth_observation_concurrent_misses_cannot_double_commit() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+
+    // Two threads each read a distinct generation, then both try to commit.
+    // The generation guard ensures only the one matching the current value
+    // writes through; the other is rejected. This is a structural proof: the
+    // commit function's generation check is the concurrency guard.
+    let gen_a = AUTH_OBSERVATION_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    invalidate_auth_observation();
+    let gen_b = AUTH_OBSERVATION_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+
+    let committed_a = commit_auth_observation(gen_a, true, true);
+    let committed_b = commit_auth_observation(gen_b, false, false);
+
+    // Exactly one commit wins.
+    assert!(
+        committed_a ^ committed_b,
+        "exactly one of the two generations must commit (a={committed_a}, b={committed_b})"
+    );
+    assert!(auth_observation_present_for_test());
+
+    // The winning observation is the one with the current generation.
+    let (cached_present, _) = cached_auth_observation().unwrap();
+    if committed_b {
+        assert!(!cached_present, "gen_b won => its observation must hold");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Reviewer-requested tests (Issue 3): prove the authority/background contract
+// boundary holds. These are the three scenarios the reviewer identified as gaps
+// in the first iteration.
+// ---------------------------------------------------------------------------
+
+/// Issue 1 proof: cached presentation auth cannot influence the authority path.
+///
+/// Seeds the observation cache with `authenticated=true` (via the internal
+/// commit helper), then calls `resolve_auth_observation` with a held key. The
+/// held-key path must run `models_authenticated` live (returns false in the test
+/// env — no Docker) and NOT serve the cached `true`. This is the Touch ID
+/// arm/renew contract: a cached `true` must never permit the ceremony after
+/// Gateway auth has actually failed.
+#[test]
+fn authority_path_ignores_cached_auth_observation() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::with_gw_key();
+
+    // Warm the cache with authenticated=true via the internal commit seam.
+    let gen = AUTH_OBSERVATION_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        commit_auth_observation(gen, true, true),
+        "seed cache with authenticated=true"
+    );
+
+    // Verify the cache is warm.
+    let (cached_present, cached_authed) = cached_auth_observation().expect("cache should be warm");
+    assert!(
+        cached_present && cached_authed,
+        "cache seeded with true/true"
+    );
+
+    // Authority path with a held key: must NOT serve from cache. In the test
+    // env models_authenticated returns false (no Docker), so the live result
+    // must be authenticated=false — the cached true must NOT leak through.
+    let (present, authed) =
+        resolve_auth_observation(&store, AuthProbeMode::AuthorityLive(Some("gw_deadbeef")));
+    assert!(present, "held key => present");
+    assert!(
+        !authed,
+        "authority path must run live models_authenticated (false in test env), \
+         not serve cached authenticated=true"
+    );
+    assert_eq!(
+        store.get_count(),
+        0,
+        "held-key path must not touch Keychain at all"
+    );
+}
+
+/// Issue 2 proof: background reads remain constant until explicit invalidation
+/// (no TTL). Warm the cache, then call the background path many times and prove
+/// zero additional Keychain reads — the observation persists indefinitely.
+#[test]
+fn background_reads_constant_until_lifecycle_invalidation() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::with_gw_key();
+
+    // First background call: cache miss → one read.
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    assert_eq!(store.get_count(), 1);
+
+    // Many subsequent background calls: cache persists, zero additional reads.
+    // (Previously a 30s TTL would have re-read every 30s; now it's lifecycle-only.)
+    for _ in 0..20 {
+        let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    }
+    assert_eq!(
+        store.get_count(),
+        1,
+        "background path must not re-read Keychain until lifecycle invalidation"
+    );
+
+    // Only an explicit lifecycle invalidation forces a re-read.
+    invalidate_auth_observation();
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    assert_eq!(store.get_count(), 2, "post-invalidation re-reads once");
+}
+
+/// Issue 3 proof: a probe whose generation was superseded by a lifecycle
+/// invalidation mid-flight cannot repopulate the observation with stale auth.
+///
+/// Simulates the race: read generation G0, invalidate (advance to G1), then
+/// attempt to commit the G0 observation. The generation guard must reject it
+/// so a stale "authenticated=true" cannot overwrite the invalidated cache.
+#[test]
+fn stale_generation_cannot_repopulate_observation() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+
+    // Step 1: a normal background probe commits at G0.
+    let store = CountingKeychainStore::with_gw_key();
+    let (present, _) = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    assert!(present, "key is present");
+    assert!(auth_observation_present_for_test());
+
+    // Step 2: read G0, then a lifecycle mutation invalidates (advances to G1).
+    let stale_gen = AUTH_OBSERVATION_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    invalidate_auth_observation();
+    let current_gen = AUTH_OBSERVATION_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    assert_ne!(
+        stale_gen, current_gen,
+        "invalidation must advance generation"
+    );
+
+    // Step 3: a probe that computed its observation at G0 tries to commit.
+    // The guard must reject it — the key may have been rotated by the lifecycle
+    // mutation between read and commit.
+    let rejected = commit_auth_observation(stale_gen, true, true);
+    assert!(
+        !rejected,
+        "stale-generation commit must be rejected even if auth was true"
+    );
+
+    // The cache remains cleared by the invalidation, not repopulated by the
+    // stale probe.
+    assert!(
+        !auth_observation_present_for_test(),
+        "rejected stale commit must not repopulate the cache"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// P1 regression: authority path must return unauthenticated when the key is
+// absent or the Keychain read fails, even if the background cache holds a warm
+// authenticated=true. This is the exact failure path the reviewer identified:
+// gateway_pack_status_fresh converts Ok(None)/Err to AuthorityLive(None), and
+// resolve_auth_observation must NOT fall through to the cache.
+// ---------------------------------------------------------------------------
+
+/// SecretStore whose get_password always returns Err (simulates Keychain ACL
+/// failure / unreadable item).
+struct FailingKeychainStore {
+    gets: AtomicUsize,
+}
+
+impl FailingKeychainStore {
+    fn new() -> Self {
+        Self {
+            gets: AtomicUsize::new(0),
+        }
+    }
+
+    fn get_count(&self) -> usize {
+        self.gets.load(AtomicOrdering::SeqCst)
+    }
+}
+
+impl SecretStore for FailingKeychainStore {
+    fn set_password(&self, _: &str, _: &str, _: &str) -> Result<(), String> {
+        Err("keychain unavailable".into())
+    }
+    fn get_password(&self, _: &str, _: &str) -> Result<Option<String>, String> {
+        self.gets.fetch_add(1, AtomicOrdering::SeqCst);
+        Err("keychain read failed".into())
+    }
+    fn delete_password(&self, _: &str, _: &str) -> Result<(), String> {
+        Err("keychain unavailable".into())
+    }
+}
+
+/// Helper: seed the observation cache with (key_present=true, authenticated=true)
+/// at the current generation.
+fn seed_cache_authenticated_true() {
+    let gen = AUTH_OBSERVATION_GENERATION.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        commit_auth_observation(gen, true, true),
+        "seed cache with authenticated=true"
+    );
+}
+
+#[test]
+fn authority_absent_key_returns_unauthenticated_despite_warm_cache() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+
+    // Warm the background cache with authenticated=true.
+    seed_cache_authenticated_true();
+    let (_, cached_authed) = cached_auth_observation().expect("cache warm");
+    assert!(cached_authed, "cache seeded with authenticated=true");
+
+    // Exercise the same Keychain-load-to-AuthProbeMode seam used by
+    // gateway_pack_status_fresh. Ok(None) must become AuthorityLive(None)
+    // without serving the cached true.
+    let store = CountingKeychainStore::new(); // no key seeded
+    let (present, authed) =
+        with_loaded_authority_mode(&store, |mode| resolve_auth_observation(&store, mode));
+    assert_eq!(
+        store.get_count(),
+        1,
+        "authority path must read Keychain once"
+    );
+    assert!(!present, "absent key => key_present must be false");
+    assert!(
+        !authed,
+        "authority path must return unauthenticated despite warm cached=true"
+    );
+}
+
+#[test]
+fn authority_failing_keychain_returns_unauthenticated_despite_warm_cache() {
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+
+    // Warm the background cache with authenticated=true.
+    seed_cache_authenticated_true();
+    let (_, cached_authed) = cached_auth_observation().expect("cache warm");
+    assert!(cached_authed, "cache seeded with authenticated=true");
+
+    // Exercise the exact production seam: an actual SecretStore error must be
+    // read once, collapse to AuthorityLive(None), and fail closed without
+    // serving the cached true.
+    let store = FailingKeychainStore::new();
+    let (present, authed) =
+        with_loaded_authority_mode(&store, |mode| resolve_auth_observation(&store, mode));
+    assert_eq!(
+        store.get_count(),
+        1,
+        "authority path must read Keychain once"
+    );
+    assert!(
+        !present,
+        "failed keychain read => key_present must be false"
+    );
+    assert!(
+        !authed,
+        "authority path must return unauthenticated despite warm cached=true"
+    );
 }

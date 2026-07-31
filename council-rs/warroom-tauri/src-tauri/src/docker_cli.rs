@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::thread;
@@ -144,7 +144,10 @@ pub enum DockerDaemonState {
     Ready,
 }
 
-/// Run a process with a hard wall-clock timeout. On timeout the child is killed.
+/// Run a process with a hard wall-clock timeout. On timeout the child is killed
+/// and reaped. Stdin is closed (null). See [`run_command_timeout_input`] when
+/// the child must consume a prompt or body on stdin.
+///
 /// Never returns stdout/stderr to callers that need redaction — use
 /// [`format_cmd_failure`] which only emits fixed categories.
 ///
@@ -152,12 +155,27 @@ pub enum DockerDaemonState {
 /// immediately with **no** delayed signal and no join of a full-timeout sleeper
 /// (a prior sleeper+join pattern forced every successful `compose up --wait`
 /// to wait the full 180s before Enable could provision Keychain keys).
-pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, String> {
+pub fn run_command_timeout(cmd: Command, timeout: Duration) -> Result<Output, String> {
+    run_command_timeout_input(cmd, timeout, None)
+}
+
+/// Same kill/reap contract as [`run_command_timeout`], with optional stdin
+/// bytes written concurrently (so large prompts cannot deadlock against full
+/// stdout pipes). On timeout the child is killed and all helper threads are
+/// joined; no orphan processes.
+pub fn run_command_timeout_input(
+    mut cmd: Command,
+    timeout: Duration,
+    stdin: Option<&[u8]>,
+) -> Result<Output, String> {
     use std::time::Instant;
 
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+    if stdin.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
 
     let mut child = cmd
         .spawn()
@@ -181,6 +199,20 @@ pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output
         buf
     });
 
+    // Write stdin on a helper thread so a slow consumer cannot block the wait
+    // loop past the deadline (kill still wins).
+    let in_handle = match (stdin, child.stdin.take()) {
+        (Some(bytes), Some(mut pipe)) => {
+            let owned = bytes.to_vec();
+            Some(thread::spawn(move || {
+                let _ = pipe.write_all(&owned);
+                // Close pipe so the child sees EOF.
+                drop(pipe);
+            }))
+        }
+        _ => None,
+    };
+
     let deadline = Instant::now() + timeout;
     let status = loop {
         match child.try_wait() {
@@ -196,6 +228,9 @@ pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output
                     })?;
                     let _ = out_handle.join();
                     let _ = err_handle.join();
+                    if let Some(h) = in_handle {
+                        let _ = h.join();
+                    }
                     let _ = reaped;
                     return Err(DockerErrorKind::Timeout.as_str().to_string());
                 }
@@ -206,6 +241,9 @@ pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output
                 let _ = child.wait();
                 let _ = out_handle.join();
                 let _ = err_handle.join();
+                if let Some(h) = in_handle {
+                    let _ = h.join();
+                }
                 return Err(format!(
                     "{}: wait failed: {e}",
                     DockerErrorKind::SpawnFailed.as_str()
@@ -216,6 +254,9 @@ pub fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output
 
     let stdout = out_handle.join().unwrap_or_default();
     let stderr = err_handle.join().unwrap_or_default();
+    if let Some(h) = in_handle {
+        let _ = h.join();
+    }
     Ok(Output {
         status,
         stdout,
@@ -381,20 +422,31 @@ pub const AMBIENT_SCRUB_ENV_KEYS: &[&str] = &[
     "NVIDIA_API_KEY",
     "AUTH_PEPPER",
     "BOOTSTRAP_TOKEN",
+    // Watch/Outbox admin read token: an ambient host value must never reach
+    // the containers — the only admissible value is the Keychain-held token
+    // the native host injects via the validated secret env (applied after
+    // this scrub, so it wins).
+    "WATCH_ADMIN_TOKEN",
     // Touch ID bridge: the arm-principal registry is a bearer-token secret.
     // An ambient `GW_ARM_PRINCIPALS` in the operator's login shell must never
     // reach the pack sidecar — the only admissible value is the one the native
     // host mints into the Keychain for this app.
     "GW_ARM_PRINCIPALS",
+    // Host CLI adapters: only the app-owned spawn env may supply URL/token.
+    // Ambient parent values must never arm or re-point these routes.
+    "CLAUDE_PROXY_URL",
+    "CODEX_PROXY_URL",
+    "CLAUDE_PROXY_TOKEN",
+    "CODEX_PROXY_TOKEN",
 ];
 
-/// Watch/admin surfaces the desktop pack contract requires disarmed. Forced
+/// Watch producer/dispatcher and the Council-spend route stay force-disarmed
 /// on every Docker/Compose spawn AFTER any caller-supplied env, so neither
-/// the parent environment nor an internal caller can arm them
-/// (`WATCH_PRODUCER_ENABLED=false` alone never neutralized admin APIs gated
-/// on `WATCH_ADMIN_TOKEN`). Values match the pack compose contract.
+/// the parent environment nor an internal caller can arm them. The
+/// watch-admin read credential is no longer disarmed here: it is a validated,
+/// Keychain-held secret admitted through the allow-listed secret env, while
+/// ambient host values remain scrubbed. Values match the pack compose contract.
 pub const FORCED_DISARM_ENV: &[(&str, &str)] = &[
-    ("WATCH_ADMIN_TOKEN", ""),
     ("COUNCIL_GATEWAY_TOKEN", ""),
     ("WATCH_PRODUCER_ENABLED", "false"),
     ("WATCH_DISPATCHER_ENABLED", "false"),
@@ -408,8 +460,8 @@ fn apply_ambient_scrub_env(cmd: &mut Command) {
     }
 }
 
-/// Force disarmed Watch/admin surfaces (see [`FORCED_DISARM_ENV`]). Runs
-/// last on every spawn so no layer can re-arm them.
+/// Force disarmed Watch producer/dispatcher and Council-spend surfaces (see
+/// [`FORCED_DISARM_ENV`]). Runs last on every spawn so no layer can re-arm them.
 fn apply_forced_disarm_env(cmd: &mut Command) {
     for (key, value) in FORCED_DISARM_ENV {
         cmd.env(key, value);
@@ -550,7 +602,8 @@ fn validate_compose_invocation(
 /// 2. the validated pack env (allow-listed keys only) — explicit `cmd.env`
 ///    beats both the inherited parent value and the `--env-file` pins under
 ///    Compose variable precedence,
-/// 3. the disarmed-surface force, last, so no layer can arm Watch/admin.
+/// 3. the disarmed-surface force, last, so no layer can arm the Watch
+///    producer/dispatcher or the Council-spend route.
 ///
 /// Re-validates at the construction boundary so no internal caller can bypass
 /// the fixed project, argv, path, or environment allowlists.
@@ -611,19 +664,27 @@ pub const COMPOSE_ENV_KEY_ALLOWLIST: &[&str] = &[
     "DAILY_SPEND_CAP_USD",
     "WATCH_MAX_FANOUT_COST_USD",
     "COUNCIL_GATEWAY_KEY_ID",
+    // Watch/Outbox admin read credential: a Keychain-held secret admitted only
+    // through this allow-listed secret env; ambient copies are scrubbed first.
+    "WATCH_ADMIN_TOKEN",
     // Touch ID bridge — the ONLY two arm-surface keys the desktop pack admits.
     // `GW_ARM_PRINCIPALS` is a Keychain-held bearer registry (secret channel,
     // never written to the public env file); `GW_ARM_ATTEST_KEYS_PATH` is a
     // non-secret in-container path pin. Every other arm knob
     // (`GW_ARM_DEVIATION_FLAG`, `GW_ARM_PRINCIPAL_DOMAINS`, `ARM_NOTIFY_URL`,
-    // `ARM_STAGE_TTL_MS`) stays an empty compose literal, and
-    // `WATCH_ADMIN_TOKEN` remains in FORCED_DISARM_ENV.
+    // `ARM_STAGE_TTL_MS`) stays an empty compose literal.
     "GW_ARM_PRINCIPALS",
     "GW_ARM_ATTEST_KEYS_PATH",
     // Host path of the app-owned enrollment registry, bind-mounted read-only.
     // Same class as IRIN_DESKTOP_LEDGER_KEY: a validated app-owned path, not an
     // arm-surface knob.
     "IRIN_DESKTOP_ARM_KEYS",
+    // Host CLI adapters (Claude/Codex): URL is non-secret but must still be
+    // forced from the validated pack env; tokens are Keychain-held secrets.
+    "CLAUDE_PROXY_URL",
+    "CODEX_PROXY_URL",
+    "CLAUDE_PROXY_TOKEN",
+    "CODEX_PROXY_TOKEN",
 ];
 
 const COMPOSE_SUBCOMMAND_ALLOWLIST: &[&str] = &[
@@ -738,10 +799,14 @@ fn match_secret_assignment(bytes: &[u8], i: usize) -> Option<(&'static str, usiz
         "OPENAI_API_KEY=",
         "ANTHROPIC_API_KEY=",
         "NVIDIA_API_KEY=",
+        "CLAUDE_PROXY_TOKEN=",
+        "CODEX_PROXY_TOKEN=",
         "admin_key=",
         "raw_key=",
         "Authorization: Bearer ",
         "Authorization:Bearer ",
+        "X-Proxy-Auth: Bearer ",
+        "X-Proxy-Auth:Bearer ",
     ];
     for key in KEYS {
         let kb = key.as_bytes();
@@ -891,6 +956,31 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "must not join a full-timeout sleeper after success"
+        );
+    }
+
+    #[test]
+    fn run_command_timeout_input_feeds_stdin_and_kills_on_timeout() {
+        use std::time::Instant;
+        // Deterministic: `cat` echoes stdin; no provider CLI.
+        let cat = Command::new("/bin/cat");
+        let out = run_command_timeout_input(cat, Duration::from_secs(2), Some(b"prompt-body"))
+            .expect("cat");
+        assert!(out.status.success());
+        assert_eq!(out.stdout, b"prompt-body");
+
+        let mut sleep = Command::new("/bin/sleep");
+        sleep.arg("30");
+        let start = Instant::now();
+        let err =
+            run_command_timeout_input(sleep, Duration::from_millis(400), Some(b"x")).unwrap_err();
+        assert!(
+            err.contains(DockerErrorKind::Timeout.as_str()) || err.contains("timeout"),
+            "{err}"
+        );
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "timeout path must kill/reap promptly"
         );
     }
 
@@ -1094,7 +1184,8 @@ mod tests {
         // Validated pack channel values win over ambient for provider keys…
         let mut extra = ComposeEnv::new();
         extra.insert("XAI_API_KEY".into(), "validated-provider-key".into());
-        // …but even an allow-listed caller value can never arm Watch surfaces.
+        // …but even an allow-listed caller value can never arm the Watch
+        // producer/dispatcher.
         extra.insert("WATCH_PRODUCER_ENABLED".into(), "true".into());
         let cmd = build_compose_command(
             Path::new("/usr/local/bin/docker"),
@@ -1109,6 +1200,7 @@ mod tests {
             env.get("XAI_API_KEY").map(String::as_str),
             Some("validated-provider-key")
         );
+        // No validated secret-env value: the ambient admin token is scrubbed.
         assert_eq!(env.get("WATCH_ADMIN_TOKEN").map(String::as_str), Some(""));
         assert_eq!(
             env.get("COUNCIL_GATEWAY_TOKEN").map(String::as_str),
@@ -1120,6 +1212,35 @@ mod tests {
         );
         assert_eq!(
             env.get("WATCH_DISPATCHER_ENABLED").map(String::as_str),
+            Some("false")
+        );
+
+        // A validated WATCH_ADMIN_TOKEN from the secret env is admitted and
+        // survives; producer/dispatcher stay disarmed regardless.
+        let watch_token = "ab".repeat(32);
+        let mut extra_armed = ComposeEnv::new();
+        extra_armed.insert("WATCH_ADMIN_TOKEN".into(), watch_token.clone());
+        let cmd_armed = build_compose_command(
+            Path::new("/usr/local/bin/docker"),
+            &compose,
+            None,
+            &["config"],
+            Some(&extra_armed),
+        )
+        .expect("compose command builds with watch admin token");
+        let env_armed = spawn_env(&cmd_armed);
+        assert_eq!(
+            env_armed.get("WATCH_ADMIN_TOKEN").map(String::as_str),
+            Some(watch_token.as_str())
+        );
+        assert_eq!(
+            env_armed.get("WATCH_PRODUCER_ENABLED").map(String::as_str),
+            Some("false")
+        );
+        assert_eq!(
+            env_armed
+                .get("WATCH_DISPATCHER_ENABLED")
+                .map(String::as_str),
             Some("false")
         );
 
@@ -1145,8 +1266,9 @@ mod tests {
 
     /// Touch ID bridge: the pack admits exactly two arm-surface env keys, and
     /// an ambient `GW_ARM_PRINCIPALS` can never ride the spawn. Everything else
-    /// on the arm surface stays rejected by the allow-list, and
-    /// `WATCH_ADMIN_TOKEN` stays forced empty regardless of the caller.
+    /// on the arm surface stays rejected by the allow-list. `WATCH_ADMIN_TOKEN`
+    /// is no longer force-disarmed: it is admitted via the validated secret
+    /// env and scrubbed from the ambient environment.
     #[test]
     fn compose_env_allowlist_admits_only_the_two_arm_bridge_keys() {
         for admitted in ["GW_ARM_PRINCIPALS", "GW_ARM_ATTEST_KEYS_PATH"] {
@@ -1160,7 +1282,6 @@ mod tests {
             "GW_ARM_PRINCIPAL_DOMAINS",
             "ARM_NOTIFY_URL",
             "ARM_STAGE_TTL_MS",
-            "WATCH_ADMIN_TOKEN",
             "WATCH_DISPATCHER_GATEWAY_KEY",
         ] {
             assert!(
@@ -1173,11 +1294,29 @@ mod tests {
             "an ambient arm-principal registry must be scrubbed before the pack env"
         );
         assert!(
-            FORCED_DISARM_ENV
-                .iter()
-                .any(|(k, v)| *k == "WATCH_ADMIN_TOKEN" && v.is_empty()),
-            "WATCH_ADMIN_TOKEN stays forced empty with the arm bridge wired"
+            COMPOSE_ENV_KEY_ALLOWLIST.contains(&"WATCH_ADMIN_TOKEN"),
+            "the watch-admin read token is admitted via the validated secret env"
         );
+        assert!(
+            AMBIENT_SCRUB_ENV_KEYS.contains(&"WATCH_ADMIN_TOKEN"),
+            "an ambient watch-admin token must be scrubbed before the pack env"
+        );
+        assert!(
+            !FORCED_DISARM_ENV
+                .iter()
+                .any(|(k, _)| *k == "WATCH_ADMIN_TOKEN"),
+            "WATCH_ADMIN_TOKEN is no longer force-disarmed"
+        );
+        for still_disarmed in [
+            ("COUNCIL_GATEWAY_TOKEN", ""),
+            ("WATCH_PRODUCER_ENABLED", "false"),
+            ("WATCH_DISPATCHER_ENABLED", "false"),
+        ] {
+            assert!(
+                FORCED_DISARM_ENV.contains(&still_disarmed),
+                "{still_disarmed:?} must stay force-disarmed"
+            );
+        }
     }
 
     #[test]
@@ -1203,7 +1342,8 @@ mod tests {
         let env = spawn_env(&cmd);
         assert_eq!(env.get("GW_ARM_PRINCIPALS").map(String::as_str), Some(""));
 
-        // The validated pack channel value wins, and admin stays disarmed.
+        // The validated pack channel value wins; the ambient admin token stays
+        // scrubbed (no secret-env value on this spawn).
         let mut extra = ComposeEnv::new();
         extra.insert(
             "GW_ARM_PRINCIPALS".into(),

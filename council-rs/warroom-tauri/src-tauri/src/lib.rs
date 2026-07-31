@@ -16,8 +16,10 @@ mod tailscale_cli;
 mod touch_id;
 
 use gateway_pack::{GatewayPackState, GatewayPackStatus};
-use keychain::{load_gw_api_key, migrate_legacy_secrets, KeychainSecretStore};
-use status_authority::{DesktopStatusSnapshot, Freshness};
+use keychain::{
+    load_gw_api_key, load_watch_admin_token, migrate_legacy_secrets_with_values,
+    seed_arm_principal_observation, KeychainSecretStore,
+};
 use lifecycle::{
     classify_council_lifecycle, classify_gateway_lifecycle, classify_phone_lifecycle,
     compose_app_lifecycle, AppLifecycleStatus, CouncilLifecycleInput,
@@ -31,11 +33,17 @@ use private_config::{
     ensure_writable_base_overlay, gui_login_environment, load_or_create_private_config,
 };
 use sidecar::{
-    compose_sidecar_args, compose_sidecar_env, probe_council_server, validate_council_root,
-    wait_for_port_release, CouncilServerProbe, GatewayChildCredentials,
+    compose_sidecar_args, compose_sidecar_env, probe_council_server, wait_for_port_release,
+    CouncilServerProbe, GatewayChildCredentials,
 };
+use status_authority::{DesktopStatusSnapshot, Freshness};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
+
+/// Fail-closed owned Council PID for process-exit reclaim (SIGTERM/atexit).
+/// 0 means no owned child is recorded.
+static OWNED_COUNCIL_PID: AtomicU32 = AtomicU32::new(0);
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{TrayIconBuilder, TrayIconEvent},
@@ -67,10 +75,8 @@ struct CouncilServer(Mutex<TrackedChild>);
 /// drop auth — and a gateway-toggle restart would silently drop `--base-dir`).
 #[derive(Default, Clone)]
 struct LastSpawnConfig {
-    council_path: Option<String>,
     server_port: Option<u16>,
     auth_token: Option<String>,
-    council_root: Option<String>,
     librarian_base: Option<String>,
 }
 
@@ -161,6 +167,26 @@ fn should_reveal_main_window(webview_label: &str, event: PageLoadEvent) -> bool 
 /// Prefer an orderly kill of the owned child, then re-check the PID so a stuck
 /// listener is not left reparented under launchd/PID 1 when the host exits.
 /// Never kills a process that is not the tracked child PID.
+fn record_owned_council_pid(pid: Option<u32>) {
+    OWNED_COUNCIL_PID.store(pid.unwrap_or(0), Ordering::SeqCst);
+}
+
+fn kill_recorded_owned_council_pid() {
+    let pid = OWNED_COUNCIL_PID.swap(0, Ordering::SeqCst);
+    if pid == 0 {
+        return;
+    }
+    unix_kill_pid(pid, 15);
+    std::thread::sleep(Duration::from_millis(150));
+    if unix_pid_alive(pid) {
+        unix_kill_pid(pid, 9);
+    }
+}
+
+extern "C" fn atexit_kill_owned_council() {
+    kill_recorded_owned_council_pid();
+}
+
 fn stop_tracked_council_server(app: &AppHandle) {
     let state = app.state::<CouncilServer>();
     let mut tracked_pid: Option<u32> = None;
@@ -170,7 +196,15 @@ fn stop_tracked_council_server(app: &AppHandle) {
             let _ = child.kill();
         }
     };
+    // Prefer the last owned spawn port; fall back to the build-time default.
+    let owned_port = app
+        .try_state::<SpawnConfigCache>()
+        .and_then(|cache| cache.0.lock().ok().and_then(|g| g.server_port))
+        .or_else(|| default_serve_port().ok())
+        .unwrap_or(8765);
+    // Always clear the process-global owned PID so atexit does not double-kill.
     if let Some(pid) = tracked_pid {
+        record_owned_council_pid(None);
         // No owned child anymore: clear the governed-route proof so pack
         // status cannot claim governed from health + persisted flag alone.
         gateway_pack::record_owned_council_route(None);
@@ -184,8 +218,13 @@ fn stop_tracked_council_server(app: &AppHandle) {
                 unix_kill_pid(pid, 9);
             }
         }
-        // Best-effort listener release after owned child death.
-        let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(3));
+        // Best-effort listener release after owned child death (actual port).
+        let _ = wait_for_port_release(owned_port, Duration::from_secs(3));
+    } else {
+        // Host exit without a tracked CommandChild handle: still reclaim the
+        // recorded PID if any (race between drop and Exit).
+        kill_recorded_owned_council_pid();
+        let _ = wait_for_port_release(owned_port, Duration::from_secs(3));
     }
 }
 
@@ -227,6 +266,9 @@ fn unix_kill_pid(_pid: u32, _sig: i32) {}
 fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>) {
     const ATTEMPTS: u32 = 12;
     const INTERVAL: Duration = Duration::from_secs(5);
+    /// Early window may call resume; resume is single-flight and wait-only when
+    /// the pack project is already up (no repeated force-recreate/Keychain rebuild).
+    const MAX_EARLY_RESUME_ATTEMPTS: u32 = 4;
     tauri::async_runtime::spawn_blocking(move || {
         for attempt in 0..ATTEMPTS {
             std::thread::sleep(INTERVAL);
@@ -240,9 +282,26 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
             if !persisted || owned == Some(true) || owned != Some(false) {
                 return;
             }
-            let pack_ok = if gateway_pack::pack_auth_revalidated(&store) {
-                true
-            } else if attempt < 4 {
+            let revalidated = gateway_pack::pack_auth_revalidated(&store);
+            let pack_ok = if revalidated {
+                match gateway_pack::resume_installed_pack(&store) {
+                    Ok(()) => true,
+                    Err(e) => {
+                        let _ = app.emit(
+                            "council-log",
+                            format!(
+                                "[system] governed-promote attempt {}: Watch/Outbox auth not ready ({e})",
+                                attempt + 1
+                            ),
+                        );
+                        false
+                    }
+                }
+            } else if gateway_pack::promote_may_call_resume(
+                attempt,
+                MAX_EARLY_RESUME_ATTEMPTS,
+                revalidated,
+            ) {
                 match gateway_pack::resume_installed_pack(&store) {
                     Ok(()) => true,
                     Err(e) => {
@@ -257,6 +316,7 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
                     }
                 }
             } else {
+                // After early window: revalidation-only polls (first branch).
                 false
             };
             if !gateway_pack::may_promote_to_governed(persisted, owned, pack_ok) {
@@ -281,18 +341,13 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
                 wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             match try_start_council_server(
                 &app,
-                config.council_path.as_deref(),
                 config.server_port,
                 token.as_deref(),
                 Some(true),
-                config.council_root.as_deref(),
                 config.librarian_base.as_deref(),
             ) {
                 Ok(msg) => {
-                    let _ = app.emit(
-                        "council-log",
-                        format!("[system] governed-promote: {msg}"),
-                    );
+                    let _ = app.emit("council-log", format!("[system] governed-promote: {msg}"));
                     let _ = gateway_pack::status_with_council_route(&store, true, false);
                     let _ = status_authority::recompute(&app, Freshness::Action);
                     return;
@@ -307,11 +362,9 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
                     );
                     let _ = try_start_council_server(
                         &app,
-                        config.council_path.as_deref(),
                         config.server_port,
                         token.as_deref(),
                         Some(false),
-                        config.council_root.as_deref(),
                         config.librarian_base.as_deref(),
                     );
                     let _ = status_authority::recompute(&app, Freshness::Action);
@@ -325,24 +378,39 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
     });
 }
 
-/// Adopt a matching external Council when available; otherwise spawn a managed
-/// `council --serve` when this is a packaged install (bundled binary + base-dir)
-/// or a debug development build. Packaged releases own the bundled Council
-/// lifecycle and do not require `make setup`, Rust, Node, or Docker for core
-/// War Room. Gateway remains optional (`via_gateway` default off).
+/// Spawn an app-owned `council --serve` child.
+///
+/// Packaged installs always own the bundled Council. Debug builds may own a
+/// repo-built sidecar. An occupied Council port is a startup conflict — this
+/// shell never adopts an external process. Gateway remains optional
+/// (`via_gateway` default off for packaged installs).
 ///
 /// `via_gateway`: `Some(_)` sets `COUNCIL_VIA_GATEWAY` explicitly ("1"/"0"); `None` inherits
 /// (packaged installs force `Some(false)` unless the caller opts in).
-/// `council_root`: Settings councilRoot — when non-blank it must pass
-/// `validate_council_root` and replaces the `--base-dir` value only.
 fn try_start_council_server(
     app: &AppHandle,
-    council_path: Option<&str>,
     server_port: Option<u16>,
     auth_token: Option<&str>,
     via_gateway: Option<bool>,
-    council_root: Option<&str>,
     librarian_base: Option<&str>,
+) -> Result<String, String> {
+    try_start_council_server_with_credentials(
+        app,
+        server_port,
+        auth_token,
+        via_gateway,
+        librarian_base,
+        None,
+    )
+}
+
+fn try_start_council_server_with_credentials(
+    app: &AppHandle,
+    server_port: Option<u16>,
+    auth_token: Option<&str>,
+    via_gateway: Option<bool>,
+    librarian_base: Option<&str>,
+    preloaded_gateway_creds: Option<&GatewayChildCredentials>,
 ) -> Result<String, String> {
     let state = app.state::<CouncilServer>();
     let mut guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -358,13 +426,6 @@ fn try_start_council_server(
     eprintln!("[council-runtime] start requested on :{port}");
 
     let packaged = is_packaged_install();
-
-    // Validate the base-dir override before spawning — a bad base dir makes
-    // council exit at startup and the failure would only surface via the log
-    // pump while this fn reports Ok. Whitespace-only is treated as absent
-    // (same as the councilPath precedent in resolve_council_binary).
-    let council_root = council_root.map(str::trim).filter(|s| !s.is_empty());
-    let base_dir_override = council_root.map(validate_council_root).transpose()?;
     let (expected_sha, expected_dirty) = bundled_build_identity();
     match probe_council_server(
         port,
@@ -374,12 +435,8 @@ fn try_start_council_server(
         auth_token,
     ) {
         CouncilServerProbe::MatchingBuild => {
-            eprintln!("[council-runtime] adopted exact build on :{port}");
-            // Adopted, not owned: we did not spawn this process, so its
-            // route is unproven and status must not claim governed from it.
-            gateway_pack::record_owned_council_route(None);
-            return Ok(format!(
-                "adopted Council already running on :{port} (matching build identity)"
+            return Err(format!(
+                "port {port} is already occupied by a Council process; free the port before launching this app (this app will not adopt or kill it)"
             ));
         }
         CouncilServerProbe::DifferentBuild => {
@@ -398,29 +455,27 @@ fn try_start_council_server(
     }
 
     // Packaged release owns the bundled sidecar. Debug owns a repo-built sidecar.
-    // Unpackaged release (dev shell without bundle) still requires an external runtime.
+    // Unpackaged release (dev shell without bundle) cannot self-start Council.
     if !packaged && !cfg!(debug_assertions) {
         return Err(
             "Council is not running and this build is not a self-contained app bundle. \
-             Use the DMG-packaged app, or start Council externally."
+             Use the DMG-packaged app, or run `make warroom` for source browser development."
                 .to_string(),
         );
     }
 
-    let effective = resolve_council_binary(council_path)?;
+    let effective = resolve_council_binary()?;
     let effective = effective.to_string_lossy().into_owned();
 
     // Packaged: writable Application Support overlay of bundled base-dir (cabinets save).
-    // Dev: council-rs repo root (or validated override).
-    let spawn_base = if let Some(ref override_path) = base_dir_override {
-        override_path.clone()
-    } else if packaged {
+    // Dev: council-rs repo root.
+    let spawn_base = if packaged {
         let bundled = paths::bundled_base_dir().ok_or_else(|| {
             "packaged install is missing Contents/Resources/council-base".to_string()
         })?;
         ensure_writable_base_overlay(&bundled)?
     } else {
-        resolve_spawn_base_dir(None)?
+        resolve_spawn_base_dir()?
     };
     let spawn_base_str = spawn_base.to_string_lossy().into_owned();
 
@@ -451,39 +506,71 @@ fn try_start_council_server(
     // Keychain-sourced GW_API_KEY for governed mode only. Never from login shell.
     let gateway_creds: Option<GatewayChildCredentials> = if via_gateway == Some(true) {
         let store = KeychainSecretStore;
-        match load_gw_api_key(&store) {
-            Ok(Some(api_key)) => {
-                // Packaged installs spawn governed only on proven pack-side
-                // authentication — the same requirement restart_sidecar
-                // enforces with the full AuthenticatedReady state. The spawn
-                // itself creates the governed-child proof, so this gate uses
-                // the status-level predicate (enabled + live-authenticated),
-                // which the enable and relaunch-restore flows satisfy right
-                // after their own revalidation and a Disabled pack never does.
-                if packaged {
-                    // Authority path: never act on a presentation cache sample.
-                    let st = gateway_pack::gateway_pack_status_fresh(&store);
-                    if !st.spawn_capable {
-                        return Err(format!(
-                            "Gateway is not authenticated-ready ({}). {}",
-                            st.state.as_str(),
-                            st.message
-                        ));
-                    }
-                }
-                Some(GatewayChildCredentials {
-                    api_key,
-                    gateway_url: docker_cli::DESKTOP_GATEWAY_URL.to_string(),
-                })
-            }
-            Ok(None) => {
-                return Err(
-                    "GW_API_KEY is not in the macOS Keychain. Use Settings → Enable Gateway \
-                     (installed release) or provision a client key before enabling governed mode."
-                        .to_string(),
+        if let Some(credentials) = preloaded_gateway_creds {
+            if packaged {
+                let st = gateway_pack::gateway_pack_status_fresh_with_key(
+                    &store,
+                    Some(&credentials.api_key),
                 );
+                if !st.spawn_capable
+                    || !credentials
+                        .watch_admin_token
+                        .as_deref()
+                        .is_some_and(gateway_pack::watch_admin_surfaces_authenticated)
+                {
+                    return Err(format!(
+                        "Gateway models and Watch/Outbox auth are not ready ({}). {}",
+                        st.state.as_str(),
+                        st.message
+                    ));
+                }
             }
-            Err(e) => return Err(format!("Keychain read failed: {e}")),
+            Some(credentials.clone())
+        } else {
+            match load_gw_api_key(&store) {
+                Ok(Some(api_key)) => {
+                    if packaged {
+                        // Thread the already-loaded key: the fresh auth probe runs
+                        // /v1/models live without a redundant GW_API_KEY Keychain get.
+                        let st = gateway_pack::gateway_pack_status_fresh_with_key(
+                            &store,
+                            Some(&api_key),
+                        );
+                        if !st.spawn_capable {
+                            return Err(format!(
+                                "Gateway is not authenticated-ready ({}). {}",
+                                st.state.as_str(),
+                                st.message
+                            ));
+                        }
+                    }
+                    let watch_admin_token = load_watch_admin_token(&store)
+                        .map_err(|e| format!("Watch/Outbox admin Keychain read failed: {e}"))?;
+                    if packaged
+                        && !watch_admin_token
+                            .as_deref()
+                            .is_some_and(gateway_pack::watch_admin_surfaces_authenticated)
+                    {
+                        return Err(
+                            "Gateway models auth passed but Watch/Outbox admin auth is not ready"
+                                .to_string(),
+                        );
+                    }
+                    Some(GatewayChildCredentials {
+                        api_key,
+                        gateway_url: docker_cli::DESKTOP_GATEWAY_URL.to_string(),
+                        watch_admin_token,
+                    })
+                }
+                Ok(None) => {
+                    return Err(
+                        "GW_API_KEY is not in the macOS Keychain. Use Settings → Enable Gateway \
+                     (installed release) or provision a client key before enabling governed mode."
+                            .to_string(),
+                    );
+                }
+                Err(e) => return Err(format!("Keychain read failed: {e}")),
+            }
         }
     } else {
         None
@@ -497,13 +584,7 @@ fn try_start_council_server(
     } else {
         None
     };
-    // compose_sidecar_args: first arg is default base-dir; third overrides --base-dir.
-    let args = compose_sidecar_args(
-        &spawn_base_str,
-        port,
-        Some(spawn_base_str.as_str()),
-        web_dist.as_deref(),
-    );
+    let args = compose_sidecar_args(&spawn_base_str, port, web_dist.as_deref());
 
     let mut command = app
         .shell()
@@ -526,8 +607,6 @@ fn try_start_council_server(
     }
     // Finder/GUI launch: inject login PATH + provider keys so Discover works without a terminal.
     // Never imports GW_API_KEY (filtered in is_council_provider_env_key).
-    // Apply login env first, then compose_sidecar_env scrub/inject wins for Gateway vars
-    // when re-applied below after login merge.
     if packaged {
         for (key, value) in gui_login_environment() {
             command = command.env(key, value);
@@ -616,11 +695,9 @@ fn try_start_council_server(
             if terminated {
                 let server_state = app_for_logs.state::<CouncilServer>();
                 if let Ok(mut server_guard) = server_state.0.lock() {
-                    // Only clear the child this pump belongs to — a stale
-                    // Terminated from a killed child must not untrack a respawn.
                     if server_guard.generation == spawn_generation {
                         server_guard.child = None;
-                        // Owned child is gone; its route proof dies with it.
+                        record_owned_council_pid(None);
                         gateway_pack::record_owned_council_route(None);
                     }
                 };
@@ -628,30 +705,27 @@ fn try_start_council_server(
         }
     });
 
+    let owned_pid = child.pid();
     guard.child = Some(child);
-    // Prove the owned child's route for gateway_pack_status: only a spawn
-    // with COUNCIL_VIA_GATEWAY=1 (Keychain creds) counts as governed. Record
-    // while still holding the server guard so the log pump's Terminated
-    // cleanup cannot interleave between the child store and this record.
+    record_owned_council_pid(Some(owned_pid));
     gateway_pack::record_owned_council_route(Some(via_gateway == Some(true)));
     drop(guard);
 
     // Cache the spawn config so restart_sidecar can respawn with the same
-    // council path + pairing token + council root (token is not re-sent by
-    // the frontend). council_root is cached as the trimmed user value, not the
-    // canonicalized path, so restart re-validates against the live filesystem.
+    // pairing token (token is not re-sent by the frontend).
     {
         let config_state = app.state::<SpawnConfigCache>();
         if let Ok(mut config_guard) = config_state.0.lock() {
             *config_guard = LastSpawnConfig {
-                council_path: council_path.map(str::to_string),
                 server_port: Some(port),
                 auth_token: auth_token.map(str::to_string),
-                council_root: council_root.map(str::to_string),
                 librarian_base: librarian_base.map(str::to_string),
             };
         };
     }
+
+    // Ownership proof line for packaged/native smokes (stderr → app.log).
+    eprintln!("council --serve started on :{port}");
 
     let _ = app
         .notification()
@@ -666,22 +740,18 @@ fn try_start_council_server(
     ))
 }
 
-/// Start or adopt Council for the desktop shell.
-/// Packaged installs spawn the bundled sidecar; debug builds may spawn a repo
-/// binary; matching external Council is adopted when already healthy.
+/// Start an app-owned Council for debug/source desktop shells.
+/// Packaged installs spawn the bundled sidecar from native setup; frontend
+/// start is refused so it cannot race the governed restore path.
 /// Sets `COUNCIL_CORS_ORIGINS` for Tauri asset origins and Next dev (3010) / API port.
 /// `COUNCIL_DEV_NO_AUTH` is set only in debug builds; release requires `COUNCIL_AUTH_TOKEN`.
 /// The default port is selected at build time from `IRIN_COUNCIL_PORT` in
 /// isolated worktrees and remains 8765 for the canonical installed runtime.
-/// `council_root` (Settings councilRoot, camelCase over invoke) overrides
-/// `--base-dir` after validation; blank/absent uses bundled base-dir or repo root.
 #[tauri::command]
 async fn start_council_server(
     app: AppHandle,
-    council_path: Option<String>,
     server_port: Option<u16>,
     auth_token: Option<String>,
-    council_root: Option<String>,
     librarian_base: Option<String>,
 ) -> Result<String, String> {
     // Packaged / installed-release: native setup owns Council startup. A
@@ -696,11 +766,9 @@ async fn start_council_server(
     }
     try_start_council_server(
         &app,
-        council_path.as_deref(),
         server_port,
         auth_token.as_deref(),
         None,
-        council_root.as_deref(),
         librarian_base.as_deref(),
     )
 }
@@ -732,14 +800,10 @@ async fn stop_council_server(
 /// that creates the governed-child proof, so it must not demand
 /// `governed_ready` (chicken-and-egg). Enroll/arm still require fresh
 /// `governed_ready` after the restart completes.
-/// `council_root`: optional fresh `--base-dir` override — unlike the pairing
-/// token it can change mid-session, so the restart accepts the form value
-/// instead of trusting the cache; `None` falls back to the cached spawn value.
 #[tauri::command]
 async fn restart_sidecar(
     app: AppHandle,
     via_gateway: bool,
-    council_root: Option<String>,
     librarian_base: Option<String>,
 ) -> Result<String, String> {
     // Port-release polling blocks (up to 5s) — keep it off the async runtime.
@@ -764,20 +828,6 @@ async fn restart_sidecar(
             guard.clone()
         };
 
-        // Validate the effective council root BEFORE killing the running
-        // sidecar — an invalid path must leave the current backend untouched
-        // rather than tearing it down and failing the respawn.
-        let effective_root = council_root
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .map(str::to_string)
-            .or_else(|| config.council_root.clone());
-        effective_root
-            .as_deref()
-            .map(validate_council_root)
-            .transpose()?;
-
         let had_child = {
             let state = app.state::<CouncilServer>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -796,15 +846,9 @@ async fn restart_sidecar(
                 expected_dirty,
                 config.auth_token.as_deref(),
             ) {
-                CouncilServerProbe::MatchingBuild => {
-                    return Err(
-                        "Council is managed by the external IRIN runtime; restart it with `make runtime-restart`"
-                            .to_string(),
-                    );
-                }
-                CouncilServerProbe::DifferentBuild => {
+                CouncilServerProbe::MatchingBuild | CouncilServerProbe::DifferentBuild => {
                     return Err(format!(
-                        "Council on :{port} has a different source identity; run `make setup` and rebuild this app from the same checkout"
+                        "port {port} is occupied by another Council process; free the port before restarting (this app only restarts the Council child it owns)"
                     ));
                 }
                 CouncilServerProbe::Unavailable => {
@@ -832,11 +876,9 @@ async fn restart_sidecar(
 
         try_start_council_server(
             &app,
-            config.council_path.as_deref(),
             Some(port),
             config.auth_token.as_deref(),
             Some(via_gateway),
-            effective_root.as_deref(),
             librarian_base.as_deref().or(config.librarian_base.as_deref()),
         )
     })
@@ -895,11 +937,9 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, St
         let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
         match try_start_council_server(
             &app2,
-            config.council_path.as_deref(),
             None,
             config.auth_token.as_deref(),
             Some(true),
-            config.council_root.as_deref(),
             config.librarian_base.as_deref(),
         ) {
             Ok(msg) => {
@@ -929,11 +969,9 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, St
                 );
                 let rollback_note = match try_start_council_server(
                     &app2,
-                    config.council_path.as_deref(),
                     None,
                     config.auth_token.as_deref(),
                     Some(false),
-                    config.council_root.as_deref(),
                     config.librarian_base.as_deref(),
                 ) {
                     Ok(msg) => {
@@ -992,11 +1030,9 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, S
                 wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
                 &app2,
-                config.council_path.as_deref(),
                 None,
                 config.auth_token.as_deref(),
                 Some(false),
-                config.council_root.as_deref(),
                 config.librarian_base.as_deref(),
             )
             .map_err(|e| format!("Gateway disabled but Council Direct restart failed: {e}"))?;
@@ -1039,11 +1075,9 @@ async fn gateway_pack_stop(app: AppHandle) -> Result<DesktopStatusSnapshot, Stri
                 wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
                 &app2,
-                config.council_path.as_deref(),
                 None,
                 config.auth_token.as_deref(),
                 Some(false),
-                config.council_root.as_deref(),
                 config.librarian_base.as_deref(),
             )
             .map_err(|e| {
@@ -1087,11 +1121,9 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<DesktopStatusSnapshot,
                 wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
             try_start_council_server(
                 &app2,
-                config.council_path.as_deref(),
                 None,
                 config.auth_token.as_deref(),
                 Some(false),
-                config.council_root.as_deref(),
                 config.librarian_base.as_deref(),
             )
             .map_err(|e| {
@@ -1342,15 +1374,22 @@ fn gateway_pack_enabled_flag_fresh() -> bool {
     gateway_pack::gateway_pack_status_fresh(&store).enabled
 }
 
-/// Authenticated, build-matched Council readiness owned entirely by native
-/// code. This is the only readiness proof accepted before publishing Council
-/// to the operator's tailnet.
+/// Authenticated, build-matched readiness of the **app-owned** Council child.
+/// This is the only readiness proof accepted before publishing Council to the
+/// operator's tailnet. An external process on the port never counts.
 fn council_backend_ready(app: &AppHandle) -> bool {
     council_backend_ready_probe(app)
 }
 
 /// Shared probe used by phone publication and the status authority.
 fn council_backend_ready_probe(app: &AppHandle) -> bool {
+    let owned = {
+        let state = app.state::<CouncilServer>();
+        state.0.lock().map(|g| g.child.is_some()).unwrap_or(false)
+    };
+    if !owned {
+        return false;
+    }
     let auth_token = {
         let state = app.state::<SpawnConfigCache>();
         state
@@ -1519,14 +1558,11 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            // One-time, non-destructive adoption of Keychain secrets stored by
-            // the legacy "Council War Room" build (never deletes legacy items).
-            {
-                let store = KeychainSecretStore;
-                migrate_legacy_secrets(&store);
+            // Fail-closed: if the host process exits without RunEvent::Exit,
+            // still reclaim any recorded owned Council PID.
+            unsafe {
+                let _ = libc::atexit(atexit_kill_owned_council);
             }
-            // Host-authoritative status loop: ordered snapshots on desktop-status.
-            status_authority::start_background_loop(app.handle().clone());
             let handle = app.handle().clone();
             let menu = Menu::with_items(
                 app,
@@ -1570,6 +1606,31 @@ pub fn run() {
                 let auto_start_handle = app.handle().clone();
                 let packaged = is_packaged_install();
                 tauri::async_runtime::spawn(async move {
+                    // One cold-launch Keychain flight. Legacy migration returns
+                    // the GW/pepper values it already read; the remaining four
+                    // accounts are loaded once here and threaded through resume
+                    // and governed Council spawn.
+                    let (launch_key, launch_secrets) = if packaged {
+                        let store = KeychainSecretStore;
+                        let migrated = migrate_legacy_secrets_with_values(&store);
+                        gateway_pack::invalidate_auth_observation();
+                        match gateway_pack::load_launch_secrets(&store, migrated.auth_pepper) {
+                            Ok(secrets) => {
+                                seed_arm_principal_observation(
+                                    secrets.arm_principal_token.is_some(),
+                                );
+                                (migrated.gw_api_key, Some(secrets))
+                            }
+                            Err(error) => {
+                                eprintln!(
+                                    "[council-runtime] cold-launch secret preload failed: {error}"
+                                );
+                                (migrated.gw_api_key, None)
+                            }
+                        }
+                    } else {
+                        (None, None)
+                    };
                     let mut persisted_via_gateway = false;
                     let auth_token = if packaged {
                         match load_or_create_private_config() {
@@ -1611,20 +1672,70 @@ pub fn run() {
                         // Direct. via_gateway_default stays true so a later
                         // promote can succeed without manual re-enable.
                         let mut launch_via_gateway = false;
+                        let preloaded_gateway_creds = match (
+                            launch_key.as_ref(),
+                            launch_secrets.as_ref(),
+                        ) {
+                            (Some(api_key), Some(secrets)) => Some(GatewayChildCredentials {
+                                api_key: api_key.clone(),
+                                gateway_url: docker_cli::DESKTOP_GATEWAY_URL.to_string(),
+                                watch_admin_token: Some(secrets.watch_admin_token.clone()),
+                            }),
+                            _ => None,
+                        };
                         if packaged && persisted_via_gateway {
                             let store = KeychainSecretStore;
-                            if gateway_pack::pack_auth_revalidated(&store) {
-                                launch_via_gateway = true;
-                                let _ = auto_start_handle.emit(
-                                    "council-log",
-                                    "[system] auto-start: restoring governed route — Gateway Pack revalidated (Docker up, pack authenticated, Keychain key usable)",
-                                );
+                            let preloaded = launch_key
+                                .as_ref()
+                                .zip(launch_secrets.as_ref());
+                            if preloaded
+                                .is_some_and(|(key, _)| gateway_pack::pack_auth_revalidated_with_key(key))
+                            {
+                                // Pack containers already healthy; still bring up
+                                // app-owned host adapters and reconcile the
+                                // Watch-token contract before governed spawn.
+                                let reconciliation = match preloaded {
+                                    Some((key, secrets)) => {
+                                        gateway_pack::resume_installed_pack_with_key(
+                                            &store, key, secrets,
+                                        )
+                                    }
+                                    None => {
+                                        Err("cold-launch Keychain preload unavailable".to_string())
+                                    }
+                                };
+                                launch_via_gateway =
+                                    gateway_pack::governed_launch_after_watch_reconciliation(
+                                        true,
+                                        reconciliation.is_ok(),
+                                    );
+                                if launch_via_gateway {
+                                    let _ = auto_start_handle.emit(
+                                        "council-log",
+                                        "[system] auto-start: restoring governed route — Gateway Pack and Watch/Outbox auth revalidated",
+                                    );
+                                } else if let Err(e) = reconciliation {
+                                    let _ = auto_start_handle.emit(
+                                        "council-log",
+                                        format!(
+                                            "[system] auto-start: Watch-token reconciliation failed ({e}); starting Council in Direct mode"
+                                        ),
+                                    );
+                                }
                             } else {
                                 let _ = auto_start_handle.emit(
                                     "council-log",
                                     "[system] auto-start: pack not immediately ready — attempting bounded resume (compose up + health/auth wait)",
                                 );
-                                match gateway_pack::resume_installed_pack(&store) {
+                                let resume = match preloaded {
+                                    Some((key, secrets)) => gateway_pack::resume_installed_pack_with_key(
+                                        &store, key, secrets,
+                                    ),
+                                    None => Err(
+                                        "cold-launch Keychain preload unavailable".to_string(),
+                                    ),
+                                };
+                                match resume {
                                     Ok(()) => {
                                         launch_via_gateway = true;
                                         let _ = auto_start_handle.emit(
@@ -1646,14 +1757,17 @@ pub fn run() {
                         let mut first_attempt = true;
                         let mut route = launch_via_gateway;
                         loop {
-                            match try_start_council_server(
+                            match try_start_council_server_with_credentials(
                                 &auto_start_handle,
-                                None,
                                 None,
                                 token_ref,
                                 Some(route),
                                 None,
-                                None,
+                                if route {
+                                    preloaded_gateway_creds.as_ref()
+                                } else {
+                                    None
+                                },
                             ) {
                                 Ok(msg) => {
                                     let _ = auto_start_handle.emit(
@@ -1703,6 +1817,13 @@ pub fn run() {
                             );
                         }
                     }
+                    gateway_pack::seed_auth_observation_from_preloaded_key(
+                        launch_key.as_deref(),
+                    );
+                    // Start presentation polling only after cold launch has
+                    // seeded both presence caches. Background ticks perform
+                    // zero Keychain reads.
+                    status_authority::start_background_loop(auto_start_handle.clone());
                 });
             }
 

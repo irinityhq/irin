@@ -481,7 +481,7 @@ fn migrate_legacy_overlay_yaml(path: &Path) -> std::io::Result<()> {
 
 /// Env pairs so a Finder-launched app can still discover CLI providers.
 ///
-/// Matches canonical IRIN runtime semantics (`scripts/irin-runtime.sh`):
+/// Matches login-shell provider env semantics for GUI Discover:
 /// - Capture the operator environment **once** via interactive login shell:
 ///   `/bin/zsh -lic 'printenv -0'` (same `-lic` shape as launchd serve).
 /// - Import only **Council provider** variables (see `is_council_provider_env_key`).
@@ -602,7 +602,7 @@ const LOGIN_CAPTURE_FAILURE_DIAGNOSTIC: &str =
     "IRIN could not capture the interactive login environment after two bounded attempts; command discovery may be incomplete.";
 
 pub fn capture_interactive_login_env() -> Vec<(String, String)> {
-    // Same shape as `scripts/irin-runtime.sh` launchd serve: /bin/zsh -lic …
+    // Login-shell provider env merge: /bin/zsh -lic …
     // macOS printenv has no -0; emit NUL-delimited KEY=VALUE via python3 (always
     // present on Apple silicon build hosts / operator Macs with CLT).
     let mut cmd = std::process::Command::new("/bin/zsh");

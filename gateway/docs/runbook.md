@@ -16,7 +16,7 @@ repository.
 | Gateway state | Docker volume `gateway_sidecar_data` |
 | Gateway URL | `http://127.0.0.1:18080` |
 
-From the IRIN repository root, run `make setup-prepare` to prepare local files
+From the IRIN repository root, run `make gateway-prepare-config` to prepare local files
 without starting the product. Setup preserves valid operator-owned values while
 adding or replacing missing, placeholder, or invalid IRIN-managed fields. The
 Gateway environment and signing key must remain mode `0600`; provider keys are
@@ -27,9 +27,8 @@ not copied into either.
 From the repository root:
 
 ```bash
-make runtime-up
-make runtime-status
-make runtime-down
+make gateway-prepare-config
+# start Gateway compose from gateway/ as documented below
 ```
 
 The runtime controller builds Council, War Room Web, Gateway, and the Rust
@@ -52,7 +51,7 @@ deletes durable Gateway state.
 
 ## Bootstrap an operator key
 
-`make setup-prepare` creates a one-time `BOOTSTRAP_TOKEN`. Use it only when no
+`make gateway-prepare-config` creates a one-time `BOOTSTRAP_TOKEN`. Use it only when no
 admin key exists:
 
 ```bash
@@ -67,10 +66,10 @@ curl -fsS -X POST http://127.0.0.1:18080/admin/keys \
 
 The raw key is returned once. Store it outside the repository. Before retiring
 the one-time bootstrap credential, ensure the private runtime environment has a
-non-empty `WATCH_ADMIN_TOKEN`; canonical `make setup` generates this separate
+non-empty `WATCH_ADMIN_TOKEN`; `make gateway-prepare-config` generates this separate
 credential automatically. After at least two admin keys exist, remove
 `BOOTSTRAP_TOKEN` and restart the runtime. Watch and Outbox admin reads continue
-to use `WATCH_ADMIN_TOKEN`. Older installs should rerun `make setup-prepare` to
+to use `WATCH_ADMIN_TOKEN`. Older installs should rerun `make gateway-prepare-config` to
 add the missing value without replacing or printing existing credentials.
 
 Create another key with an existing admin key:
@@ -125,7 +124,7 @@ enabling any action path.
 Stop the runtime before taking a state backup:
 
 ```bash
-make runtime-down
+# stop Gateway compose for the local project
 docker run --rm \
   -v gateway_sidecar_data:/source:ro \
   -v "$PWD":/backup \

@@ -1,5 +1,9 @@
 //! Compose env construction: public pins, secret process env, teardown placeholders.
 
+use super::cli_adapters::{
+    apply_proxy_compose_env, current_status as cli_adapters_current_status,
+    empty_proxy_compose_pairs, ensure_proxy_tokens,
+};
 use super::install::load_validated_manifest;
 use super::keys::{random_hex, serialize_public_env, validate_env_value, write_atomic_0600};
 use super::manifest::{ImageRef, ValidatedManifest};
@@ -9,11 +13,67 @@ use super::paths::{
 };
 use crate::docker_cli::{path_is_safe_argv, ComposeEnv};
 use crate::keychain::{
-    load_arm_principal_token, load_auth_pepper, store_auth_pepper, SecretStore, ARM_PRINCIPAL_NAME,
+    load_arm_principal_token, load_auth_pepper, load_watch_admin_token, store_auth_pepper,
+    store_watch_admin_token, SecretStore, ARM_PRINCIPAL_NAME,
 };
 use crate::private_config::gui_login_environment;
 use std::fs;
 use std::path::{Path, PathBuf};
+
+/// Canary tenant the desktop pack sidecar serves. The app-owned Council child
+/// must send the same tenant on governed spawns or every Watch/Outbox admin
+/// read 403s (source development keeps the `sovereign` default in Council).
+pub(crate) const PACK_WATCH_CANARY_TENANT: &str = "canary";
+
+/// Keychain material held for one cold-launch flight. Values stay native-only
+/// and are dropped after compose/Council spawn; this prevents repeated account
+/// reads without persisting another copy of any secret.
+#[derive(Clone)]
+pub struct LaunchSecrets {
+    pub auth_pepper: String,
+    pub watch_admin_token: String,
+    pub arm_principal_token: Option<String>,
+    pub proxy_tokens: (String, String),
+}
+
+pub fn load_or_create_watch_admin_token(store: &dyn SecretStore) -> Result<String, String> {
+    match load_watch_admin_token(store)
+        .map_err(|e| format!("keychain load watch admin token: {e}"))?
+    {
+        Some(value) => Ok(value),
+        None => {
+            let value = random_hex(32)?;
+            store_watch_admin_token(store, &value)
+                .map_err(|e| format!("keychain store watch admin token: {e}"))?;
+            Ok(value)
+        }
+    }
+}
+
+pub fn load_launch_secrets(
+    store: &dyn SecretStore,
+    preloaded_pepper: Option<String>,
+) -> Result<LaunchSecrets, String> {
+    let auth_pepper = match preloaded_pepper {
+        Some(value) => value,
+        None => {
+            let value = random_hex(32)?;
+            store_auth_pepper(store, &value).map_err(|e| format!("keychain store pepper: {e}"))?;
+            value
+        }
+    };
+    let watch_admin_token = load_or_create_watch_admin_token(store)?;
+    let arm_principal_token =
+        load_arm_principal_token(store).map_err(|e| format!("keychain load arm principal: {e}"))?;
+    let proxy_tokens =
+        ensure_proxy_tokens(store).map_err(|e| format!("keychain proxy tokens: {e}"))?;
+    Ok(LaunchSecrets {
+        auth_pepper,
+        watch_admin_token,
+        arm_principal_token,
+        proxy_tokens,
+    })
+}
 
 /// Non-secret compose pins from validated sources only (manifest image refs,
 /// app-owned paths, fixed pack-contract values). Single source for both the
@@ -75,10 +135,15 @@ pub(crate) fn pack_pin_pairs(
         ("GATEWAY_BASE_URL".into(), "http://gateway:8080".into()),
         ("WATCH_PRODUCER_ENABLED".into(), "false".into()),
         ("WATCH_DISPATCHER_ENABLED".into(), "false".into()),
-        ("WATCH_CANARY_TENANT".into(), "canary".into()),
+        (
+            "WATCH_CANARY_TENANT".into(),
+            PACK_WATCH_CANARY_TENANT.into(),
+        ),
         ("DAILY_SPEND_CAP_USD".into(), "25".into()),
         ("WATCH_MAX_FANOUT_COST_USD".into(), "2.50".into()),
-        // Surfaces disabled — never generate WATCH_ADMIN_TOKEN / COUNCIL_GATEWAY_TOKEN.
+        // Council-spend route disabled — never generate COUNCIL_GATEWAY_TOKEN.
+        // WATCH_ADMIN_TOKEN is minted into the secret env (Keychain-held),
+        // never a public pin.
         ("BOOTSTRAP_TOKEN".into(), "".into()),
     ];
     if let Some(kid) = key_id {
@@ -129,9 +194,15 @@ pub(crate) fn build_pack_pin_env(
 }
 
 /// Build process env for compose: secrets + providers. Never written to disk.
+///
+/// `proxy_tokens`: when `Some`, use the already-loaded Claude/Codex tokens and
+/// do **not** re-enter Keychain for those accounts. Cold-launch FullStart resume
+/// loads tokens once for adapters then passes them here so each account is
+/// authorized at most once per flight (macOS can prompt on every get).
 pub(crate) fn build_compose_secret_env(
     store: &dyn SecretStore,
     bootstrap: Option<&str>,
+    proxy_tokens: Option<(String, String)>,
 ) -> Result<ComposeEnv, String> {
     let mut env = ComposeEnv::new();
     let pepper = match load_auth_pepper(store).map_err(|e| format!("keychain load pepper: {e}"))? {
@@ -144,6 +215,23 @@ pub(crate) fn build_compose_secret_env(
     };
     validate_env_value("AUTH_PEPPER", &pepper)?;
     env.insert("AUTH_PEPPER".into(), pepper);
+
+    // Watch/Outbox admin read surface: Keychain-held bearer, minted once at
+    // Enable with the same load-or-mint pattern as AUTH_PEPPER. Secret
+    // channel only — never the public env file, never the ambient parent env.
+    let watch_admin = match load_watch_admin_token(store)
+        .map_err(|e| format!("keychain load watch admin token: {e}"))?
+    {
+        Some(t) => t,
+        None => {
+            let t = random_hex(32)?;
+            store_watch_admin_token(store, &t)
+                .map_err(|e| format!("keychain store watch admin token: {e}"))?;
+            t
+        }
+    };
+    validate_env_value("WATCH_ADMIN_TOKEN", &watch_admin)?;
+    env.insert("WATCH_ADMIN_TOKEN".into(), watch_admin);
 
     if let Some(bs) = bootstrap {
         validate_env_value("BOOTSTRAP_TOKEN", bs)?;
@@ -203,6 +291,78 @@ pub(crate) fn build_compose_secret_env(
         };
         env.insert(key.to_string(), safe);
     }
+
+    // Host CLI adapters (Claude/Codex): Keychain tokens + live health only.
+    // Never write these to the public env file. Unready adapters inject empty
+    // URL/token so Gateway readiness stays fail-closed — never a Direct fallthrough.
+    let (claude_tok, codex_tok) = match proxy_tokens {
+        Some(pair) => pair,
+        None => ensure_proxy_tokens(store).map_err(|e| format!("keychain proxy tokens: {e}"))?,
+    };
+    let adapter_status = cli_adapters_current_status();
+    apply_proxy_compose_env(&mut env, &adapter_status, &claude_tok, &codex_tok)?;
+
+    Ok(env)
+}
+
+/// Compose secrets from the values already loaded for this cold-launch flight.
+/// Unlike [`build_compose_secret_env`], this performs no Keychain reads.
+pub(crate) fn build_compose_secret_env_with_launch_secrets(
+    bootstrap: Option<&str>,
+    secrets: &LaunchSecrets,
+) -> Result<ComposeEnv, String> {
+    let mut env = ComposeEnv::new();
+    validate_env_value("AUTH_PEPPER", &secrets.auth_pepper)?;
+    env.insert("AUTH_PEPPER".into(), secrets.auth_pepper.clone());
+    validate_env_value("WATCH_ADMIN_TOKEN", &secrets.watch_admin_token)?;
+    env.insert(
+        "WATCH_ADMIN_TOKEN".into(),
+        secrets.watch_admin_token.clone(),
+    );
+    env.insert(
+        "BOOTSTRAP_TOKEN".into(),
+        bootstrap.unwrap_or_default().to_string(),
+    );
+    let principals = secrets
+        .arm_principal_token
+        .as_ref()
+        .map(|token| format!("{ARM_PRINCIPAL_NAME}:{token}"))
+        .unwrap_or_default();
+    validate_env_value("GW_ARM_PRINCIPALS", &principals)?;
+    env.insert("GW_ARM_PRINCIPALS".into(), principals);
+
+    let login = if std::env::var_os("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV").is_some() {
+        Vec::new()
+    } else {
+        gui_login_environment()
+    };
+    for key in [
+        "XAI_API_KEY",
+        "OPENAI_API_KEY",
+        "ANTHROPIC_API_KEY",
+        "NVIDIA_API_KEY",
+    ] {
+        let value = std::env::var(key)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .or_else(|| {
+                login
+                    .iter()
+                    .find(|(candidate, _)| candidate == key)
+                    .map(|(_, value)| value.clone())
+                    .filter(|value| !value.trim().is_empty())
+            })
+            .filter(|value| validate_env_value(key, value).is_ok())
+            .unwrap_or_default();
+        env.insert(key.to_string(), value);
+    }
+    let adapter_status = cli_adapters_current_status();
+    apply_proxy_compose_env(
+        &mut env,
+        &adapter_status,
+        &secrets.proxy_tokens.0,
+        &secrets.proxy_tokens.1,
+    )?;
     Ok(env)
 }
 
@@ -211,6 +371,9 @@ pub(crate) fn build_compose_secret_env(
 /// overlap). This is the only legitimate channel for compose-interpolated
 /// values; the docker_cli spawn path scrubs ambient copies first and forces
 /// disarmed Watch/admin surfaces last.
+///
+/// `proxy_tokens`: pass `Some` when the caller already loaded Claude/Codex
+/// tokens (single-pass resume/enable); `None` loads/mints inside.
 pub(crate) fn build_full_compose_env(
     store: &dyn SecretStore,
     bootstrap: Option<&str>,
@@ -218,6 +381,7 @@ pub(crate) fn build_full_compose_env(
     ledger: &Path,
     validated: &ValidatedManifest,
     key_id: Option<&str>,
+    proxy_tokens: Option<(String, String)>,
 ) -> Result<ComposeEnv, String> {
     let mut env = build_pack_pin_env(
         pack_root,
@@ -226,7 +390,28 @@ pub(crate) fn build_full_compose_env(
         &validated.sidecar,
         key_id,
     )?;
-    env.extend(build_compose_secret_env(store, bootstrap)?);
+    env.extend(build_compose_secret_env(store, bootstrap, proxy_tokens)?);
+    Ok(env)
+}
+
+pub(crate) fn build_full_compose_env_with_launch_secrets(
+    bootstrap: Option<&str>,
+    pack_root: &Path,
+    ledger: &Path,
+    validated: &ValidatedManifest,
+    key_id: Option<&str>,
+    secrets: &LaunchSecrets,
+) -> Result<ComposeEnv, String> {
+    let mut env = build_pack_pin_env(
+        pack_root,
+        ledger,
+        &validated.gateway,
+        &validated.sidecar,
+        key_id,
+    )?;
+    env.extend(build_compose_secret_env_with_launch_secrets(
+        bootstrap, secrets,
+    )?);
     Ok(env)
 }
 
@@ -262,6 +447,10 @@ pub(crate) fn teardown_compose_env(pack_root: &Path, key_id: Option<&str>) -> Co
         "GW_ARM_PRINCIPALS",
     ] {
         env.insert(key.to_string(), String::new());
+    }
+    // Host CLI adapters: teardown never loads Keychain proxy tokens.
+    for (k, v) in empty_proxy_compose_pairs() {
+        env.insert(k, v);
     }
     // The bind-mount source and the in-container registry path are non-secret
     // pins Compose must still interpolate for `down`; fall back to the fixed

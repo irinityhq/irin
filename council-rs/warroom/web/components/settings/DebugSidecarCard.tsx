@@ -37,10 +37,8 @@ export function DebugSidecarCard({
           onClick={async () => {
             try {
               const msg = await startCouncilServer(
-                form.councilPath || undefined,
                 undefined,
                 form.authToken,
-                form.councilRoot || undefined,
                 form.librarianBase || undefined,
               );
               notify("success", msg);

@@ -116,10 +116,10 @@ only" if Gateway has no adapter for it.
 These five artifacts are easy to conflate and are architecturally distinct:
 
 - **Source receipt.** Written by the runtime controller
-  (`scripts/irin-runtime.sh`) to `~/.local/state/irin/runtime/source.json`
+  (historical source-runtime path, retired) to a local state file
   each time the canonical runtime starts. It records the exact Git origin,
   branch, commit SHA, and tree cleanliness of the checkout that owns the
-  running services, so `make runtime-status` can detect drift between the
+  running services so operators can detect drift between the
   checkout and what is actually running.
 - **Precedent `RetrievalReceipt`.** A frozen, in-process result of one
   precedent-index retrieval (`council-rs/src/precedent/mod.rs`), carrying
@@ -188,8 +188,8 @@ example Hermes root on 443 — can coexist. The copyable origin is
 `https://<device>.<tailnet>.ts.net:8443` (port omitted only when the
 configured port is 443). Open that origin in a browser on the same tailnet;
 War Room is the same web surface (same-origin REST and WebSocket), not a
-separate native phone client. Source-managed runtime (`make setup`,
-`scripts/irin-runtime.sh`) starts local Council/Web/Gateway only and never
+separate native phone client. Foreground `make warroom` starts local
+Council/Web only and never
 applies, replaces, or disables Tailscale Serve. Tailscale Funnel (public
 internet exposure) is never configured by IRIN. Shared-tailnet operators may
 retain Council's token authentication as optional defense in depth; when a

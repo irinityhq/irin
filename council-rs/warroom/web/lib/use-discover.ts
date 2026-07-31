@@ -79,6 +79,35 @@ async function doFetch(): Promise<DiscoverResponse> {
   return inFlight;
 }
 
+/**
+ * Backend-readiness signal owned by the boot-health poller (War Room shell).
+ *
+ * Short `DISCOVER_RETRY` bursts only cover micro-races. Packaged cold start
+ * often binds Council tens of seconds later, after discover has already
+ * exhausted and left a sticky "Provider discovery failed" convene blocker.
+ * When health/cabinets become ready, re-drive discovery once if inventory is
+ * still missing or a sticky error remains. Shares any in-flight load; does
+ * not open a second poller or timer.
+ */
+export function notifyDiscoverBackendReady(): void {
+  if (inFlight) {
+    const shared = inFlight;
+    void shared.catch(() => {
+      // This readiness pulse arrived while an older request was still running.
+      // Re-drive after that shared failure settles; the boot poller will not
+      // emit another pulse merely because discovery failed.
+      if (inFlight === null && (cache === null || lastError !== null)) {
+        void doFetch().catch(() => {});
+      }
+    });
+    return;
+  }
+  if (cache !== null && lastError === null) return;
+  void doFetch().catch(() => {
+    // Sticky error already published to listeners; manual Rescan remains.
+  });
+}
+
 export function useDiscover() {
   const [data, setData] = useState<DiscoverResponse | null>(cache);
   const [loading, setLoading] = useState<boolean>(lastLoading || !!inFlight || !cache);

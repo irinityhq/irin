@@ -1,5 +1,8 @@
 //! Pack lifecycle mutations: enable / disable / stop / uninstall.
 
+use super::cli_adapters::{
+    ensure_cli_adapters_with_tokens, ensure_proxy_tokens, stop_cli_adapters,
+};
 use super::env::{build_full_compose_env, teardown_compose_env, write_public_compose_env};
 use super::health::{
     admin_surface_ready, desktop_project_running, gateway_health_ok, models_authenticated,
@@ -12,7 +15,8 @@ use super::install::{
 use super::keys::{ensure_arm_keys_file, ensure_ledger_key, random_hex};
 use super::paths::{gateway_data_dir, public_env_path, PACK_DIR_NAME};
 use super::status::{
-    bump_pack_lifecycle_generation, gateway_pack_status_fresh, invalidate_status_cache,
+    bump_pack_lifecycle_generation, gateway_pack_status_fresh, gateway_pack_status_fresh_with_key,
+    invalidate_auth_observation, invalidate_status_cache,
 };
 use super::types::{GatewayPackState, GatewayPackStatus};
 use crate::docker_cli::{
@@ -95,6 +99,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
     bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    invalidate_auth_observation();
     // A pack identity change invalidates any prior rehearsal presentation.
     crate::touch_id::clear_rehearsal_passed();
     lifecycle_stage("enable_begin", "ok");
@@ -136,6 +141,33 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         lifecycle_stage("arm_keys", "error");
     })?;
     lifecycle_stage("arm_keys", "ok");
+
+    // Host CLI adapters before compose env: mint Keychain tokens once and start
+    // app-owned Claude/Codex listeners when CLIs are present+authenticated.
+    // Tokens are reused for every compose secret env on this enable flight so
+    // each proxy account is read at most once (Keychain can prompt per get).
+    // Missing CLI leaves that route empty (fail-closed) and does not abort Enable.
+    let proxy_tokens = ensure_proxy_tokens(store).inspect_err(|_| {
+        lifecycle_stage("cli_adapters", "token_error");
+    })?;
+    let adapter_status = ensure_cli_adapters_with_tokens(&proxy_tokens.0, &proxy_tokens.1);
+    lifecycle_stage(
+        "cli_adapters",
+        &format!(
+            "claude={} codex={}",
+            if adapter_status.claude.is_ready() {
+                "ready"
+            } else {
+                adapter_status.claude_reason.as_str()
+            },
+            if adapter_status.codex.is_ready() {
+                "ready"
+            } else {
+                adapter_status.codex_reason.as_str()
+            }
+        ),
+    );
+
     let existing_key_id = load_or_create_private_config()?.gateway_key_id;
     let env_path = write_public_compose_env(
         &pack_root,
@@ -183,6 +215,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
                 &ledger,
                 &validated,
                 existing_key_id.as_deref(),
+                Some(proxy_tokens.clone()),
             )
             .inspect_err(|_| {
                 lifecycle_stage("secret_env", "error");
@@ -215,6 +248,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
             &ledger,
             &validated,
             existing_key_id.as_deref(),
+            Some(proxy_tokens.clone()),
         )
         .inspect_err(|e| {
             // Fixed non-secret categories only — never log the error body if it
@@ -246,12 +280,23 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
             lifecycle_stage("provision", "error");
         })?;
         lifecycle_stage("provision", "ok");
+        // Provisioning has stored the new client key. Fence the mutation now,
+        // before later compose/auth work can fail, so a background observation
+        // repopulated during provisioning cannot survive the credential change.
+        invalidate_auth_observation();
         // Blank bootstrap and recreate sidecar without it.
-        let spawn_env_blank =
-            build_full_compose_env(store, None, &pack_root, &ledger, &validated, Some(&kid))
-                .inspect_err(|_| {
-                    lifecycle_stage("secret_env_blank", "error");
-                })?;
+        let spawn_env_blank = build_full_compose_env(
+            store,
+            None,
+            &pack_root,
+            &ledger,
+            &validated,
+            Some(&kid),
+            Some(proxy_tokens.clone()),
+        )
+        .inspect_err(|_| {
+            lifecycle_stage("secret_env_blank", "error");
+        })?;
         write_public_compose_env(
             &pack_root,
             &ledger,
@@ -282,6 +327,9 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         return Err("Gateway client key failed /v1/models after enable".to_string());
     }
     lifecycle_stage("models_auth", "ok");
+    // Final fence: downstream compose/auth work is also long enough for a
+    // background tick to repopulate after the immediate post-provision fence.
+    invalidate_auth_observation();
 
     let mut cfg = load_or_create_private_config()?;
     cfg.via_gateway_default = true;
@@ -291,7 +339,7 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     assert_private_json_has_no_raw_key()?;
     lifecycle_stage("enable_complete", "authenticated");
 
-    let mut st = gateway_pack_status_fresh(store);
+    let mut st = gateway_pack_status_fresh_with_key(store, Some(&key));
     // Not fully ready until Council restart succeeds — lib marks the proven
     // governed child. Pack auth alone is spawn-capable but not governed-ready.
     if st.authenticated && st.enabled {
@@ -358,6 +406,7 @@ pub fn disable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
     bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    invalidate_auth_observation();
     crate::touch_id::clear_rehearsal_passed();
     let mut cfg = load_or_create_private_config()?;
     cfg.via_gateway_default = false;
@@ -380,6 +429,7 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
     };
     bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    invalidate_auth_observation();
     crate::touch_id::clear_rehearsal_passed();
     lifecycle_stage("stop_lock", "ok");
 
@@ -403,6 +453,10 @@ pub fn stop_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, S
     } else {
         lifecycle_stage("stop_config", "already_direct");
     }
+
+    // Stop app-owned host adapters with the pack (idempotent).
+    stop_cli_adapters();
+    lifecycle_stage("cli_adapters_stop", "ok");
 
     if let Some(pack_root) = installed_pack_root() {
         let compose = compose_file(&pack_root);
@@ -462,7 +516,11 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
     bump_pack_lifecycle_generation();
     invalidate_status_cache();
+    invalidate_auth_observation();
     crate::touch_id::clear_rehearsal_passed();
+
+    // Host adapters first so uninstall never leaves listeners after Keychain wipe.
+    stop_cli_adapters();
 
     let key_id = load_or_create_private_config()
         .ok()
@@ -506,6 +564,10 @@ pub fn uninstall_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStat
     // Compose is already down (best-effort above); continue removing app data
     // so a Keychain ACL failure does not leave a half-installed pack tree.
     let keychain_err = delete_all_gateway_pack_secrets(store).err();
+    // Teardown is long enough for a background tick to have observed the key
+    // before deletion. Invalidate again at the credential mutation boundary;
+    // do this even on error because cleanup may have deleted only some items.
+    invalidate_auth_observation();
     let dir = gateway_data_dir();
     if dir.is_dir() {
         fs::remove_dir_all(&dir).map_err(|e| format!("remove gateway data dir: {e}"))?;

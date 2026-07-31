@@ -18,7 +18,9 @@ import {
   startCouncilServer,
   type GatewayPackStatus,
 } from "@/lib/tauri";
+import { createBootHealthPoller } from "@/lib/boot-health-poll";
 import { gatewayHeaderTruth } from "@/lib/gateway-pack";
+import { notifyDiscoverBackendReady } from "@/lib/use-discover";
 import { warroomHealthLabel } from "@/lib/warroom-health-label";
 import { cn } from "@/lib/cn";
 import type { Cabinet, HealthResponse } from "@/lib/types";
@@ -57,8 +59,15 @@ export default function WarRoom() {
   const lastStartRef = useRef<StartPayload | null>(null);
   const sidecarAutoStartRef = useRef(false);
   const [hasLastStart, setHasLastStart] = useState(false);
-  /** Mount-time health retry window (1.5/3/6s): header stays CONNECTING. */
+  /**
+   * Cold-start CONNECTING flag from the readiness-driven boot poller.
+   * Stays true while native pack resume / Council bind is still legitimately
+   * in flight; false once online or the connecting budget is exhausted.
+   */
   const [bootRetryActive, setBootRetryActive] = useState(false);
+  const bootPollerRef = useRef<ReturnType<typeof createBootHealthPoller> | null>(
+    null,
+  );
 
   const start = useCallback(
     (p: StartPayload) => {
@@ -97,7 +106,8 @@ export default function WarRoom() {
     setView("history");
   };
 
-  const loadInitialState = useCallback(async () => {
+  /** Probe health + cabinets. Returns true only when the UI can go online. */
+  const loadInitialState = useCallback(async (): Promise<boolean> => {
     const runtimeConfig = await loadRuntimeConfig();
     setApiStatus("loading");
     setApiError(null);
@@ -146,32 +156,50 @@ export default function WarRoom() {
     if (failures.length > 0) {
       setApiStatus("error");
       setApiError(failures.join(" · "));
-    } else {
-      setApiStatus("online");
+      return false;
     }
+    setApiStatus("online");
+    setApiError(null);
+    return true;
   }, []);
 
   useEffect(() => {
     initRuntimeConfig();
     let aborted = false;
-    const bootDelays = [1500, 3000, 6000];
 
+    const poller = createBootHealthPoller({
+      probe: async () => {
+        const ready = await loadInitialState();
+        return ready ? "ready" : "not_ready";
+      },
+      onRetryActiveChange: (active) => {
+        if (!aborted) setBootRetryActive(active);
+      },
+      onPhaseChange: (phase) => {
+        // Own discover recovery off the same readiness transition that clears
+        // the offline header — late Council bind after DISCOVER_RETRY exhausted.
+        if (!aborted && phase === "online") {
+          notifyDiscoverBackendReady();
+        }
+      },
+    });
+    bootPollerRef.current = poller;
+
+    /** Readiness-driven boot poll (replaces fixed 1.5/3/6s one-shots). */
     const scheduleBootHealthRetries = () => {
-      setBootRetryActive(true);
-      bootDelays.forEach((ms, i) => {
-        window.setTimeout(() => {
-          if (aborted) return;
-          void loadInitialState().finally(() => {
-            if (!aborted && i === bootDelays.length - 1) {
-              setBootRetryActive(false);
-            }
-          });
-        }, ms);
-      });
+      if (aborted) return;
+      poller.startConnecting();
     };
 
     void loadRuntimeConfig();
-    void loadInitialState();
+    // Browser / fast path: one immediate probe. Packaged Tauri continues via
+    // scheduleBootHealthRetries while native owns Council startup.
+    void loadInitialState().then((ready) => {
+      if (aborted) return;
+      if (ready) {
+        poller.markOnline();
+      }
+    });
 
     void configReady.then((cfg) => {
       if (!isTauri() || sidecarAutoStartRef.current) return;
@@ -188,10 +216,8 @@ export default function WarRoom() {
             return;
           }
           void startCouncilServer(
-            cfg.councilPath || undefined,
             councilPortFromApiBase(cfg.apiBase),
             cfg.authToken,
-            cfg.councilRoot || undefined,
             cfg.librarianBase || undefined,
           )
             .then(() => {
@@ -206,10 +232,8 @@ export default function WarRoom() {
           // Command missing on older shells: keep source-dev start path.
           if (aborted) return;
           void startCouncilServer(
-            cfg.councilPath || undefined,
             councilPortFromApiBase(cfg.apiBase),
             cfg.authToken,
-            cfg.councilRoot || undefined,
             cfg.librarianBase || undefined,
           )
             .then(() => {
@@ -222,12 +246,22 @@ export default function WarRoom() {
     });
 
     const onConfig = () => {
-      void loadInitialState();
+      void loadInitialState().then((ready) => {
+        if (aborted) return;
+        if (ready) {
+          poller.markOnline();
+        } else if (isTauri()) {
+          // Transient backend loss after a config change: re-enter readiness poll.
+          scheduleBootHealthRetries();
+        }
+      });
     };
     window.addEventListener("warroom-config-changed", onConfig);
 
     return () => {
       aborted = true;
+      poller.stop();
+      bootPollerRef.current = null;
       window.removeEventListener("warroom-config-changed", onConfig);
     };
   }, [loadInitialState]);
@@ -256,7 +290,7 @@ export default function WarRoom() {
         onAbort={abort}
       />
 
-      {apiStatus === "error" && (
+      {apiStatus === "error" && !bootRetryActive && (
         <BackendConnectionBanner message={apiError} />
       )}
 
@@ -295,7 +329,15 @@ export default function WarRoom() {
             initialSelectedId={lastSessionId ?? undefined}
             apiStatus={apiStatus}
             apiError={apiError}
-            onRetryConnection={() => void loadInitialState()}
+            onRetryConnection={() => {
+              void loadInitialState().then((ready) => {
+                if (ready) {
+                  bootPollerRef.current?.markOnline();
+                } else {
+                  bootPollerRef.current?.startConnecting();
+                }
+              });
+            }}
           />
         )}
         {view === "outbox" && <OutboxView initialTenant={outboxTenant} />}

@@ -92,6 +92,10 @@ fn teardown_compose_env_never_loads_keychain_or_provider_secrets() {
     );
     assert_eq!(env.get("BOOTSTRAP_TOKEN").map(String::as_str), Some(""));
     assert_eq!(env.get("XAI_API_KEY").map(String::as_str), Some(""));
+    assert_eq!(env.get("CLAUDE_PROXY_TOKEN").map(String::as_str), Some(""));
+    assert_eq!(env.get("CODEX_PROXY_TOKEN").map(String::as_str), Some(""));
+    assert_eq!(env.get("CLAUDE_PROXY_URL").map(String::as_str), Some(""));
+    assert_eq!(env.get("CODEX_PROXY_URL").map(String::as_str), Some(""));
     for secret in [
         pepper.as_str(),
         key.as_str(),
@@ -231,6 +235,7 @@ fn full_compose_env_secrets_win_over_pin_defaults() {
         Path::new("/app/ledger"),
         &validated,
         None,
+        None,
     )
     .unwrap();
     // Secret env overrides the blank pin default for bootstrap.
@@ -251,10 +256,59 @@ fn full_compose_env_secrets_win_over_pin_defaults() {
         env.get("IRIN_DESKTOP_PACK_ROOT").map(String::as_str),
         Some("/app/pack")
     );
+    // Proxy slots always forced (empty when adapters unready).
+    assert!(env.contains_key("CLAUDE_PROXY_URL"));
+    assert!(env.contains_key("CODEX_PROXY_URL"));
+    assert!(env.contains_key("CLAUDE_PROXY_TOKEN"));
+    assert!(env.contains_key("CODEX_PROXY_TOKEN"));
     match prev_skip {
         Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", v),
         None => std::env::remove_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV"),
     }
+}
+
+#[test]
+fn proxy_tokens_never_reach_public_env_file() {
+    let _g = test_env_lock();
+    let prev_support = std::env::var(crate::private_config::APP_SUPPORT_ROOT_ENV).ok();
+    let uniq = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let support = std::env::temp_dir().join(format!("gw-proxy-public-{uniq}"));
+    let _ = fs::remove_dir_all(&support);
+    fs::create_dir_all(&support).unwrap();
+    std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, &support);
+
+    let store = MemorySecretStore::default();
+    let (claude_tok, codex_tok) = super::super::cli_adapters::ensure_proxy_tokens(&store).unwrap();
+    let path = write_public_compose_env(
+        Path::new("/app/pack"),
+        Path::new("/app/ledger"),
+        &test_image_ref("ghcr.io/irin/gateway", "a"),
+        &test_image_ref("ghcr.io/irin/sidecar", "b"),
+        None,
+    )
+    .unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+    assert!(
+        !body.contains(&claude_tok) && !body.contains(&codex_tok),
+        "public env must never contain proxy tokens"
+    );
+    assert!(!body.contains("CLAUDE_PROXY_TOKEN="));
+    assert!(!body.contains("CODEX_PROXY_TOKEN="));
+    assert!(!body.contains("CLAUDE_PROXY_URL="));
+    assert!(!body.contains("CODEX_PROXY_URL="));
+
+    match prev_support {
+        Some(v) => std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, v),
+        None => std::env::remove_var(crate::private_config::APP_SUPPORT_ROOT_ENV),
+    }
+    let _ = fs::remove_dir_all(&support);
 }
 
 /// Extract `${VAR…}` names from compose YAML (handles `:-`, `:?`, `}` end).
@@ -291,13 +345,13 @@ fn arm_principals_come_from_the_keychain_and_never_the_env_file() {
 
     // No token stored: the registry string is empty, so the sidecar boots
     // with zero principals and every arm route 401s.
-    let env = build_compose_secret_env(&store, None).unwrap();
+    let env = build_compose_secret_env(&store, None, None).unwrap();
     assert_eq!(env.get("GW_ARM_PRINCIPALS").map(String::as_str), Some(""));
 
     // With a token: `<name>:<token>`, and the name is the audit label.
     let token = format!("tok_{:032x}", std::process::id());
     crate::keychain::store_arm_principal_token(&store, &token).unwrap();
-    let env = build_compose_secret_env(&store, None).unwrap();
+    let env = build_compose_secret_env(&store, None, None).unwrap();
     let registry = env.get("GW_ARM_PRINCIPALS").cloned().unwrap_or_default();
     assert_eq!(registry, format!("irin-desktop:{token}"));
     // No separator or injection byte can appear inside the value.
@@ -335,6 +389,45 @@ fn arm_principals_come_from_the_keychain_and_never_the_env_file() {
     .unwrap();
     assert!(!body.contains("GW_ARM_PRINCIPALS"));
     assert!(!body.contains("tok_"));
+
+    match prev_skip {
+        Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", v),
+        None => std::env::remove_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV"),
+    }
+}
+
+/// The watch-admin read token is minted once into the Keychain and reused on
+/// later Enable runs; it never becomes a public pin.
+#[test]
+fn watch_admin_token_minted_once_and_never_a_public_pin() {
+    let _g = test_env_lock();
+    let prev_skip = std::env::var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV").ok();
+    std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", "1");
+    let store = MemorySecretStore::default();
+
+    let first = build_compose_secret_env(&store, None, None).unwrap();
+    let minted = first.get("WATCH_ADMIN_TOKEN").cloned().unwrap_or_default();
+    assert!(crate::keychain::is_valid_watch_admin_token(&minted));
+
+    // A later Enable run reuses the Keychain item instead of rotating it.
+    let second = build_compose_secret_env(&store, None, None).unwrap();
+    assert_eq!(
+        second.get("WATCH_ADMIN_TOKEN").map(String::as_str),
+        Some(minted.as_str())
+    );
+
+    let pins = build_pack_pin_env(
+        Path::new("/app/pack"),
+        Path::new("/app/ledger"),
+        &test_image_ref("ghcr.io/irin/gateway", "e"),
+        &test_image_ref("ghcr.io/irin/sidecar", "f"),
+        None,
+    )
+    .unwrap();
+    assert!(
+        !pins.contains_key("WATCH_ADMIN_TOKEN"),
+        "the watch-admin read token is never a public pin"
+    );
 
     match prev_skip {
         Some(v) => std::env::set_var("IRIN_GATEWAY_PACK_SKIP_LOGIN_ENV", v),
@@ -388,6 +481,8 @@ fn every_compose_interpolated_var_is_pinned_scrubbed_or_disarmed() {
         "NVIDIA_API_KEY",
         "AUTH_PEPPER",
         "BOOTSTRAP_TOKEN",
+        // Watch/Outbox admin read token: Keychain-held, supplied by the secret
+        // env layer and scrubbed from the ambient environment before it.
         "WATCH_ADMIN_TOKEN",
         "COUNCIL_GATEWAY_TOKEN",
         "WATCH_PRODUCER_ENABLED",
@@ -395,6 +490,11 @@ fn every_compose_interpolated_var_is_pinned_scrubbed_or_disarmed() {
         // Touch ID bridge: Keychain-held, supplied by the secret env layer
         // and scrubbed from the ambient environment before it.
         "GW_ARM_PRINCIPALS",
+        // Host CLI adapters: secret env layer (empty when unready).
+        "CLAUDE_PROXY_URL",
+        "CODEX_PROXY_URL",
+        "CLAUDE_PROXY_TOKEN",
+        "CODEX_PROXY_TOKEN",
     ]
     .into_iter()
     .collect();

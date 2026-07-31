@@ -104,6 +104,8 @@ async function installSmokeOnlyWebSocketShim(page: Page) {
 }
 
 test.describe("Phase 9 N01 — seat_chunk token streaming (real WS smoke shim)", () => {
+  test.setTimeout(60_000);
+
   test("smoke shim emits seat_chunk frames before seat_complete", async ({ page }) => {
     await installSmokeOnlyWebSocketShim(page);
     await page.goto("/");
@@ -122,14 +124,16 @@ test.describe("Phase 9 N01 — seat_chunk token streaming (real WS smoke shim)",
     const ws = await wsPromise;
 
     // Collect frames until done; assert at least one seat_chunk precedes a
-    // seat_complete for the same seat.
+    // seat_complete for the same seat. The full ship matrix can leave the
+    // release server CPU-bound long enough that the first frame arrives after
+    // the default 20-second smoke deadline.
     const types: string[] = [];
     let sawChunk = false;
     let sawComplete = false;
-    const deadline = Date.now() + 20_000;
+    const deadline = Date.now() + 45_000;
     while (Date.now() < deadline && !sawComplete) {
       const frame = await ws
-        .waitForEvent("framereceived", { timeout: 20_000 })
+        .waitForEvent("framereceived", { timeout: 45_000 })
         .catch(() => null);
       if (!frame) break;
       const data = JSON.parse(frame.payload as string) as { type: string };

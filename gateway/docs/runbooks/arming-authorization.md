@@ -41,8 +41,9 @@ control — no terminal command. What changes:
 - The Gateway Pack admits exactly two arm-surface env keys on the sidecar:
   `GW_ARM_PRINCIPALS` (Keychain-held, per-spawn only, scrubbed from the ambient
   environment) and `GW_ARM_ATTEST_KEYS_PATH` (a fixed in-container path).
-  `WATCH_ADMIN_TOKEN` stays forced empty, and producer/dispatcher stay `false`
-  at boot.
+  `WATCH_ADMIN_TOKEN` is armed the same way (Keychain-held, per-spawn only,
+  scrubbed from the ambient environment) for the read-only Watch/Outbox
+  surface, and producer/dispatcher stay `false` at boot.
 - The enrollment registry is an app-owned file bind-mounted read-only at
   `/run/secrets/arm_attest_keys.json` only in the validating sidecar. It holds
   PUBLIC credential records but remains root-owned mode `0600`. The edge never
@@ -123,7 +124,7 @@ For Touch ID on macOS:
 
 ```bash
 gateway/bin/arm-enroll
-make runtime-restart
+relaunch IRIN.app or restart the Gateway Pack from Settings
 ```
 
 Enrollment writes only the public credential record to the durable sidecar

@@ -1,11 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help setup setup-prepare release-check worktree worktree-remove tools lint-crypto preflight check ship-check verify verify-down verify-formal runtime-up runtime-down runtime-restart runtime-status docker-cache-prune warroom dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction worktree-gc lint-security opengrep lint-lua
-setup: ## macOS: prepare config, start the managed runtime, and enable login recovery
-	bash scripts/setup-local.sh
-
-setup-prepare: ## Prepare private local config and signing material without starting services
-	bash scripts/setup-local.sh --prepare-only
+.PHONY: help release-check worktree worktree-remove tools lint-crypto preflight check ship-check verify verify-down verify-formal docker-cache-prune warroom dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction worktree-gc lint-security opengrep lint-lua gateway-prepare-config cli-proxies-up cli-proxies-down cli-proxies-status
 
 release-check: ## Verify product completeness and tree hygiene
 	bash scripts/check-release-tree.sh
@@ -55,17 +50,8 @@ verify-formal: ## Selective Kani + Miri on sovereign-protocol JCS (advisory if t
 	bash scripts/run-kani.sh
 	bash scripts/run-miri.sh
 
-runtime-up: ## Build and start the canonical local product runtime
-	bash scripts/irin-runtime.sh start
-
-runtime-down: ## Stop the canonical local product runtime
-	bash scripts/irin-runtime.sh stop
-
-runtime-restart: ## Rebuild and restart the canonical local product runtime
-	bash scripts/irin-runtime.sh restart
-
-runtime-status: ## Show Council, Web, Gateway, and Tailscale runtime status
-	bash scripts/irin-runtime.sh status
+gateway-prepare-config: ## Developer-only: prepare private Gateway local config (no services)
+	bash gateway/tools/prepare-local-config.sh
 
 docker-cache-prune: ## Reclaim rebuildable Docker BuildKit cache (keeps images, containers, and volumes)
 	@docker info >/dev/null 2>&1 || (echo "The Docker daemon is not ready; start it before pruning the build cache."; exit 1)

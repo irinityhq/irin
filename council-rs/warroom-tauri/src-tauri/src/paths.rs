@@ -238,26 +238,18 @@ fn allowed_council_binaries(root: &Path) -> Vec<PathBuf> {
 
 /// Resolve the council binary for spawn.
 ///
-/// Priority when `explicit` is absent:
+/// Priority:
 /// 1. Bundled `Contents/MacOS/council` when present (packaged install)
 /// 2. Repo `target/release/council` under `COUNCIL_RS_DIR` / workspace (dev)
 ///
-/// When `explicit` is set (non-whitespace), the path must canonicalize to one of
-/// the allowed locations above — same pin as pre-DMG product (no arbitrary exec).
-/// Whitespace-only `explicit` is treated as absent.
-pub fn resolve_council_binary(explicit: Option<&str>) -> Result<PathBuf, String> {
+/// Product code never accepts a user-supplied binary path. Tests may still pin
+/// `COUNCIL_RS_DIR` to exercise the repo binary resolution path.
+pub fn resolve_council_binary() -> Result<PathBuf, String> {
     let root = resolve_council_rs_dir();
-    let allowed_list = allowed_council_binaries(&root);
-
-    let candidate = match explicit.map(str::trim).filter(|s| !s.is_empty()) {
-        Some(p) => PathBuf::from(p),
-        None => {
-            if let Some(bundled) = bundled_council_binary() {
-                bundled
-            } else {
-                default_council_binary_path()
-            }
-        }
+    let candidate = if let Some(bundled) = bundled_council_binary() {
+        bundled
+    } else {
+        default_council_binary_path()
     };
 
     if !candidate.is_file() {
@@ -273,6 +265,7 @@ pub fn resolve_council_binary(explicit: Option<&str>) -> Result<PathBuf, String>
         .canonicalize()
         .map_err(|e| format!("failed to canonicalize council binary path: {e}"))?;
 
+    let allowed_list = allowed_council_binaries(&root);
     let mut allowed_canonicals = Vec::new();
     for allowed in &allowed_list {
         if allowed.is_file() {
@@ -283,7 +276,6 @@ pub fn resolve_council_binary(explicit: Option<&str>) -> Result<PathBuf, String>
     }
 
     if allowed_canonicals.is_empty() {
-        // Dev tree without a built binary: surface the missing-file path clearly.
         return Err(format!(
             "council binary not found at {}. Build with: cd {} && cargo build --release",
             default_council_binary(&root).display(),
@@ -309,14 +301,8 @@ pub fn resolve_council_binary(explicit: Option<&str>) -> Result<PathBuf, String>
 /// Resolve `--base-dir` for a packaged or development spawn.
 ///
 /// Packaged: `Resources/council-base`. Dev: council-rs repo root.
-pub fn resolve_spawn_base_dir(council_root_override: Option<&str>) -> Result<PathBuf, String> {
-    if let Some(root) = council_root_override
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
-        // Caller validates via validate_council_root when override is set.
-        return Ok(PathBuf::from(root));
-    }
+/// There is no user-facing councilRoot override.
+pub fn resolve_spawn_base_dir() -> Result<PathBuf, String> {
     if let Some(bundled) = bundled_base_dir() {
         return bundled
             .canonicalize()
@@ -481,7 +467,7 @@ mod tests {
         let tmp = std::env::temp_dir().join(format!("council-bin-missing-{}", std::process::id()));
         fs::create_dir_all(&tmp).unwrap();
         std::env::set_var("COUNCIL_RS_DIR", &tmp);
-        let err = resolve_council_binary(None).unwrap_err();
+        let err = resolve_council_binary().unwrap_err();
         assert!(err.contains("council binary not found"));
         assert!(err.contains("cargo build --release"));
         let _ = fs::remove_dir_all(&tmp);
@@ -489,47 +475,14 @@ mod tests {
     }
 
     #[test]
-    fn resolve_council_binary_empty_explicit_uses_default() {
-        let _guard = env_lock();
-        let prev = std::env::var("COUNCIL_RS_DIR").ok();
-        let tmp =
-            std::env::temp_dir().join(format!("council-bin-empty-explicit-{}", std::process::id()));
-        let bin = write_release_council_at(&tmp);
-        std::env::set_var("COUNCIL_RS_DIR", &tmp);
-
-        let got = resolve_council_binary(Some("   ")).unwrap();
-        assert_eq!(got, bin.canonicalize().unwrap());
-
-        let _ = fs::remove_dir_all(&tmp);
-        restore_council_rs_dir(prev);
-    }
-
-    #[test]
-    fn resolve_council_binary_rejects_path_outside_release() {
-        let _guard = env_lock();
-        let prev = std::env::var("COUNCIL_RS_DIR").ok();
-        let tmp = std::env::temp_dir().join(format!("council-bin-reject-{}", std::process::id()));
-        write_release_council_at(&tmp);
-        let rogue = tmp.join("rogue-council");
-        fs::write(&rogue, b"").unwrap();
-        std::env::set_var("COUNCIL_RS_DIR", &tmp);
-
-        let err = resolve_council_binary(Some(rogue.to_str().unwrap())).unwrap_err();
-        assert!(err.contains("council binary must be the release build"));
-
-        let _ = fs::remove_dir_all(&tmp);
-        restore_council_rs_dir(prev);
-    }
-
-    #[test]
-    fn resolve_council_binary_accepts_release_path() {
+    fn resolve_council_binary_uses_release_under_council_rs_dir() {
         let _guard = env_lock();
         let prev = std::env::var("COUNCIL_RS_DIR").ok();
         let tmp = std::env::temp_dir().join(format!("council-bin-ok-{}", std::process::id()));
         let bin = write_release_council_at(&tmp);
         std::env::set_var("COUNCIL_RS_DIR", &tmp);
 
-        let got = resolve_council_binary(Some(bin.to_str().unwrap())).unwrap();
+        let got = resolve_council_binary().unwrap();
         assert_eq!(got, bin.canonicalize().unwrap());
 
         let _ = fs::remove_dir_all(&tmp);

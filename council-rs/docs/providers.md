@@ -127,7 +127,7 @@ export VERTEX_GEMINI_MODEL=<model-id>
 Restart the canonical runtime after changing provider configuration:
 
 ```bash
-make runtime-restart
+relaunch `make warroom` or IRIN.app
 ```
 
 ## Smoke Calls

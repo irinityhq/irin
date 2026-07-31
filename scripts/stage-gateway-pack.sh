@@ -50,14 +50,17 @@ fi
 if ! grep -q 'irin-desktop-gateway' "$SRC_PACK/docker-compose.yml"; then
   die "gateway pack compose must declare fixed project name irin-desktop-gateway"
 fi
-# Touch ID bridge: WATCH_ADMIN_TOKEN stays an empty literal that accepts no env
-# input, and only the two admitted arm keys may be interpolated.
-if ! grep -q '^[[:space:]]*-[[:space:]]*WATCH_ADMIN_TOKEN=$' "$SRC_PACK/docker-compose.yml"; then
-  die "gateway pack compose must keep WATCH_ADMIN_TOKEN as an empty literal"
+# Watch/Outbox admin reads are armed via the validated native spawn env: the
+# compose must interpolate exactly this form (ambient host values are scrubbed
+# by the native spawn layer; the Keychain-held value never touches the public
+# env file). COUNCIL_GATEWAY_TOKEN and WATCH_DISPATCHER_GATEWAY_KEY stay empty
+# literals that accept no env input.
+if ! grep -qF -- '- WATCH_ADMIN_TOKEN=${WATCH_ADMIN_TOKEN:-}' "$SRC_PACK/docker-compose.yml"; then
+  die "gateway pack compose must interpolate WATCH_ADMIN_TOKEN from the native spawn env"
 fi
-if grep -E '^[[:space:]]*-[[:space:]]*(WATCH_ADMIN_TOKEN|COUNCIL_GATEWAY_TOKEN|WATCH_DISPATCHER_GATEWAY_KEY)=.*\$\{' \
+if grep -E '^[[:space:]]*-[[:space:]]*(COUNCIL_GATEWAY_TOKEN|WATCH_DISPATCHER_GATEWAY_KEY)=.*\$\{' \
     "$SRC_PACK/docker-compose.yml" >/dev/null; then
-  die "gateway pack compose must not interpolate admin/watch token surfaces"
+  die "gateway pack compose must not interpolate council/watch-dispatcher token surfaces"
 fi
 if grep -E '^[[:space:]]*-[[:space:]]*(GW_ARM_DEVIATION_FLAG|GW_ARM_PRINCIPAL_DOMAINS|ARM_NOTIFY_URL|ARM_STAGE_TTL_MS)=.*\$\{' \
     "$SRC_PACK/docker-compose.yml" >/dev/null; then

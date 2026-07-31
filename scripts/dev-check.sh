@@ -8,6 +8,7 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
 }
 cd "$ROOT"
 
+original_argc=$#
 original_args=("$@")
 mode=check
 dry_run="${IRIN_CHECK_DRY_RUN:-0}"
@@ -24,7 +25,10 @@ fi
 # Every real check owns the bounded shared Cargo target for its full lifetime.
 # Dry-runs remain side-effect free.
 if [[ "$dry_run" != 1 && "${IRIN_CARGO_POLICY_ACTIVE:-0}" != 1 ]]; then
-  exec "$ROOT/scripts/cargo-target-policy.sh" run "$ROOT" "$0" "${original_args[@]}"
+  if (( original_argc > 0 )); then
+    exec "$ROOT/scripts/cargo-target-policy.sh" run "$ROOT" "$0" "${original_args[@]}"
+  fi
+  exec "$ROOT/scripts/cargo-target-policy.sh" run "$ROOT" "$0"
 fi
 export CARGO_INCREMENTAL=0
 unset CARGO_TARGET_DIR
@@ -143,6 +147,10 @@ run() {
   printf '\n'
   [[ "$dry_run" == "1" ]] || "$@"
 }
+
+if [[ -x scripts/test-gateway-prepare-config.sh ]]; then
+  run "Gateway local-config helper self-test" scripts/test-gateway-prepare-config.sh
+fi
 
 any_rust=false
 rust_packages=()

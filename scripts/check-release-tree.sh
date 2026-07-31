@@ -48,9 +48,9 @@ required=(
   scripts/new-worktree.sh
   scripts/remove-worktree.sh
   scripts/smoke-macos-tauri-app.sh
+  scripts/test-gateway-prepare-config.sh
   scripts/test-development-workflow.sh
-  scripts/irin-runtime.sh
-  scripts/setup-local.sh
+  gateway/tools/prepare-local-config.sh
   council-rs/src/main.rs
   council-rs/warroom/web/package-lock.json
   council-rs/warroom/web/app/page.tsx
@@ -120,7 +120,7 @@ for path in "${files[@]}"; do
         council-rs/docs/operator-guide.md|council-rs/docs/persistence.md|\
         council-rs/docs/providers.md|council-rs/docs/war-room.md|\
         council-rs/warroom-tauri/README.md|council-rs/warroom/docs/TAURI-AUTH.md|\
-        docs/architecture.md|docs/cabinets.md|docs/ci-operating-model.md|docs/cross-process-boundaries.md|docs/development-workflow.md|docs/release-runbook.md|docs/security-claims-vs-reality.md|\
+        docs/architecture.md|docs/cabinets.md|docs/ci-operating-model.md|docs/codebase-simplification-plan.md|docs/codebase-simplification-pr2-execution.md|docs/cross-process-boundaries.md|docs/development-workflow.md|docs/release-runbook.md|docs/security-claims-vs-reality.md|\
         docs/security-tooling.md|docs/surface-map.md|docs/troubleshooting.md|\
         packaging/gateway-pack/README.md|\
         gateway/COUNCIL_GATEWAY_CONTRACT.md|gateway/README.md|gateway/SECURITY.md|\

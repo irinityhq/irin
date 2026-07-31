@@ -1,30 +1,31 @@
 # Gateway Operator Quickstart
 
-On macOS, Gateway is normally started with the complete IRIN runtime from the
-repository root:
+On macOS, the installed app can enable an optional Gateway Pack from Settings.
+For Gateway development from a checkout:
 
 ```bash
-make setup
-make runtime-status
+make gateway-prepare-config
+docker compose -p gateway --env-file "$HOME/.config/irin/gateway.env" \
+  -f gateway/docker-compose.yml -f gateway/docker-compose.canary.yml \
+  up -d --build
 ```
 
 The default endpoint is `http://127.0.0.1:18080`. Do not bind Gateway directly
 to an untrusted network.
 
-Ubuntu runs Gateway through its Docker/component paths rather than the
-macOS-only root runtime controller. Start with [`verify.md`](verify.md) for the
-portable isolated lane and [`runbook.md`](runbook.md) for the canonical
-operator boundary; `make warroom` alone starts Council and War Room Web, not
-Gateway.
+Ubuntu runs Gateway through its Docker/component paths. Start with
+[`verify.md`](verify.md) for the portable isolated lane and
+[`runbook.md`](runbook.md) for the operator boundary; `make warroom` alone
+starts Council and War Room Web, not Gateway.
 
 ## Local Configuration
 
-The root setup creates:
+`make gateway-prepare-config` creates:
 
-- `~/.config/irin/gateway.env` for Gateway and runtime settings
+- `~/.config/irin/gateway.env` for Gateway development settings
 - `~/.irin/ledger_key.pem` for the local Ed25519 signing seed
 
-Configuration files and the signing seed are mode `0600`. Setup preserves
+Configuration files and the signing seed are mode `0600`. The helper preserves
 valid operator-owned values while adding or replacing missing, placeholder, or
 invalid IRIN-managed fields. Provider credentials remain in the login-shell
 environment and are never copied into Gateway configuration.
@@ -34,7 +35,8 @@ environment and are never copied into Gateway configuration.
 ```bash
 curl -fsS http://127.0.0.1:18080/health
 curl -fsS http://127.0.0.1:18080/metrics | head
-make runtime-status
+docker compose -p gateway --env-file "$HOME/.config/irin/gateway.env" \
+  -f gateway/docker-compose.yml -f gateway/docker-compose.canary.yml ps
 ```
 
 Gateway is fail-closed. A healthy service can still return `401` for protected
@@ -116,22 +118,26 @@ make -C gateway smoke-phase3
 ## CLI Provider Proxies
 
 Gateway includes optional host-side proxies for authenticated Claude, Codex,
-and Gemini CLIs under `tools/`. The canonical IRIN runtime automatically starts
-the Claude and Codex proxies when their CLIs are present. They bind all host
-interfaces so Docker Desktop can reach them, and refuse that bind unless setup's
-distinct shared proxy token is available. Do not forward these ports or expose
-them outside a trusted private host/network boundary. Standalone operators who
-launch a proxy manually should keep its default loopback bind unless container
-access is required and authenticated.
+and Gemini CLIs under `tools/`. The installed app owns Claude and Codex adapter
+lifecycle when Gateway Pack is enabled; development Compose does not start those
+adapters automatically. Adapter listeners bind all host interfaces so Docker
+Desktop can reach them, and refuse that bind unless a distinct shared proxy
+token is available. Do not forward these ports or expose them outside a trusted
+private host/network boundary. Standalone operators who launch a proxy manually
+should keep its default loopback bind unless container access is required and
+authenticated.
 
 ## Day-2 Commands
 
 From the repository root:
 
 ```bash
-make runtime-status
-make runtime-restart
-make runtime-down
+docker compose -p gateway --env-file "$HOME/.config/irin/gateway.env" \
+  -f gateway/docker-compose.yml -f gateway/docker-compose.canary.yml ps
+docker compose -p gateway --env-file "$HOME/.config/irin/gateway.env" \
+  -f gateway/docker-compose.yml -f gateway/docker-compose.canary.yml restart
+docker compose -p gateway --env-file "$HOME/.config/irin/gateway.env" \
+  -f gateway/docker-compose.yml -f gateway/docker-compose.canary.yml down
 make verify
 make verify-down
 ```
