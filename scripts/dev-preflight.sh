@@ -7,17 +7,11 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   exit 1
 }
 cd "$ROOT"
-METHODOLOGY_ROOT="${IRIN_METHODOLOGY_ROOT:-$ROOT}"
-
 mode="${1:-start}"
 [[ "$mode" == "start" || "$mode" == "ship" ]] || {
   printf 'usage: %s [start|ship]\n' "$0" >&2
   exit 2
 }
-
-if [[ "$mode" == "ship" || -f "$ROOT/.irin-worktree.env" ]]; then
-  export IRIN_REQUIRE_GORTEX=1
-fi
 
 branch="$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)"
 [[ -n "$branch" ]] || { printf 'ERROR: detached worktrees cannot ship IRIN changes\n' >&2; exit 1; }
@@ -80,8 +74,6 @@ if [[ -f "$ROOT/.irin-worktree.env" ]]; then
 else
   printf 'Runtime: canonical ports (no .irin-worktree.env)\n'
 fi
-
-"$METHODOLOGY_ROOT/scripts/gortex-worktree.sh" doctor "$ROOT"
 
 if [[ "$mode" == "start" ]]; then
   printf 'Next: edit in this worktree, run make check while iterating, and make ship-check before claiming done.\n'

@@ -174,26 +174,26 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
 
-  release-tree:
-    name: Release tree
+  public-tree:
+    name: Public tree
     runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
     timeout-minutes: 10
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - name: Install release-tree scanner on hosted runners
+      - name: Install public-tree scanner on hosted runners
         if: runner.environment != 'self-hosted'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq ripgrep
 
-      - name: Verify release-tree scanner on self-hosted runners
+      - name: Verify public-tree scanner on self-hosted runners
         if: runner.environment == 'self-hosted'
         run: command -v rg
 
-      - name: Verify product completeness and tree hygiene
-        run: scripts/check-release-tree.sh
+      - name: Verify public source-tree boundaries
+        run: scripts/check-public-tree.sh
 
   public-pr-language:
     name: Public PR language
@@ -758,7 +758,7 @@ jobs:
       - detect-changes
       - gitleaks
       - security-scanners
-      - release-tree
+      - public-tree
       - public-pr-language
       - workspace-supply-chain
       - tauri-supply-chain

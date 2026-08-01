@@ -33,9 +33,6 @@ fi
 export CARGO_INCREMENTAL=0
 unset CARGO_TARGET_DIR
 
-if [[ "$mode" == "ship" || -f "$ROOT/.irin-worktree.env" ]]; then
-  export IRIN_REQUIRE_GORTEX=1
-fi
 # Product checks must not inherit worktree runtime ports into ambient Tauri
 # builds (build.rs requires matching TAURI_CONFIG CSP). Preflight and the native
 # smoke re-read .irin-worktree.env or pick their own ports.
@@ -188,8 +185,6 @@ run_rust_ship_proof() {
 }
 
 if [[ "$mode" == "check" ]]; then
-  run "Gortex detect_changes continuity receipt" scripts/gortex-worktree.sh detect "$ROOT"
-  run "Gortex affected-test analysis" scripts/gortex-worktree.sh affected "$ROOT" "${paths[@]}"
   if [[ "$(lane gateway_rust)" == true ]]; then
     run "Gateway focused tests" cargo test -p gateway-sidecar
   fi
@@ -215,11 +210,8 @@ if [[ "$mode" == "check" ]]; then
   exit 0
 fi
 
-run "Current-base and Gortex preflight" scripts/dev-preflight.sh ship
-run "Gortex detect_changes continuity receipt" scripts/gortex-worktree.sh detect "$ROOT"
-run "Gortex affected-test analysis" scripts/gortex-worktree.sh affected "$ROOT" "${paths[@]}"
+run "Current-base preflight" scripts/dev-preflight.sh ship
 run "Classifier self-test" scripts/test-classify-ci-paths.sh
-run "Workflow-script self-test" scripts/test-development-workflow.sh
 run "Pinned actionlint" scripts/bootstrap-actionlint.sh
 run "GitHub Actions lint" .irin-tools/bin/actionlint -color
 
@@ -260,7 +252,7 @@ if [[ "$(lane warroom_web)" == true || "$(lane warroom_tauri)" == true ]]; then
     IRIN_NATIVE_SKIP_BUILD=0 IRIN_NATIVE_VISUAL=1 scripts/smoke-macos-tauri-app.sh
 fi
 
-run "Release tree" make release-check
+run "Public tree" make release-check
 run "Public-language checker self-test" scripts/check-public-pr-language.sh --self-test
 run "Public commit language" scripts/check-public-pr-language.sh --range "origin/main..HEAD"
 run "Diff whitespace" git diff --check origin/main --

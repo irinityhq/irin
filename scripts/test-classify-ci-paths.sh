@@ -22,14 +22,14 @@ full_proof='true true true true true true true true true'
 
 cases=(
   "root docs|$all_false|README.md CONTRIBUTING.md"
-  "nested component docs|$all_false|gateway/docs/runbook.md sentinel/docs/YOUR-AGENT.md council-rs/docs/war-room.md council-rs/warroom/docs/TAURI-AUTH.md"
+  "nested component docs|$all_false|gateway/docs/runbook.md sentinel/docs/protocol-implementation.md council-rs/docs/war-room.md council-rs/warroom/docs/TAURI-AUTH.md"
   "workflow forces full|$full_pr|.github/workflows/ci.yml"
   "action forces full|$full_pr|.github/actions/rust-setup/action.yml"
   "manual forces full|$full_proof|__manual_dispatch__"
   "schedule forces full|$full_proof|__scheduled_proof__"
   "integrated main forces full|$full_pr|__integrated_main__"
   "unknown forces full|$full_pr|new-surface/config.json"
-  "operator ship scripts stay light|$all_false|scripts/dev-check.sh scripts/new-worktree.sh scripts/gortex-worktree.sh scripts/dev-preflight.sh"
+  "development scripts stay light|$all_false|scripts/dev-check.sh scripts/new-worktree.sh scripts/dev-preflight.sh"
   "root Makefile conservatively selects the full matrix|$full_pr|Makefile"
   "cargo-deny bootstrap selects supply-chain validation|false false false false false false true true false|scripts/bootstrap-dev-tools.sh"
   "classifier scripts still force full|$full_pr|scripts/classify-ci-paths.sh"

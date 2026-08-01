@@ -160,6 +160,4 @@ and frozen [`COMMS_CONTRACT.md`](../sentinel/COMMS_CONTRACT.md).
 
 For the process/language boundary inventory (Lua↔sidecar JSON, Council↔Gateway
 headers, tauri spawn env, envelope ownership), see
-[`cross-process-boundaries.md`](cross-process-boundaries.md). For optional
-local Gortex layer allow-lists (never committed), see
-[`security-tooling.md`](security-tooling.md#local-gortex-architecture-layers-operator-only).
+[`cross-process-boundaries.md`](cross-process-boundaries.md).

@@ -30,6 +30,8 @@ council-rs/warroom-tauri/src-tauri/resources/
 .grok/
 .scratch/
 .superpowers/
+.hermes/
+.zcode/
 .mcp.json
 .gortex.yaml
 CLAUDE.md

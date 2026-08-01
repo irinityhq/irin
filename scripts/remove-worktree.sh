@@ -31,7 +31,6 @@ fi
 runtime_state_dir=""
 if [[ -f "$destination/.irin-worktree.env" ]]; then
   runtime_state_dir="$(sed -n 's/^IRIN_RUNTIME_STATE_DIR=//p' "$destination/.irin-worktree.env" | head -n 1)"
-  export IRIN_REQUIRE_GORTEX=1
 fi
 if [[ -n "$runtime_state_dir" ]]; then
   allowed_root="$(cd "${HOME}/.local/state/irin/worktrees" 2>/dev/null && pwd -P)" || {
@@ -62,27 +61,7 @@ if [[ -n "$runtime_state_dir" ]]; then
   runtime_state_dir="$resolved_runtime_state_dir"
 fi
 
-# Source-managed runtime lifecycle is retired (PR2). Governed Claude/Codex
-# proxy ownership now lives in the installed app, not in checkout scripts.
-if [[ "${IRIN_REQUIRE_GORTEX:-0}" == 1 ]]; then
-  command -v gortex >/dev/null 2>&1 || {
-    printf 'ERROR: Gortex CLI is required to remove a managed worktree cleanly\n' >&2
-    exit 1
-  }
-fi
-if command -v gortex >/dev/null 2>&1; then
-  # Untrack while the path still exists. If Git refuses removal, restore the
-  # index registration so the failed teardown leaves no hidden state change.
-  gortex untrack "$destination" >/dev/null
-  if ! git -C "$SOURCE_ROOT" worktree remove "$destination"; then
-    gortex track "$destination" --as-worktree >/dev/null 2>&1 || true
-    gortex daemon reload >/dev/null 2>&1 || true
-    exit 1
-  fi
-  gortex daemon reload >/dev/null 2>&1 || true
-else
-  git -C "$SOURCE_ROOT" worktree remove "$destination"
-fi
+git -C "$SOURCE_ROOT" worktree remove "$destination"
 if [[ -n "$runtime_state_dir" && -d "$runtime_state_dir" ]]; then
   rm -rf -- "$runtime_state_dir"
   printf 'Removed generated runtime state: %s\n' "$runtime_state_dir"

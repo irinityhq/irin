@@ -15,6 +15,8 @@
 **/*.pfx
 **/.secrets/**
 **/secrets/**
+**/.hermes/**
+**/.zcode/**
 
 # Generated/build noise is not useful model context.
 **/node_modules/**

@@ -36,7 +36,6 @@ cleanup_failed_creation() {
   trap - EXIT
   [[ -z "${slot_lock:-}" ]] || rmdir "$slot_lock" >/dev/null 2>&1 || true
   if [[ "$status" -ne 0 && "${created:-0}" == "1" ]]; then
-    command -v gortex >/dev/null 2>&1 && gortex untrack "$destination" >/dev/null 2>&1 || true
     git -C "$ROOT" worktree remove --force "$destination" >/dev/null 2>&1 || true
     git -C "$ROOT" branch -D "$branch" >/dev/null 2>&1 || true
     printf 'ERROR: worktree setup failed; removed incomplete worktree and branch\n' >&2
@@ -112,12 +111,9 @@ chmod 600 "$destination/.irin-worktree.env"
 rmdir "$slot_lock"
 slot_lock=""
 
-# Invoke the creator checkout's methodology so this works before these files
-# have landed on origin/main. Managed operator worktrees require Gortex; the
-# public contributor fallback remains `make check` in an ordinary checkout.
-IRIN_REQUIRE_GORTEX=1 bash "$ROOT/scripts/gortex-worktree.sh" track "$destination"
-(cd "$destination" && IRIN_REQUIRE_GORTEX=1 IRIN_METHODOLOGY_ROOT="$ROOT" \
-  bash "$ROOT/scripts/dev-preflight.sh")
+# Invoke the creator checkout's preflight so this works before these files have
+# landed on origin/main.
+(cd "$destination" && bash "$ROOT/scripts/dev-preflight.sh")
 
 created=0
 trap - EXIT

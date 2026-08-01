@@ -69,10 +69,9 @@ for path in "${paths[@]}"; do
       tauri_supply_chain=true
       ;;
 
-    # Operator methodology / shipping tooling: light always-on checks plus the
-    # workflow self-tests inside make ship-check. Do not tax product lanes
-    # (Rust matrix, War Room, Tauri visual) for script-only edits.
-    scripts/dev-*.sh|scripts/new-worktree.sh|scripts/remove-worktree.sh|scripts/worktree-gc.sh|scripts/gortex-worktree.sh|scripts/check-*.sh|scripts/test-development-workflow.sh|scripts/with-test-ports.sh)
+    # Development and shipping tooling stays on the light always-on checks. Do
+    # not tax product lanes (Rust matrix, War Room, Tauri visual) for script-only edits.
+    scripts/dev-*.sh|scripts/new-worktree.sh|scripts/remove-worktree.sh|scripts/worktree-gc.sh|scripts/check-*.sh|scripts/with-test-ports.sh)
       ;;
 
     # Root workspace manifests affect every member. The standalone Tauri crate

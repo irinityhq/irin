@@ -240,12 +240,11 @@ The worktree gets isolated ports and its own Docker project name. See
 - [`docs/cross-process-boundaries.md`](docs/cross-process-boundaries.md) —
   process/language boundary inventory (Lua↔sidecar, governed headers, spawn env).
 - [`docs/security-tooling.md`](docs/security-tooling.md) — local scanners,
-  Selene, config-key convention, optional Gortex layer map.
+  Selene, and the config-key search convention.
 - [`docs/cabinets.md`](docs/cabinets.md) — cabinet selection, customization,
   the optional NVIDIA starter, and model entitlement churn.
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) — Docker, ports,
   login-shell discovery, Tailscale, and teardown.
-- [`AGENTS.md`](AGENTS.md) — repository operating manual for coding agents.
 - Component docs: [`council-rs/README.md`](council-rs/README.md),
   [`gateway/README.md`](gateway/README.md),
   [`sentinel/README.md`](sentinel/README.md).

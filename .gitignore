@@ -18,6 +18,8 @@ runs/
 .irin-worktree-base
 .irin-receipts/
 .irin-tools/
+.hermes/
+.zcode/
 
 # DMG packaging artifacts and isolated test state (generated)
 /packaging/artifacts/

@@ -24,9 +24,9 @@ cd ../irin-wt-fix-example
 ```
 
 The creator fetches `origin/main`, creates the branch from that exact commit,
-writes a collision-checked ignored worktree runtime profile, requires and
-registers the linked worktree with Gortex, and runs the initial preflight. If setup fails, it
-removes the incomplete worktree rather than leaving a half-configured checkout.
+writes a collision-checked ignored worktree runtime profile, and runs the
+initial preflight. If setup fails, it removes the incomplete worktree rather
+than leaving a half-configured checkout.
 
 Remove a finished clean worktree while retaining its branch:
 
@@ -43,75 +43,35 @@ make worktree-gc APPLY=1
 ```
 
 The removal gate refuses main, detached, or dirty worktrees, stops the isolated
-runtime, removes the Git worktree, and unregisters it from Gortex. Managed
-worktrees also set a shared `CARGO_TARGET_DIR` under `~/.cache/irin/cargo-target`
-so the next worktree reuses compiled artifacts instead of a cold multi-GB build.
-
-## Gortex is MCP-first
-
-The operator keeps one Gortex daemon and MCP service running. Each agent should
-use the MCP in this order:
-
-1. `smart_context` at task entry;
-2. `get_editing_context` before a non-trivial source edit;
-3. `detect_changes` and affected-test analysis before completion;
-4. `change_contract` when a shared protocol, signing, outbox, communications,
-   capability, or CI authority surface is touched.
-
-`make preflight` verifies the daemon, configured clients, exact worktree
-registration, and index freshness. A daemon that is merely running is not
-enough: the indexed path and commit must belong to the current linked worktree.
-
-If the MCP is configured but not visible to the current client, state
-`GORTEX_MCP_MISSING` in the work report and use the named continuity path:
-
-```bash
-scripts/gortex-worktree.sh detect
-```
-
-That command first proves the exact worktree index matches its current Git
-HEAD. On v0.61 a stale graph record is unregistered and the exact worktree is
-re-registered through `gortex track --as-worktree --wait`; source and runtime
-state are untouched. The wrapper then invokes the daemon's `detect_changes`
-tool through `gortex call`. The check and ship gates separately
-pass the complete changed-path set to `gortex affected`; selected tests and a
-graph-confirmed empty selection are valid advisory receipts, while an analysis
-failure blocks the gate. The deterministic classifier lanes remain the test
-execution floor. This keeps work moving while preserving the fact that client
-discovery needs repair. Do not substitute an old main-checkout index for the
-linked worktree.
+runtime, and removes the Git worktree. Managed worktrees also set a shared
+`CARGO_TARGET_DIR` under `~/.cache/irin/cargo-target` so the next worktree
+reuses compiled artifacts instead of a cold multi-GB build.
 
 Every tracked `build.rs` is also required to have an explicit CODEOWNERS entry.
-The release-tree gate fails when a new build-time execution surface is added
+The public-tree gate fails when a new build-time execution surface is added
 without authority review.
-Managed operator worktrees and `make ship-check` require the Gortex CLI
-continuity path to succeed. `make check` remains usable in an ordinary public
-checkout without private operator tooling, and CI does not depend on Gortex.
 
 ## The three gates
 
 ### `make preflight`
 
-Run before editing. It rejects main, detached HEAD, a dirty starting tree, an
-untracked or stale Gortex worktree when Gortex is installed, and missing Git
-base information. It records the current `origin/main` commit and prints the
-worktree's Council, Web, and Gateway ports.
+Run before editing. It rejects main, detached HEAD, a dirty starting tree, and
+missing Git base information. It records the current `origin/main` commit and
+prints the worktree's Council, Web, and Gateway ports.
 
 ### `make check`
 
 Run during implementation. The existing CI path classifier selects focused
-Rust, Web, embedded-export, or Tauri tests. It also records a Gortex
-`detect_changes` result when Gortex is available. This is the fast feedback
-loop, not the shipping claim.
+Rust, Web, embedded-export, or Tauri tests. This is the fast feedback loop,
+not the shipping claim.
 
 ### `make ship-check`
 
 Run immediately before claiming completion or updating the pull request. It:
 
 - refuses a receipt based on an older `origin/main`;
-- reruns the Gortex change and impact pass;
-- runs the local equivalents for every selected CI lane only (operator
-  methodology scripts and docs stay on always-on light checks; a single Rust
+- runs the local equivalents for every selected CI lane only (documentation
+  and development scripts stay on always-on light checks; a single Rust
   crate uses package-scoped fmt/clippy/test; full matrix or multi-crate fan-out
   still runs the workspace);
 - treats every War Room Web change as a Tauri product change;
@@ -119,7 +79,7 @@ Run immediately before claiming completion or updating the pull request. It:
   and a native macOS application launch and visible-surface smoke when those
   lanes are selected;
 - rejects high or critical production npm advisories;
-- runs release-tree, public-language, secret, and whitespace checks; and
+- runs public-tree, public-language, secret, and whitespace checks; and
 - writes an ignored receipt under `.irin-receipts/` with the branch, commits,
   complete changed-file set, deterministic tested-tree fingerprint, lanes,
   commands, results, and completion time.

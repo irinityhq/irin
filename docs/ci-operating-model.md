@@ -1,8 +1,8 @@
 # CI operating model
 
 IRIN uses a stable CI aggregate, `ci / CI required`, backed by scoped proof
-lanes. Branch protection pairs it with stable CodeQL, dependency-review, and
-automated-review checks. The model is local-first: trusted project work can use
+lanes. Branch protection pairs it with stable CodeQL and dependency-review
+checks. The model is local-first: trusted project work can use
 persistent self-hosted capacity, while code outside the trust predicate runs
 only on GitHub-hosted runners.
 
@@ -43,7 +43,7 @@ Every pull request reports these jobs, including documentation-only changes:
 - path classification;
 - root secret scan;
 - security scanners (advisory Opengrep + Selene; findings non-blocking);
-- release-tree hygiene;
+- public-tree hygiene;
 - public PR language; and
 - the `ci / CI required` aggregate.
 
@@ -53,8 +53,8 @@ checksum-verified release and validates every workflow before the aggregate can
 pass. The detection job first runs the classifier's
 self-test and validates its complete Boolean output schema, so broken or missing
 classification output fails closed rather than skipping every heavy lane. It is
-the stable aggregate for the scoped CI lanes; the security and automated-review
-workflows remain separate required branch-protection contexts.
+the stable aggregate for the scoped CI lanes; security workflows remain separate
+required branch-protection contexts.
 
 `scripts/classify-ci-paths.sh` is the path-to-lane contract. Its table-driven
 self-test covers documentation, component runtime source, War Room web, Tauri,
@@ -134,27 +134,21 @@ Dependency review runs on pull requests with read-only permissions and a
 full-SHA-pinned GitHub action. Its stable `Dependency Review` check rejects
 newly introduced vulnerabilities of moderate severity or higher.
 
-The repository's automated review service reports a stable status check.
-Repository configuration enables status checks and re-review on updates;
-branch protection enforces the check conclusion separately from the service's
-review-sensitivity setting.
-
 ## Branch-protection contract
 
 Once all contexts have appeared on a real pull request, `main` requires:
 
 - `ci / CI required`;
 - `CodeQL required`;
-- `Dependency Review`; and
-- the configured automated-review status check.
+- `Dependency Review`.
 
 The exact names are operating contracts. Rename a caller job or aggregate only
 in a maintenance window where the replacement context first registers on a
 real pull request. Main protection also applies to administrators.
 `CODEOWNERS` records the maintainer for authority-bearing paths, but does not
 require a second personal account to approve the primary maintainer's changes.
-The required CI, CodeQL, dependency-review, automated-review, current-base,
-and conversation-resolution gates provide the solo-maintainer merge boundary.
+The required CI, CodeQL, dependency-review, current-base, and
+conversation-resolution gates provide the solo-maintainer merge boundary.
 
 ## Promotion and pre-public checklist
 
@@ -173,8 +167,7 @@ For the public repository:
 - prove workflow changes execute their own same-SHA graph;
 - register required check names before changing branch protection;
 - use a deliberately failing pull request to prove every required context
-  blocks merge, including an automated-review score below its configured
-  threshold;
+  blocks merge;
 - retain one branch, stacked commits, and one promotion pull request; and
 - keep release attestation, signed-commit enforcement, and a narrower Actions
   allowlist as separately reviewed hardening rather than overstating them here.

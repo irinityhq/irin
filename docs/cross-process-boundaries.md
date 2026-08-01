@@ -59,6 +59,6 @@ stays on sovereign-protocol + existing formal/scanner coverage.
 
 - [`architecture.md`](architecture.md) — Direct vs Governed product shape
 - [`surface-map.md`](surface-map.md) — operator-visible HTTP/Watch surfaces
-- [`security-tooling.md`](security-tooling.md) — scanners, Selene, local Gortex layers
+- [`security-tooling.md`](security-tooling.md) — scanners, Selene, and config-key search
 - [`gateway/COUNCIL_GATEWAY_CONTRACT.md`](../gateway/COUNCIL_GATEWAY_CONTRACT.md)
 - [`sentinel/COMMS_CONTRACT.md`](../sentinel/COMMS_CONTRACT.md)

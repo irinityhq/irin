@@ -2,8 +2,8 @@
 
 .PHONY: help release-check worktree worktree-remove tools lint-crypto preflight check ship-check verify verify-down verify-formal docker-cache-prune warroom dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction worktree-gc lint-security opengrep lint-lua gateway-prepare-config cli-proxies-up cli-proxies-down cli-proxies-status
 
-release-check: ## Verify product completeness and tree hygiene
-	bash scripts/check-release-tree.sh
+release-check: ## Verify public source-tree boundaries
+	bash scripts/check-public-tree.sh
 
 worktree: ## Create an isolated development worktree (BRANCH=feature/example)
 	@test -n "$(BRANCH)" || (echo "usage: make worktree BRANCH=feature/example"; exit 2)
@@ -31,7 +31,7 @@ opengrep: lint-security ## Alias for lint-security
 lint-lua: ## Advisory Selene lint of gateway OpenResty Lua (IRIN_SELENE_FAIL=1 to gate)
 	bash scripts/run-selene.sh
 
-preflight: ## Prove branch, base, worktree isolation, and Gortex readiness before editing
+preflight: ## Prove branch, base, and worktree isolation before editing
 	bash scripts/dev-preflight.sh
 
 check: ## Run fast tests selected from the current diff
