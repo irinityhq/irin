@@ -34,6 +34,9 @@ authoritative file location and fails if any finding lacks a path.
 | `irin.rust.arming-bearer-eq` | rust | bearer/token `==` under `watch/` |
 | `irin.lua.credential-path` | lua | body/headers to sinks without scrub (best-effort) |
 | `irin.lua.ngx-log-authorization` | lua | logging Authorization / admin key headers |
+| `irin.rust.guard-scan-requires-debug-env` | rust | `/guard/scan` only under `GATEWAY_DEBUG_GUARD_SCAN` (audit F-1) |
+| `irin.rust.uds-router-requires-global-rate-limit` | rust | `build_router` wires `global_rate_limit` (audit F-3) |
+| `irin.rust.tenant-policy-write-requires-admin` | rust | `watch_set_tenant_policy` calls `admin_token_matches` (audit F-6) |
 
 Prefer `subtle::ConstantTimeEq` and `admin_token_matches` /
 `ArmPrincipals::authenticate` over raw string equality for secrets.

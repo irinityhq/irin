@@ -1,0 +1,91 @@
+# IRIN — route-without-sibling-guard pins (audit F-1 / F-3 / F-6 class).
+# Pattern: a route registered without the guard its siblings already possess.
+# Proven by PR #19 (B1/B2/B4): string/key pins in the advisory Opengrep lane.
+# Product fixes already land in sidecar-rs; these rules catch regressions.
+rules:
+  - id: irin.rust.guard-scan-requires-debug-env
+    message: >-
+      /guard/scan must register only under GATEWAY_DEBUG_GUARD_SCAN=1
+      (audit F-1). Unconditional registration exposes decontaminator
+      fingerprinting to any UDS caller. Prefer guard_scan_enabled_from(...)
+      or the env-var gate; registration-time gating (not in-handler) so
+      bad bodies also 404.
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: gateway-sidecar
+      irin.category: sibling-guard
+      irin.audit: F-1
+      irin.gap_class: route-without-sibling-guard
+    paths:
+      include:
+        - "**/sidecar-rs/src/routes/**"
+        - "**/sidecar-rs/src/main.rs"
+    patterns:
+      - pattern: $R.route("/guard/scan", ...)
+      # Production shape: helper must read GATEWAY_DEBUG_GUARD_SCAN from env
+      # (not a hard-coded Some("1") that would always enable the route).
+      - pattern-not-inside: |
+          if guard_scan_enabled_from(
+              std::env::var("GATEWAY_DEBUG_GUARD_SCAN").ok().as_deref()
+          ) {
+            ...
+          }
+      # Migration safety net while any remaining call sites use the old form.
+      - pattern-not-inside: |
+          if std::env::var("GATEWAY_DEBUG_GUARD_SCAN")
+              .map(...)
+              .unwrap_or(false)
+          {
+            ...
+          }
+
+  - id: irin.rust.uds-router-requires-global-rate-limit
+    message: >-
+      build_router must wire global_rate_limit as the outermost flood
+      backstop (audit F-3). Without it, UDS callers bypass the Lua /v1/
+      rate-limit path and can saturate the sidecar.
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: gateway-sidecar
+      irin.category: sibling-guard
+      irin.audit: F-3
+      irin.gap_class: route-without-sibling-guard
+    paths:
+      include:
+        - "**/sidecar-rs/src/routes/mod.rs"
+    patterns:
+      - pattern: |
+          pub(crate) fn build_router(...) -> Router {
+            ...
+          }
+      # Function-pointer pass-as-argument is awkward for full AST order checks;
+      # presence pin + ratelimit unit/oneshot tests. A comment-only occurrence
+      # is residual risk accepted for this advisory lane (same as PR #19 pins).
+      - pattern-not-regex: 'global_rate_limit'
+
+  - id: irin.rust.tenant-policy-write-requires-admin
+    message: >-
+      watch_set_tenant_policy must call admin_token_matches before
+      mutating policy (audit F-6). Sibling watch mutation routes
+      (force-wake, quarantine clear, outbox admin) already fail closed
+      on the admin bearer; canary-tenant alone is not enough.
+    severity: WARNING
+    languages: [rust]
+    metadata:
+      irin.surface: gateway-sidecar
+      irin.category: sibling-guard
+      irin.audit: F-6
+      irin.gap_class: route-without-sibling-guard
+    paths:
+      include:
+        - "**/sidecar-rs/src/watch/api/**"
+    patterns:
+      - pattern: |
+          pub async fn watch_set_tenant_policy(...) -> Response {
+            ...
+          }
+      # Presence pin (statement or `if !admin_token_matches(...)`). Order
+      # before mutation is locked by watch_api behavioral tests, not regex.
+      - pattern-not-regex: 'admin_token_matches'

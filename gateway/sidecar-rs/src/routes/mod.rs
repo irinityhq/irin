@@ -60,6 +60,15 @@ pub(crate) struct BuildRouterParts {
     pub attest_keys: Arc<crate::watch::attest::AttestKeyRegistry>,
 }
 
+/// Audit F-1: `/guard/scan` registers only when this returns true.
+///
+/// Pure env-seam (no process-global mutation) so unit tests can pin the gate
+/// without racing other tests. Production passes
+/// `std::env::var("GATEWAY_DEBUG_GUARD_SCAN").ok().as_deref()`.
+pub(crate) fn guard_scan_enabled_from(raw: Option<&str>) -> bool {
+    raw == Some("1")
+}
+
 /// Assemble the full UDS router. Route registrations match main.rs order.
 pub(crate) fn build_router(parts: BuildRouterParts) -> Router {
     let BuildRouterParts {
@@ -216,10 +225,7 @@ pub(crate) fn build_router(parts: BuildRouterParts) -> Router {
     // uniformly hits the 404 fallback, disclosing nothing about its existence.
     // Registration-time gating avoids an in-handler `Json` extractor returning
     // a distinguishable 400/415. Production never sets it.
-    if std::env::var("GATEWAY_DEBUG_GUARD_SCAN")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-    {
+    if guard_scan_enabled_from(std::env::var("GATEWAY_DEBUG_GUARD_SCAN").ok().as_deref()) {
         app = app.route("/guard/scan", post(guard::guard_scan_debug));
     }
 
@@ -234,4 +240,20 @@ pub(crate) fn build_router(parts: BuildRouterParts) -> Router {
             crate::ratelimit::global_rate_limit,
         ))
         .with_state(state.clone())
+}
+
+#[cfg(test)]
+mod sibling_guard_tests {
+    use super::guard_scan_enabled_from;
+
+    /// Audit F-1 park: only the exact `1` value enables the debug route.
+    #[test]
+    fn guard_scan_enabled_only_for_exact_one() {
+        assert!(!guard_scan_enabled_from(None));
+        assert!(!guard_scan_enabled_from(Some("")));
+        assert!(!guard_scan_enabled_from(Some("0")));
+        assert!(!guard_scan_enabled_from(Some("true")));
+        assert!(!guard_scan_enabled_from(Some("1 ")));
+        assert!(guard_scan_enabled_from(Some("1")));
+    }
 }
