@@ -160,4 +160,3 @@ echo "=== tauri build (bundles=$BUNDLES) ==="
 APP="$CARGO_TARGET_DIR/release/bundle/macos/IRIN.app"
 [[ -d "$APP" ]] || die "app bundle not found at $APP (tauri build did not produce it)"
 echo "=== app-bundle primitive complete: $APP ==="
-)

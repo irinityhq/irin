@@ -104,33 +104,17 @@ fn ensure_bundle_input_placeholders(manifest_dir: &Path) {
     }
     println!("cargo:rerun-if-changed={}", cabinets.display());
 
-    // Gateway pack resources (compose + conf/lua staged by scripts/stage-gateway-pack.sh).
+    // Gateway pack resources must be staged explicitly (scripts/stage-gateway-pack.sh
+    // or the app-bundle primitive). Silent placeholders are forbidden so an
+    // unstaged `tauri build` fails closed instead of shipping inert compose.
     let gw_pack = manifest_dir.join("resources").join("gateway-pack");
     let gw_compose = gw_pack.join("docker-compose.yml");
-    if !gw_compose.is_file() {
-        let _ = std::fs::create_dir_all(&gw_pack);
-        let _ = std::fs::write(
-            &gw_compose,
-            b"# placeholder - run scripts/stage-gateway-pack.sh before DMG build\nname: irin-desktop-gateway\nservices: {}\n",
-        );
-        let _ = std::fs::write(
-            gw_pack.join("image-manifest.json"),
-            br#"{
-  "schema_version": 1,
-  "mode": "local-dev",
-  "pack_version": "placeholder",
-  "images": {
-    "gateway": "irin-desktop/gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-    "sidecar": "irin-desktop/sidecar@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-  },
-  "watch_invariants": {
-    "WATCH_PRODUCER_ENABLED": false,
-    "WATCH_DISPATCHER_ENABLED": false
-  }
-}
-"#,
-        );
-    }
+    assert!(
+        gw_compose.is_file(),
+        "missing staged Gateway Pack at {}; run scripts/stage-gateway-pack.sh \
+         (or packaging/build-app-bundle.sh) before building the Tauri app",
+        gw_compose.display()
+    );
     println!("cargo:rerun-if-changed={}", gw_compose.display());
 
     // Tauri validates resource paths even for `cargo test`. This inert,

@@ -7,6 +7,8 @@
 #   local-dev  (default for regression) — requires a local-dev manifest
 #   production — requires an explicitly supplied production manifest path;
 #                refuses local-dev manifests and placeholder digests
+#   smoke-inert — tracked nginx/conf/lua + generated minimal disarmed
+#                manifest; stamped smoke-inert; no Docker images
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,8 +26,8 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
   || die "missing gateway runtime assets under $GATEWAY"
 
 case "$MODE" in
-  local-dev|production) ;;
-  *) die "IRIN_GATEWAY_PACK_MODE must be local-dev or production (got $MODE)" ;;
+  local-dev|production|smoke-inert) ;;
+  *) die "IRIN_GATEWAY_PACK_MODE must be local-dev, production, or smoke-inert (got $MODE)" ;;
 esac
 
 # Fail closed: production-shaped compose must never ship build: directives or HOME mounts.
@@ -65,6 +67,48 @@ fi
 if grep -E '^[[:space:]]*-[[:space:]]*(GW_ARM_DEVIATION_FLAG|GW_ARM_PRINCIPAL_DOMAINS|ARM_NOTIFY_URL|ARM_STAGE_TTL_MS)=.*\$\{' \
     "$SRC_PACK/docker-compose.yml" >/dev/null; then
   die "gateway pack admits only GW_ARM_PRINCIPALS and GW_ARM_ATTEST_KEYS_PATH on the arm surface"
+fi
+
+stage_smoke_inert() {
+  rm -rf "$DEST"
+  mkdir -p "$DEST"
+  printf '' >"$DEST/arm-bridge-enabled"
+  chmod 0644 "$DEST/arm-bridge-enabled"
+  cp -f "$SRC_PACK/docker-compose.yml" "$DEST/docker-compose.yml"
+  cp -f "$SRC_PACK/README.md" "$DEST/README.md"
+  cp -f "$GATEWAY/nginx.conf" "$DEST/nginx.conf"
+  rsync -a --delete "$GATEWAY/conf/" "$DEST/conf/"
+  rsync -a --delete "$GATEWAY/lua/" "$DEST/lua/"
+  # Minimal disarmed manifest — no Docker images, clearly non-promotable.
+  cat >"$DEST/image-manifest.json" <<'EOF'
+{
+  "schema_version": 1,
+  "mode": "local-dev",
+  "pack_version": "smoke-inert",
+  "source_sha": "smoke-inert",
+  "source_dirty": true,
+  "images": {
+    "gateway": "irin-desktop/gateway@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "sidecar": "irin-desktop/sidecar@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  },
+  "watch_invariants": {
+    "WATCH_PRODUCER_ENABLED": false,
+    "WATCH_DISPATCHER_ENABLED": false
+  }
+}
+EOF
+  printf 'mode=smoke-inert\nmanifest_src=generated-smoke-inert\n' >"$DEST/STAGED_MODE.txt"
+  # Explicit marker for isolation assertions (DMG must never contain this).
+  printf 'smoke-inert\n' >"$DEST/SMOKE_INERT"
+  grep -q 'WATCH_PRODUCER_ENABLED=false' "$DEST/docker-compose.yml" \
+    || die "staged compose lost watch-off"
+  printf 'staged gateway pack -> %s (mode=smoke-inert, no Docker images)\n' "$DEST"
+  find "$DEST" -type f | wc -l | awk '{print "files:", $1}'
+}
+
+if [[ "$MODE" == "smoke-inert" ]]; then
+  stage_smoke_inert
+  exit 0
 fi
 
 pick_manifest() {
