@@ -4,13 +4,19 @@
 //! F-6 (tenant-policy admin bearer) already live in sidecar-rs. This file
 //! parks the remaining F-4 contract (ip-check stays UDS-internal; nginx must
 //! not expose it) and locks the source wiring so a silent revert fails CI.
+//!
+//! These are deliberate *string pins* (cheap CI ratchet), not full behavioral
+//! proofs. Opengrep AST rules and existing handler/unit tests cover structure
+//! and semantics; a clever rename that keeps identifiers while dropping the
+//! guard can still pass here — that residual risk is accepted for this lane.
 
 use std::fs;
 use std::path::PathBuf;
 
 fn repo_file(relative: &str) -> String {
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    // sidecar-rs → gateway → monorepo root
+    // Deliberate layout pin: sidecar-rs → gateway → monorepo root.
+    // A move of sidecar-rs under another intermediate directory must update this.
     let root = manifest
         .parent()
         .and_then(|p| p.parent())
@@ -27,11 +33,23 @@ fn repo_file(relative: &str) -> String {
 #[test]
 fn f4_nginx_does_not_expose_auth_ip_check() {
     let nginx = repo_file("gateway/nginx.conf");
-    assert!(
-        !nginx.contains("auth/ip-check"),
-        "nginx.conf must not expose /auth/ip-check; that route is UDS-internal \
-         for Lua sidecar.ip_check (audit F-4 park)"
-    );
+    // Match location directives only — a doc comment mentioning the path
+    // must not fail CI (Gemini review). Exact + prefix forms cover current
+    // nginx style (see `location = /auth/rotate`).
+    let exposed = [
+        "location = /auth/ip-check",
+        "location /auth/ip-check",
+        "location ^~ /auth/ip-check",
+        "location ~ /auth/ip-check",
+        "location ~* /auth/ip-check",
+    ];
+    for needle in exposed {
+        assert!(
+            !nginx.contains(needle),
+            "nginx.conf must not expose /auth/ip-check via `{needle}`; that \
+             route is UDS-internal for Lua sidecar.ip_check (audit F-4 park)"
+        );
+    }
     // Sibling that IS intentionally HTTP-exposed stays present as a control.
     assert!(
         nginx.contains("location = /auth/rotate"),
@@ -40,6 +58,9 @@ fn f4_nginx_does_not_expose_auth_ip_check() {
 }
 
 /// Audit F-1 source lock: registration stays behind the env-seam helper.
+///
+/// String split is a cheap pin; block scoping is enforced by Opengrep
+/// `pattern-not-inside` on `guard_scan_enabled_from(std::env::var(...))`.
 #[test]
 fn f1_guard_scan_registration_uses_env_seam() {
     let routes = repo_file("gateway/sidecar-rs/src/routes/mod.rs");
@@ -50,6 +71,13 @@ fn f1_guard_scan_registration_uses_env_seam() {
     assert!(
         routes.contains("GATEWAY_DEBUG_GUARD_SCAN"),
         "GATEWAY_DEBUG_GUARD_SCAN must remain the env key for F-1"
+    );
+    // Prefer the production call shape so a hard-coded Some(\"1\") fails CI.
+    assert!(
+        routes.contains(
+            "guard_scan_enabled_from(std::env::var(\"GATEWAY_DEBUG_GUARD_SCAN\")"
+        ),
+        "guard_scan_enabled_from must receive GATEWAY_DEBUG_GUARD_SCAN from env"
     );
     // Unconditional .route("/guard/scan" outside the helper gate is the bug.
     // The only allowed registration is inside the enabled_from if-block.
@@ -64,6 +92,9 @@ fn f1_guard_scan_registration_uses_env_seam() {
 }
 
 /// Audit F-3 source lock: global flood backstop stays wired on build_router.
+///
+/// Presence-only pin; outermost-layer order is documented in build_router and
+/// covered by ratelimit unit/oneshot tests, not by this string lock.
 #[test]
 fn f3_build_router_wires_global_rate_limit() {
     let routes = repo_file("gateway/sidecar-rs/src/routes/mod.rs");

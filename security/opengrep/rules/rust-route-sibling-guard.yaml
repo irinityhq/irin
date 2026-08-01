@@ -23,10 +23,15 @@ rules:
         - "**/sidecar-rs/src/main.rs"
     patterns:
       - pattern: $R.route("/guard/scan", ...)
+      # Production shape: helper must read GATEWAY_DEBUG_GUARD_SCAN from env
+      # (not a hard-coded Some("1") that would always enable the route).
       - pattern-not-inside: |
-          if guard_scan_enabled_from(...) {
+          if guard_scan_enabled_from(
+              std::env::var("GATEWAY_DEBUG_GUARD_SCAN").ok().as_deref()
+          ) {
             ...
           }
+      # Migration safety net while any remaining call sites use the old form.
       - pattern-not-inside: |
           if std::env::var("GATEWAY_DEBUG_GUARD_SCAN")
               .map(...)
@@ -55,8 +60,9 @@ rules:
           pub(crate) fn build_router(...) -> Router {
             ...
           }
-      # Function-pointer pass-as-argument is awkward for AST pattern-not;
-      # regex pins the required symbol inside the matched function body.
+      # Function-pointer pass-as-argument is awkward for full AST order checks;
+      # presence pin + ratelimit unit/oneshot tests. A comment-only occurrence
+      # is residual risk accepted for this advisory lane (same as PR #19 pins).
       - pattern-not-regex: 'global_rate_limit'
 
   - id: irin.rust.tenant-policy-write-requires-admin
@@ -80,5 +86,6 @@ rules:
           pub async fn watch_set_tenant_policy(...) -> Response {
             ...
           }
-      # Matches both statement form and `if !admin_token_matches(...)`.
+      # Presence pin (statement or `if !admin_token_matches(...)`). Order
+      # before mutation is locked by watch_api behavioral tests, not regex.
       - pattern-not-regex: 'admin_token_matches'

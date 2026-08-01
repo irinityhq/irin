@@ -8,14 +8,15 @@ result cannot establish that the desktop product still works.
 ## One lifecycle
 
 ```text
-make worktree → make preflight → edit and make check → ship-check → push once → pull request
+make worktree → make preflight → edit and make check → make ship-check → push once → pull request
 ```
 
 Use one logical change, named branch, owner, and linked worktree. Prefer one
 subsystem per pull request (`council-rs`, `gateway`, `sentinel`, packaging, or
 CI), stacked commits inside that PR, and blast radius over file-count religion.
-Iterate locally until `make check` is green, then push once; do not use the
-remote PR as a review scratch pad. Runtime ports,
+Iterate locally until `make check` is green, run `make ship-check` once before
+the PR is marked ready, then push once; do not use the remote PR as a review
+scratch pad. Runtime ports,
 Compose names, state directories, generated Web assets, and native application
 processes must remain scoped to that worktree. A launcher must refuse an
 occupied port rather than terminate a process it does not own.
