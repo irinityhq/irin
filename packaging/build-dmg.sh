@@ -10,8 +10,6 @@ source "$ROOT/packaging/env.sh"
 [[ "$(uname -m)" == "arm64" ]] || { echo "ERROR: aarch64/Apple silicon only" >&2; exit 1; }
 
 TAURI_DIR="$IRIN_SRC/council-rs/warroom-tauri"
-WEB_DIR="$IRIN_SRC/council-rs/warroom/web"
-STAGE_SCRIPT="$TAURI_DIR/scripts/stage-bundle-inputs.sh"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -138,50 +136,22 @@ echo "BUILD_SHA=${IRIN_TAURI_BUILD_GIT_SHA:-unknown}"
 echo "BUILD_DIRTY=${IRIN_TAURI_BUILD_DIRTY:-unknown}"
 echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
 
-echo "=== cargo build council (release, aarch64) ==="
-(
-  cd "$IRIN_SRC"
-  cargo build --release -p council-rs --bin council
-)
-
-echo "=== stage bundled council + base-dir resources ==="
-bash "$STAGE_SCRIPT"
-
-echo "=== stage Gateway Pack runtime assets (mode=$PACK_MODE) ==="
-bash "$ROOT/scripts/stage-gateway-pack.sh"
-
-echo "=== npm ci warroom web + tauri ==="
-(
-  cd "$WEB_DIR"
-  if [[ -f package-lock.json ]]; then
-    npm ci --prefer-offline --no-audit --progress=false
-  else
-    npm install --no-audit --progress=false
-  fi
-)
-(
-  cd "$TAURI_DIR"
-  if [[ -f package-lock.json ]]; then
-    npm ci --prefer-offline --no-audit --progress=false
-  else
-    npm install --no-audit --progress=false
-  fi
-)
-
-echo "=== tauri build (app + dmg) ==="
-(
-  cd "$TAURI_DIR"
-  # Keep host provenance aligned with env (packaging isolation may use separate target dir).
-  export IRIN_TAURI_BUILD_GIT_SHA COUNCIL_BUILD_GIT_SHA
-  export IRIN_TAURI_BUILD_DIRTY COUNCIL_BUILD_DIRTY
-  npm run tauri build -- --bundles app,dmg
-)
+# Shared app factory: Council build → stage → Gateway → web export → Tauri app.
+# Consumer-specific signing / DMG / HASHES remain below.
+export IRIN_GATEWAY_PACK_MODE="$PACK_MODE"
+export IRIN_APP_TARGET_DIR="$CARGO_TARGET_DIR"
+export IRIN_TAURI_BUNDLES="${IRIN_TAURI_BUNDLES:-app}"
+bash "$ROOT/packaging/build-app-bundle.sh"
 
 # Resolve the app strictly from this build's pinned target dir (env.sh).
 # Never scavenge other target dirs: a stale foreign build (e.g. a port-isolated
 # smoke app with a different baked-in Council port) would be packaged silently.
 APP="$CARGO_TARGET_DIR/release/bundle/macos/IRIN.app"
-[[ -d "$APP" ]] || die "app bundle not found at $APP (tauri build did not produce it)"
+[[ -d "$APP" ]] || die "app bundle not found at $APP (app-bundle primitive did not produce it)"
+# Fail closed: a prior/concurrent smoke must never pollute a shippable DMG.
+if grep -Rql 'smoke-inert' "$APP" 2>/dev/null; then
+  die "finished app contains smoke-inert marker; refusing to package"
+fi
 
 echo "=== ad-hoc codesign (build artifact only; never use production credentials) ==="
 codesign --force --deep --sign - "$APP"
