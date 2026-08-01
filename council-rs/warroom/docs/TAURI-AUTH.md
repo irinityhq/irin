@@ -60,7 +60,8 @@ of hydrating it.
 `configReady` resolves after the first `loadRuntimeConfig()` so health checks and
 WebSocket connects use hydrated URLs and the current session token.
 
-Changing Settings does not require re-running `npm run build:tauri`.
+Changing Settings does not require re-running the Tauri asset export
+(`npm run build:tauri` → `warroom-tauri/scripts/build-warroom-assets.sh`).
 
 Prefer loopback URLs (`127.0.0.1` / `localhost`) — Settings warns on non-loopback
 hosts because the auth token would be sent to remote machines if misconfigured.

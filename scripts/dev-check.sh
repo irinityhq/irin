@@ -204,6 +204,9 @@ if [[ "$mode" == "check" ]]; then
   fi
   if [[ "$(lane warroom_tauri)" == true ]]; then
     run "Embedded export build" npm --prefix council-rs/warroom/web run build:tauri
+    # build.rs fails closed without staged Gateway Pack resources.
+    run "Stage smoke-inert Gateway Pack" \
+      env IRIN_GATEWAY_PACK_MODE=smoke-inert bash scripts/stage-gateway-pack.sh
     run "Tauri Rust tests" cargo test --manifest-path council-rs/warroom-tauri/src-tauri/Cargo.toml
   fi
   run "Diff whitespace" git diff --check origin/main --

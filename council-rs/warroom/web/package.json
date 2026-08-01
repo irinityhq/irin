@@ -7,7 +7,7 @@
     "dev:local": "next dev --webpack --hostname 127.0.0.1 --port 3010",
     "build": "next build --webpack",
     "build:hosted": "next build --webpack",
-    "build:tauri": "bash ../../../scripts/build-warroom-web-tauri.sh",
+    "build:tauri": "bash ../../warroom-tauri/scripts/build-warroom-assets.sh",
     "dev:tauri": "NEXT_PUBLIC_API_BASE=http://127.0.0.1:8765 NEXT_PUBLIC_WS_BASE=ws://127.0.0.1:8765 NEXT_PUBLIC_GATEWAY_BASE=${GATEWAY_URL:-http://127.0.0.1:18080} npm run dev:local",
     "start": "next start",
     "lint": "eslint . --max-warnings 0",

@@ -74,9 +74,10 @@ make -C council-rs warroom-check
 # Or step-by-step
 bash council-rs/warroom-tauri/scripts/smoke-hybrid-build.sh
 
-# Or from warroom/web (lint/typecheck/export gate)
+# Or from warroom/web (lint/typecheck) then the single Tauri asset builder
 cd council-rs/warroom/web && npm run lint && npm run typecheck && npm run build:tauri
-test -f .next-tauri/index.html
+# build:tauri → warroom-tauri/scripts/build-warroom-assets.sh (export + dist copy)
+test -f ../warroom-tauri/warroom-web-dist/index.html
 ```
 
 ### Manual Tauri smoke (local)
