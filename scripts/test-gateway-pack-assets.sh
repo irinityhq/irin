@@ -107,6 +107,46 @@ python3 -c 'import os,sys; assert (os.stat(sys.argv[1]).st_mode & 0o777) == 0o64
 [[ -f "$TMP/gateway-pack/image-manifest.json" ]] || die "stage manifest"
 grep -q 'mode=local-dev' "$TMP/gateway-pack/STAGED_MODE.txt" || die "staged mode stamp"
 
+# Staged Lua must be content-identical to gateway/lua (freshness gate).
+# Existence checks alone allowed stale generated copies to slip through.
+assert_lua_fresh() {
+  local staged="$1" source="$2" label="$3"
+  if ! diff -rq "$staged" "$source" >/dev/null; then
+    echo "ERROR: $label: staged gateway-pack/lua drifts from gateway/lua:" >&2
+    diff -rq "$staged" "$source" >&2 || true
+    die "$label: staged Lua is not content-identical to gateway/lua"
+  fi
+  local staged_hash source_hash
+  staged_hash="$(
+    cd "$staged"
+    find . -type f | LC_ALL=C sort | while IFS= read -r f; do
+      printf '%s  %s\n' "$(shasum -a 256 "$f" | awk '{print $1}')" "$f"
+    done
+  )"
+  source_hash="$(
+    cd "$source"
+    find . -type f | LC_ALL=C sort | while IFS= read -r f; do
+      printf '%s  %s\n' "$(shasum -a 256 "$f" | awk '{print $1}')" "$f"
+    done
+  )"
+  [[ "$staged_hash" == "$source_hash" ]] \
+    || die "$label: staged Lua sha256 walk differs from gateway/lua"
+}
+
+assert_lua_fresh "$TMP/gateway-pack/lua" "$ROOT/gateway/lua" "stage"
+
+# Negative proof: a mutated staged file must fail the freshness gate.
+probe="$TMP/gateway-pack/lua/cost.lua"
+[[ -f "$probe" ]] || die "staged cost.lua missing for freshness negative proof"
+cp "$probe" "$TMP/cost.lua.freshness-bak"
+printf '\n-- freshness-gate-probe\n' >>"$probe"
+if diff -rq "$TMP/gateway-pack/lua" "$ROOT/gateway/lua" >/dev/null 2>&1; then
+  mv "$TMP/cost.lua.freshness-bak" "$probe"
+  die "Lua freshness gate failed to detect staged drift"
+fi
+mv "$TMP/cost.lua.freshness-bak" "$probe"
+assert_lua_fresh "$TMP/gateway-pack/lua" "$ROOT/gateway/lua" "post-negative-proof"
+
 # Production stage must refuse local-dev manifest.
 if IRIN_GATEWAY_PACK_MODE=production \
   IRIN_GATEWAY_PACK_PROD_MANIFEST="$LOCAL_MANI" \

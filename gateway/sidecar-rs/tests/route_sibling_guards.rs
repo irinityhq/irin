@@ -74,9 +74,7 @@ fn f1_guard_scan_registration_uses_env_seam() {
     );
     // Prefer the production call shape so a hard-coded Some(\"1\") fails CI.
     assert!(
-        routes.contains(
-            "guard_scan_enabled_from(std::env::var(\"GATEWAY_DEBUG_GUARD_SCAN\")"
-        ),
+        routes.contains("guard_scan_enabled_from(std::env::var(\"GATEWAY_DEBUG_GUARD_SCAN\")"),
         "guard_scan_enabled_from must receive GATEWAY_DEBUG_GUARD_SCAN from env"
     );
     // Unconditional .route("/guard/scan" outside the helper gate is the bug.

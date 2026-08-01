@@ -10,6 +10,10 @@ set -euo pipefail
 # Static export writes to warroom/web/.next-tauri/ (gitignored) and is copied
 # into warroom-tauri/warroom-web-dist/.
 #
+# Owns the Tauri export env vars and the next-env.d.ts snapshot/restore trap
+# (formerly scripts/build-warroom-web-tauri.sh). Runs `npm run build` directly —
+# never `build:tauri` (avoids recursion; package.json build:tauri points here).
+#
 # Usage (from warroom-tauri/):
 #   bash scripts/build-warroom-assets.sh
 #
@@ -58,7 +62,27 @@ if [ "$NEXT_BUILD_MODE" = "export" ]; then
   # Requires next.config.ts to honor WARROOM_TAURI_EXPORT=1 by setting
   # output: "export" and distDir: ".next-tauri". Keeping this separate from
   # .next-hosted prevents a Tauri export from invalidating the live web UI.
-  npm run build:tauri
+  #
+  # Preserve next-env.d.ts across the export build (Next may rewrite it).
+  NEXT_ENV="$WARROOM_WEB_DIR/next-env.d.ts"
+  NEXT_ENV_SNAPSHOT="$(mktemp "${TMPDIR:-/tmp}/irin-next-env.XXXXXX")"
+  cleanup_next_env() {
+    cp "$NEXT_ENV_SNAPSHOT" "$NEXT_ENV"
+    rm -f "$NEXT_ENV_SNAPSHOT"
+  }
+  trap cleanup_next_env EXIT INT TERM
+  cp "$NEXT_ENV" "$NEXT_ENV_SNAPSHOT"
+
+  env \
+    WARROOM_TAURI_EXPORT=1 \
+    NEXT_PUBLIC_API_BASE=http://127.0.0.1:8765 \
+    NEXT_PUBLIC_WS_BASE=ws://127.0.0.1:8765 \
+    NEXT_PUBLIC_GATEWAY_BASE="${GATEWAY_URL:-http://127.0.0.1:18080}" \
+    npm run build
+
+  cleanup_next_env
+  trap - EXIT INT TERM
+
   if [ ! -f ".next-tauri/index.html" ]; then
     echo "ERROR: static export did not produce .next-tauri/index.html"
     echo "Do not copy .next/static by itself; it is not a valid Tauri frontendDist."

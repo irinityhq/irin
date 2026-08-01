@@ -57,28 +57,6 @@ local _M = {}
 -- Cap response body capture at 1MB to prevent OOM
 local MAX_RESPONSE_CAPTURE = 1048576  -- 1MB
 
-function _M._extract_sse_usage(text)
-    for line in text:gmatch("data:%s*([^\r\n]+)") do
-        local trimmed = line:gsub("%s+$", "")
-        if trimmed ~= "[DONE]" then
-            local data = cjson.decode(trimmed)
-            if data then
-                local u = nil
-                if type(data.usage) == "table" then
-                    u = data.usage
-                elseif data.response and type(data.response.usage) == "table" then
-                    u = data.response.usage
-                end
-                if u and ((u.prompt_tokens or u.input_tokens or 0) > 0
-                       or (u.completion_tokens or u.output_tokens or 0) > 0
-                       or (u.total_tokens or 0) > 0) then
-                    ngx.ctx.gw_streaming_usage = u
-                end
-            end
-        end
-    end
-end
-
 -- Helper: extract JSON from a translated SSE line ("data: {...}\n\n") and
 -- feed it to the Responses stream wrapper. Returns wrapped event lines or "".
 local function self_wrap_sse_line(wrap_ctx, sse_line)

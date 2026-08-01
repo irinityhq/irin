@@ -10,13 +10,12 @@ help:
 	@echo "Council developer targets (invoke from the IRIN root with: make -C council-rs <target>)"
 	@echo "  warroom-dev              Run the Tauri development shell"
 	@echo "  warroom-browser          Run Council + browser War Room for development"
-	@echo "  warroom-build            Build and locally sign the Tauri bundle"
 	@echo "  warroom-export           Build static War Room assets"
 	@echo "  warroom-web-check        Run the Linux-safe War Room web/export gate"
 	@echo "  warroom-tauri-check      Run Tauri export markers and Rust tests"
 	@echo "  warroom-check            Run the complete macOS War Room gate"
 	@echo "  warroom-product-check    Exercise the exact embedded export in Chromium"
-	@echo "  warroom-native-smoke     Build and prove the native macOS app window"
+	@echo "  warroom-native-smoke     Test-only native macOS smoke (non-promotable; not an app factory)"
 	@echo "  audit-rust               Audit Council Rust dependencies"
 	@echo "  check-no-legacy-reqwest  Reject the retired reqwest/native-TLS stack"
 
@@ -55,7 +54,7 @@ check-no-legacy-reqwest:
 
 .PHONY: check-no-legacy-reqwest
 
-.PHONY: warroom-dev warroom-build warroom-sign warroom-export warroom-web-check warroom-web-check-isolated warroom-tauri-check warroom-check warroom-check-isolated warroom-product-check warroom-native-smoke warroom-browser
+.PHONY: warroom-dev warroom-export warroom-web-check warroom-web-check-isolated warroom-tauri-check warroom-check warroom-check-isolated warroom-product-check warroom-native-smoke warroom-browser
 
 # --------------------------------------------------------------------------
 # warroom-browser — one command: council :8765 + Next.js :3010 (post-reboot)
@@ -64,28 +63,11 @@ warroom-browser:
 	bash scripts/warroom-browser-dev.sh
 
 # --------------------------------------------------------------------------
-# warroom-dev / warroom-build — IRIN desktop (Tauri, Phase 2 hybrid Next.js)
+# warroom-dev — IRIN desktop (Tauri, Phase 2 hybrid Next.js)
+# Production IRIN.app factory is packaging/build-dmg.sh (via build-app-bundle.sh).
 # --------------------------------------------------------------------------
 warroom-dev:
 	bash scripts/warroom-tauri-dev.sh
-
-warroom-build:
-	cargo build --release -p council-rs --bin council --locked
-	bash warroom-tauri/scripts/stage-bundle-inputs.sh
-	cd warroom/web && npm ci
-	cd warroom-tauri && npm ci && npm run tauri build $(if $(strip $(TAURI_BUILD_CONFIG)),-- --config "$(TAURI_BUILD_CONFIG)",)
-	$(MAKE) warroom-sign
-
-warroom-sign:
-	@if [ "$$(uname -s)" = "Darwin" ]; then \
-	  APP="warroom-tauri/src-tauri/target/release/bundle/macos/IRIN.app"; \
-	  test -d "$$APP" || { echo "Missing app bundle: $$APP" >&2; exit 1; }; \
-	  if ! codesign --verify --deep --strict "$$APP" >/dev/null 2>&1; then \
-	    echo "Ad-hoc signing local IRIN bundle"; \
-	    codesign --force --deep --sign - "$$APP"; \
-	  fi; \
-	  codesign --verify --deep --strict "$$APP"; \
-	fi
 
 warroom-export:
 	bash warroom-tauri/scripts/build-warroom-assets.sh

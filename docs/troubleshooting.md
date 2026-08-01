@@ -109,7 +109,7 @@ profile, it will not take effect until:
 Run `./target/release/council --base-dir council-rs --discover` after that
 to confirm the provider now shows as available — it is a non-billable check.
 If a key still does not show up, confirm it is exported in the same shell
-IRIN's launchd services actually run under (`echo $SHELL`, and check that
+that launches `make warroom` or IRIN.app (`echo $SHELL`, and check that
 the variable is not only set in an interactive-only block of your profile).
 
 ## Private phone access (installed IRIN.app)

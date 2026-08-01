@@ -59,8 +59,23 @@ assert_markers "Drift" "Drift surface asset"
 if [ "${WARROOM_SMOKE_SKIP_TAURI_TESTS:-}" = "1" ]; then
   echo "Skipping Tauri Rust tests (covered by the dedicated macOS Tauri lane)"
 else
+  # build.rs fails closed without a staged Gateway Pack; stage the smoke-inert
+  # fixture so unit tests / tauri_build do not depend on silent placeholders.
+  # stage-gateway-pack.sh takes the shared app-bundle lock for the canonical dest.
+  REPO_ROOT="$(cd "$COUNCIL_RS_ROOT/.." && pwd)"
+  # shellcheck source=/dev/null
+  source "$REPO_ROOT/packaging/app-bundle-lock.sh"
+  echo "Staging smoke-inert Gateway Pack for Tauri Rust tests..."
+  IRIN_GATEWAY_PACK_MODE=smoke-inert \
+    bash "$REPO_ROOT/scripts/stage-gateway-pack.sh"
+  cleanup_gw_stage() {
+    irin_scrub_smoke_inert_gateway_pack
+  }
+  trap cleanup_gw_stage EXIT
   echo "Running Rust unit tests (src-tauri)..."
   (cd "$ROOT/src-tauri" && cargo test)
+  cleanup_gw_stage
+  trap - EXIT
 fi
 
 echo "OK: requested hybrid export and Tauri checks succeeded"

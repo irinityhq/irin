@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build and launch the exact native bundle; prove app-owned Council spawn.
 # Prefer packaging/smoke-full-app.sh for full packaged ownership proof; this
-# harness covers the native warroom-build path without MatchingBuild adoption.
+# harness covers the shared app-bundle primitive with an isolated smoke-inert
+# Gateway fixture (non-promotable by construction).
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -202,11 +203,40 @@ with open(path, "w", encoding="utf-8") as handle:
     )
 PY
 
+smoke_target_dir="${IRIN_NATIVE_TARGET_DIR:-$tmp/cargo-target}"
+mkdir -p "$smoke_target_dir"
+gateway_stage="$ROOT/council-rs/warroom-tauri/src-tauri/resources/gateway-pack"
+
 if [[ "${IRIN_NATIVE_SKIP_BUILD:-0}" != "1" ]]; then
-  make -C "$ROOT/council-rs" warroom-build TAURI_BUILD_CONFIG="$smoke_tauri_config"
+  # Isolated Cargo target + exclusive app-bundle lock + smoke-inert Gateway.
+  # Primitive scrub + this harness cleanup must not leave inert content in the
+  # shared production staging tree.
+  IRIN_APP_TARGET_DIR="$smoke_target_dir" \
+  IRIN_TAURI_CONFIG_OVERLAY="$smoke_tauri_config" \
+  IRIN_GATEWAY_PACK_MODE=smoke-inert \
+  IRIN_TAURI_BUNDLES=app \
+    bash "$ROOT/packaging/build-app-bundle.sh"
+  # Explicit ad-hoc sign + verify (consumer-owned; primitive does not sign).
+  app="$smoke_target_dir/release/bundle/macos/IRIN.app"
+  [[ -d "$app" ]] || {
+    printf 'ERROR: smoke app bundle missing after primitive: %s\n' "$app" >&2
+    exit 1
+  }
+  codesign --force --deep --sign - "$app"
+  codesign --verify --deep --strict "$app"
+else
+  app="${IRIN_NATIVE_APP:-$smoke_target_dir/release/bundle/macos/IRIN.app}"
 fi
 
-app="${IRIN_NATIVE_APP:-$ROOT/council-rs/warroom-tauri/src-tauri/target/release/bundle/macos/IRIN.app}"
+# Drop any leftover smoke-inert staging from the shared tree (defense in depth
+# beyond the primitive's EXIT scrub).
+if [[ -f "$gateway_stage/SMOKE_INERT" ]] \
+  || { [[ -f "$gateway_stage/STAGED_MODE.txt" ]] \
+    && grep -q 'mode=smoke-inert' "$gateway_stage/STAGED_MODE.txt" 2>/dev/null; }; then
+  rm -rf "$gateway_stage"
+fi
+
+app="${IRIN_NATIVE_APP:-$app}"
 binary="$app/Contents/MacOS/council-warroom-tauri"
 [[ -x "$binary" ]] || { printf 'ERROR: native app binary missing: %s\n' "$binary" >&2; exit 1; }
 # Resolve through worktree target symlinks so pgrep matches the LaunchServices
@@ -216,6 +246,23 @@ app_real="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$a
 [[ -x "$binary" ]] || { printf 'ERROR: resolved native app binary missing: %s\n' "$binary" >&2; exit 1; }
 binary_pattern="$(printf '%s\n' "$binary" | sed 's/[][\\.^$*+?{}()|]/\\&/g')"
 codesign --verify --deep --strict "$app"
+# Non-promotable: unique smoke bundle id must be present.
+bundle_plist="$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$bundle_plist" 2>/dev/null \
+  | grep -Fq "com.irinity.irin.smoke${IRIN_COUNCIL_PORT}" \
+  || {
+    printf 'ERROR: smoke app missing isolated bundle id com.irinity.irin.smoke%s\n' \
+      "$IRIN_COUNCIL_PORT" >&2
+    exit 1
+  }
+if [[ "${IRIN_NATIVE_SKIP_BUILD:-0}" != "1" ]]; then
+  # Fresh smoke builds must embed the inert fixture; shared staging was scrubbed.
+  grep -Rql 'smoke-inert' "$app" 2>/dev/null \
+    || {
+      printf 'ERROR: smoke app missing smoke-inert marker (fixture not bundled)\n' >&2
+      exit 1
+    }
+fi
 
 # Packaged ownership requires the staged bundled Council binary.
 bundled_council="$app/Contents/MacOS/council"

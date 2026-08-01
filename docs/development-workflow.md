@@ -2,8 +2,9 @@
 
 IRIN treats a change as ready only when both the requested behavior and the
 affected product surfaces are proven. This matters most for the War Room: its
-Web source is also embedded in the native Tauri application, so a browser-only
-result cannot establish that the desktop product still works.
+Web source is also embedded in the desktop application (Tauri is the
+implementation; `make dmg-build` is the sole production IRIN.app factory), so
+a browser-only result cannot establish that the desktop product still works.
 
 ## One lifecycle
 
@@ -114,11 +115,14 @@ The War Room gate has three distinct proofs:
 1. Hosted Playwright tests exercise the browser-served Next application.
 2. Export Playwright tests serve `warroom-web-dist`, the exact assets embedded
    by Tauri, and repeat the full hosted Playwright corpus against that export.
-3. The required local macOS ship smoke builds and launches the native application, proves its
+3. The required local macOS ship smoke builds and launches a non-promotable
+   native test app (isolated bundle id; not the production DMG path), proves its
    process and window remain alive, captures only that application window, and
    verifies visible core navigation text. It uses no provider credentials and
    does not arm Watch or execute a real action. CI separately records a
    headless process proof and labels it as such; it does not claim visual proof.
+   Ship the product artifact with `make dmg-build` (release transaction for
+   production).
 
 Artifact marker searches remain quick diagnostics, not product evidence.
 Provider calls, paid deliberation, Watch arming, and external mutations remain

@@ -204,7 +204,20 @@ if [[ "$mode" == "check" ]]; then
   fi
   if [[ "$(lane warroom_tauri)" == true ]]; then
     run "Embedded export build" npm --prefix council-rs/warroom/web run build:tauri
+    # build.rs fails closed without staged Gateway Pack resources.
+    # stage-gateway-pack.sh takes the shared app-bundle lock; scrub on EXIT so
+    # make check never leaves smoke-inert in the shared Tauri resources tree.
+    # shellcheck source=/dev/null
+    source "$ROOT/packaging/app-bundle-lock.sh"
+    scrub_dev_check_smoke_inert() {
+      irin_scrub_smoke_inert_gateway_pack
+    }
+    trap scrub_dev_check_smoke_inert EXIT INT TERM
+    run "Stage smoke-inert Gateway Pack" \
+      env IRIN_GATEWAY_PACK_MODE=smoke-inert bash scripts/stage-gateway-pack.sh
     run "Tauri Rust tests" cargo test --manifest-path council-rs/warroom-tauri/src-tauri/Cargo.toml
+    scrub_dev_check_smoke_inert
+    trap - EXIT INT TERM
   fi
   run "Diff whitespace" git diff --check origin/main --
   exit 0

@@ -37,8 +37,9 @@ Browser development from the repository root:
 make warroom
 ```
 
-Internal native shell harness (component developers and CI; product install is
-the DMG):
+Internal native shell harness (component developers and CI). Tauri is the
+implementation layer; the sole production IRIN.app factory is
+`make dmg-build` / the release transaction:
 
 ```bash
 make -C council-rs warroom-dev

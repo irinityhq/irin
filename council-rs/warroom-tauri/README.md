@@ -12,11 +12,13 @@ desktop builds retain a developer-only `council --serve` sidecar.
 
 ## Product install versus component development
 
-Product installation is owned by the root [IRIN README](../../README.md): the
-signed, notarized DMG from GitHub Releases is the product path. Root
-`make warroom` is the source browser development path. The commands
-below are internal component developer and packaging harnesses, not alternate
-operator installation targets.
+Product installation is owned by the root [IRIN README](../../README.md):
+`make dmg-build` / the release transaction is the sole production IRIN.app
+factory; the signed, notarized DMG from GitHub Releases is the operator
+install path. Tauri is the desktop implementation layer. Root `make warroom`
+is the source browser development path. The commands below are internal
+component developer and CI harnesses (including non-promotable native smoke),
+not alternate operator installation targets.
 
 Development-only overrides:
 
@@ -74,9 +76,10 @@ make -C council-rs warroom-check
 # Or step-by-step
 bash council-rs/warroom-tauri/scripts/smoke-hybrid-build.sh
 
-# Or from warroom/web (lint/typecheck/export gate)
+# Or from warroom/web (lint/typecheck) then the single Tauri asset builder
 cd council-rs/warroom/web && npm run lint && npm run typecheck && npm run build:tauri
-test -f .next-tauri/index.html
+# build:tauri → warroom-tauri/scripts/build-warroom-assets.sh (export + dist copy)
+test -f ../warroom-tauri/warroom-web-dist/index.html
 ```
 
 ### Manual Tauri smoke (local)
