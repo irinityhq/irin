@@ -216,7 +216,7 @@ if [[ "${IRIN_NATIVE_SKIP_BUILD:-0}" != "1" ]]; then
   IRIN_GATEWAY_PACK_MODE=smoke-inert \
   IRIN_TAURI_BUNDLES=app \
     bash "$ROOT/packaging/build-app-bundle.sh"
-  # Explicit ad-hoc sign + verify (replaces warroom-sign; primitive does not sign).
+  # Explicit ad-hoc sign + verify (consumer-owned; primitive does not sign).
   app="$smoke_target_dir/release/bundle/macos/IRIN.app"
   [[ -d "$app" ]] || {
     printf 'ERROR: smoke app bundle missing after primitive: %s\n' "$app" >&2
