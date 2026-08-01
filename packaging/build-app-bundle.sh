@@ -16,19 +16,20 @@
 #   IRIN_GATEWAY_PACK_MODE    → local-dev | production | smoke-inert
 #   IRIN_TAURI_BUNDLES        → tauri --bundles value (default: app)
 #
-# Staging isolation: fail-closed exclusive lock covering staging → bundle
-# completion (mkdir lock + held ownership file). Concurrent/interrupted
-# consumers cannot interleave shared generated inputs.
+# Staging isolation: fail-closed exclusive lock (packaging/app-bundle-lock.sh)
+# covering staging → bundle completion. Nested writers honor
+# IRIN_APP_BUNDLE_LOCK_HELD=1.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 source "$ROOT/packaging/env.sh"
+# shellcheck source=/dev/null
+source "$ROOT/packaging/app-bundle-lock.sh"
 
 TAURI_DIR="$IRIN_SRC/council-rs/warroom-tauri"
 WEB_DIR="$IRIN_SRC/council-rs/warroom/web"
 STAGE_SCRIPT="$TAURI_DIR/scripts/stage-bundle-inputs.sh"
-LOCK_DIR="$ROOT/packaging/build/app-bundle.lock.d"
 GATEWAY_DEST="$TAURI_DIR/src-tauri/resources/gateway-pack"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -48,63 +49,17 @@ if [[ -n "${IRIN_APP_TARGET_DIR:-}" ]]; then
 fi
 mkdir -p "$CARGO_TARGET_DIR"
 
-lock_held=0
-release_build_lock() {
-  if [[ "$lock_held" == "1" && -d "$LOCK_DIR" ]]; then
-    rm -f "$LOCK_DIR/owner" 2>/dev/null || true
-    rmdir "$LOCK_DIR" 2>/dev/null || true
-    lock_held=0
-  fi
-}
-
-# If smoke-inert staging was interrupted, never leave that marker in the
-# shared production staging tree after the lock is released.
-scrub_smoke_inert_staging() {
-  if [[ "$MODE" != "smoke-inert" ]]; then
-    return 0
-  fi
-  if [[ -f "$GATEWAY_DEST/STAGED_MODE.txt" ]] \
-    && grep -q 'mode=smoke-inert' "$GATEWAY_DEST/STAGED_MODE.txt" 2>/dev/null; then
-    rm -rf "$GATEWAY_DEST"
-  elif [[ -f "$GATEWAY_DEST/SMOKE_INERT" ]]; then
-    rm -rf "$GATEWAY_DEST"
-  fi
-}
-
 on_exit() {
   status=$?
-  scrub_smoke_inert_staging || true
-  release_build_lock || true
+  if [[ "$MODE" == "smoke-inert" ]]; then
+    irin_scrub_smoke_inert_gateway_pack "$GATEWAY_DEST" || true
+  fi
+  irin_app_bundle_lock_release || true
   exit "$status"
 }
 trap on_exit EXIT INT TERM
 
-acquire_build_lock() {
-  mkdir -p "$(dirname "$LOCK_DIR")"
-  local i
-  for i in $(seq 1 600); do
-    if mkdir "$LOCK_DIR" 2>/dev/null; then
-      printf 'pid=%s\nmode=%s\nstarted_at=%s\n' \
-        "$$" "$MODE" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$LOCK_DIR/owner"
-      lock_held=1
-      return 0
-    fi
-    # Stale lock: owner pid gone.
-    if [[ -f "$LOCK_DIR/owner" ]]; then
-      local owner_pid
-      owner_pid="$(sed -n 's/^pid=//p' "$LOCK_DIR/owner" | head -n 1)"
-      if [[ -n "$owner_pid" ]] && ! kill -0 "$owner_pid" 2>/dev/null; then
-        rm -f "$LOCK_DIR/owner" 2>/dev/null || true
-        rmdir "$LOCK_DIR" 2>/dev/null || true
-        continue
-      fi
-    fi
-    sleep 0.5
-  done
-  die "timed out waiting for exclusive app-bundle build lock ($LOCK_DIR)"
-}
-
-acquire_build_lock
+irin_app_bundle_lock_acquire "build-app-bundle:$MODE"
 echo "=== IRIN app-bundle primitive ==="
 echo "ROOT=$ROOT"
 echo "IRIN_GATEWAY_PACK_MODE=$MODE"
@@ -122,6 +77,8 @@ echo "=== stage bundled council + base-dir + helper ==="
 bash "$STAGE_SCRIPT"
 
 echo "=== stage Gateway Pack (mode=$MODE) ==="
+# Outer lock held; nested stage-gateway-pack must not re-acquire.
+export IRIN_APP_BUNDLE_LOCK_HELD=1
 bash "$ROOT/scripts/stage-gateway-pack.sh"
 
 echo "=== npm ci warroom web + tauri ==="

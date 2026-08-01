@@ -12,6 +12,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=/dev/null
+source "$ROOT/packaging/app-bundle-lock.sh"
 SRC_PACK="$ROOT/packaging/gateway-pack"
 GATEWAY="$ROOT/gateway"
 DEST="${1:-$ROOT/council-rs/warroom-tauri/src-tauri/resources/gateway-pack}"
@@ -20,6 +22,15 @@ LOCAL_MANIFEST_SRC="${IRIN_GATEWAY_PACK_LOCAL_MANIFEST:-$ROOT/packaging/build/ga
 PROD_MANIFEST_SRC="${IRIN_GATEWAY_PACK_PROD_MANIFEST:-}"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+# Exclusive lock when writing the shared Tauri resources tree. Nested callers
+# under build-app-bundle.sh export IRIN_APP_BUNDLE_LOCK_HELD=1 and skip.
+# Temp destinations (asset tests) do not take the lock.
+_stage_lock_release() {
+  irin_app_bundle_lock_release || true
+}
+trap _stage_lock_release EXIT INT TERM
+irin_app_bundle_lock_acquire_for_gateway_dest "$DEST" "stage-gateway-pack:$MODE"
 
 [[ -f "$SRC_PACK/docker-compose.yml" ]] || die "missing $SRC_PACK/docker-compose.yml"
 [[ -d "$GATEWAY/conf" && -d "$GATEWAY/lua" && -f "$GATEWAY/nginx.conf" ]] \
@@ -72,6 +83,11 @@ fi
 stage_smoke_inert() {
   rm -rf "$DEST"
   mkdir -p "$DEST"
+  # Write the isolation marker BEFORE any copy so an interrupted stage is
+  # still recognizable by EXIT scrubs (never leave a partial unmarked tree).
+  printf 'smoke-inert\n' >"$DEST/SMOKE_INERT"
+  printf 'mode=smoke-inert\nmanifest_src=generated-smoke-inert\npartial=1\n' \
+    >"$DEST/STAGED_MODE.txt"
   printf '' >"$DEST/arm-bridge-enabled"
   chmod 0644 "$DEST/arm-bridge-enabled"
   cp -f "$SRC_PACK/docker-compose.yml" "$DEST/docker-compose.yml"
@@ -98,8 +114,6 @@ stage_smoke_inert() {
 }
 EOF
   printf 'mode=smoke-inert\nmanifest_src=generated-smoke-inert\n' >"$DEST/STAGED_MODE.txt"
-  # Explicit marker for isolation assertions (DMG must never contain this).
-  printf 'smoke-inert\n' >"$DEST/SMOKE_INERT"
   grep -q 'WATCH_PRODUCER_ENABLED=false' "$DEST/docker-compose.yml" \
     || die "staged compose lost watch-off"
   printf 'staged gateway pack -> %s (mode=smoke-inert, no Docker images)\n' "$DEST"

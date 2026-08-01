@@ -61,17 +61,15 @@ if [ "${WARROOM_SMOKE_SKIP_TAURI_TESTS:-}" = "1" ]; then
 else
   # build.rs fails closed without a staged Gateway Pack; stage the smoke-inert
   # fixture so unit tests / tauri_build do not depend on silent placeholders.
+  # stage-gateway-pack.sh takes the shared app-bundle lock for the canonical dest.
   REPO_ROOT="$(cd "$COUNCIL_RS_ROOT/.." && pwd)"
-  GW_STAGE="$ROOT/src-tauri/resources/gateway-pack"
+  # shellcheck source=/dev/null
+  source "$REPO_ROOT/packaging/app-bundle-lock.sh"
   echo "Staging smoke-inert Gateway Pack for Tauri Rust tests..."
   IRIN_GATEWAY_PACK_MODE=smoke-inert \
     bash "$REPO_ROOT/scripts/stage-gateway-pack.sh"
   cleanup_gw_stage() {
-    if [[ -f "$GW_STAGE/SMOKE_INERT" ]] \
-      || { [[ -f "$GW_STAGE/STAGED_MODE.txt" ]] \
-        && grep -q 'mode=smoke-inert' "$GW_STAGE/STAGED_MODE.txt" 2>/dev/null; }; then
-      rm -rf "$GW_STAGE"
-    fi
+    irin_scrub_smoke_inert_gateway_pack
   }
   trap cleanup_gw_stage EXIT
   echo "Running Rust unit tests (src-tauri)..."

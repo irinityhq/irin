@@ -107,15 +107,22 @@ fn ensure_bundle_input_placeholders(manifest_dir: &Path) {
     // Gateway pack resources must be staged explicitly (scripts/stage-gateway-pack.sh
     // or the app-bundle primitive). Silent placeholders are forbidden so an
     // unstaged `tauri build` fails closed instead of shipping inert compose.
+    // Require the full staged inventory — compose alone accepted the old
+    // build.rs placeholder and interrupted mid-stage trees.
     let gw_pack = manifest_dir.join("resources").join("gateway-pack");
     let gw_compose = gw_pack.join("docker-compose.yml");
+    let gw_manifest = gw_pack.join("image-manifest.json");
+    let gw_mode = gw_pack.join("STAGED_MODE.txt");
     assert!(
-        gw_compose.is_file(),
-        "missing staged Gateway Pack at {}; run scripts/stage-gateway-pack.sh \
+        gw_compose.is_file() && gw_manifest.is_file() && gw_mode.is_file(),
+        "incomplete staged Gateway Pack under {}; need docker-compose.yml, \
+         image-manifest.json, and STAGED_MODE.txt — run scripts/stage-gateway-pack.sh \
          (or packaging/build-app-bundle.sh) before building the Tauri app",
-        gw_compose.display()
+        gw_pack.display()
     );
     println!("cargo:rerun-if-changed={}", gw_compose.display());
+    println!("cargo:rerun-if-changed={}", gw_manifest.display());
+    println!("cargo:rerun-if-changed={}", gw_mode.display());
 
     // Tauri validates resource paths even for `cargo test`. This inert,
     // gitignored placeholder is never a release payload:
