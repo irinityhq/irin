@@ -15,7 +15,7 @@ help:
 	@echo "  warroom-tauri-check      Run Tauri export markers and Rust tests"
 	@echo "  warroom-check            Run the complete macOS War Room gate"
 	@echo "  warroom-product-check    Exercise the exact embedded export in Chromium"
-	@echo "  warroom-native-smoke     Build and prove the native macOS app window"
+	@echo "  warroom-native-smoke     Test-only native macOS smoke (non-promotable; not an app factory)"
 	@echo "  audit-rust               Audit Council Rust dependencies"
 	@echo "  check-no-legacy-reqwest  Reject the retired reqwest/native-TLS stack"
 
