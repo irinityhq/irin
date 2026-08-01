@@ -70,12 +70,13 @@ for the complete contract.
    proposal saves you from building something that collides with in-flight work
    or the deliberate non-goals below. Typo and doc fixes can skip straight to a
    PR.
-2. **Fork and branch.** One coherent product change per PR. Narrow,
-   individually understandable commits inside the PR are encouraged; splitting
-   one product change across several PRs that share product, release, or
-   verification paths is not. Review findings are repaired on the owning
-   branch. Unrelated cleanups and process-only changes wait while a product
-   PR is open.
+2. **Fork and branch.** One coherent product change per PR, ideally one
+   subsystem (`council-rs`, `gateway`, `sentinel`, packaging, or CI). Narrow,
+   stacked commits inside the PR are encouraged; splitting one product change
+   across several PRs that share product, release, or verification paths is
+   not. Judge size by blast radius, not file count. Review findings are
+   repaired on the owning branch (target ≤ two automated review rounds).
+   Unrelated cleanups and process-only changes wait while a product PR is open.
 3. **Commit messages** follow `type(scope): summary` — e.g.
    `fix(warroom): …`, `docs(readme): …`, `feat(gateway): …`,
    `ci: …`, `chore: …`. Scope is optional; a clear imperative summary is not.
