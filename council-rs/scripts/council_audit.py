@@ -2,6 +2,8 @@
 """
 council_audit.py — Corpus-scale health report for council sessions.
 
+Operator-only manual tooling (no product/CI surface).
+
 Crunches sessions/index.jsonl + full JSON files offline (no API spend).
 Replaces one-off heritage/duo runs for prevalence questions.
 

@@ -2,6 +2,8 @@
 """
 sheldon_eval.py — Ground-truth eval harness for claim_validator (Sheldon).
 
+Operator-only manual tooling (no product/CI surface).
+
 Measures per provider/candidate (full matrix support):
   1. Local scoping guard (skip_scoped fixtures — no API $)
   2. Live validation: claim extraction, CONTRADICTED rate, citation overrides,
