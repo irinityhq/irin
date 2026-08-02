@@ -20,43 +20,62 @@ source "$ROOT/packaging/env.sh"
 
 PROMOTION="${PROMOTION:-0}"
 APP_NAME="IRIN.app"
-TEST_APPS="$ROOT/packaging/test-apps"
-DEST_APP="${IRIN_SMOKE_APP:-$TEST_APPS/$APP_NAME}"
+
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+# Exact candidate path required — no packaging/test-apps, packaging/artifacts,
+# or /Applications fallback. Always fresh-extract the named DMG into smoke/.
+[[ -z "${IRIN_SMOKE_APP:-}" ]] \
+  || die "IRIN_SMOKE_APP is forbidden; pass IRIN_CANDIDATE_PATH and let smoke extract into candidate/smoke/"
+irin_require_candidate_path
+CANDIDATE="$IRIN_CANDIDATE_PATH"
+SMOKE_ROOT="$CANDIDATE/smoke"
+DEST_APP="$SMOKE_ROOT/$APP_NAME"
+MOUNT="$SMOKE_ROOT/dmg-mount"
+DMG="$(find "$CANDIDATE" -maxdepth 1 -type f -name '*.dmg' | head -1 || true)"
+[[ -n "$DMG" && -f "$DMG" ]] || die "candidate DMG missing under $CANDIDATE"
+HASHES_PATH="$CANDIDATE/HASHES.txt"
+REPORT="$CANDIDATE/logs/FULL_APP_SMOKE.txt"
+WEBVIEW_SHOT="$CANDIDATE/logs/webview-smoke.png"
+PIDFILE="$SMOKE_ROOT/smoke-host.pid"
+SIDECAR_PIDFILE="$SMOKE_ROOT/smoke-sidecar.pid"
 TEST_HOME="$ROOT/packaging/test-home/smoke-$$"
-MOUNT="$ROOT/packaging/build/dmg-mount"
-IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-0.1.2}"
-DMG="${IRIN_DMG_PATH:-$ROOT/packaging/artifacts/IRIN_${IRIN_RELEASE_VERSION}_aarch64.dmg}"
-REPORT="$ROOT/packaging/receipts/FULL_APP_SMOKE.txt"
-WEBVIEW_SHOT="$ROOT/packaging/receipts/webview-smoke.png"
-PIDFILE="$ROOT/packaging/build/smoke-host.pid"
-SIDECAR_PIDFILE="$ROOT/packaging/build/smoke-sidecar.pid"
 FAKE_MARKER_NAME="XAI_API_KEY"
 FAKE_MARKER_VALUE="irin-dmg-fake-marker-not-a-real-key"
 DENIED_FAKE_NAME="GW_API_KEY"
 DENIED_FAKE_VALUE="should-never-import-gateway-key"
-HASHES_PATH="${IRIN_DMG_HASHES_PATH:-}"
 
-die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+if [[ -n "${IRIN_DMG_PATH:-}" ]]; then
+  [[ "$(cd "$(dirname "$IRIN_DMG_PATH")" && pwd)/$(basename "$IRIN_DMG_PATH")" == "$(cd "$(dirname "$DMG")" && pwd)/$(basename "$DMG")" ]] \
+    || die "IRIN_DMG_PATH must be the candidate DMG"
+fi
+if [[ -n "${IRIN_DMG_HASHES_PATH:-}" ]]; then
+  [[ "$(cd "$(dirname "$IRIN_DMG_HASHES_PATH")" && pwd)/$(basename "$IRIN_DMG_HASHES_PATH")" == "$HASHES_PATH" ]] \
+    || die "IRIN_DMG_HASHES_PATH must be the candidate HASHES.txt"
+fi
+
 log() { printf '%s\n' "$*" | tee -a "$REPORT"; }
 
-# Never auto-select a receipt: an explicit path binds provenance checks to the
-# same HASHES.txt that verify-dmg accepted for this candidate.
-if [[ -z "${IRIN_TAURI_BUILD_GIT_SHA:-}" && -n "$HASHES_PATH" ]]; then
-  [[ -f "$HASHES_PATH" ]] || die "explicit HASHES receipt missing: $HASHES_PATH"
-  SOURCE_SHA_COUNT="$(awk -F= '$1 == "source_sha" { count++ } END { print count + 0 }' "$HASHES_PATH")"
-  [[ "$SOURCE_SHA_COUNT" == "1" ]] \
-    || die "receipt must contain exactly one source_sha entry (found $SOURCE_SHA_COUNT): $HASHES_PATH"
-  IRIN_TAURI_BUILD_GIT_SHA="$(awk -v prefix='source_sha=' 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1); exit }' "$HASHES_PATH")"
-  [[ "$IRIN_TAURI_BUILD_GIT_SHA" =~ ^[0-9a-f]{40}$ ]] \
-    || die "receipt source_sha must be one lowercase 40-character git SHA: $HASHES_PATH"
-  export IRIN_TAURI_BUILD_GIT_SHA
+# Bind provenance to the candidate HASHES.txt.
+SOURCE_SHA_COUNT="$(awk -F= '$1 == "source_sha" { count++ } END { print count + 0 }' "$HASHES_PATH")"
+[[ "$SOURCE_SHA_COUNT" == "1" ]] \
+  || die "receipt must contain exactly one source_sha entry (found $SOURCE_SHA_COUNT): $HASHES_PATH"
+RECEIPT_SOURCE_SHA="$(awk -v prefix='source_sha=' 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1); exit }' "$HASHES_PATH")"
+[[ "$RECEIPT_SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+  || die "receipt source_sha must be one lowercase 40-character git SHA: $HASHES_PATH"
+if [[ -n "${IRIN_TAURI_BUILD_GIT_SHA:-}" && "$IRIN_TAURI_BUILD_GIT_SHA" != "$RECEIPT_SOURCE_SHA" ]]; then
+  die "IRIN_TAURI_BUILD_GIT_SHA does not match candidate receipt source_sha"
 fi
-EXPECTED_SHA="${IRIN_TAURI_BUILD_GIT_SHA:-$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || true)}"
+export IRIN_TAURI_BUILD_GIT_SHA="$RECEIPT_SOURCE_SHA"
+EXPECTED_SHA="$RECEIPT_SOURCE_SHA"
+IRIN_RELEASE_VERSION="$(awk -v prefix='release_version=' 'index($0, prefix) == 1 { print substr($0, length(prefix) + 1); exit }' "$HASHES_PATH")"
+[[ -n "$IRIN_RELEASE_VERSION" ]] || die "receipt missing release_version: $HASHES_PATH"
 
-mkdir -p "$ROOT/packaging/receipts" "$TEST_APPS" "$(dirname "$PIDFILE")"
+mkdir -p "$CANDIDATE/logs" "$SMOKE_ROOT" "$(dirname "$PIDFILE")"
 : >"$REPORT"
 log "=== smoke-full-app $(date -u +%Y-%m-%dT%H:%M:%SZ) ==="
 log "ROOT=$ROOT"
+log "CANDIDATE=$CANDIDATE"
 log "PROMOTION=$PROMOTION"
 log "IRIN_RELEASE_VERSION=$IRIN_RELEASE_VERSION"
 log "expected_sha=${EXPECTED_SHA:-unknown}"
@@ -64,22 +83,24 @@ log "expected_sha=${EXPECTED_SHA:-unknown}"
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS only"
 [[ "$(uname -m)" == "arm64" ]] || die "arm64 only"
 
-# --- ensure test app exists (untouched DMG copy preferred) ---
-if [[ ! -d "$DEST_APP" ]]; then
-  [[ -f "$DMG" ]] || die "missing DMG and no IRIN_SMOKE_APP: $DMG"
-  if mount | grep -q "$MOUNT"; then
-    hdiutil detach "$MOUNT" -force 2>/dev/null || true
-  fi
-  rm -rf "$MOUNT"
-  mkdir -p "$MOUNT"
-  hdiutil attach "$DMG" -mountpoint "$MOUNT" -readonly -nobrowse
-  SRC_APP="$(find "$MOUNT" -maxdepth 2 -name "$APP_NAME" -type d | head -1 || true)"
-  [[ -d "$SRC_APP" ]] || die "app not found in DMG"
-  rm -rf "$DEST_APP"
-  ditto "$SRC_APP" "$DEST_APP"
+# Always fresh-extract the named DMG into the candidate's own smoke/.
+# An existing extracted app cannot bypass extraction.
+if mount | grep -q "$MOUNT"; then
   hdiutil detach "$MOUNT" -force 2>/dev/null || true
 fi
-[[ -d "$DEST_APP" ]] || die "missing app: $DEST_APP"
+rm -rf "$DEST_APP" "$MOUNT"
+mkdir -p "$MOUNT"
+hdiutil attach "$DMG" -mountpoint "$MOUNT" -readonly -nobrowse
+# Detach on any failure after attach (same pattern as verify-dmg / install-verify).
+trap 'hdiutil detach "$MOUNT" -force 2>/dev/null || true' EXIT
+SRC_APP="$(find "$MOUNT" -maxdepth 2 -name "$APP_NAME" -type d | head -1 || true)"
+[[ -d "$SRC_APP" ]] || die "app not found in DMG"
+ditto "$SRC_APP" "$DEST_APP"
+hdiutil detach "$MOUNT" -force 2>/dev/null || true
+trap - EXIT
+rm -rf "$MOUNT"
+[[ -d "$DEST_APP" ]] || die "missing app after extract: $DEST_APP"
+log "fresh_extract=true dest_app=$DEST_APP"
 
 if ! codesign --verify --deep --strict "$DEST_APP" >/dev/null 2>&1; then
   die "untouched app failed codesign verify (will not re-sign)"

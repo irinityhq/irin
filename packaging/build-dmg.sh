@@ -1,5 +1,15 @@
 #!/usr/bin/env bash
-# Build a self-contained aarch64 IRIN .app + .dmg from this monorepo.
+# Build a self-contained aarch64 IRIN .app + .dmg into the durable candidate store.
+#
+# Output layout (IRIN_CANDIDATE_ROOT, default ~/.local/state/irin/candidates):
+#   .staging/<attempt-id>/          build workspace (moved on success/fail)
+#   .attempts/<attempt-id>.json     attempt metadata (outside immutable payload)
+#   <version>/<source-sha>/<candidate-id>/
+#     candidate.json   IRIN.app   IRIN_<ver>_aarch64.dmg
+#     HASHES.txt       bundle-manifest.txt
+#     proofs/  smoke/  install/  logs/
+#
+# packaging/artifacts/ is never identity.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -13,13 +23,7 @@ TAURI_DIR="$IRIN_SRC/council-rs/warroom-tauri"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-sha256_file() {
-  local path="$1" value
-  value="$(shasum -a 256 "$path" | awk '{print $1}')" \
-    || die "could not hash artifact: $path"
-  [[ "$value" =~ ^[0-9a-f]{64}$ ]] || die "invalid SHA-256 result for artifact: $path"
-  printf '%s' "$value"
-}
+sha256_file() { irin_sha256_file "$1"; }
 
 macho_inventory() {
   local app="$1" candidate
@@ -43,7 +47,7 @@ assert_expected_macho_inventory() {
   }
 }
 
-verify_production_signature() {
+verify_developer_id_signature() {
   local artifact="$1" expected_team="$2" label="$3" details entitlements team
   codesign --verify --strict "$artifact" \
     || die "$label failed strict signature verification"
@@ -66,30 +70,42 @@ verify_production_signature() {
   fi
 }
 
-# Packaging mode: local-dev (default, non-releasable) or production (strict).
-# A release build must set IRIN_DMG_PACK_MODE=production and supply a real
-# production Gateway Pack manifest. local-dev cannot be notarized by the
-# release target and is visibly labeled in HASHES.txt.
+# Packaging mode:
+#   local-dev  — ad-hoc sign; non-publishable (Phase A)
+#   signed-rc  — Developer ID + hardened runtime; no GHCR/notary/staple (Phase B)
+#   production — Developer ID + notarize + staple; publishable (Phase C)
 PACK_MODE="${IRIN_DMG_PACK_MODE:-local-dev}"
 case "$PACK_MODE" in
-  local-dev|production) ;;
-  *) die "IRIN_DMG_PACK_MODE must be local-dev or production (got $PACK_MODE)" ;;
+  local-dev|signed-rc|production) ;;
+  *) die "IRIN_DMG_PACK_MODE must be local-dev, signed-rc, or production (got $PACK_MODE)" ;;
 esac
-export IRIN_GATEWAY_PACK_MODE="$PACK_MODE"
+
+# Gateway Pack staging modes only understand local-dev | production | smoke-inert.
+# signed-rc binds local staged Gateway/sidecar inputs to the source SHA without
+# claiming registry provenance.
+case "$PACK_MODE" in
+  production) GATEWAY_PACK_MODE="production" ;;
+  *) GATEWAY_PACK_MODE="local-dev" ;;
+esac
+export IRIN_GATEWAY_PACK_MODE="$GATEWAY_PACK_MODE"
 
 # Release version names the DMG artifact. local-dev defaults to 0.1.2 for
 # backward compatibility; production must set IRIN_RELEASE_VERSION explicitly
-# (the release transaction exports it from the tag) and it must equal the
-# Tauri bundle version, or the DMG would mislabel the app it ships.
-if [[ "$PACK_MODE" == "production" && -z "${IRIN_RELEASE_VERSION:-}" ]]; then
-  die "production DMG requires IRIN_RELEASE_VERSION set explicitly (the release transaction exports it from the tag)"
-fi
-IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-0.1.2}"
-export IRIN_RELEASE_VERSION
+# (the release transaction exports it from the tag). signed-rc defaults from
+# tauri.conf.json. Non-local modes must equal the Tauri bundle version.
 TAURI_CONF="$TAURI_DIR/src-tauri/tauri.conf.json"
 TAURI_BUNDLE_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$TAURI_CONF")" \
   || die "could not read version from $TAURI_CONF (python3 required)"
-if [[ "$PACK_MODE" == "production" && "$IRIN_RELEASE_VERSION" != "$TAURI_BUNDLE_VERSION" ]]; then
+if [[ "$PACK_MODE" == "production" && -z "${IRIN_RELEASE_VERSION:-}" ]]; then
+  die "production DMG requires IRIN_RELEASE_VERSION set explicitly (the release transaction exports it from the tag)"
+fi
+if [[ "$PACK_MODE" == "local-dev" ]]; then
+  IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-0.1.2}"
+else
+  IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-$TAURI_BUNDLE_VERSION}"
+fi
+export IRIN_RELEASE_VERSION
+if [[ "$PACK_MODE" != "local-dev" && "$IRIN_RELEASE_VERSION" != "$TAURI_BUNDLE_VERSION" ]]; then
   die "IRIN_RELEASE_VERSION=$IRIN_RELEASE_VERSION != tauri.conf.json version=$TAURI_BUNDLE_VERSION; bump the version in council-rs/warroom-tauri/src-tauri/tauri.conf.json in its own commit before running the release transaction"
 fi
 
@@ -100,11 +116,14 @@ if [[ "$REQUIRE_CLEAN" == "1" ]]; then
   fi
   export IRIN_TAURI_BUILD_DIRTY=false
   export COUNCIL_BUILD_DIRTY=false
-  export IRIN_TAURI_BUILD_GIT_SHA
   IRIN_TAURI_BUILD_GIT_SHA="$(git -C "$ROOT" rev-parse HEAD)"
   export IRIN_TAURI_BUILD_GIT_SHA
   export COUNCIL_BUILD_GIT_SHA="$IRIN_TAURI_BUILD_GIT_SHA"
 fi
+
+SOURCE_SHA="${IRIN_TAURI_BUILD_GIT_SHA:-}"
+[[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]] \
+  || die "full 40-char source SHA required (IRIN_TAURI_BUILD_GIT_SHA); got ${SOURCE_SHA:-empty}"
 
 if [[ "$PACK_MODE" == "production" ]]; then
   [[ -n "${IRIN_GATEWAY_PACK_PROD_MANIFEST:-}" ]] || die \
@@ -114,7 +133,6 @@ if [[ "$PACK_MODE" == "production" ]]; then
   if grep -q '"mode"[[:space:]]*:[[:space:]]*"local-dev"' "$IRIN_GATEWAY_PACK_PROD_MANIFEST"; then
     die "production DMG refuses a local-dev Gateway Pack manifest"
   fi
-  # Refuse leftover local-dev build output as production input.
   LOCAL_LEFTOVER="$ROOT/packaging/build/gateway-pack/image-manifest.local.json"
   if [[ -f "$LOCAL_LEFTOVER" ]] && [[ "$(cd "$(dirname "$IRIN_GATEWAY_PACK_PROD_MANIFEST")" && pwd)/$(basename "$IRIN_GATEWAY_PACK_PROD_MANIFEST")" == "$(cd "$(dirname "$LOCAL_LEFTOVER")" && pwd)/$(basename "$LOCAL_LEFTOVER")" ]]; then
     die "production DMG refuses packaging/build/gateway-pack/image-manifest.local.json"
@@ -128,27 +146,107 @@ if [[ "$PACK_MODE" == "production" ]]; then
     || die "production Gateway Pack manifest failed immutable registry provenance verification"
 fi
 
+if [[ "$PACK_MODE" == "signed-rc" || "$PACK_MODE" == "production" ]]; then
+  : "${APPLE_SIGNING_IDENTITY:?$PACK_MODE mode requires APPLE_SIGNING_IDENTITY}"
+fi
+if [[ "$PACK_MODE" == "production" ]]; then
+  : "${APPLE_NOTARY_PROFILE:?production mode requires APPLE_NOTARY_PROFILE}"
+fi
+
+# --- Candidate staging -------------------------------------------------------
+
+irin_resolve_candidate_root
+ATTEMPT_ID="$(python3 -c 'import uuid; print(uuid.uuid4())')"
+STAGING_ROOT="$IRIN_CANDIDATE_ROOT/.staging"
+ATTEMPTS_ROOT="$IRIN_CANDIDATE_ROOT/.attempts"
+STAGING="$STAGING_ROOT/$ATTEMPT_ID"
+mkdir -p "$STAGING" "$ATTEMPTS_ROOT" \
+  "$STAGING/proofs" "$STAGING/smoke" "$STAGING/install" "$STAGING/logs"
+
+ATTEMPT_META="$ATTEMPTS_ROOT/${ATTEMPT_ID}.json"
+ATTEMPT_STARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+CANDIDATE_FINALIZED=0
+CANDIDATE_PATH=""
+
+write_attempt_meta() {
+  local result="$1" finished candidate_id candidate_path
+  finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  candidate_id="${2:-}"
+  candidate_path="${3:-}"
+  # Paths/IDs via env — never interpolate into an unquoted Python string
+  # (IRIN_CANDIDATE_ROOT may contain quotes/backslashes).
+  ATTEMPT_ID="$ATTEMPT_ID" \
+  ATTEMPT_STARTED_AT="$ATTEMPT_STARTED_AT" \
+  FINISHED="$finished" \
+  SOURCE_SHA="$SOURCE_SHA" \
+  IRIN_RELEASE_VERSION="$IRIN_RELEASE_VERSION" \
+  PACK_MODE="$PACK_MODE" \
+  RESULT="$result" \
+  CANDIDATE_ID="$candidate_id" \
+  CANDIDATE_PATH="$candidate_path" \
+  python3 - "$ATTEMPT_META" <<'PY'
+import json, os, sys
+path = sys.argv[1]
+doc = {
+  "attempt_id": os.environ["ATTEMPT_ID"],
+  "started_at": os.environ["ATTEMPT_STARTED_AT"],
+  "finished_at": os.environ["FINISHED"],
+  "source_sha": os.environ["SOURCE_SHA"],
+  "semver": os.environ["IRIN_RELEASE_VERSION"],
+  "pack_mode": os.environ["PACK_MODE"],
+  "result": os.environ["RESULT"],
+}
+if os.environ.get("CANDIDATE_ID"):
+    doc["candidate_id"] = os.environ["CANDIDATE_ID"]
+if os.environ.get("CANDIDATE_PATH"):
+    doc["candidate_path"] = os.environ["CANDIDATE_PATH"]
+with open(path, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, sort_keys=True, indent=2)
+    fh.write("\n")
+PY
+}
+
+on_fail() {
+  local status=$?
+  if [[ "$CANDIDATE_FINALIZED" == "1" ]]; then
+    exit "$status"
+  fi
+  # Move failed staging under version/sha/failed/<attempt-id>/; never promote later.
+  if [[ -d "$STAGING" ]]; then
+    local fail_parent fail_dest
+    fail_parent="$IRIN_CANDIDATE_ROOT/$IRIN_RELEASE_VERSION/$SOURCE_SHA/failed"
+    fail_dest="$fail_parent/$ATTEMPT_ID"
+    mkdir -p "$fail_parent"
+    if [[ ! -e "$fail_dest" ]]; then
+      mv "$STAGING" "$fail_dest" 2>/dev/null || true
+    fi
+  fi
+  write_attempt_meta "failed" || true
+  exit "$status"
+}
+trap on_fail EXIT
+
 echo "=== IRIN DMG build ==="
 echo "ROOT=$ROOT"
 echo "PACK_MODE=$PACK_MODE"
+echo "GATEWAY_PACK_MODE=$GATEWAY_PACK_MODE"
 echo "RELEASE_VERSION=$IRIN_RELEASE_VERSION"
-echo "BUILD_SHA=${IRIN_TAURI_BUILD_GIT_SHA:-unknown}"
+echo "BUILD_SHA=$SOURCE_SHA"
 echo "BUILD_DIRTY=${IRIN_TAURI_BUILD_DIRTY:-unknown}"
 echo "CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
+echo "IRIN_CANDIDATE_ROOT=$IRIN_CANDIDATE_ROOT"
+echo "ATTEMPT_ID=$ATTEMPT_ID"
+echo "STAGING=$STAGING"
 
 # Shared app factory: Council build → stage → Gateway → web export → Tauri app.
-# Consumer-specific signing / DMG / HASHES remain below.
-export IRIN_GATEWAY_PACK_MODE="$PACK_MODE"
+export IRIN_GATEWAY_PACK_MODE="$GATEWAY_PACK_MODE"
 export IRIN_APP_TARGET_DIR="$CARGO_TARGET_DIR"
 export IRIN_TAURI_BUNDLES="${IRIN_TAURI_BUNDLES:-app}"
 bash "$ROOT/packaging/build-app-bundle.sh"
 
 # Resolve the app strictly from this build's pinned target dir (env.sh).
-# Never scavenge other target dirs: a stale foreign build (e.g. a port-isolated
-# smoke app with a different baked-in Council port) would be packaged silently.
 APP="$CARGO_TARGET_DIR/release/bundle/macos/IRIN.app"
 [[ -d "$APP" ]] || die "app bundle not found at $APP (app-bundle primitive did not produce it)"
-# Fail closed: a prior/concurrent smoke must never pollute a shippable DMG.
 if grep -Rql 'smoke-inert' "$APP" 2>/dev/null; then
   die "finished app contains smoke-inert marker; refusing to package"
 fi
@@ -168,14 +266,11 @@ else
   BUNDLED_BASE="$(dirname "$FOUND_CABINETS")"
   echo "NOTE: cabinets at $FOUND_CABINETS"
 fi
-# Fail closed: packaged app must ship executable hermes seat adapter under base-dir.
 HERMES_ADAPTER="$BUNDLED_BASE/scripts/hermes-seat-adapter.sh"
 [[ -x "$HERMES_ADAPTER" ]] \
   || die "bundled hermes seat adapter missing or not executable under base-dir: $HERMES_ADAPTER"
 echo "bundled hermes adapter: $HERMES_ADAPTER"
 
-# Council serves this same static export on :8765 for private tailnet access.
-# The desktop webview still consumes Tauri's frontendDist from the bundle.
 WARROOM_WEB="$APP/Contents/Resources/warroom-web"
 [[ -f "$WARROOM_WEB/index.html" ]] \
   || die "bundled War Room export missing: $WARROOM_WEB/index.html"
@@ -186,17 +281,15 @@ TOUCH_ID_HELPER="$APP/Contents/Helpers/arm-attest"
   || die "bundled Touch ID helper missing, empty, or not executable: $TOUCH_ID_HELPER"
 echo "bundled Touch ID helper: $TOUCH_ID_HELPER"
 
-mkdir -p "$ROOT/packaging/artifacts"
-DEST_APP="$ROOT/packaging/artifacts/IRIN.app"
-DEST_DMG="$ROOT/packaging/artifacts/IRIN_${IRIN_RELEASE_VERSION}_aarch64.dmg"
+# Stage the shippable copy under the candidate attempt (not packaging/artifacts).
+DEST_APP="$STAGING/IRIN.app"
+DEST_DMG="$STAGING/IRIN_${IRIN_RELEASE_VERSION}_aarch64.dmg"
 rm -rf "$DEST_APP"
 ditto "$APP" "$DEST_APP"
 
-if [[ "$PACK_MODE" == "production" ]]; then
-  : "${APPLE_SIGNING_IDENTITY:?production mode requires APPLE_SIGNING_IDENTITY}"
-  : "${APPLE_NOTARY_PROFILE:?production mode requires APPLE_NOTARY_PROFILE}"
+if [[ "$PACK_MODE" == "signed-rc" || "$PACK_MODE" == "production" ]]; then
   assert_expected_macho_inventory "$DEST_APP"
-  echo "=== Developer ID signing (inside-out, hardened runtime) ==="
+  echo "=== Developer ID signing (inside-out, hardened runtime; mode=$PACK_MODE) ==="
   codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
     "$DEST_APP/Contents/Helpers/arm-attest"
   codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" \
@@ -210,10 +303,10 @@ if [[ "$PACK_MODE" == "production" ]]; then
     || die "could not inspect outer app signature"
   OUTER_TEAM="$(awk -F= '$1 == "TeamIdentifier" { print $2; exit }' <<<"$OUTER_DETAILS")"
   [[ -n "$OUTER_TEAM" ]] || die "outer app signature has no TeamIdentifier"
-  verify_production_signature "$DEST_APP" "$OUTER_TEAM" "outer app"
-  verify_production_signature "$DEST_APP/Contents/Helpers/arm-attest" "$OUTER_TEAM" "Touch ID helper"
-  verify_production_signature "$DEST_APP/Contents/MacOS/council" "$OUTER_TEAM" "Council sidecar"
-  verify_production_signature "$DEST_APP/Contents/MacOS/council-warroom-tauri" "$OUTER_TEAM" "Tauri host"
+  verify_developer_id_signature "$DEST_APP" "$OUTER_TEAM" "outer app"
+  verify_developer_id_signature "$DEST_APP/Contents/Helpers/arm-attest" "$OUTER_TEAM" "Touch ID helper"
+  verify_developer_id_signature "$DEST_APP/Contents/MacOS/council" "$OUTER_TEAM" "Council sidecar"
+  verify_developer_id_signature "$DEST_APP/Contents/MacOS/council-warroom-tauri" "$OUTER_TEAM" "Tauri host"
   assert_expected_macho_inventory "$DEST_APP"
 else
   codesign --force --deep --sign - "$DEST_APP"
@@ -221,23 +314,24 @@ else
 fi
 
 echo "=== hdiutil DMG ($PACK_MODE) ==="
-STAGE="$ROOT/packaging/build/dmg-stage"
-rm -rf "$STAGE"
-mkdir -p "$STAGE"
-ditto "$DEST_APP" "$STAGE/IRIN.app"
-ln -sf /Applications "$STAGE/Applications"
+DMG_STAGE="$STAGING/.dmg-stage"
+rm -rf "$DMG_STAGE"
+mkdir -p "$DMG_STAGE"
+ditto "$DEST_APP" "$DMG_STAGE/IRIN.app"
+ln -sf /Applications "$DMG_STAGE/Applications"
 rm -f "$DEST_DMG"
-hdiutil create -volname "IRIN" -srcfolder "$STAGE" -ov -format UDZO "$DEST_DMG"
+hdiutil create -volname "IRIN" -srcfolder "$DMG_STAGE" -ov -format UDZO "$DEST_DMG"
+rm -rf "$DMG_STAGE"
 
+STAPLED=false
 NOTARY_SUBMISSION_ID=""
 NOTARY_SUBMIT_JSON=""
 NOTARY_LOG_JSON=""
 if [[ "$PACK_MODE" == "production" ]]; then
   echo "=== sign DMG, notarize, retain log, staple ==="
   codesign --force --timestamp --sign "$APPLE_SIGNING_IDENTITY" "$DEST_DMG"
-  mkdir -p "$ROOT/packaging/receipts"
-  NOTARY_SUBMIT_JSON="$ROOT/packaging/receipts/NOTARY-SUBMIT-${IRIN_RELEASE_VERSION}.json"
-  NOTARY_LOG_JSON="$ROOT/packaging/receipts/NOTARY-LOG-${IRIN_RELEASE_VERSION}.json"
+  NOTARY_SUBMIT_JSON="$STAGING/logs/NOTARY-SUBMIT-${IRIN_RELEASE_VERSION}.json"
+  NOTARY_LOG_JSON="$STAGING/logs/NOTARY-LOG-${IRIN_RELEASE_VERSION}.json"
   xcrun notarytool submit --keychain-profile "$APPLE_NOTARY_PROFILE" \
     --wait --output-format json "$DEST_DMG" >"$NOTARY_SUBMIT_JSON"
   NOTARY_SUBMISSION_ID="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); d.get("status") == "Accepted" or sys.exit("notary status is not Accepted"); i=d.get("id", ""); i or sys.exit("notary response has no submission id"); print(i)' "$NOTARY_SUBMIT_JSON")" \
@@ -248,8 +342,14 @@ if [[ "$PACK_MODE" == "production" ]]; then
     || die "Apple notarization log contains issues; inspect $NOTARY_LOG_JSON"
   xcrun stapler staple "$DEST_DMG"
   xcrun stapler validate "$DEST_DMG"
+  STAPLED=true
+elif [[ "$PACK_MODE" == "signed-rc" ]]; then
+  echo "=== signed-rc: Developer ID app only; DMG unsigned; no notarize/staple ==="
+  # Phase B is non-publishable. Keep the DMG un-notarized/un-stapled.
+  STAPLED=false
 fi
 
+# Post-staple (or post-create) DMG SHA-256 is publishing identity for production.
 APP_SHA256="$(sha256_file "$DEST_APP/Contents/MacOS/council-warroom-tauri")"
 COUNCIL_SHA256="$(sha256_file "$DEST_APP/Contents/MacOS/council")"
 ARM_ATTEST_SHA256="$(sha256_file "$DEST_APP/Contents/Helpers/arm-attest")"
@@ -258,33 +358,143 @@ GATEWAY_PACK_MANIFEST_SHA256="$(sha256_file "$DEST_APP/Contents/Resources/gatewa
 WARROOM_WEB_INDEX_SHA256="$(sha256_file "$DEST_APP/Contents/Resources/warroom-web/index.html")"
 DMG_SHA256="$(sha256_file "$DEST_DMG")"
 
+IMAGE_MANIFEST="$DEST_APP/Contents/Resources/gateway-pack/image-manifest.json"
+IMAGE_DIGESTS="$(irin_image_digests_from_manifest "$IMAGE_MANIFEST")" \
+  || die "could not extract gateway/sidecar digests from $IMAGE_MANIFEST"
+GATEWAY_DIGEST="$(printf '%s\n' "$IMAGE_DIGESTS" | sed -n '1p')"
+SIDECAR_DIGEST="$(printf '%s\n' "$IMAGE_DIGESTS" | sed -n '2p')"
+[[ -n "$GATEWAY_DIGEST" && -n "$SIDECAR_DIGEST" ]] \
+  || die "could not extract gateway/sidecar digests from $IMAGE_MANIFEST"
+
+echo "=== gateway source binding ==="
+irin_assert_gateway_source_binding "$IMAGE_MANIFEST" "$SOURCE_SHA" "$PACK_MODE"
+
+echo "=== write bundle-manifest.txt ==="
+BUNDLE_MANIFEST="$STAGING/bundle-manifest.txt"
+irin_write_bundle_manifest "$DEST_APP" "$BUNDLE_MANIFEST"
+BUNDLE_MANIFEST_DIGEST="$(sha256_file "$BUNDLE_MANIFEST")"
+
+# HASHES.txt is part of the immutable payload tree used for exact-retry.
+# It must be byte-deterministic for identical artifact bytes: no timestamps,
+# no attempt-specific absolute staging paths, no notary submission IDs.
+# Operator diagnostics (built_at, notary ids, notes) go to logs/build-meta.txt.
+DMG_BASENAME="IRIN_${IRIN_RELEASE_VERSION}_aarch64.dmg"
+HASHES_PATH="$STAGING/HASHES.txt"
+RELEASABLE=false
+[[ "$PACK_MODE" == "production" && "$STAPLED" == "true" ]] && RELEASABLE=true
 {
-  echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   echo "pack_mode=$PACK_MODE"
   echo "release_version=$IRIN_RELEASE_VERSION"
-  echo "releasable=$([[ "$PACK_MODE" == "production" ]] && echo true || echo false)"
-  echo "source_sha=${IRIN_TAURI_BUILD_GIT_SHA:-unknown}"
+  echo "releasable=$RELEASABLE"
+  echo "stapled=$STAPLED"
+  echo "source_sha=$SOURCE_SHA"
   echo "build_dirty=${IRIN_TAURI_BUILD_DIRTY:-unknown}"
   echo "arch=aarch64-apple-darwin"
-  echo "app=$DEST_APP"
-  echo "dmg=$DEST_DMG"
+  echo "app=IRIN.app"
+  echo "dmg=$DMG_BASENAME"
   echo "app_sha256=$APP_SHA256"
   echo "council_sha256=$COUNCIL_SHA256"
   echo "arm_attest_sha256=$ARM_ATTEST_SHA256"
   echo "gateway_pack_compose_sha256=$GATEWAY_PACK_COMPOSE_SHA256"
   echo "gateway_pack_manifest_sha256=$GATEWAY_PACK_MANIFEST_SHA256"
+  echo "gateway_digest=$GATEWAY_DIGEST"
+  echo "sidecar_digest=$SIDECAR_DIGEST"
   echo "warroom_web_index_sha256=$WARROOM_WEB_INDEX_SHA256"
+  echo "bundle_manifest_digest=$BUNDLE_MANIFEST_DIGEST"
   echo "dmg_sha256=$DMG_SHA256"
+} | tee "$HASHES_PATH"
+
+{
+  echo "built_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "attempt_id=$ATTEMPT_ID"
+  echo "pack_mode=$PACK_MODE"
+  echo "source_sha=$SOURCE_SHA"
+  echo "release_version=$IRIN_RELEASE_VERSION"
   if [[ "$PACK_MODE" == "production" ]]; then
     echo "notary_submission_id=$NOTARY_SUBMISSION_ID"
-    echo "notary_submit_receipt=$(basename "$NOTARY_SUBMIT_JSON")"
-    echo "notary_log_receipt=$(basename "$NOTARY_LOG_JSON")"
+    echo "notary_submit_receipt=$(basename "${NOTARY_SUBMIT_JSON:-}")"
+    echo "notary_log_receipt=$(basename "${NOTARY_LOG_JSON:-}")"
   fi
-  if [[ "$PACK_MODE" != "production" ]]; then
-    echo "note=local-dev candidate; not for notarization or production promotion"
-  fi
-} | tee "$ROOT/packaging/artifacts/HASHES.txt"
+  case "$PACK_MODE" in
+    local-dev)
+      echo "note=local-dev candidate; not for notarization or production promotion"
+      ;;
+    signed-rc)
+      echo "note=signed-rc candidate; Developer ID only; non-publishable; T1 biometry/visual only"
+      ;;
+  esac
+} >"$STAGING/logs/build-meta.txt"
+
+# Immutable identity document only — no ID, timestamp, attempt, or status.
+IDENTITY_JSON="$(python3 - <<PY
+import json
+print(json.dumps({
+  "schema_version": 1,
+  "source_sha": "$SOURCE_SHA",
+  "semver": "$IRIN_RELEASE_VERSION",
+  "pack_mode": "$PACK_MODE",
+  "bundle_manifest_digest": "$BUNDLE_MANIFEST_DIGEST",
+  "dmg_sha256": "$DMG_SHA256",
+  "stapled": True if "$STAPLED" == "true" else False,
+  "gateway_digest": "$GATEWAY_DIGEST",
+  "sidecar_digest": "$SIDECAR_DIGEST",
+}))
+PY
+)"
+# Write canonical identity directly to disk — never capture via $(...) which
+# strips the required trailing LF and would desync candidate-id from the file.
+printf '%s' "$IDENTITY_JSON" | irin_canonical_identity_json >"$STAGING/candidate.json"
+CANDIDATE_ID="$(irin_sha256_file "$STAGING/candidate.json")"
+[[ "$CANDIDATE_ID" =~ ^[0-9a-f]{64}$ ]] || die "invalid candidate-id"
+
+# Production/publishable candidates require stapled=true; signed-rc requires false.
+case "$PACK_MODE" in
+  production)
+    [[ "$STAPLED" == "true" ]] || die "production candidate requires stapled=true"
+    ;;
+  signed-rc)
+    [[ "$STAPLED" == "false" ]] || die "signed-rc candidate requires stapled=false"
+    ;;
+  local-dev)
+    [[ "$STAPLED" == "false" ]] || die "local-dev candidate requires stapled=false"
+    ;;
+esac
+
+# Payload hash excludes proofs/smoke/install/logs mutability by design
+# (only candidate.json + HASHES + bundle-manifest + DMG + IRIN.app leaves).
+# logs/build-meta.txt is diagnostic and is NOT in the immutable payload set.
+PAYLOAD_HASH="$(irin_payload_tree_hash "$STAGING")"
+DEST_PARENT="$IRIN_CANDIDATE_ROOT/$IRIN_RELEASE_VERSION/$SOURCE_SHA"
+DEST="$DEST_PARENT/$CANDIDATE_ID"
+
+echo "=== promote staging → candidate store (exclusive claim) ==="
+PROMOTE_RESULT="$(irin_promote_candidate_from_staging "$STAGING" "$DEST")" \
+  || die "candidate promote failed"
+CANDIDATE_PATH="$DEST"
+if [[ "$PROMOTE_RESULT" == "idempotent" ]]; then
+  echo "idempotent hit: payload tree identical; discarding staging"
+  rm -rf "$STAGING"
+  write_attempt_meta "success_idempotent" "$CANDIDATE_ID" "$DEST"
+  CANDIDATE_FINALIZED=1
+  trap - EXIT
+  echo "=== build complete (idempotent) ==="
+  echo "candidate_id=$CANDIDATE_ID"
+  echo "candidate_path=$DEST"
+  echo "dmg_sha256=$DMG_SHA256"
+  echo "stapled=$STAPLED"
+  echo "payload_tree_hash=$PAYLOAD_HASH"
+  exit 0
+fi
+[[ "$PROMOTE_RESULT" == "created" ]] || die "unexpected promote result: $PROMOTE_RESULT"
+write_attempt_meta "success" "$CANDIDATE_ID" "$DEST"
+CANDIDATE_FINALIZED=1
+trap - EXIT
 
 echo "=== build complete ==="
-ls -lah "$DEST_APP" "$DEST_DMG"
-du -sh "$DEST_APP" "$DEST_DMG"
+echo "candidate_id=$CANDIDATE_ID"
+echo "candidate_path=$CANDIDATE_PATH"
+echo "dmg_sha256=$DMG_SHA256"
+echo "stapled=$STAPLED"
+echo "payload_tree_hash=$PAYLOAD_HASH"
+ls -lah "$CANDIDATE_PATH/IRIN.app" "$CANDIDATE_PATH/IRIN_${IRIN_RELEASE_VERSION}_aarch64.dmg"
+du -sh "$CANDIDATE_PATH/IRIN.app" "$CANDIDATE_PATH/IRIN_${IRIN_RELEASE_VERSION}_aarch64.dmg"

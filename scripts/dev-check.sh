@@ -219,12 +219,17 @@ if [[ "$mode" == "check" ]]; then
     scrub_dev_check_smoke_inert
     trap - EXIT INT TERM
   fi
+  # Hermetic packaging store contracts when packaging/Makefile packaging targets move.
+  if printf '%s\n' "${paths[@]}" | grep -Eq '^(packaging/|Makefile$)'; then
+    run "Candidate store contracts" bash packaging/test-candidate-store.sh
+  fi
   run "Diff whitespace" git diff --check origin/main --
   exit 0
 fi
 
 run "Current-base preflight" scripts/dev-preflight.sh ship
 run "Classifier self-test" scripts/test-classify-ci-paths.sh
+run "Candidate store contracts" bash packaging/test-candidate-store.sh
 run "Pinned actionlint" scripts/bootstrap-actionlint.sh
 run "GitHub Actions lint" .irin-tools/bin/actionlint -color
 

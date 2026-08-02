@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://irinity.local/schemas/candidate-status/v1.json",
+  "title": "IRIN candidate-status adapter (schema_version=1)",
+  "description": "Frozen W2 adapter contract consumed by ship-board (W3). Board calls scripts/candidate-status.sh --json and must not reimplement tier rules.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "reporter",
+    "candidate_path",
+    "candidate_id",
+    "source_sha",
+    "semver",
+    "pack_mode",
+    "dmg_sha256",
+    "bundle_manifest_digest",
+    "well_formed",
+    "tier",
+    "blockers",
+    "checks",
+    "caveats"
+  ],
+  "properties": {
+    "schema_version": { "const": 1 },
+    "reporter": { "const": "scripts/candidate-status.sh" },
+    "candidate_path": { "type": "string", "minLength": 1 },
+    "candidate_id": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "source_sha": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "semver": { "type": ["string", "null"] },
+    "pack_mode": {
+      "type": ["string", "null"],
+      "enum": ["local-dev", "signed-rc", "production", null]
+    },
+    "dmg_sha256": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "bundle_manifest_digest": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "well_formed": { "type": "boolean" },
+    "tier": {
+      "type": ["string", "null"],
+      "enum": [
+        null,
+        "Candidate verified",
+        "Installed",
+        "Accepted",
+        "Published"
+      ]
+    },
+    "blockers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["code", "message", "blocks_tier"],
+        "properties": {
+          "code": { "type": "string", "minLength": 1 },
+          "message": { "type": "string", "minLength": 1 },
+          "blocks_tier": {
+            "type": "string",
+            "enum": [
+              "Candidate verified",
+              "Installed",
+              "Accepted",
+              "Published"
+            ]
+          }
+        }
+      }
+    },
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "identity_ok",
+        "payload_ok",
+        "source_on_main",
+        "ci_required_green",
+        "verify_proof",
+        "install_proof",
+        "acceptance_proof",
+        "publication_proof"
+      ],
+      "properties": {
+        "identity_ok": { "type": "boolean" },
+        "payload_ok": { "type": "boolean" },
+        "source_on_main": {
+          "type": "string",
+          "enum": ["true", "false", "unavailable"]
+        },
+        "ci_required_green": {
+          "type": "string",
+          "enum": ["true", "false", "unavailable"]
+        },
+        "verify_proof": { "type": "boolean" },
+        "install_proof": { "type": "boolean" },
+        "acceptance_proof": { "type": "boolean" },
+        "publication_proof": { "type": "boolean" }
+      }
+    },
+    "caveats": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}
