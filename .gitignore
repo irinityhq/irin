@@ -27,6 +27,10 @@ runs/
 /packaging/test-home/
 /packaging/test-apps/
 /packaging/receipts/
+
+# Operator ship-board link + per-worktree marker (scripts/link-ship-board.sh)
+/tools/ship-board
+.irin-board-linked
 # Shared or local Tauri target (dir or symlink)
 council-rs/warroom-tauri/src-tauri/target/
 council-rs/warroom-tauri/src-tauri/target

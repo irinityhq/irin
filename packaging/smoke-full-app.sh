@@ -91,10 +91,13 @@ fi
 rm -rf "$DEST_APP" "$MOUNT"
 mkdir -p "$MOUNT"
 hdiutil attach "$DMG" -mountpoint "$MOUNT" -readonly -nobrowse
+# Detach on any failure after attach (same pattern as verify-dmg / install-verify).
+trap 'hdiutil detach "$MOUNT" -force 2>/dev/null || true' EXIT
 SRC_APP="$(find "$MOUNT" -maxdepth 2 -name "$APP_NAME" -type d | head -1 || true)"
 [[ -d "$SRC_APP" ]] || die "app not found in DMG"
 ditto "$SRC_APP" "$DEST_APP"
 hdiutil detach "$MOUNT" -force 2>/dev/null || true
+trap - EXIT
 rm -rf "$MOUNT"
 [[ -d "$DEST_APP" ]] || die "missing app after extract: $DEST_APP"
 log "fresh_extract=true dest_app=$DEST_APP"

@@ -122,7 +122,6 @@ PY
 # Deterministic gzip tar via Python (works on macOS bsdtar and Linux GNU tar hosts).
 python3 - "$CANDIDATE" "$ARCHIVE" "$BINDING" <<'PY'
 import gzip
-import io
 import os
 import stat
 import sys
@@ -222,54 +221,51 @@ for dirpath, dirnames, filenames in os.walk(src, followlinks=False):
         rel = name if not rel_dir else f"{rel_dir.replace(os.sep, '/')}/{name}"
         add_entry(full, rel)
 
-# Top-level DMG (regular file).
-for name in sorted(os.listdir(src)):
-    full = os.path.join(src, name)
-    if name.endswith(".dmg") and os.path.isfile(full) and not os.path.islink(full):
-        add_entry(full, name)
-
-# Inject trusted export-binding.json at archive root.
+# Inject trusted export-binding.json at archive root (os.walk already
+# includes the top-level DMG via filenames; do not add it a second time).
 entries.append(("file", "export-binding.json", binding_src))
 
-# Stable order by relative path.
+# Stable order by relative path; refuse accidental duplicate members.
 entries.sort(key=lambda e: e[1])
+seen_rel = set()
+for _, rel, _ in entries:
+    if rel in seen_rel:
+        raise SystemExit(f"duplicate archive member: {rel}")
+    seen_rel.add(rel)
 
 FIXED_MTIME = 0
-buf = io.BytesIO()
-with tarfile.open(fileobj=buf, mode="w") as tar:
-    for kind, rel, full in entries:
-        info = tarfile.TarInfo(name=rel)
-        info.mtime = FIXED_MTIME
-        info.uid = 0
-        info.gid = 0
-        info.uname = ""
-        info.gname = ""
-        if kind == "symlink":
-            info.type = tarfile.SYMTYPE
-            info.linkname = os.readlink(full)
-            info.mode = 0o777
-            info.size = 0
-            tar.addfile(info)
-        elif kind == "dir":
-            info.type = tarfile.DIRTYPE
-            info.mode = 0o755
-            info.size = 0
-            tar.addfile(info)
-        elif kind == "file":
-            st = os.lstat(full)
-            info.type = tarfile.REGTYPE
-            mode = 0o755 if (st.st_mode & stat.S_IXUSR) else 0o644
-            info.mode = mode
-            info.size = st.st_size
-            with open(full, "rb") as fh:
-                tar.addfile(info, fh)
-        else:
-            raise SystemExit(f"unknown entry kind: {kind}")
-
-raw = buf.getvalue()
+# Stream tar -> gzip -> disk (no full-archive BytesIO; production DMGs are large).
 with open(out, "wb") as fh:
     with gzip.GzipFile(filename="", mode="wb", fileobj=fh, mtime=0) as gz:
-        gz.write(raw)
+        with tarfile.open(fileobj=gz, mode="w|") as tar:
+            for kind, rel, full in entries:
+                info = tarfile.TarInfo(name=rel)
+                info.mtime = FIXED_MTIME
+                info.uid = 0
+                info.gid = 0
+                info.uname = ""
+                info.gname = ""
+                if kind == "symlink":
+                    info.type = tarfile.SYMTYPE
+                    info.linkname = os.readlink(full)
+                    info.mode = 0o777
+                    info.size = 0
+                    tar.addfile(info)
+                elif kind == "dir":
+                    info.type = tarfile.DIRTYPE
+                    info.mode = 0o755
+                    info.size = 0
+                    tar.addfile(info)
+                elif kind == "file":
+                    st = os.lstat(full)
+                    info.type = tarfile.REGTYPE
+                    mode = 0o755 if (st.st_mode & stat.S_IXUSR) else 0o644
+                    info.mode = mode
+                    info.size = st.st_size
+                    with open(full, "rb") as payload:
+                        tar.addfile(info, payload)
+                else:
+                    raise SystemExit(f"unknown entry kind: {kind}")
 PY
 
 ARCHIVE_SHA="$(irin_sha256_file "$ARCHIVE")"

@@ -8,14 +8,15 @@ name: release-images
 # manifest. A tag-triggered rebuild would not have that manifest and must not
 # pretend to receipt publication.
 #
-# Operators may still run this workflow manually for ad-hoc image builds that
-# are outside publication authority.
+# Operators may still run this workflow manually for ad-hoc rc-* image builds
+# that are outside publication authority. Immutable vX.Y.Z labels are applied
+# only by scripts/release-transaction.sh --publish from a candidate manifest.
 
 on:
   workflow_dispatch:
     inputs:
       images_tag:
-        description: "Image tag to publish (vX.Y.Z or rc-<sha12>)"
+        description: "Non-publication image tag (rc-<sha12> only; v* is --publish)"
         required: true
         type: string
 
@@ -46,18 +47,17 @@ jobs:
         env:
           TAG_NAME: ${{ github.event.inputs.images_tag }}
         run: |
+          set -euo pipefail
           git fetch origin main
-          # For v* tags that exist as git tags, require ancestry. For rc-* or
-          # free-form manual tags, require HEAD is on main.
-          if git rev-parse "${TAG_NAME}^{commit}" >/dev/null 2>&1; then
-            TAG_COMMIT="$(git rev-parse "${TAG_NAME}^{commit}")"
-            git merge-base --is-ancestor "$TAG_COMMIT" origin/main \
-              || { echo "ERROR: $TAG_NAME is not reachable from reviewed main history; refusing"; exit 1; }
-          else
-            HEAD="$(git rev-parse HEAD)"
-            git merge-base --is-ancestor "$HEAD" origin/main \
-              || { echo "ERROR: workflow HEAD is not on origin/main; refusing"; exit 1; }
+          # Manual lane is rc-* only. vX.Y.Z labels are publication authority
+          # (release-transaction --publish) and must not be pre-claimed here.
+          if [[ ! "$TAG_NAME" =~ ^rc-[0-9a-f]{7,40}$ ]]; then
+            echo "ERROR: manual release-images accepts rc-<sha12> only (got $TAG_NAME); v* labels are set by --publish" >&2
+            exit 1
           fi
+          HEAD="$(git rev-parse HEAD)"
+          git merge-base --is-ancestor "$HEAD" origin/main \
+            || { echo "ERROR: workflow HEAD is not on origin/main; refusing"; exit 1; }
 
       - name: Publish images (outside publication authority)
         env:

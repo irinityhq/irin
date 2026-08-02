@@ -186,28 +186,31 @@ trap cleanup EXIT
 
 note "extract archive into import staging"
 python3 - "$ARCHIVE" "$STAGING" <<'PY'
-import gzip
-import io
 import os
 import sys
 import tarfile
 
 archive, dest = sys.argv[1], sys.argv[2]
-with gzip.open(archive, "rb") as gz:
-    data = gz.read()
-with tarfile.open(fileobj=io.BytesIO(data), mode="r:") as tar:
-    for member in tar.getmembers():
+# Stream gzip members (no full decompress into RAM). Fail closed without
+# tarfile data filter — never extract unfiltered device/FIFO/link traversal.
+with tarfile.open(archive, mode="r:gz") as tar:
+    for member in tar:
         name = member.name
         if name.startswith("/") or name.startswith("\\") or ".." in name.split("/"):
             raise SystemExit(f"refusing unsafe archive member path: {name!r}")
+        if member.isdev() or member.isfifo() or member.ischr() or member.isblk():
+            raise SystemExit(f"refusing special archive member: {name!r}")
         if member.issym() or member.islnk():
             link = member.linkname or ""
             if link.startswith("/") or ".." in link.split("/"):
                 raise SystemExit(f"refusing unsafe link target: {name!r} -> {link!r}")
         try:
             tar.extract(member, path=dest, filter="data")
-        except TypeError:
-            tar.extract(member, path=dest)
+        except TypeError as exc:
+            raise SystemExit(
+                "refusing extract without tarfile filter='data' "
+                "(need Python with PEP 706 extraction filters)"
+            ) from exc
 PY
 
 # --- structural presence -----------------------------------------------------

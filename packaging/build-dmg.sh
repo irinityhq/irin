@@ -173,22 +173,33 @@ write_attempt_meta() {
   finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   candidate_id="${2:-}"
   candidate_path="${3:-}"
-  python3 - "$ATTEMPT_META" <<PY
-import json, sys
+  # Paths/IDs via env — never interpolate into an unquoted Python string
+  # (IRIN_CANDIDATE_ROOT may contain quotes/backslashes).
+  ATTEMPT_ID="$ATTEMPT_ID" \
+  ATTEMPT_STARTED_AT="$ATTEMPT_STARTED_AT" \
+  FINISHED="$finished" \
+  SOURCE_SHA="$SOURCE_SHA" \
+  IRIN_RELEASE_VERSION="$IRIN_RELEASE_VERSION" \
+  PACK_MODE="$PACK_MODE" \
+  RESULT="$result" \
+  CANDIDATE_ID="$candidate_id" \
+  CANDIDATE_PATH="$candidate_path" \
+  python3 - "$ATTEMPT_META" <<'PY'
+import json, os, sys
 path = sys.argv[1]
 doc = {
-  "attempt_id": "$ATTEMPT_ID",
-  "started_at": "$ATTEMPT_STARTED_AT",
-  "finished_at": "$finished",
-  "source_sha": "$SOURCE_SHA",
-  "semver": "$IRIN_RELEASE_VERSION",
-  "pack_mode": "$PACK_MODE",
-  "result": "$result",
+  "attempt_id": os.environ["ATTEMPT_ID"],
+  "started_at": os.environ["ATTEMPT_STARTED_AT"],
+  "finished_at": os.environ["FINISHED"],
+  "source_sha": os.environ["SOURCE_SHA"],
+  "semver": os.environ["IRIN_RELEASE_VERSION"],
+  "pack_mode": os.environ["PACK_MODE"],
+  "result": os.environ["RESULT"],
 }
-if "$candidate_id":
-    doc["candidate_id"] = "$candidate_id"
-if "$candidate_path":
-    doc["candidate_path"] = "$candidate_path"
+if os.environ.get("CANDIDATE_ID"):
+    doc["candidate_id"] = os.environ["CANDIDATE_ID"]
+if os.environ.get("CANDIDATE_PATH"):
+    doc["candidate_path"] = os.environ["CANDIDATE_PATH"]
 with open(path, "w", encoding="utf-8") as fh:
     json.dump(doc, fh, sort_keys=True, indent=2)
     fh.write("\n")

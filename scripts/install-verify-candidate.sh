@@ -122,12 +122,22 @@ if content_rows(cand) != content_rows(inst):
     raise SystemExit(1)
 PY
 
-EXTRA="$(python3 -c 'import json; print(json.dumps({
-  "candidate_bundle_manifest_digest": "'"$CAND_BM_DIGEST"'",
-  "installed_bundle_manifest_digest": "'"$INST_BM_DIGEST"'",
-  "installed_app_path": "'"$DEST_APP"'",
-  "dmg_path": "'"$DMG"'",
-}))')"
+# Paths/digests via env — never interpolate into an unquoted Python string.
+EXTRA="$(
+  CAND_BM_DIGEST="$CAND_BM_DIGEST" \
+  INST_BM_DIGEST="$INST_BM_DIGEST" \
+  DEST_APP="$DEST_APP" \
+  DMG="$DMG" \
+  python3 - <<'PY'
+import json, os
+print(json.dumps({
+  "candidate_bundle_manifest_digest": os.environ["CAND_BM_DIGEST"],
+  "installed_bundle_manifest_digest": os.environ["INST_BM_DIGEST"],
+  "installed_app_path": os.environ["DEST_APP"],
+  "dmg_path": os.environ["DMG"],
+}))
+PY
+)"
 
 irin_write_proof_envelope \
   "$CANDIDATE/proofs/install.json" \
