@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Self-test always wants the full key set (including exact_*).
+export IRIN_CLASSIFIER_INCLUDE_EXACT=1
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CLASSIFIER="$ROOT/scripts/classify-ci-paths.sh"
 

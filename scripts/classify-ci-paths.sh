@@ -13,6 +13,12 @@
 #   exact_candidate — app / runtime / packaging / gateway-pack / release path
 #   exact_install   — narrower subset: DMG extract/install, bundled resources,
 #                     Gateway Pack install, Arm/Watch pack-install wiring
+#
+# exact_* lines are always computed. They are printed by default locally and
+# whenever IRIN_CLASSIFIER_INCLUDE_EXACT=1. On GitHub Actions without that
+# flag they are omitted so a base-controlled ci.yml@main that still expects
+# only the classic nine keys can classify a PR that adds these outputs.
+# Post-merge detect-changes sets the flag; bootstrap scope and self-tests do too.
 
 set -euo pipefail
 
@@ -226,7 +232,13 @@ for path in "${paths[@]}"; do
   esac
 done
 
-cat <<EOF
+include_exact=1
+if [[ -n "${GITHUB_ACTIONS:-}" && "${IRIN_CLASSIFIER_INCLUDE_EXACT:-}" != "1" ]]; then
+  include_exact=0
+fi
+
+{
+  cat <<EOF
 full_matrix=$full_matrix
 gateway_rust=$gateway_rust
 council_rust=$council_rust
@@ -236,6 +248,11 @@ warroom_tauri=$warroom_tauri
 workspace_supply_chain=$workspace_supply_chain
 tauri_supply_chain=$tauri_supply_chain
 sbom=$sbom
+EOF
+  if [[ "$include_exact" == "1" ]]; then
+    cat <<EOF
 exact_candidate=$exact_candidate
 exact_install=$exact_install
 EOF
+  fi
+}

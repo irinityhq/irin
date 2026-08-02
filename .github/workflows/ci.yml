@@ -113,6 +113,10 @@ jobs:
           esac
 
           scripts/test-classify-ci-paths.sh
+          # Opt into exact_* so post-merge path-scoped candidate jobs see them.
+          # PRs still enter via ci.yml@main until this lands; classic nine keys
+          # remain the default under Actions without this flag.
+          export IRIN_CLASSIFIER_INCLUDE_EXACT=1
           classifier_output="$(scripts/classify-ci-paths.sh "${changed[@]}")"
           expected_keys=(
             full_matrix gateway_rust council_rust sentinel_rust warroom_web
@@ -825,7 +829,8 @@ jobs:
           echo "$out" | grep -q '^verification=PASS$'
           echo "$out" | grep -q '^shipping_tier_claim=none$'
           echo "$out" | grep -q "^source_sha=${BRANCH_HEAD_SHA}$"
-          if echo "$out" | grep -qi 'Candidate verified'; then
+          if echo "$out" | grep -Eiq \
+            '^(tier:[[:space:]]*Candidate verified|shipping_tier_claim=Candidate verified)'; then
             echo "ERROR: isolation job must not claim Candidate verified" >&2
             exit 1
           fi
@@ -903,7 +908,8 @@ jobs:
           echo "$out" | grep -q '^verification=PASS$'
           # Do not print Candidate verified: CI required includes this job and
           # is not green yet. After aggregate + import, candidate-status owns tier.
-          if echo "$out" | grep -qi 'Candidate verified'; then
+          if echo "$out" | grep -Eiq \
+            '^(tier:[[:space:]]*Candidate verified|shipping_tier_claim=Candidate verified)'; then
             echo "ERROR: exact-merged job must not claim Candidate verified" >&2
             exit 1
           fi
