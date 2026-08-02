@@ -832,6 +832,7 @@ jobs:
           archive="$(echo "$out" | sed -n 's/^archive_path=//p')"
           {
             echo "ARCHIVE_PATH=$archive"
+            echo "EXPORT_MANIFEST=$(echo "$out" | sed -n 's/^export_manifest=//p')"
             echo "CANDIDATE_ID=$(echo "$out" | sed -n 's/^candidate_id=//p')"
             echo "ARCHIVE_SHA256=$(echo "$out" | sed -n 's/^archive_sha256=//p')"
           } >> "$GITHUB_ENV"
@@ -843,6 +844,7 @@ jobs:
           path: |
             ${{ env.ARCHIVE_PATH }}
             ${{ env.ARCHIVE_PATH }}.sha256
+            ${{ env.EXPORT_MANIFEST }}
           if-no-files-found: error
           retention-days: 14
 
@@ -897,6 +899,7 @@ jobs:
             exit 1
           fi
           archive="$(echo "$out" | sed -n 's/^archive_path=//p')"
+          manifest="$(echo "$out" | sed -n 's/^export_manifest=//p')"
           cid="$(echo "$out" | sed -n 's/^candidate_id=//p')"
           asha="$(echo "$out" | sed -n 's/^archive_sha256=//p')"
           payload="$(echo "$out" | sed -n 's/^payload_tree_hash=//p')"
@@ -915,13 +918,15 @@ jobs:
             echo ""
             echo "Import with:"
             echo '```bash'
-            echo "scripts/import-candidate.sh --archive <downloaded> \\"
+            echo "scripts/import-candidate.sh --archive <downloaded.tar.gz> \\"
+            echo "  --export-manifest <downloaded.export.json> \\"
             echo "  --expected-source-sha ${{ github.sha }} \\"
             echo "  --expected-candidate-id $cid"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           {
             echo "ARCHIVE_PATH=$archive"
+            echo "EXPORT_MANIFEST=$manifest"
             echo "CANDIDATE_ID=$cid"
             echo "ARCHIVE_SHA256=$asha"
           } >> "$GITHUB_ENV"
@@ -933,6 +938,7 @@ jobs:
           path: |
             ${{ env.ARCHIVE_PATH }}
             ${{ env.ARCHIVE_PATH }}.sha256
+            ${{ env.EXPORT_MANIFEST }}
           if-no-files-found: error
           retention-days: 90
 

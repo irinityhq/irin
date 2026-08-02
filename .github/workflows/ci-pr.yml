@@ -11,7 +11,15 @@ permissions:
 
 jobs:
   ci:
-    # Keep runner selection on reviewed main so pull-request code cannot select
-    # a self-hosted runner. The pinned graph checks out and actionlints the PR
-    # revision, while this stable job id preserves `ci / CI required`.
-    uses: irinityhq/irin/.github/workflows/ci.yml@main
+    # Call the reusable graph from *this PR revision* (not @main) so new jobs
+    # and aggregate deps introduced on the PR — including W4 Candidate isolation
+    # proof — self-test before merge. Previously `uses: …/ci.yml@main` meant a
+    # PR that added isolation/exact-merge jobs could never run them until after
+    # merge, so the cumulative shipping-correction PR could not demonstrate the
+    # required pre-merge isolation lane.
+    #
+    # Runner safety: selection stays fail-closed inside ci.yml (hosted for
+    # untrusted/public/fork; trusted self-hosted only for private same-repo PRs
+    # authored by iws17). Do not weaken those predicates when editing ci.yml.
+    # Local reusable workflow resolves to the same commit as this dispatcher.
+    uses: ./.github/workflows/ci.yml

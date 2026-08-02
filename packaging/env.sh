@@ -446,6 +446,124 @@ PY
   mv -f "$tmp" "$out_path" || irin_env_die "could not atomically write proof: $out_path"
 }
 
+# Assert a candidate directory's on-disk payload matches candidate.json identity.
+# Checks (all must hold):
+#   - exactly one DMG; DMG bytes == identity.dmg_sha256
+#   - bundle-manifest.txt digest == identity.bundle_manifest_digest
+#   - HASHES.txt source_sha/dmg_sha256/bundle_manifest_digest/pack_mode match identity
+# Dies on any mismatch. Used by import-candidate and worktree evidence harvest
+# so a mutated DMG under an unchanged candidate.json cannot be promoted.
+irin_assert_candidate_payload_matches_identity() {
+  local cand="$1"
+  [[ -d "$cand" ]] || irin_env_die "payload assert: not a directory: $cand"
+  python3 - "$cand" <<'PY'
+import hashlib
+import json
+import os
+import re
+import sys
+
+cand = os.path.abspath(sys.argv[1])
+cj = os.path.join(cand, "candidate.json")
+hashes_path = os.path.join(cand, "HASHES.txt")
+bm_path = os.path.join(cand, "bundle-manifest.txt")
+errs = []
+
+def sha256_file(path: str) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+if not os.path.isfile(cj):
+    raise SystemExit(f"payload assert: candidate.json missing: {cj}")
+raw = open(cj, "rb").read()
+try:
+    identity = json.loads(raw.decode("utf-8"))
+except json.JSONDecodeError as exc:
+    raise SystemExit(f"payload assert: candidate.json not JSON: {exc}") from exc
+if not isinstance(identity, dict):
+    raise SystemExit("payload assert: candidate.json must be an object")
+canon = json.dumps(identity, sort_keys=True, separators=(",", ":"), ensure_ascii=False) + "\n"
+if raw.decode("utf-8") != canon:
+    errs.append("candidate.json is not in canonical identity form")
+
+for key in (
+    "source_sha",
+    "semver",
+    "pack_mode",
+    "dmg_sha256",
+    "bundle_manifest_digest",
+):
+    if key not in identity:
+        errs.append(f"candidate.json missing {key}")
+
+dmg_sha = identity.get("dmg_sha256")
+bm_sha = identity.get("bundle_manifest_digest")
+source_sha = identity.get("source_sha")
+pack_mode = identity.get("pack_mode")
+if not isinstance(dmg_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", dmg_sha or ""):
+    errs.append("identity dmg_sha256 invalid")
+if not isinstance(bm_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", bm_sha or ""):
+    errs.append("identity bundle_manifest_digest invalid")
+
+dmgs = sorted(
+    n for n in os.listdir(cand)
+    if n.endswith(".dmg") and os.path.isfile(os.path.join(cand, n))
+)
+if len(dmgs) != 1:
+    errs.append(f"exactly one DMG required (found {len(dmgs)})")
+else:
+    actual_dmg = sha256_file(os.path.join(cand, dmgs[0]))
+    if dmg_sha and actual_dmg != dmg_sha:
+        errs.append(
+            f"DMG bytes do not match identity dmg_sha256 "
+            f"(got {actual_dmg}, identity {dmg_sha})"
+        )
+
+if not os.path.isfile(bm_path):
+    errs.append("bundle-manifest.txt missing")
+else:
+    actual_bm = sha256_file(bm_path)
+    if bm_sha and actual_bm != bm_sha:
+        errs.append(
+            f"bundle-manifest.txt does not match identity digest "
+            f"(got {actual_bm}, identity {bm_sha})"
+        )
+
+if not os.path.isfile(hashes_path):
+    errs.append("HASHES.txt missing")
+else:
+    hashes = {}
+    for line in open(hashes_path, encoding="utf-8"):
+        line = line.rstrip("\n")
+        if not line or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        if k in hashes:
+            errs.append(f"duplicate HASHES key: {k}")
+        hashes[k] = v
+    for key, expected in (
+        ("source_sha", source_sha),
+        ("dmg_sha256", dmg_sha),
+        ("bundle_manifest_digest", bm_sha),
+        ("pack_mode", pack_mode),
+    ):
+        got = hashes.get(key)
+        if got != expected:
+            errs.append(f"HASHES {key} != identity ({got!r} vs {expected!r})")
+
+app = os.path.join(cand, "IRIN.app")
+if not os.path.isdir(app):
+    errs.append("IRIN.app missing")
+
+if errs:
+    raise SystemExit("payload assert failed:\n  - " + "\n  - ".join(errs))
+print("payload matches identity")
+PY
+}
+
 # Require an absolute candidate store path under IRIN_CANDIDATE_ROOT.
 # Sets: IRIN_CANDIDATE_PATH (canonical), and derives DMG/HASHES/APP when present.
 irin_require_candidate_path() {

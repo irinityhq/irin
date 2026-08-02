@@ -4,8 +4,9 @@
 # Before removal, scan *ignored* paths only for recognized candidate
 # artifacts/proofs left by legacy or failed commands. W1 writes durable
 # candidates directly to IRIN_CANDIDATE_ROOT, so there is normally nothing
-# to harvest. If recognized ignored evidence is found, validate identity and
-# import atomically into the store, or refuse removal.
+# to harvest. If recognized ignored evidence is found:
+#   - complete payload → validate identity + payload bytes, import atomically
+#   - incomplete / legacy residue → refuse removal (do not silently destroy)
 #
 # Keeps dirty-worktree refusal and branch retention. Does not add an
 # unmerged-branch acknowledgement gate: removing a clean worktree does not
@@ -20,28 +21,25 @@ destination="${1:-}"
 [[ -n "$destination" ]] || { printf 'usage: %s /absolute/worktree/path\n' "$0" >&2; exit 2; }
 [[ "$destination" == /* ]] || { printf 'ERROR: worktree path must be absolute\n' >&2; exit 1; }
 [[ -d "$destination" ]] || { printf 'ERROR: worktree does not exist: %s\n' "$destination" >&2; exit 1; }
+
 # Prefer the path Git registered for this worktree (avoids macOS /tmp -> /private/tmp
 # mismatch). Fall back to the physical path when the argument is already resolved.
-destination_arg="$destination"
-destination="$(cd "$destination" && pwd -P)"
+destination_phys="$(cd "$destination" && pwd -P)"
 registered=""
 while IFS= read -r line; do
   [[ "$line" == worktree\ * ]] || continue
   wt="${line#worktree }"
   [[ -d "$wt" ]] || continue
-  if [[ "$(cd "$wt" && pwd -P)" == "$destination" ]]; then
+  if [[ "$(cd "$wt" && pwd -P)" == "$destination_phys" ]]; then
     registered="$wt"
     break
   fi
 done < <(git -C "$SOURCE_ROOT" worktree list --porcelain 2>/dev/null || true)
 if [[ -n "$registered" ]]; then
   destination="$registered"
+else
+  destination="$destination_phys"
 fi
-[[ "$destination" != "$(cd "$SOURCE_ROOT" && pwd -P)" ]] || {
-  printf 'ERROR: refusing to remove the checkout running this command\n' >&2
-  exit 1
-}
-# Also refuse when the physical path is the command's own checkout.
 [[ "$(cd "$destination" && pwd -P)" != "$(cd "$SOURCE_ROOT" && pwd -P)" ]] || {
   printf 'ERROR: refusing to remove the checkout running this command\n' >&2
   exit 1
@@ -58,23 +56,28 @@ if [[ -n "$(git -C "$destination" status --porcelain --untracked-files=normal)" 
   git -C "$destination" status --short >&2
   exit 1
 fi
-unset destination_arg
 
 # --- recognized ignored candidate evidence ---------------------------------
 # shellcheck source=/dev/null
 source "$SOURCE_ROOT/packaging/env.sh"
 irin_resolve_candidate_root
 
-# Collect directories that look like a candidate payload tree under ignored paths.
-# Recognized markers: candidate.json + (HASHES.txt | *.dmg | proofs/*.json).
-mapfile_candidates() {
-  # Prints absolute paths of candidate-like directories (one per line).
+# Scan ignored packaging / receipt surfaces. Markers are recognized independently
+# of candidate.json so legacy HASHES/DMG/app/proof residue cannot be destroyed
+# silently. Extra roots (tests) must stay physically under the target worktree.
+scan_report="$(
+  IRIN_WORKTREE_EVIDENCE_SCAN_ROOTS="${IRIN_WORKTREE_EVIDENCE_SCAN_ROOTS:-}" \
   python3 - "$destination" <<'PY'
 import os
 import sys
 
 root = os.path.abspath(sys.argv[1])
-# Only scan known ignored packaging / receipt surfaces (not the whole tree).
+root_real = os.path.realpath(root)
+
+def under_root(path: str) -> bool:
+    real = os.path.realpath(path)
+    return real == root_real or real.startswith(root_real + os.sep)
+
 scan_roots = [
     os.path.join(root, "packaging", "artifacts"),
     os.path.join(root, "packaging", "receipts"),
@@ -82,83 +85,150 @@ scan_roots = [
     os.path.join(root, "packaging", "build"),
     os.path.join(root, ".irin-receipts"),
 ]
-# Also honor any extra ignored candidate spill dirs via env (tests).
+
 extra = os.environ.get("IRIN_WORKTREE_EVIDENCE_SCAN_ROOTS", "")
 for part in extra.split(os.pathsep):
     part = part.strip()
-    if part:
-        scan_roots.append(part if os.path.isabs(part) else os.path.join(root, part))
+    if not part:
+        continue
+    # Relative paths join under the worktree. Absolute paths must still resolve
+    # physically under the target worktree (no escape to /tmp or home).
+    candidate = part if os.path.isabs(part) else os.path.join(root, part)
+    if not under_root(candidate):
+        raise SystemExit(
+            f"refusing scan root outside target worktree: {part!r} -> {candidate}"
+        )
+    scan_roots.append(candidate)
 
-found = []
-seen = set()
+# Marker basenames / patterns that recognize candidate evidence without
+# requiring candidate.json first.
+MARKER_FILES = {
+    "candidate.json",
+    "HASHES.txt",
+    "bundle-manifest.txt",
+}
+SKIP_DIR_NAMES = {
+    "cargo-home",
+    "cargo-target",
+    "npm-cache",
+    "tmp",
+    "node_modules",
+    "target",
+    "dmg-mount",
+}
 
-def is_candidate_dir(path: str) -> bool:
-    cj = os.path.join(path, "candidate.json")
-    if not os.path.isfile(cj):
-        return False
-    has_hashes = os.path.isfile(os.path.join(path, "HASHES.txt"))
-    has_dmg = any(
-        n.endswith(".dmg") and os.path.isfile(os.path.join(path, n))
-        for n in os.listdir(path)
-    )
-    proofs = os.path.join(path, "proofs")
-    has_proof = os.path.isdir(proofs) and any(
-        n.endswith(".json") and os.path.isfile(os.path.join(proofs, n))
-        for n in os.listdir(proofs)
-    )
-    return has_hashes or has_dmg or has_proof
+# dirpath -> set of marker descriptions found
+clusters: dict[str, set[str]] = {}
+
+def note(dirpath: str, marker: str) -> None:
+    ap = os.path.abspath(dirpath)
+    if not under_root(ap):
+        raise SystemExit(f"scanner escaped worktree at {ap}")
+    clusters.setdefault(ap, set()).add(marker)
 
 for scan in scan_roots:
     if not os.path.isdir(scan):
         continue
+    if not under_root(scan):
+        raise SystemExit(f"scan root escaped worktree: {scan}")
     for dirpath, dirnames, filenames in os.walk(scan, followlinks=False):
-        # Skip huge cargo/npm caches quickly.
         base = os.path.basename(dirpath)
-        if base in {"cargo-home", "cargo-target", "npm-cache", "tmp", "node_modules", "target"}:
+        if base in SKIP_DIR_NAMES:
             dirnames[:] = []
             continue
-        if "candidate.json" in filenames and is_candidate_dir(dirpath):
-            ap = os.path.abspath(dirpath)
-            if ap not in seen:
-                seen.add(ap)
-                found.append(ap)
-            dirnames[:] = []  # do not walk into a candidate tree
+        # Do not follow symlink children.
+        dirnames[:] = [
+            d for d in sorted(dirnames)
+            if d not in SKIP_DIR_NAMES and not os.path.islink(os.path.join(dirpath, d))
+        ]
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            if name in MARKER_FILES:
+                note(dirpath, name)
+            elif name.endswith(".dmg") and os.path.isfile(full):
+                note(dirpath, f"dmg:{name}")
+            elif name.endswith(".json") and os.path.basename(dirpath) == "proofs":
+                # proofs/*.json — cluster on the parent of proofs/
+                parent = os.path.dirname(dirpath)
+                note(parent, f"proof:{name}")
+        # IRIN.app directory (or symlink-to-dir) is a marker.
+        if "IRIN.app" in dirnames or (
+            "IRIN.app" in filenames  # unlikely
+        ):
+            note(dirpath, "IRIN.app")
+        app_path = os.path.join(dirpath, "IRIN.app")
+        if os.path.isdir(app_path) or os.path.islink(app_path):
+            note(dirpath, "IRIN.app")
 
-for path in found:
-    print(path)
+def is_complete(path: str) -> bool:
+    return (
+        os.path.isfile(os.path.join(path, "candidate.json"))
+        and os.path.isfile(os.path.join(path, "HASHES.txt"))
+        and os.path.isfile(os.path.join(path, "bundle-manifest.txt"))
+        and (os.path.isdir(os.path.join(path, "IRIN.app")) or os.path.islink(os.path.join(path, "IRIN.app")))
+        and sum(
+            1
+            for n in os.listdir(path)
+            if n.endswith(".dmg") and os.path.isfile(os.path.join(path, n))
+        )
+        == 1
+    )
+
+# Emit machine-readable lines: STATUS\tPATH\tmarkers...
+for path in sorted(clusters):
+    markers = ",".join(sorted(clusters[path]))
+    status = "complete" if is_complete(path) else "incomplete"
+    print(f"{status}\t{path}\t{markers}")
 PY
+)" || {
+  printf 'ERROR: evidence scan failed\n%s\n' "$scan_report" >&2
+  exit 1
 }
 
-evidence_paths=()
+complete_paths=()
+incomplete_paths=()
 while IFS= read -r line; do
-  [[ -n "$line" ]] && evidence_paths+=("$line")
-done < <(mapfile_candidates)
+  [[ -n "$line" ]] || continue
+  status="${line%%$'\t'*}"
+  rest="${line#*$'\t'}"
+  path="${rest%%$'\t'*}"
+  markers="${rest#*$'\t'}"
+  if [[ "$status" == "complete" ]]; then
+    complete_paths+=("$path")
+  else
+    incomplete_paths+=("$path|$markers")
+  fi
+done <<<"$scan_report"
 
-if (( ${#evidence_paths[@]} > 0 )); then
-  printf 'Found recognized ignored candidate evidence under worktree:\n' >&2
-  for p in "${evidence_paths[@]}"; do
+if (( ${#incomplete_paths[@]} > 0 )); then
+  printf 'ERROR: recognized incomplete/legacy candidate evidence under worktree (refusing removal):\n' >&2
+  for item in "${incomplete_paths[@]}"; do
+    path="${item%%|*}"
+    markers="${item#*|}"
+    printf '  %s  markers=[%s]\n' "$path" "$markers" >&2
+  done
+  printf 'Move or delete deliberately, or complete the payload (candidate.json + HASHES + bundle-manifest + IRIN.app + one DMG) before removal.\n' >&2
+  exit 1
+fi
+
+if (( ${#complete_paths[@]} > 0 )); then
+  printf 'Found complete ignored candidate evidence under worktree:\n' >&2
+  for p in "${complete_paths[@]}"; do
     printf '  %s\n' "$p" >&2
   done
 
-  # Harvest promotes via packaging/env.sh helpers (same atomic path as import).
-  for evidence in "${evidence_paths[@]}"; do
-    # Evidence outside IRIN_CANDIDATE_ROOT cannot use irin_require_candidate_path;
-    # validate payload identity then promote a copy into the durable store.
-    if [[ ! -f "$evidence/candidate.json" || ! -f "$evidence/HASHES.txt" \
-      || ! -f "$evidence/bundle-manifest.txt" || ! -d "$evidence/IRIN.app" ]]; then
-      printf 'ERROR: incomplete ignored candidate evidence (cannot validate/import): %s\n' \
-        "$evidence" >&2
-      printf 'Move or delete it deliberately, or complete the payload before removal.\n' >&2
-      exit 1
-    fi
-    dmg_count="$(find "$evidence" -maxdepth 1 -type f -name '*.dmg' | wc -l | tr -d ' ')"
-    if [[ "$dmg_count" != "1" ]]; then
-      printf 'ERROR: ignored candidate evidence must contain exactly one DMG: %s\n' \
-        "$evidence" >&2
-      exit 1
-    fi
+  for evidence in "${complete_paths[@]}"; do
+    # Physical containment re-check before any delete.
+    evidence_phys="$(cd "$evidence" && pwd -P)"
+    dest_phys="$(cd "$destination" && pwd -P)"
+    case "$evidence_phys" in
+      "$dest_phys"|"$dest_phys"/*) ;;
+      *)
+        printf 'ERROR: evidence path escaped target worktree: %s\n' "$evidence" >&2
+        exit 1
+        ;;
+    esac
 
-    # Validate canonical identity and capture bindings before any store write.
     id_lines="$(python3 - "$evidence" <<'PY'
 import hashlib, json, os, sys
 root = sys.argv[1]
@@ -193,7 +263,12 @@ PY
       exit 1
     }
 
-    # Payload tree must hash cleanly (refuses incomplete / corrupt trees).
+    # Payload bytes must match identity (same gate as import-candidate).
+    if ! irin_assert_candidate_payload_matches_identity "$evidence" >/dev/null; then
+      printf 'ERROR: ignored candidate evidence payload does not match identity: %s\n' \
+        "$evidence" >&2
+      exit 1
+    fi
     if ! irin_payload_tree_hash "$evidence" >/dev/null; then
       printf 'ERROR: ignored candidate evidence failed payload tree hash: %s\n' \
         "$evidence" >&2
@@ -202,11 +277,9 @@ PY
 
     stage="$IRIN_CANDIDATE_ROOT/.staging/worktree-harvest-$(python3 -c 'import uuid; print(uuid.uuid4())')"
     mkdir -p "$(dirname "$stage")"
-    # Copy then promote (evidence stays in worktree until promote succeeds).
     rm -rf "$stage"
     mkdir -p "$stage"
-    # Copy payload + proofs only.
-    for name in candidate.json HASHES.txt bundle-manifest.txt IRIN.app proofs; do
+    for name in candidate.json HASHES.txt bundle-manifest.txt IRIN.app proofs install; do
       if [[ -e "$evidence/$name" ]]; then
         cp -a "$evidence/$name" "$stage/$name"
       fi
@@ -216,6 +289,14 @@ PY
       cp -a "$dmg" "$stage/$(basename "$dmg")"
     done
     mkdir -p "$stage/proofs" "$stage/smoke" "$stage/install" "$stage/logs"
+
+    # Re-assert after copy (bit-rot / partial copy refuse).
+    irin_assert_candidate_payload_matches_identity "$stage" >/dev/null || {
+      printf 'ERROR: harvested staging payload identity check failed: %s\n' "$evidence" >&2
+      rm -rf "$stage"
+      exit 1
+    }
+
     dest="$IRIN_CANDIDATE_ROOT/$semver/$src_sha/$cid"
     result="$(irin_promote_candidate_from_staging "$stage" "$dest")" || {
       printf 'ERROR: failed to import ignored candidate evidence into store: %s\n' \
@@ -223,7 +304,6 @@ PY
       exit 1
     }
     printf 'Harvested ignored candidate evidence → %s (%s)\n' "$dest" "$result"
-    # Drop the worktree-local copy only after durable promote.
     chmod -R u+w "$evidence" 2>/dev/null || true
     rm -rf "$evidence"
   done
