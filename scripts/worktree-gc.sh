@@ -2,6 +2,20 @@
 # List or remove clean linked worktrees whose branch is already merged into
 # origin/main or whose remote tracking branch is gone. Never touches the
 # checkout running this command, main, or dirty trees.
+#
+# Prefer explicit `make worktree-remove DEST=...` after merge. This GC path is
+# a convenience for already-merged clean trees only.
+#
+# Fragile precondition (origin-branch-gone path): squash merges leave local tips
+# that are not ancestors of origin/main. Detection then relies on
+#   git cherry origin/main HEAD
+# showing no unique patches (`+` lines). That is a content-equality heuristic,
+# not a merge-object proof — it can miss exotic histories or mis-handle empty
+# commits. Do not add further squash-detection machinery here; when unsure,
+# remove the worktree explicitly after confirming the PR is merged.
+#
+# Removal always goes through scripts/remove-worktree.sh (dirty refuse, branch
+# retention, ignored candidate-evidence harvest/refuse).
 set -euo pipefail
 
 ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
@@ -14,6 +28,19 @@ METHODOLOGY_ROOT="${IRIN_METHODOLOGY_ROOT:-$ROOT}"
 apply=0
 if [[ "${1:-}" == "--apply" ]]; then
   apply=1
+elif [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+usage: worktree-gc.sh [--apply]
+
+List (default) or remove (--apply) clean linked worktrees whose branch is
+already merged into origin/main, or whose origin tracking branch is gone and
+git cherry origin/main HEAD shows no unique patches.
+
+Prefer explicit remove-worktree after merge. The git-cherry squash heuristic is
+fragile — see the header comment. Never touches main, dirty trees, or the
+checkout running this command.
+EOF
+  exit 0
 elif [[ -n "${1:-}" ]]; then
   printf 'usage: %s [--apply]\n' "$0" >&2
   exit 2

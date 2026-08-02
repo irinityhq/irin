@@ -14,11 +14,14 @@ keys=(
   workspace_supply_chain
   tauri_supply_chain
   sbom
+  exact_candidate
+  exact_install
 )
 
-all_false='false false false false false false false false false'
-full_pr='true true true true true true true true false'
-full_proof='true true true true true true true true true'
+# 11 booleans: full gateway council sentinel web tauri ws_sc tauri_sc sbom exact_cand exact_inst
+all_false='false false false false false false false false false false false'
+full_pr='true true true true true true true true false true true'
+full_proof='true true true true true true true true true true true'
 
 cases=(
   "root docs|$all_false|README.md CONTRIBUTING.md"
@@ -30,29 +33,42 @@ cases=(
   "integrated main forces full|$full_pr|__integrated_main__"
   "unknown forces full|$full_pr|new-surface/config.json"
   "development scripts stay light|$all_false|scripts/dev-check.sh scripts/new-worktree.sh scripts/dev-preflight.sh"
+  "export/import scripts stay light (no product rebuild)|$all_false|scripts/export-candidate.sh scripts/import-candidate.sh"
   "root Makefile conservatively selects the full matrix|$full_pr|Makefile"
-  "cargo-deny bootstrap selects supply-chain validation|false false false false false false true true false|scripts/bootstrap-dev-tools.sh"
+  "cargo-deny bootstrap selects supply-chain validation|false false false false false false true true false false false|scripts/bootstrap-dev-tools.sh"
   "classifier scripts still force full|$full_pr|scripts/classify-ci-paths.sh"
-  "gateway Rust source|false true false false false false false false false|gateway/sidecar-rs/src/main.rs"
-  "gateway manifest|false true false false false false true false false|gateway/sidecar-rs/Cargo.toml"
-  "gateway non-Rust runtime|false true false false false false false false false|gateway/docker-compose.yml gateway/lua/auth.lua"
+  "gateway Rust source|false true false false false false false false false false false|gateway/sidecar-rs/src/main.rs"
+  "gateway manifest|false true false false false false true false false false false|gateway/sidecar-rs/Cargo.toml"
+  "gateway non-Rust runtime|false true false false false false false false false false false|gateway/docker-compose.yml gateway/lua/auth.lua"
   "gateway docs stay light|$all_false|gateway/README.md gateway/docs/watch-api.md"
-  "sentinel runtime|false false false true false false false false false|sentinel/tools/check_protocol_version_drift.py"
+  "sentinel runtime|false false false true false false false false false false false|sentinel/tools/check_protocol_version_drift.py"
   "sentinel docs stay light|$all_false|sentinel/README.md sentinel/docs/protocol-implementation.md"
-  "council source|false false true false false false false false false|council-rs/src/main.rs"
-  "council manifest|false false true false false false true false false|council-rs/Cargo.toml"
-  "council non-Rust runtime|false false true false false false false false false|council-rs/prompts/chair.md.j2"
+  "council source|false false true false false false false false false false false|council-rs/src/main.rs"
+  "council manifest|false false true false false false true false false false false|council-rs/Cargo.toml"
+  "council non-Rust runtime|false false true false false false false false false false false|council-rs/prompts/chair.md.j2"
   "council docs stay light|$all_false|council-rs/README.md council-rs/docs/providers.md"
-  "web source and locks also select the embedded desktop|false false false false true true false false false|council-rs/warroom/web/app/page.tsx council-rs/warroom/web/package-lock.json"
-  "warroom launchers select both product lanes|false false false false true true false false false|council-rs/scripts/warroom-tauri-dev.sh"
-  "native proof selects both product lanes|false false false false true true false false false|scripts/smoke-macos-tauri-app.sh scripts/macos-window-proof.swift"
-  "tauri source|false false false false false true false false false|council-rs/warroom-tauri/src-tauri/src/lib.rs"
-  "tauri lock|false false false false false true false true false|council-rs/warroom-tauri/src-tauri/Cargo.lock"
-  "root cargo workspace|false true true true false false true false false|Cargo.toml Cargo.lock"
-  "shared deny policy|false false false false false false true true false|deny.toml"
-  "shared protocol source fans out|false true true true false false false false false|sentinel/sovereign-protocol/src/lib.rs"
-  "shared protocol manifest fans out|false true true true false false true false false|sentinel/sovereign-protocol/Cargo.toml"
-  "mixed paths union lanes|false true false false true true false false false|gateway/lua/auth.lua council-rs/warroom/web/package.json"
+  "web source and locks also select the embedded desktop|false false false false true true false false false true false|council-rs/warroom/web/app/page.tsx council-rs/warroom/web/package-lock.json"
+  "warroom launchers select both product lanes|false false false false true true false false false true false|council-rs/scripts/warroom-tauri-dev.sh"
+  "native proof selects both product lanes|false false false false true true false false false true false|scripts/smoke-macos-tauri-app.sh scripts/macos-window-proof.swift"
+  "tauri source|false false false false false true false false false true false|council-rs/warroom-tauri/src-tauri/src/lib.rs"
+  "tauri resources select install proof|false false false false false true false false false true true|council-rs/warroom-tauri/src-tauri/resources/gateway-pack/docker-compose.yml"
+  "tauri lock|false false false false false true false true false true false|council-rs/warroom-tauri/src-tauri/Cargo.lock"
+  "root cargo workspace|false true true true false false true false false false false|Cargo.toml Cargo.lock"
+  "shared deny policy|false false false false false false true true false false false|deny.toml"
+  "shared protocol source fans out|false true true true false false false false false false false|sentinel/sovereign-protocol/src/lib.rs"
+  "shared protocol manifest fans out|false true true true false false true false false false false|sentinel/sovereign-protocol/Cargo.toml"
+  "mixed paths union lanes|false true false false true true false false false true false|gateway/lua/auth.lua council-rs/warroom/web/package.json"
+  # W4 positive: packaging → exact_candidate
+  "packaging env selects exact candidate|false false false false false true false false false true false|packaging/env.sh"
+  "packaging build-dmg selects candidate+install|false false false false false true false false false true true|packaging/build-dmg.sh"
+  "packaging gateway-pack selects candidate+install|false false false false false true false false false true true|packaging/gateway-pack/docker-compose.yml"
+  # W4 positive: gateway pack / release scripts
+  "stage-gateway-pack selects candidate+install|false false false false false true false false false true true|scripts/stage-gateway-pack.sh"
+  "release-transaction selects exact candidate|false false false false false false false false false true false|scripts/release-transaction.sh"
+  "install-verify selects candidate+install|false false false false false false false false false true true|scripts/install-verify-candidate.sh"
+  # W4 negative: docs/tooling must not build a candidate
+  "docs-only tooling negative|$all_false|docs/architecture.md docs/development-workflow.md"
+  "worktree scripts stay light|$all_false|scripts/remove-worktree.sh scripts/worktree-gc.sh"
 )
 
 failures=0
@@ -82,8 +98,17 @@ stdin_output="$(printf '%s\n' \
   'council-rs/warroom/web/package.json' \
   | "$CLASSIFIER")"
 if [[ "$(sed -n 's/^gateway_rust=//p' <<<"$stdin_output")" != true ]] \
-  || [[ "$(sed -n 's/^warroom_web=//p' <<<"$stdin_output")" != true ]]; then
+  || [[ "$(sed -n 's/^warroom_web=//p' <<<"$stdin_output")" != true ]] \
+  || [[ "$(sed -n 's/^exact_candidate=//p' <<<"$stdin_output")" != true ]]; then
   printf 'classifier self-test: stdin mode failed\n' >&2
+  exit 1
+fi
+
+# Explicit: docs-only must not set exact_candidate or exact_install.
+docs_out="$($CLASSIFIER README.md docs/architecture.md)"
+if [[ "$(sed -n 's/^exact_candidate=//p' <<<"$docs_out")" != false ]] \
+  || [[ "$(sed -n 's/^exact_install=//p' <<<"$docs_out")" != false ]]; then
+  printf 'classifier self-test: docs-only must not select exact candidate/install\n' >&2
   exit 1
 fi
 

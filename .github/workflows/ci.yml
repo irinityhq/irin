@@ -53,6 +53,8 @@ jobs:
       workspace_supply_chain: ${{ steps.scope.outputs.workspace_supply_chain }}
       tauri_supply_chain: ${{ steps.scope.outputs.tauri_supply_chain }}
       sbom: ${{ steps.scope.outputs.sbom }}
+      exact_candidate: ${{ steps.scope.outputs.exact_candidate }}
+      exact_install: ${{ steps.scope.outputs.exact_install }}
       changed_files: ${{ steps.scope.outputs.changed_files }}
     steps:
       - name: Checkout repository
@@ -74,7 +76,23 @@ jobs:
               changed=(__scheduled_proof__)
               ;;
             push)
-              changed=(__integrated_main__)
+              # Path-scoped from the actual before...github.sha diff (not the
+              # legacy __integrated_main__ full-matrix sentinel). A zero or
+              # unavailable base fails safe to the full matrix.
+              before="${{ github.event.before }}"
+              head="${{ github.sha }}"
+              if [[ -z "$before" || "$before" =~ ^0+$ ]] \
+                || ! git cat-file -e "${before}^{commit}" 2>/dev/null; then
+                changed=(__integrated_main__)
+              else
+                changed=()
+                diff_output="$(git diff --name-only "$before...$head" --)"
+                while IFS= read -r path; do
+                  [[ -n "$path" ]] && changed+=("$path")
+                done <<<"$diff_output"
+                # Empty diff (e.g. empty commit) → no product lanes; keep
+                # always-on light checks only (classifier with zero paths).
+              fi
               ;;
             pull_request)
               base="${{ github.event.pull_request.base.sha }}"
@@ -99,6 +117,7 @@ jobs:
           expected_keys=(
             full_matrix gateway_rust council_rust sentinel_rust warroom_web
             warroom_tauri workspace_supply_chain tauri_supply_chain sbom
+            exact_candidate exact_install
           )
           [[ "$(printf '%s\n' "$classifier_output" | sed '/^$/d' | wc -l | tr -d ' ')" == "${#expected_keys[@]}" ]]
           for key in "${expected_keys[@]}"; do
@@ -497,7 +516,8 @@ jobs:
         run: make -C council-rs warroom-web-check
 
   warroom-tauri:
-    name: War Room desktop (Tauri) macOS
+    # Process proof only (IRIN_NATIVE_VISUAL=0). Not visual/product acceptance.
+    name: smoke-inert process proof - no visual/product acceptance
     runs-on: macos-15
     timeout-minutes: 30
     needs: detect-changes
@@ -748,6 +768,174 @@ jobs:
           done
           exit "$cleanup_status"
 
+  # ---------------------------------------------------------------------------
+  # W4 durable candidate jobs (do not collapse).
+  # 1) PR isolation: ad-hoc candidate from branch HEAD; no shipping tier.
+  # 2) Post-merge exact: rebuild for the squash/merge commit; export durable
+  #    bundle. Candidate verified is reportable only after import + green
+  #    aggregate — this job prints verification PASS only.
+  # Never upload a local make ship-check receipt as a GitHub status.
+  # ---------------------------------------------------------------------------
+  candidate-isolation-proof:
+    name: Candidate isolation proof (PR; no shipping tier)
+    runs-on: macos-15
+    timeout-minutes: 90
+    needs: detect-changes
+    if: >
+      needs.detect-changes.outputs.exact_candidate == 'true' &&
+      github.event_name == 'pull_request'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: warroom-tauri
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: council-rs/warroom/web/package-lock.json
+
+      - name: Hermetic packaging + export/import contracts
+        run: |
+          bash packaging/test-candidate-store.sh
+          bash scripts/test-export-import-candidate.sh
+
+      - name: Build ad-hoc candidate from branch HEAD (no shipping tier)
+        env:
+          IRIN_CANDIDATE_ROOT: ${{ runner.temp }}/irin-candidates
+        run: |
+          set -euo pipefail
+          mkdir -p "$IRIN_CANDIDATE_ROOT"
+          # Isolation contracts prove cross-SHA refuse; the build binds HEAD.
+          out="$(bash scripts/ci-build-adhoc-candidate.sh \
+            --export-dir "$IRIN_CANDIDATE_ROOT/.exports/${{ github.sha }}")"
+          printf '%s\n' "$out"
+          echo "$out" | grep -q '^verification=PASS$'
+          echo "$out" | grep -q '^shipping_tier_claim=none$'
+          if echo "$out" | grep -qi 'Candidate verified'; then
+            echo "ERROR: isolation job must not claim Candidate verified" >&2
+            exit 1
+          fi
+          {
+            echo "## Candidate isolation proof (PR; no shipping tier)"
+            echo ""
+            echo "Branch HEAD candidate is isolation evidence only — not a shipping tier."
+            echo '```'
+            printf '%s\n' "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          archive="$(echo "$out" | sed -n 's/^archive_path=//p')"
+          {
+            echo "ARCHIVE_PATH=$archive"
+            echo "CANDIDATE_ID=$(echo "$out" | sed -n 's/^candidate_id=//p')"
+            echo "ARCHIVE_SHA256=$(echo "$out" | sed -n 's/^archive_sha256=//p')"
+          } >> "$GITHUB_ENV"
+
+      - name: Upload isolation candidate archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: candidate-isolation-${{ github.sha }}
+          path: |
+            ${{ env.ARCHIVE_PATH }}
+            ${{ env.ARCHIVE_PATH }}.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  exact-merged-candidate:
+    name: Exact merged candidate
+    runs-on: macos-15
+    timeout-minutes: 90
+    needs: detect-changes
+    if: >
+      needs.detect-changes.outputs.exact_candidate == 'true' &&
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: warroom-tauri
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: council-rs/warroom/web/package-lock.json
+
+      - name: Hermetic packaging + export/import contracts
+        run: |
+          bash packaging/test-candidate-store.sh
+          bash scripts/test-export-import-candidate.sh
+
+      - name: Build exact merged-SHA candidate and export durable bundle
+        env:
+          IRIN_CANDIDATE_ROOT: ${{ runner.temp }}/irin-candidates
+          EXACT_INSTALL: ${{ needs.detect-changes.outputs.exact_install }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$IRIN_CANDIDATE_ROOT"
+          args=(--export-dir "$IRIN_CANDIDATE_ROOT/.exports/${{ github.sha }}" --source-sha "${{ github.sha }}")
+          if [[ "$EXACT_INSTALL" == "true" ]]; then
+            args+=(--install)
+          fi
+          out="$(bash scripts/ci-build-adhoc-candidate.sh "${args[@]}")"
+          printf '%s\n' "$out"
+          echo "$out" | grep -q '^verification=PASS$'
+          # Do not print Candidate verified: CI required includes this job and
+          # is not green yet. After aggregate + import, candidate-status owns tier.
+          if echo "$out" | grep -qi 'Candidate verified'; then
+            echo "ERROR: exact-merged job must not claim Candidate verified" >&2
+            exit 1
+          fi
+          archive="$(echo "$out" | sed -n 's/^archive_path=//p')"
+          cid="$(echo "$out" | sed -n 's/^candidate_id=//p')"
+          asha="$(echo "$out" | sed -n 's/^archive_sha256=//p')"
+          payload="$(echo "$out" | sed -n 's/^payload_tree_hash=//p')"
+          {
+            echo "## Exact merged candidate"
+            echo ""
+            echo "| Field | Value |"
+            echo "| --- | --- |"
+            echo "| source_sha | \`${{ github.sha }}\` |"
+            echo "| candidate_id | \`$cid\` |"
+            echo "| archive_sha256 | \`$asha\` |"
+            echo "| payload_tree_hash | \`$payload\` |"
+            echo "| exact_install | \`$EXACT_INSTALL\` |"
+            echo "| verification | PASS |"
+            echo "| shipping_tier_claim | none (import + green CI required) |"
+            echo ""
+            echo "Import with:"
+            echo '```bash'
+            echo "scripts/import-candidate.sh --archive <downloaded> \\"
+            echo "  --expected-source-sha ${{ github.sha }} \\"
+            echo "  --expected-candidate-id $cid"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "ARCHIVE_PATH=$archive"
+            echo "CANDIDATE_ID=$cid"
+            echo "ARCHIVE_SHA256=$asha"
+          } >> "$GITHUB_ENV"
+
+      - name: Upload exact merged candidate bundle (90-day retention)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: exact-merged-candidate-${{ github.sha }}
+          path: |
+            ${{ env.ARCHIVE_PATH }}
+            ${{ env.ARCHIVE_PATH }}.sha256
+          if-no-files-found: error
+          retention-days: 90
+
   ci-required:
     name: CI required
     runs-on: ${{ fromJSON(github.event.repository.private == true && (github.event_name != 'pull_request' || (github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == 'iws17')) && '{"group":"IRIN trusted main","labels":"irin-ci"}' || '["ubuntu-latest"]') }}
@@ -769,6 +957,8 @@ jobs:
       - warroom-tauri
       - sentinel-rust
       - gateway-smoke
+      - candidate-isolation-proof
+      - exact-merged-candidate
     steps:
       - name: Require successful or skipped CI lanes
         env:
