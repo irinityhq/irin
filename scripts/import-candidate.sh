@@ -304,7 +304,10 @@ rm -f "$STAGING/export-binding.json"
 # Ensure optional dirs exist for later tier evidence.
 mkdir -p "$STAGING/proofs" "$STAGING/smoke" "$STAGING/install" "$STAGING/logs"
 
-DEST="$IRIN_CANDIDATE_ROOT/$SEMVER/$SOURCE_SHA/$RECOMPUTED_ID"
+# Safe path components + physical containment under IRIN_CANDIDATE_ROOT.
+DEST="$(irin_assert_safe_candidate_dest \
+  "$IRIN_CANDIDATE_ROOT" "$SEMVER" "$SOURCE_SHA" "$RECOMPUTED_ID")" \
+  || die "refusing unsafe candidate destination path"
 note "promote import staging → $DEST"
 PROMOTE_RESULT="$(irin_promote_candidate_from_staging "$STAGING" "$DEST")" \
   || die "promote failed"

@@ -35,6 +35,9 @@ make_staging() {
     "$staging/proofs" "$staging/smoke" "$staging/install" "$staging/logs"
   printf 'host' >"$staging/IRIN.app/Contents/MacOS/council-warroom-tauri"
   printf 'side' >"$staging/IRIN.app/Contents/MacOS/council"
+  # Executable bits must be recorded in the manifest so mode-drop corruption fails.
+  chmod 0755 "$staging/IRIN.app/Contents/MacOS/council-warroom-tauri" \
+    "$staging/IRIN.app/Contents/MacOS/council"
   # Framework-style directory symlink (must round-trip as symlink, not dir).
   mkdir -p "$staging/IRIN.app/Contents/Frameworks/Real.framework/Versions/A"
   printf 'fw' >"$staging/IRIN.app/Contents/Frameworks/Real.framework/Versions/A/Real"
@@ -117,7 +120,6 @@ cp -a "$DEST/IRIN.app/." "$DEST/install/IRIN.app/"
 chmod -R u+w "$DEST/install/IRIN.app"
 cp "$DEST/bundle-manifest.txt" "$DEST/install/bundle-manifest.txt"
 BM_D="$(irin_sha256_file "$DEST/bundle-manifest.txt")"
-DMG_D="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["dmg_sha256"])' "$DEST/candidate.json")"
 INST_EXTRA="$(python3 -c 'import json,sys; print(json.dumps({
   "candidate_bundle_manifest_digest": sys.argv[1],
   "installed_bundle_manifest_digest": sys.argv[1],
@@ -354,5 +356,47 @@ pass "source SHA mismatch refuses import"
 
 [[ "$IMP" != *"Candidate verified"* ]] || fail "import must not print Candidate verified"
 pass "import does not claim Candidate verified"
+
+# --- app executable-bit corruption refuses export (W2 parity) ----------------
+export IRIN_CANDIDATE_ROOT="$TEST_HOME/candidates"
+source "$ROOT/packaging/env.sh"
+HOST_BIN="$DEST/IRIN.app/Contents/MacOS/council-warroom-tauri"
+chmod u+w "$HOST_BIN"
+chmod a-x "$HOST_BIN"  # drop execute; freeze-normalized mode must fail vs stored 0755/0555
+set +e
+out="$(irin_assert_candidate_payload_matches_identity "$DEST" 2>&1)"
+ec=$?
+set -e
+[[ $ec -ne 0 ]] || fail "app mode corruption should fail payload assert: $out"
+[[ "$out" == *"mode mismatch"* || "$out" == *"payload assert failed"* ]] \
+  || fail "expected mode mismatch: $out"
+set +e
+out="$("$EXPORT" --candidate "$DEST" --output "$TEST_HOME/export-corrupt" 2>&1)"
+ec=$?
+set -e
+[[ $ec -ne 0 ]] || fail "export must refuse app mode corruption: $out"
+# restore for cleanup
+chmod u+w "$HOST_BIN" 2>/dev/null || true
+chmod a+x "$HOST_BIN" 2>/dev/null || true
+pass "app executable-bit corruption refuses payload assert and export"
+
+# --- unsafe semver cannot build a store path ---------------------------------
+BAD_ID="$(python3 -c 'print("c"*64)')"
+mkdir -p "$TEST_HOME/safe-root"
+set +e
+out="$(irin_assert_safe_candidate_dest \
+  "$TEST_HOME/safe-root" '../escape' "$(sha40 a)" "$BAD_ID" 2>&1)"
+ec=$?
+set -e
+[[ $ec -ne 0 ]] || fail "semver with ../ should refuse: $out"
+[[ "$out" == *"unsafe"* || "$out" == *"invalid"* || "$out" == *"component"* || "$out" == *"escapes"* ]] \
+  || fail "expected unsafe semver message: $out"
+set +e
+out="$(irin_assert_safe_candidate_dest \
+  "$TEST_HOME/safe-root" '0.1.2' 'not-a-sha' "$BAD_ID" 2>&1)"
+ec=$?
+set -e
+[[ $ec -ne 0 ]] || fail "non-hex source_sha should refuse"
+pass "unsafe semver/source_sha refuse safe dest helper"
 
 printf 'export-import self-test: OK\n'

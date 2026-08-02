@@ -107,6 +107,8 @@ MARKER_FILES = {
     "HASHES.txt",
     "bundle-manifest.txt",
 }
+# Never walk into these for clustering (IRIN.app internals are not clusters;
+# install/ is a witness tree under a candidate, not a separate candidate).
 SKIP_DIR_NAMES = {
     "cargo-home",
     "cargo-target",
@@ -115,10 +117,11 @@ SKIP_DIR_NAMES = {
     "node_modules",
     "target",
     "dmg-mount",
+    "IRIN.app",
 }
 
 # dirpath -> set of marker descriptions found
-clusters: dict[str, set[str]] = {}
+clusters = {}
 
 def note(dirpath: str, marker: str) -> None:
     ap = os.path.abspath(dirpath)
@@ -136,43 +139,82 @@ for scan in scan_roots:
         if base in SKIP_DIR_NAMES:
             dirnames[:] = []
             continue
-        # Do not follow symlink children.
-        dirnames[:] = [
-            d for d in sorted(dirnames)
-            if d not in SKIP_DIR_NAMES and not os.path.islink(os.path.join(dirpath, d))
-        ]
+        # Do not follow symlink children; do not descend into IRIN.app.
+        keep = []
+        for d in sorted(dirnames):
+            full_d = os.path.join(dirpath, d)
+            if d in SKIP_DIR_NAMES or os.path.islink(full_d):
+                continue
+            keep.append(d)
+        dirnames[:] = keep
+
+        # install/ under a candidate parent: attach witnesses to the parent so
+        # install/bundle-manifest.txt + install/IRIN.app are not a separate cluster.
+        under_install = os.path.basename(dirpath) == "install"
+        install_parent = os.path.dirname(dirpath) if under_install else ""
+        install_belongs_to_parent = under_install and (
+            os.path.isfile(os.path.join(install_parent, "candidate.json"))
+            or os.path.isfile(os.path.join(install_parent, "HASHES.txt"))
+        )
+
         for name in filenames:
             full = os.path.join(dirpath, name)
             if name in MARKER_FILES:
-                note(dirpath, name)
+                if install_belongs_to_parent and name in (
+                    "bundle-manifest.txt",
+                    "HASHES.txt",
+                    "candidate.json",
+                ):
+                    # Only install/bundle-manifest is expected; still pin to parent.
+                    note(install_parent, f"install:{name}")
+                else:
+                    note(dirpath, name)
             elif name.endswith(".dmg") and os.path.isfile(full):
                 note(dirpath, f"dmg:{name}")
             elif name.endswith(".json") and os.path.basename(dirpath) == "proofs":
-                # proofs/*.json — cluster on the parent of proofs/
                 parent = os.path.dirname(dirpath)
                 note(parent, f"proof:{name}")
-        # IRIN.app directory (or symlink-to-dir) is a marker.
-        if "IRIN.app" in dirnames or (
-            "IRIN.app" in filenames  # unlikely
-        ):
-            note(dirpath, "IRIN.app")
+
         app_path = os.path.join(dirpath, "IRIN.app")
         if os.path.isdir(app_path) or os.path.islink(app_path):
-            note(dirpath, "IRIN.app")
+            if install_belongs_to_parent:
+                note(install_parent, "install:IRIN.app")
+            else:
+                note(dirpath, "IRIN.app")
 
 def is_complete(path: str) -> bool:
+    try:
+        names = os.listdir(path)
+    except OSError:
+        return False
     return (
         os.path.isfile(os.path.join(path, "candidate.json"))
         and os.path.isfile(os.path.join(path, "HASHES.txt"))
         and os.path.isfile(os.path.join(path, "bundle-manifest.txt"))
-        and (os.path.isdir(os.path.join(path, "IRIN.app")) or os.path.islink(os.path.join(path, "IRIN.app")))
+        and (
+            os.path.isdir(os.path.join(path, "IRIN.app"))
+            or os.path.islink(os.path.join(path, "IRIN.app"))
+        )
         and sum(
             1
-            for n in os.listdir(path)
+            for n in names
             if n.endswith(".dmg") and os.path.isfile(os.path.join(path, n))
         )
         == 1
     )
+
+# Collapse: any incomplete cluster nested under a complete candidate root is
+# install/proof residue of that candidate, not a separate incomplete spill.
+complete_roots = [p for p in clusters if is_complete(p)]
+for path in list(clusters):
+    if is_complete(path):
+        continue
+    for croot in complete_roots:
+        if path == croot or path.startswith(croot + os.sep):
+            # Absorb nested markers into the complete parent.
+            clusters[croot].update(clusters[path])
+            del clusters[path]
+            break
 
 # Emit machine-readable lines: STATUS\tPATH\tmarkers...
 for path in sorted(clusters):
@@ -262,8 +304,12 @@ PY
       printf 'ERROR: bad candidate-id from evidence: %s\n' "$evidence" >&2
       exit 1
     }
+    [[ "$src_sha" =~ ^[0-9a-f]{40}$ ]] || {
+      printf 'ERROR: bad source_sha from evidence: %s\n' "$evidence" >&2
+      exit 1
+    }
 
-    # Payload bytes must match identity (same gate as import-candidate).
+    # Payload bytes must match identity (same gate as import-candidate / W2).
     if ! irin_assert_candidate_payload_matches_identity "$evidence" >/dev/null; then
       printf 'ERROR: ignored candidate evidence payload does not match identity: %s\n' \
         "$evidence" >&2
@@ -297,7 +343,12 @@ PY
       exit 1
     }
 
-    dest="$IRIN_CANDIDATE_ROOT/$semver/$src_sha/$cid"
+    dest="$(irin_assert_safe_candidate_dest \
+      "$IRIN_CANDIDATE_ROOT" "$semver" "$src_sha" "$cid")" || {
+      printf 'ERROR: unsafe candidate destination for evidence: %s\n' "$evidence" >&2
+      rm -rf "$stage"
+      exit 1
+    }
     result="$(irin_promote_candidate_from_staging "$stage" "$dest")" || {
       printf 'ERROR: failed to import ignored candidate evidence into store: %s\n' \
         "$evidence" >&2

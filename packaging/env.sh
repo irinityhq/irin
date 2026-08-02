@@ -446,13 +446,49 @@ PY
   mv -f "$tmp" "$out_path" || irin_env_die "could not atomically write proof: $out_path"
 }
 
+# Assert store path components cannot escape IRIN_CANDIDATE_ROOT.
+# semver: single path component (no slashes, no ..); source_sha: 40 lowercase hex;
+# candidate_id: 64 lowercase hex. Returns absolute DEST; dies on escape.
+irin_assert_safe_candidate_dest() {
+  local root="$1" semver="$2" source_sha="$3" candidate_id="$4"
+  local dest dest_parent dest_real root_real
+  [[ -n "$root" && "$root" == /* ]] || irin_env_die "candidate root must be absolute"
+  # Single-component semver: digits/letters/dot/plus/hyphen only (e.g. 0.1.2, 0.1.2-rc.1).
+  [[ "$semver" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]] \
+    || irin_env_die "unsafe or invalid semver component: $semver"
+  [[ "$semver" != *".."* && "$semver" != *'/'* && "$semver" != *'\\'* ]] \
+    || irin_env_die "semver must be a single path component: $semver"
+  [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] \
+    || irin_env_die "source_sha must be 40 lowercase hex chars: $source_sha"
+  [[ "$candidate_id" =~ ^[0-9a-f]{64}$ ]] \
+    || irin_env_die "candidate_id must be 64 lowercase hex chars: $candidate_id"
+  dest="${root}/${semver}/${source_sha}/${candidate_id}"
+  dest_parent="$(dirname "$dest")"
+  mkdir -p "$dest_parent" || irin_env_die "could not create candidate parent: $dest_parent"
+  root_real="$(cd "$root" && pwd -P)" || irin_env_die "could not resolve candidate root: $root"
+  dest_real="$(cd "$dest_parent" && pwd -P)/$(basename "$dest")" \
+    || irin_env_die "could not resolve candidate dest parent: $dest_parent"
+  case "$dest_real" in
+    "$root_real"/*) ;;
+    *) irin_env_die "candidate dest escapes IRIN_CANDIDATE_ROOT ($root_real): $dest_real" ;;
+  esac
+  # Also refuse if any intermediate component is a symlink that walks out.
+  case "$(cd "$dest_parent" && pwd -P)" in
+    "$root_real"|"$root_real"/*) ;;
+    *) irin_env_die "candidate dest parent escapes store root: $dest_parent" ;;
+  esac
+  printf '%s' "$dest_real"
+}
+
 # Assert a candidate directory's on-disk payload matches candidate.json identity.
 # Checks (all must hold):
 #   - exactly one DMG; DMG bytes == identity.dmg_sha256
 #   - bundle-manifest.txt digest == identity.bundle_manifest_digest
 #   - HASHES.txt source_sha/dmg_sha256/bundle_manifest_digest/pack_mode match identity
+#   - IRIN.app path/kind/content/freeze-normalized-mode match bundle-manifest.txt
+#     (same comparison as scripts/candidate-status.sh / W2)
 # Dies on any mismatch. Used by import-candidate and worktree evidence harvest
-# so a mutated DMG under an unchanged candidate.json cannot be promoted.
+# so a mutated DMG/app under an unchanged candidate.json cannot be promoted.
 irin_assert_candidate_payload_matches_identity() {
   local cand="$1"
   [[ -d "$cand" ]] || irin_env_die "payload assert: not a directory: $cand"
@@ -475,6 +511,94 @@ def sha256_file(path: str) -> str:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+def mode_oct(path: str) -> str:
+    return format(os.lstat(path).st_mode & 0o777, "04o")
+
+def compute_bundle_manifest_rows(app: str) -> list:
+    """Match irin_write_bundle_manifest / candidate-status row shape."""
+    app = os.path.abspath(app)
+    rows = []
+    for dirpath, dirnames, filenames in os.walk(app, followlinks=False):
+        dirnames.sort()
+        filenames.sort()
+        for name in dirnames:
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, app).replace(os.sep, "/")
+            if os.path.islink(full):
+                rows.append((rel, "symlink", mode_oct(full), os.readlink(full)))
+            else:
+                rows.append((rel, "dir", mode_oct(full), "-"))
+        for name in filenames:
+            full = os.path.join(dirpath, name)
+            rel = os.path.relpath(full, app).replace(os.sep, "/")
+            if os.path.islink(full):
+                rows.append((rel, "symlink", mode_oct(full), os.readlink(full)))
+            elif os.path.isfile(full):
+                rows.append((rel, "file", mode_oct(full), sha256_file(full)))
+            else:
+                rows.append((rel, "other", mode_oct(full), "-"))
+    rows.sort(key=lambda r: r[0])
+    return rows
+
+def parse_bundle_manifest(text: str) -> dict:
+    out = {}
+    for line in text.splitlines():
+        if not line:
+            continue
+        parts = line.split("\t")
+        if len(parts) != 4:
+            raise ValueError(f"malformed bundle-manifest row: {line!r}")
+        rel, kind, mode, payload = parts
+        if rel in out:
+            raise ValueError(f"duplicate bundle-manifest path: {rel}")
+        out[rel] = (kind, mode, payload)
+    return out
+
+def freeze_normalized_mode(mode_str: str) -> str:
+    """Clear write bits only (chmod a-w freeze); preserve r/x. Matches W2."""
+    mode = int(mode_str, 8)
+    return format(mode & ~0o222, "04o")
+
+def app_content_matches_manifest(app: str, stored_manifest_text: str) -> list:
+    """Path/kind/payload + freeze-normalized mode — same rules as candidate-status."""
+    local_errs = []
+    try:
+        stored = parse_bundle_manifest(stored_manifest_text)
+    except ValueError as exc:
+        return [str(exc)]
+    current_rows = compute_bundle_manifest_rows(app)
+    current = {rel: (kind, mode, payload) for rel, kind, mode, payload in current_rows}
+    stored_paths = set(stored)
+    current_paths = set(current)
+    missing = sorted(stored_paths - current_paths)
+    extra = sorted(current_paths - stored_paths)
+    if missing:
+        local_errs.append(f"IRIN.app missing paths from bundle-manifest: {missing[:5]}")
+    if extra:
+        local_errs.append(f"IRIN.app has paths not in bundle-manifest: {extra[:5]}")
+    for rel in sorted(stored_paths & current_paths):
+        s_kind, s_mode, s_payload = stored[rel]
+        c_kind, c_mode, c_payload = current[rel]
+        if s_kind != c_kind:
+            local_errs.append(
+                f"IRIN.app kind mismatch for {rel}: stored={s_kind} current={c_kind}"
+            )
+            continue
+        if s_payload != c_payload:
+            local_errs.append(f"IRIN.app content mismatch for {rel}")
+        try:
+            s_norm = freeze_normalized_mode(s_mode)
+            c_norm = freeze_normalized_mode(c_mode)
+        except ValueError as exc:
+            local_errs.append(f"IRIN.app mode parse for {rel}: {exc}")
+            continue
+        if s_norm != c_norm:
+            local_errs.append(
+                f"IRIN.app mode mismatch for {rel}: "
+                f"stored={s_mode}(norm {s_norm}) current={c_mode}(norm {c_norm})"
+            )
+    return local_errs
 
 if not os.path.isfile(cj):
     raise SystemExit(f"payload assert: candidate.json missing: {cj}")
@@ -503,10 +627,17 @@ dmg_sha = identity.get("dmg_sha256")
 bm_sha = identity.get("bundle_manifest_digest")
 source_sha = identity.get("source_sha")
 pack_mode = identity.get("pack_mode")
+semver = identity.get("semver")
 if not isinstance(dmg_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", dmg_sha or ""):
     errs.append("identity dmg_sha256 invalid")
 if not isinstance(bm_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", bm_sha or ""):
     errs.append("identity bundle_manifest_digest invalid")
+if not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_sha or ""):
+    errs.append("identity source_sha must be 40 lowercase hex")
+if not isinstance(semver, str) or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+-]*", semver or ""):
+    errs.append("identity semver is not a safe single path component")
+elif ".." in (semver or "") or "/" in (semver or "") or "\\" in (semver or ""):
+    errs.append("identity semver must be a single path component")
 
 dmgs = sorted(
     n for n in os.listdir(cand)
@@ -555,8 +686,13 @@ else:
             errs.append(f"HASHES {key} != identity ({got!r} vs {expected!r})")
 
 app = os.path.join(cand, "IRIN.app")
-if not os.path.isdir(app):
+if not (os.path.isdir(app) or os.path.islink(app)):
     errs.append("IRIN.app missing")
+elif not os.path.isfile(bm_path):
+    pass  # already recorded
+else:
+    stored_bm_text = open(bm_path, encoding="utf-8").read()
+    errs.extend(app_content_matches_manifest(app, stored_bm_text))
 
 if errs:
     raise SystemExit("payload assert failed:\n  - " + "\n  - ".join(errs))

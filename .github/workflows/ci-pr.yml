@@ -10,16 +10,174 @@ permissions:
   contents: read
 
 jobs:
+  # Base-controlled graph: runner selection predicates live in reviewed main.
+  # Do not switch this to `uses: ./.github/workflows/ci.yml` — a PR could then
+  # rewrite runs-on and the trusted self-hosted guard in one commit.
   ci:
-    # Call the reusable graph from *this PR revision* (not @main) so new jobs
-    # and aggregate deps introduced on the PR — including W4 Candidate isolation
-    # proof — self-test before merge. Previously `uses: …/ci.yml@main` meant a
-    # PR that added isolation/exact-merge jobs could never run them until after
-    # merge, so the cumulative shipping-correction PR could not demonstrate the
-    # required pre-merge isolation lane.
-    #
-    # Runner safety: selection stays fail-closed inside ci.yml (hosted for
-    # untrusted/public/fork; trusted self-hosted only for private same-repo PRs
-    # authored by iws17). Do not weaken those predicates when editing ci.yml.
-    # Local reusable workflow resolves to the same commit as this dispatcher.
-    uses: ./.github/workflows/ci.yml
+    uses: irinityhq/irin/.github/workflows/ci.yml@main
+
+  # ---------------------------------------------------------------------------
+  # W4 bootstrap (hosted-only). Until the isolation job lands on main via the
+  # pin above, packaging-touching PRs still need a pre-merge isolation lane.
+  # This job is defined in the dispatcher with hard-coded GitHub-hosted
+  # runners only (macos-15 / ubuntu-latest). It never uses the trusted
+  # self-hosted runner group expression from ci.yml.
+  # After W4 merges to main, the @main graph owns the lane; this bootstrap
+  # remains a fail-closed hosted re-proof of the PR tree's scripts.
+  # ---------------------------------------------------------------------------
+  w4-bootstrap-scope:
+    name: W4 bootstrap scope
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      exact_candidate: ${{ steps.scope.outputs.exact_candidate }}
+      has_w4_scripts: ${{ steps.scope.outputs.has_w4_scripts }}
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - id: scope
+        name: Classify PR paths for candidate isolation
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="${{ github.event.pull_request.base.sha }}"
+          head="${{ github.event.pull_request.head.sha }}"
+          exact_candidate=false
+          has_w4=false
+          if [[ -x scripts/classify-ci-paths.sh ]]; then
+            changed=()
+            if git cat-file -e "${base}^{commit}" 2>/dev/null; then
+              while IFS= read -r path; do
+                [[ -n "$path" ]] && changed+=("$path")
+              done < <(git diff --name-only "$base...$head" --)
+            else
+              changed=(__unknown_base__)
+            fi
+            out="$(scripts/classify-ci-paths.sh "${changed[@]+"${changed[@]}"}")"
+            exact_candidate="$(sed -n 's/^exact_candidate=//p' <<<"$out")"
+          fi
+          if [[ -x scripts/ci-build-adhoc-candidate.sh \
+            && -x scripts/export-candidate.sh \
+            && -x scripts/import-candidate.sh \
+            && -x scripts/test-export-import-candidate.sh ]]; then
+            has_w4=true
+          fi
+          {
+            echo "exact_candidate=${exact_candidate:-false}"
+            echo "has_w4_scripts=${has_w4}"
+          } >> "$GITHUB_OUTPUT"
+          printf 'exact_candidate=%s has_w4_scripts=%s\n' \
+            "${exact_candidate:-false}" "$has_w4"
+
+  w4-isolation-bootstrap-hermetic:
+    name: Candidate isolation proof (PR bootstrap; hermetic hosted)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    needs: w4-bootstrap-scope
+    if: needs.w4-bootstrap-scope.outputs.has_w4_scripts == 'true'
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Hermetic W4 export/import + classifier contracts
+        run: |
+          set -euo pipefail
+          bash scripts/test-classify-ci-paths.sh
+          bash packaging/test-candidate-store.sh
+          out="$(bash scripts/test-export-import-candidate.sh 2>&1)"
+          printf '%s\n' "$out"
+          if echo "$out" | grep -qi 'Candidate verified'; then
+            echo "ERROR: hermetic bootstrap must not claim Candidate verified" >&2
+            exit 1
+          fi
+
+  w4-isolation-bootstrap-macos:
+    name: Candidate isolation proof (PR bootstrap; macos-15 hosted only)
+    # Hard-coded GitHub-hosted runner. No self-hosted expression. No runner group.
+    runs-on: macos-15
+    timeout-minutes: 90
+    needs: w4-bootstrap-scope
+    if: >
+      needs.w4-bootstrap-scope.outputs.has_w4_scripts == 'true' &&
+      needs.w4-bootstrap-scope.outputs.exact_candidate == 'true'
+    steps:
+      - name: Checkout pull request
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - name: Install Rust and restore cache
+        uses: ./.github/actions/rust-setup
+        with:
+          lane: warroom-tauri
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: council-rs/warroom/web/package-lock.json
+
+      - name: Hermetic contracts then ad-hoc candidate (no shipping tier)
+        env:
+          IRIN_CANDIDATE_ROOT: ${{ runner.temp }}/irin-candidates
+        run: |
+          set -euo pipefail
+          mkdir -p "$IRIN_CANDIDATE_ROOT"
+          bash packaging/test-candidate-store.sh
+          bash scripts/test-export-import-candidate.sh
+          out="$(bash scripts/ci-build-adhoc-candidate.sh \
+            --export-dir "$IRIN_CANDIDATE_ROOT/.exports/${{ github.sha }}")"
+          printf '%s\n' "$out"
+          echo "$out" | grep -q '^verification=PASS$'
+          echo "$out" | grep -q '^shipping_tier_claim=none$'
+          if echo "$out" | grep -qi 'Candidate verified'; then
+            echo "ERROR: bootstrap must not claim Candidate verified" >&2
+            exit 1
+          fi
+          {
+            echo "## W4 isolation bootstrap (hosted only; no shipping tier)"
+            echo ""
+            echo "Base-controlled \`ci.yml@main\` does not yet own this lane on unmerged"
+            echo "graphs. This job runs only on GitHub-hosted macos-15."
+            echo '```'
+            printf '%s\n' "$out"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          archive="$(echo "$out" | sed -n 's/^archive_path=//p')"
+          manifest="$(echo "$out" | sed -n 's/^export_manifest=//p')"
+          {
+            echo "ARCHIVE_PATH=$archive"
+            echo "EXPORT_MANIFEST=$manifest"
+          } >> "$GITHUB_ENV"
+
+      - name: Upload bootstrap isolation archive
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: candidate-isolation-bootstrap-${{ github.sha }}
+          path: |
+            ${{ env.ARCHIVE_PATH }}
+            ${{ env.ARCHIVE_PATH }}.sha256
+            ${{ env.EXPORT_MANIFEST }}
+          if-no-files-found: error
+          retention-days: 14
+
+  w4-isolation-bootstrap-required:
+    name: W4 isolation bootstrap required
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: always()
+    needs:
+      - w4-bootstrap-scope
+      - w4-isolation-bootstrap-hermetic
+      - w4-isolation-bootstrap-macos
+    steps:
+      - name: Require hosted bootstrap success or skip
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          set -euo pipefail
+          # Scope always required. Hermetic/macos may be skipped when scripts or
+          # exact_candidate are absent; then skip is success.
+          jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<<"$NEEDS"
