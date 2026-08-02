@@ -62,13 +62,13 @@ warroom: ## macOS/Ubuntu: run Council + War Room Web in the foreground
 	COUNCIL_PORT="$${IRIN_COUNCIL_PORT:-8765}" WARROOM_WEB_PORT="$${IRIN_WEB_PORT:-3010}" \
 		$(MAKE) -C council-rs warroom-browser
 
-dmg-build: ## Build ad-hoc signed IRIN .app + .dmg (Apple silicon)
+dmg-build: ## Build IRIN candidate into IRIN_CANDIDATE_ROOT (prints candidate_path=)
 	bash packaging/build-dmg.sh
 
-dmg-verify: ## Verify untouched DMG + explicit receipt (requires IRIN_DMG_HASHES_PATH; never re-signs)
+dmg-verify: ## Verify named candidate (requires IRIN_CANDIDATE_PATH; never re-signs)
 	bash packaging/verify-dmg.sh
 
-dmg-smoke: ## Full-app packaged smoke (PROMOTION=1 for strict promotion gate)
+dmg-smoke: ## Full-app smoke from named candidate (requires IRIN_CANDIDATE_PATH; always fresh-extract)
 	bash packaging/smoke-full-app.sh
 
 gateway-pack-stage: ## Stage runtime-only Gateway Pack into Tauri resources (gitignored)
@@ -81,6 +81,7 @@ gateway-pack-test: ## Static + isolation tests for the optional Gateway Pack
 	bash scripts/test-gateway-pack-assets.sh
 	bash scripts/test-gateway-pack-isolation.sh
 	bash scripts/test-gateway-pack-desktop-ownership.sh
+	bash packaging/test-candidate-store.sh
 
 gateway-pack-integration-smoke: ## Isolated compose smoke (local-dev images; foreign fixtures survive the product, harness cleans its own)
 	bash scripts/test-gateway-pack-integration-smoke.sh
