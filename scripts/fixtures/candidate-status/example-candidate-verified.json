@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "reporter": "scripts/candidate-status.sh",
+  "candidate_path": "/Users/example/.local/state/irin/candidates/0.1.2/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "candidate_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "semver": "0.1.2",
+  "pack_mode": "local-dev",
+  "dmg_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "bundle_manifest_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "well_formed": true,
+  "tier": "Candidate verified",
+  "blockers": [
+    {
+      "code": "missing_install_proof",
+      "message": "proofs/install.json missing",
+      "blocks_tier": "Installed"
+    }
+  ],
+  "checks": {
+    "identity_ok": true,
+    "payload_ok": true,
+    "source_on_main": "true",
+    "ci_required_green": "true",
+    "verify_proof": true,
+    "install_proof": false,
+    "acceptance_proof": false,
+    "publication_proof": false
+  },
+  "caveats": []
+}

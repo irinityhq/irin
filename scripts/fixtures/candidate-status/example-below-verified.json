@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "reporter": "scripts/candidate-status.sh",
+  "candidate_path": "/Users/example/.local/state/irin/candidates/0.1.2/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "candidate_id": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+  "source_sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "semver": "0.1.2",
+  "pack_mode": "local-dev",
+  "dmg_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "bundle_manifest_digest": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "well_formed": true,
+  "tier": null,
+  "blockers": [
+    {
+      "code": "missing_verify_proof",
+      "message": "proofs/verify.json missing",
+      "blocks_tier": "Candidate verified"
+    },
+    {
+      "code": "source_on_main_unavailable",
+      "message": "could not determine whether source SHA is on origin/main (network/local refs unavailable)",
+      "blocks_tier": "Candidate verified"
+    },
+    {
+      "code": "ci_required_unavailable",
+      "message": "could not determine CI required aggregate state (network/auth unavailable)",
+      "blocks_tier": "Candidate verified"
+    }
+  ],
+  "checks": {
+    "identity_ok": true,
+    "payload_ok": true,
+    "source_on_main": "unavailable",
+    "ci_required_green": "unavailable",
+    "verify_proof": false,
+    "install_proof": false,
+    "acceptance_proof": false,
+    "publication_proof": false
+  },
+  "caveats": []
+}

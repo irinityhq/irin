@@ -82,6 +82,7 @@ gateway-pack-test: ## Static + isolation tests for the optional Gateway Pack
 	bash scripts/test-gateway-pack-isolation.sh
 	bash scripts/test-gateway-pack-desktop-ownership.sh
 	bash packaging/test-candidate-store.sh
+	bash scripts/test-candidate-status.sh
 
 gateway-pack-integration-smoke: ## Isolated compose smoke (local-dev images; foreign fixtures survive the product, harness cleans its own)
 	bash scripts/test-gateway-pack-integration-smoke.sh
