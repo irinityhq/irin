@@ -380,19 +380,50 @@ def freeze_normalized_mode(mode_str: str) -> str:
     return format(mode & ~0o222, "04o")
 
 
+def app_symlink_containment_errors(app: str) -> list:
+    """Every symlink under IRIN.app must resolve physically inside IRIN.app.
+
+    Safe framework-relative links (e.g. Current -> A) pass. Absolute or
+    escaping targets fail — same rule as packaging/env.sh payload assert.
+    """
+    errs = []
+    app_real = os.path.realpath(app)
+    app_prefix = app_real if app_real.endswith(os.sep) else app_real + os.sep
+    for dirpath, dirnames, filenames in os.walk(app, followlinks=False):
+        for name in list(dirnames) + list(filenames):
+            full = os.path.join(dirpath, name)
+            if not os.path.islink(full):
+                continue
+            rel = os.path.relpath(full, app).replace(os.sep, "/")
+            target = os.readlink(full)
+            try:
+                resolved = os.path.realpath(full)
+            except OSError as exc:
+                errs.append(f"IRIN.app symlink {rel} could not be resolved: {exc}")
+                continue
+            if resolved != app_real and not resolved.startswith(app_prefix):
+                errs.append(
+                    f"IRIN.app symlink escapes app: {rel} -> {target!r} "
+                    f"(resolved {resolved})"
+                )
+    return errs
+
+
 def app_content_matches_manifest(app: str, stored_manifest_text: str) -> list:
     """Verify current IRIN.app against a stored bundle-manifest.
 
     Compares path set, entry kind, content payload (file SHA-256 or symlink
     target), and freeze-normalized mode (write bits cleared; r/x preserved).
     Executable-bit loss (e.g. 0755→0644) fails; pure a-w freeze (0755→0555)
-    passes.
+    passes. Also requires every symlink target to resolve physically inside
+    IRIN.app (absolute/escaping links cannot become Candidate verified).
     """
     errs = []
+    errs.extend(app_symlink_containment_errors(app))
     try:
         stored = parse_bundle_manifest(stored_manifest_text)
     except ValueError as exc:
-        return [str(exc)]
+        return errs + [str(exc)]
     current_rows = compute_bundle_manifest_rows(app)
     current = {rel: (kind, mode, payload) for rel, kind, mode, payload in current_rows}
     stored_paths = set(stored)

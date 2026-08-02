@@ -615,13 +615,51 @@ def freeze_normalized_mode(mode_str: str) -> str:
     mode = int(mode_str, 8)
     return format(mode & ~0o222, "04o")
 
-def app_content_matches_manifest(app: str, stored_manifest_text: str) -> list:
-    """Path/kind/payload + freeze-normalized mode — same rules as candidate-status."""
+def app_symlink_containment_errors(app: str) -> list:
+    """Every symlink under IRIN.app must resolve physically inside IRIN.app.
+
+    Safe framework-relative links (e.g. Current -> A) pass. Absolute or
+    escaping targets (e.g. ExternalPointer -> /tmp/Evil) fail. Prevents
+    export/harvest from blessing a mutable external pointer that import
+    would refuse as an unsafe link.
+    """
     local_errs = []
+    app_real = os.path.realpath(app)
+    if not app_real.endswith(os.sep):
+        app_prefix = app_real + os.sep
+    else:
+        app_prefix = app_real
+    for dirpath, dirnames, filenames in os.walk(app, followlinks=False):
+        # Inspect symlink dirs without descending through them.
+        for name in list(dirnames) + list(filenames):
+            full = os.path.join(dirpath, name)
+            if not os.path.islink(full):
+                continue
+            rel = os.path.relpath(full, app).replace(os.sep, "/")
+            target = os.readlink(full)
+            try:
+                resolved = os.path.realpath(full)
+            except OSError as exc:
+                local_errs.append(f"IRIN.app symlink {rel} could not be resolved: {exc}")
+                continue
+            if resolved != app_real and not resolved.startswith(app_prefix):
+                local_errs.append(
+                    f"IRIN.app symlink escapes app: {rel} -> {target!r} "
+                    f"(resolved {resolved})"
+                )
+    return local_errs
+
+def app_content_matches_manifest(app: str, stored_manifest_text: str) -> list:
+    """Path/kind/payload + freeze-normalized mode + symlink containment.
+
+    Same rules as candidate-status, plus physical containment of symlink targets.
+    """
+    local_errs = []
+    local_errs.extend(app_symlink_containment_errors(app))
     try:
         stored = parse_bundle_manifest(stored_manifest_text)
     except ValueError as exc:
-        return [str(exc)]
+        return local_errs + [str(exc)]
     current_rows = compute_bundle_manifest_rows(app)
     current = {rel: (kind, mode, payload) for rel, kind, mode, payload in current_rows}
     stored_paths = set(stored)

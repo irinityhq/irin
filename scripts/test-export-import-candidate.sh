@@ -400,6 +400,76 @@ rm -f "$APP_REAL"
 mv "$APP_BACKUP" "$APP_REAL"
 pass "top-level IRIN.app symlink refuses payload assert"
 
+# --- internal symlink escaping IRIN.app refuses (absolute external pointer) --
+chmod -R u+w "$DEST/IRIN.app" 2>/dev/null || true
+EVIL_DIR="$TEST_HOME/external/Evil"
+mkdir -p "$EVIL_DIR"
+printf 'evil' >"$EVIL_DIR/payload"
+mkdir -p "$DEST/IRIN.app/Contents/Frameworks"
+ln -s "$EVIL_DIR" "$DEST/IRIN.app/Contents/Frameworks/ExternalPointer"
+# Regenerate identity with the escaping link (adversary rebuilds legitimately).
+irin_write_bundle_manifest "$DEST/IRIN.app" "$DEST/bundle-manifest.txt"
+BM_NEW="$(irin_sha256_file "$DEST/bundle-manifest.txt")"
+python3 - "$DEST/candidate.json" "$BM_NEW" <<'PY'
+import json, sys
+path, bm = sys.argv[1:]
+doc = json.load(open(path))
+doc["bundle_manifest_digest"] = bm
+open(path, "w").write(json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+# Keep HASHES in sync so only the escape is the failure mode.
+python3 - "$DEST/HASHES.txt" "$BM_NEW" <<'PY'
+import sys
+path, bm = sys.argv[1:]
+lines = []
+for line in open(path):
+    if line.startswith("bundle_manifest_digest="):
+        lines.append(f"bundle_manifest_digest={bm}\n")
+    else:
+        lines.append(line)
+open(path, "w").writelines(lines)
+PY
+set +e
+out="$(irin_assert_candidate_payload_matches_identity "$DEST" 2>&1)"
+ec=$?
+set -e
+[[ $ec -ne 0 ]] || fail "escaping internal symlink should refuse payload assert: $out"
+[[ "$out" == *"escapes app"* || "$out" == *"symlink escapes"* ]] \
+  || fail "expected escapes-app message: $out"
+set +e
+out="$("$EXPORT" --candidate "$DEST" --output "$TEST_HOME/export-escape" 2>&1)"
+ec=$?
+set -e
+[[ $ec -ne 0 ]] || fail "export must refuse escaping internal symlink: $out"
+# Safe relative framework link still passes after removing the escape.
+rm -f "$DEST/IRIN.app/Contents/Frameworks/ExternalPointer"
+# Current -> A already in fixture from make_staging; re-identity to clean state.
+irin_write_bundle_manifest "$DEST/IRIN.app" "$DEST/bundle-manifest.txt"
+BM_OK="$(irin_sha256_file "$DEST/bundle-manifest.txt")"
+python3 - "$DEST/candidate.json" "$BM_OK" <<'PY'
+import json, sys
+path, bm = sys.argv[1:]
+doc = json.load(open(path))
+doc["bundle_manifest_digest"] = bm
+open(path, "w").write(json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+python3 - "$DEST/HASHES.txt" "$BM_OK" <<'PY'
+import sys
+path, bm = sys.argv[1:]
+lines = []
+for line in open(path):
+    if line.startswith("bundle_manifest_digest="):
+        lines.append(f"bundle_manifest_digest={bm}\n")
+    else:
+        lines.append(line)
+open(path, "w").writelines(lines)
+PY
+# Re-freeze payload modes after edits (export requires identity match).
+irin_freeze_immutable_payload "$DEST" 2>/dev/null || true
+irin_assert_candidate_payload_matches_identity "$DEST" >/dev/null \
+  || fail "safe relative framework symlinks must still pass payload assert"
+pass "escaping internal symlink refuses; safe relative framework links pass"
+
 # --- intermediate symlink must not mkdir outside store before refuse --------
 BAD_ID="$(python3 -c 'print("c"*64)')"
 OUTSIDE="$TEST_HOME/outside-store"
