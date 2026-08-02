@@ -922,12 +922,16 @@ jobs:
             printf '%s\n' "$out"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          archive="$(echo "$out" | sed -n 's/^archive_path=//p')"
+          # export + ad-hoc summary both print archive_path=; take one line only
+          # so GITHUB_ENV stays KEY=value (multi-line values break the file command).
+          kv() { printf '%s\n' "$1" | sed -n "s/^${2}=//p" | head -n1; }
+          archive="$(kv "$out" archive_path)"
+          [[ -n "$archive" && -f "$archive" ]] || { echo "ERROR: missing archive_path" >&2; exit 1; }
           {
             echo "ARCHIVE_PATH=$archive"
-            echo "EXPORT_MANIFEST=$(echo "$out" | sed -n 's/^export_manifest=//p')"
-            echo "CANDIDATE_ID=$(echo "$out" | sed -n 's/^candidate_id=//p')"
-            echo "ARCHIVE_SHA256=$(echo "$out" | sed -n 's/^archive_sha256=//p')"
+            echo "EXPORT_MANIFEST=$(kv "$out" export_manifest)"
+            echo "CANDIDATE_ID=$(kv "$out" candidate_id)"
+            echo "ARCHIVE_SHA256=$(kv "$out" archive_sha256)"
             echo "BRANCH_HEAD_SHA=$BRANCH_HEAD_SHA"
           } >> "$GITHUB_ENV"
 
@@ -993,11 +997,14 @@ jobs:
             echo "ERROR: exact-merged job must not claim Candidate verified" >&2
             exit 1
           fi
-          archive="$(echo "$out" | sed -n 's/^archive_path=//p')"
-          manifest="$(echo "$out" | sed -n 's/^export_manifest=//p')"
-          cid="$(echo "$out" | sed -n 's/^candidate_id=//p')"
-          asha="$(echo "$out" | sed -n 's/^archive_sha256=//p')"
-          payload="$(echo "$out" | sed -n 's/^payload_tree_hash=//p')"
+          # export + ad-hoc summary both print key= lines; take one line only.
+          kv() { printf '%s\n' "$1" | sed -n "s/^${2}=//p" | head -n1; }
+          archive="$(kv "$out" archive_path)"
+          manifest="$(kv "$out" export_manifest)"
+          cid="$(kv "$out" candidate_id)"
+          asha="$(kv "$out" archive_sha256)"
+          payload="$(kv "$out" payload_tree_hash)"
+          [[ -n "$archive" && -f "$archive" ]] || { echo "ERROR: missing archive_path" >&2; exit 1; }
           {
             echo "## Exact merged candidate"
             echo ""

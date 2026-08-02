@@ -219,8 +219,12 @@ jobs:
             printf '%s\n' "$out"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          archive="$(echo "$out" | sed -n 's/^archive_path=//p')"
-          manifest="$(echo "$out" | sed -n 's/^export_manifest=//p')"
+          # export + ad-hoc summary both print archive_path=; take one line only
+          # so GITHUB_ENV stays KEY=value (multi-line values break the file command).
+          kv() { printf '%s\n' "$1" | sed -n "s/^${2}=//p" | head -n1; }
+          archive="$(kv "$out" archive_path)"
+          manifest="$(kv "$out" export_manifest)"
+          [[ -n "$archive" && -f "$archive" ]] || { echo "ERROR: missing archive_path" >&2; exit 1; }
           {
             echo "ARCHIVE_PATH=$archive"
             echo "EXPORT_MANIFEST=$manifest"
