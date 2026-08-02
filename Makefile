@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help release-check worktree worktree-remove tools lint-crypto preflight check ship-check verify verify-down verify-formal docker-cache-prune warroom dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction worktree-gc lint-security opengrep lint-lua gateway-prepare-config cli-proxies-up cli-proxies-down cli-proxies-status
+.PHONY: help release-check worktree worktree-remove tools lint-crypto preflight check ship-check verify verify-down verify-formal docker-cache-prune warroom dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction candidate-status install-verify record-acceptance link-ship-board worktree-gc lint-security opengrep lint-lua gateway-prepare-config cli-proxies-up cli-proxies-down cli-proxies-status
 
 release-check: ## Verify public source-tree boundaries
 	bash scripts/check-public-tree.sh
@@ -83,6 +83,7 @@ gateway-pack-test: ## Static + isolation tests for the optional Gateway Pack
 	bash scripts/test-gateway-pack-desktop-ownership.sh
 	bash packaging/test-candidate-store.sh
 	bash scripts/test-candidate-status.sh
+	bash scripts/test-release-transaction-w3.sh
 
 gateway-pack-integration-smoke: ## Isolated compose smoke (local-dev images; foreign fixtures survive the product, harness cleans its own)
 	bash scripts/test-gateway-pack-integration-smoke.sh
@@ -96,8 +97,20 @@ gateway-pack-prod-images: ## Build + push production GHCR images (IRIN_PACK_IMAG
 production-manifest: ## Pin production manifest from live GHCR digests (IRIN_PACK_IMAGES_TAG=...)
 	bash scripts/generate-production-manifest.sh
 
-release-transaction: ## Fail-closed release ladder (scripts/release-transaction.sh --tag vX.Y.Z | --dry-run-rc)
+candidate-status: ## Sole candidate-tier reporter (ARGS=--candidate PATH [--json] [--require TIER])
+	bash scripts/candidate-status.sh $(ARGS)
+
+install-verify: ## Fresh-extract candidate DMG into install/ + write install proof (ARGS=--candidate PATH)
+	bash scripts/install-verify-candidate.sh $(ARGS)
+
+record-acceptance: ## Interactive T2 acceptance (ARGS=--candidate PATH --installed-app PATH; tty required)
+	bash scripts/record-acceptance.sh $(ARGS)
+
+release-transaction: ## Prepare or publish (ARGS=--prepare-production --t1-packet P | --publish --tag vX.Y.Z --candidate PATH --t2-packet PATH)
 	bash scripts/release-transaction.sh $(ARGS)
+
+link-ship-board: ## Link durable ship-board into this worktree (operator-owned SSOT)
+	bash scripts/link-ship-board.sh
 
 build: ## Build the full Rust workspace in release mode
 	bash scripts/cargo-target-policy.sh run "$(CURDIR)" cargo build --workspace --release
