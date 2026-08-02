@@ -52,12 +52,20 @@ jobs:
           # Manual lane is rc-* only. vX.Y.Z labels are publication authority
           # (release-transaction --publish) and must not be pre-claimed here.
           if [[ ! "$TAG_NAME" =~ ^rc-[0-9a-f]{7,40}$ ]]; then
-            echo "ERROR: manual release-images accepts rc-<sha12> only (got $TAG_NAME); v* labels are set by --publish" >&2
+            echo "ERROR: manual release-images accepts rc-<hex> only (got $TAG_NAME); v* labels are set by --publish" >&2
             exit 1
           fi
           HEAD="$(git rev-parse HEAD)"
           git merge-base --is-ancestor "$HEAD" origin/main \
             || { echo "ERROR: workflow HEAD is not on origin/main; refusing"; exit 1; }
+          # Bind label to the commit actually built (default-branch HEAD).
+          # Accept rc-${HEAD:0:12} or any rc-<prefix> that is a prefix of HEAD.
+          suffix="${TAG_NAME#rc-}"
+          if [[ "$HEAD" != "$suffix"* ]]; then
+            echo "ERROR: $TAG_NAME is not bound to HEAD $HEAD (expected rc-${HEAD:0:12} or rc-<prefix-of-HEAD>)" >&2
+            exit 1
+          fi
+          echo "Bound image tag $TAG_NAME to HEAD $HEAD"
 
       - name: Publish images (outside publication authority)
         env:

@@ -127,6 +127,86 @@ jobs:
           for key in "${expected_keys[@]}"; do
             [[ "$(printf '%s\n' "$classifier_output" | grep -Ec "^${key}=(true|false)$")" == 1 ]]
           done
+
+          # Base-controlled exact_* overlay (workflow-inline). Do not trust the
+          # PR checkout's classifier alone for isolation/exact gates — a PR can
+          # rewrite that script to emit exact_candidate=false. Keep in sync with
+          # ci-pr.yml bootstrap path_requires_exact_candidate.
+          path_requires_exact_candidate() {
+            case "$1" in
+              packaging/*|\
+              council-rs/warroom/web/*|\
+              council-rs/warroom-tauri/*|\
+              council-rs/src-tauri/*|\
+              council-rs/scripts/warroom-*|\
+              scripts/smoke-macos-tauri-app.sh|\
+              scripts/macos-window-proof.swift|\
+              scripts/stage-gateway-pack.sh|\
+              scripts/build-gateway-pack-dev-images.sh|\
+              scripts/build-gateway-pack-prod-images.sh|\
+              scripts/generate-production-manifest.sh|\
+              scripts/verify-production-image-provenance.sh|\
+              scripts/test-gateway-pack-*.sh|\
+              scripts/test-production-image-provenance.sh|\
+              scripts/install-verify-candidate.sh|\
+              scripts/release-transaction.sh|\
+              scripts/test-release-transaction*.sh|\
+              scripts/record-acceptance.sh|\
+              scripts/candidate-status.sh|\
+              scripts/test-candidate-status.sh|\
+              scripts/ci-build-adhoc-candidate.sh|\
+              scripts/export-candidate.sh|\
+              scripts/import-candidate.sh|\
+              scripts/test-export-import-candidate.sh|\
+              scripts/classify-ci-paths.sh|\
+              scripts/test-classify-ci-paths.sh|\
+              .github/workflows/ci.yml|\
+              .github/workflows/ci-pr.yml|\
+              Makefile|\
+              __manual_dispatch__|__scheduled_proof__|__integrated_main__|__unknown_base__|__unknown_event__)
+                return 0
+                ;;
+            esac
+            return 1
+          }
+          path_requires_exact_install() {
+            case "$1" in
+              packaging/build-dmg.sh|packaging/verify-dmg.sh|packaging/smoke-full-app.sh|packaging/smoke-gateway-pack.sh|packaging/build-app-bundle.sh|packaging/app-bundle-lock.sh|\
+              packaging/gateway-pack/*|\
+              scripts/stage-gateway-pack.sh|\
+              scripts/build-gateway-pack-dev-images.sh|\
+              scripts/build-gateway-pack-prod-images.sh|\
+              scripts/generate-production-manifest.sh|\
+              scripts/verify-production-image-provenance.sh|\
+              scripts/test-gateway-pack-*.sh|\
+              scripts/test-production-image-provenance.sh|\
+              scripts/install-verify-candidate.sh|\
+              Makefile|\
+              __manual_dispatch__|__scheduled_proof__|__integrated_main__|__unknown_base__|__unknown_event__)
+                return 0
+                ;;
+              council-rs/warroom-tauri/*|council-rs/src-tauri/*)
+                case "$1" in
+                  */resources/*|*gateway*|*pack*|*install*|*arm-attest*|*arm_*) return 0 ;;
+                esac
+                return 1
+                ;;
+            esac
+            return 1
+          }
+          exact_candidate=false
+          exact_install=false
+          for path in "${changed[@]}"; do
+            path_requires_exact_candidate "$path" && exact_candidate=true
+            path_requires_exact_install "$path" && exact_install=true
+          done
+          # Overlay: workflow policy wins over PR-supplied classifier values.
+          classifier_output="$(
+            printf '%s\n' "$classifier_output" \
+              | sed -e "s/^exact_candidate=.*/exact_candidate=${exact_candidate}/" \
+                    -e "s/^exact_install=.*/exact_install=${exact_install}/"
+          )"
+
           printf '%s\n' "$classifier_output" | tee -a "$GITHUB_OUTPUT"
           {
             echo "changed_files<<EOF"
