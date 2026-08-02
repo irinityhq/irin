@@ -785,8 +785,12 @@ jobs:
       needs.detect-changes.outputs.exact_candidate == 'true' &&
       github.event_name == 'pull_request'
     steps:
-      - name: Checkout repository
+      # On pull_request, github.sha is the synthetic merge commit. W4 requires
+      # the ad-hoc candidate from branch HEAD (github.event.pull_request.head.sha).
+      - name: Checkout branch HEAD
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Install Rust and restore cache
         uses: ./.github/actions/rust-setup
@@ -808,15 +812,19 @@ jobs:
       - name: Build ad-hoc candidate from branch HEAD (no shipping tier)
         env:
           IRIN_CANDIDATE_ROOT: ${{ runner.temp }}/irin-candidates
+          BRANCH_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           mkdir -p "$IRIN_CANDIDATE_ROOT"
-          # Isolation contracts prove cross-SHA refuse; the build binds HEAD.
+          test "$(git rev-parse HEAD)" = "$BRANCH_HEAD_SHA"
+          # Isolation contracts prove cross-SHA refuse; the build binds branch HEAD.
           out="$(bash scripts/ci-build-adhoc-candidate.sh \
-            --export-dir "$IRIN_CANDIDATE_ROOT/.exports/${{ github.sha }}")"
+            --source-sha "$BRANCH_HEAD_SHA" \
+            --export-dir "$IRIN_CANDIDATE_ROOT/.exports/${BRANCH_HEAD_SHA}")"
           printf '%s\n' "$out"
           echo "$out" | grep -q '^verification=PASS$'
           echo "$out" | grep -q '^shipping_tier_claim=none$'
+          echo "$out" | grep -q "^source_sha=${BRANCH_HEAD_SHA}$"
           if echo "$out" | grep -qi 'Candidate verified'; then
             echo "ERROR: isolation job must not claim Candidate verified" >&2
             exit 1
@@ -824,7 +832,7 @@ jobs:
           {
             echo "## Candidate isolation proof (PR; no shipping tier)"
             echo ""
-            echo "Branch HEAD candidate is isolation evidence only — not a shipping tier."
+            echo "Branch HEAD (\`$BRANCH_HEAD_SHA\`) candidate is isolation evidence only — not a shipping tier."
             echo '```'
             printf '%s\n' "$out"
             echo '```'
@@ -835,12 +843,13 @@ jobs:
             echo "EXPORT_MANIFEST=$(echo "$out" | sed -n 's/^export_manifest=//p')"
             echo "CANDIDATE_ID=$(echo "$out" | sed -n 's/^candidate_id=//p')"
             echo "ARCHIVE_SHA256=$(echo "$out" | sed -n 's/^archive_sha256=//p')"
+            echo "BRANCH_HEAD_SHA=$BRANCH_HEAD_SHA"
           } >> "$GITHUB_ENV"
 
       - name: Upload isolation candidate archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: candidate-isolation-${{ github.sha }}
+          name: candidate-isolation-${{ env.BRANCH_HEAD_SHA }}
           path: |
             ${{ env.ARCHIVE_PATH }}
             ${{ env.ARCHIVE_PATH }}.sha256

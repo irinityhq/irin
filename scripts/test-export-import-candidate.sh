@@ -380,8 +380,47 @@ chmod u+w "$HOST_BIN" 2>/dev/null || true
 chmod a+x "$HOST_BIN" 2>/dev/null || true
 pass "app executable-bit corruption refuses payload assert and export"
 
-# --- unsafe semver cannot build a store path ---------------------------------
+# --- top-level IRIN.app symlink refuses (external mutable pointer) -----------
+APP_REAL="$DEST/IRIN.app"
+APP_BACKUP="$TEST_HOME/IRIN.app.real-backup"
+EXT_APP="$TEST_HOME/external-IRIN.app"
+chmod -R u+w "$DEST" 2>/dev/null || true
+mv "$APP_REAL" "$APP_BACKUP"
+cp -a "$APP_BACKUP" "$EXT_APP"
+ln -s "$EXT_APP" "$APP_REAL"
+set +e
+out="$(irin_assert_candidate_payload_matches_identity "$DEST" 2>&1)"
+ec=$?
+set -e
+[[ $ec -ne 0 ]] || fail "top-level IRIN.app symlink should refuse: $out"
+[[ "$out" == *"symlink"* || "$out" == *"must not be a symlink"* ]] \
+  || fail "expected top-level symlink refuse: $out"
+# restore real app
+rm -f "$APP_REAL"
+mv "$APP_BACKUP" "$APP_REAL"
+pass "top-level IRIN.app symlink refuses payload assert"
+
+# --- intermediate symlink must not mkdir outside store before refuse --------
 BAD_ID="$(python3 -c 'print("c"*64)')"
+OUTSIDE="$TEST_HOME/outside-store"
+mkdir -p "$OUTSIDE" "$TEST_HOME/store-root"
+# root/0.1.2 -> outside; must refuse before creating SHA dir outside the store.
+ln -s "$OUTSIDE" "$TEST_HOME/store-root/0.1.2"
+before_outside="$(find "$OUTSIDE" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
+set +e
+out="$(irin_assert_safe_candidate_dest \
+  "$TEST_HOME/store-root" '0.1.2' "$(sha40 a)" "$BAD_ID" 2>&1)"
+ec=$?
+set -e
+[[ $ec -ne 0 ]] || fail "intermediate symlink escape should refuse: $out"
+[[ "$out" == *"symlink"* || "$out" == *"escape"* ]] \
+  || fail "expected symlink/escape message: $out"
+after_outside="$(find "$OUTSIDE" -mindepth 1 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$after_outside" == "$before_outside" ]] \
+  || fail "mkdir created content outside store ($before_outside -> $after_outside): $OUTSIDE"
+pass "intermediate symlink refuses without mkdir outside store"
+
+# --- unsafe semver / non-hex source_sha --------------------------------------
 mkdir -p "$TEST_HOME/safe-root"
 set +e
 out="$(irin_assert_safe_candidate_dest \

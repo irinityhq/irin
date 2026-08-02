@@ -22,8 +22,10 @@ jobs:
   # This job is defined in the dispatcher with hard-coded GitHub-hosted
   # runners only (macos-15 / ubuntu-latest). It never uses the trusted
   # self-hosted runner group expression from ci.yml.
-  # After W4 merges to main, the @main graph owns the lane; this bootstrap
-  # remains a fail-closed hosted re-proof of the PR tree's scripts.
+  #
+  # Branch protection must require the check context named below:
+  #   "W4 isolation bootstrap required"
+  # until W4's isolation job is required via `ci / CI required` on main.
   # ---------------------------------------------------------------------------
   w4-bootstrap-scope:
     name: W4 bootstrap scope
@@ -32,10 +34,13 @@ jobs:
     outputs:
       exact_candidate: ${{ steps.scope.outputs.exact_candidate }}
       has_w4_scripts: ${{ steps.scope.outputs.has_w4_scripts }}
+      branch_head_sha: ${{ steps.scope.outputs.branch_head_sha }}
     steps:
-      - name: Checkout pull request
+      # Always scope against branch HEAD (not the synthetic merge commit).
+      - name: Checkout branch HEAD
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
 
       - id: scope
@@ -45,6 +50,7 @@ jobs:
           set -euo pipefail
           base="${{ github.event.pull_request.base.sha }}"
           head="${{ github.event.pull_request.head.sha }}"
+          test "$(git rev-parse HEAD)" = "$head"
           exact_candidate=false
           has_w4=false
           if [[ -x scripts/classify-ci-paths.sh ]]; then
@@ -68,9 +74,10 @@ jobs:
           {
             echo "exact_candidate=${exact_candidate:-false}"
             echo "has_w4_scripts=${has_w4}"
+            echo "branch_head_sha=${head}"
           } >> "$GITHUB_OUTPUT"
-          printf 'exact_candidate=%s has_w4_scripts=%s\n' \
-            "${exact_candidate:-false}" "$has_w4"
+          printf 'exact_candidate=%s has_w4_scripts=%s head=%s\n' \
+            "${exact_candidate:-false}" "$has_w4" "$head"
 
   w4-isolation-bootstrap-hermetic:
     name: Candidate isolation proof (PR bootstrap; hermetic hosted)
@@ -79,12 +86,15 @@ jobs:
     needs: w4-bootstrap-scope
     if: needs.w4-bootstrap-scope.outputs.has_w4_scripts == 'true'
     steps:
-      - name: Checkout pull request
+      - name: Checkout branch HEAD
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Hermetic W4 export/import + classifier contracts
         run: |
           set -euo pipefail
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
           bash scripts/test-classify-ci-paths.sh
           bash packaging/test-candidate-store.sh
           out="$(bash scripts/test-export-import-candidate.sh 2>&1)"
@@ -104,8 +114,10 @@ jobs:
       needs.w4-bootstrap-scope.outputs.has_w4_scripts == 'true' &&
       needs.w4-bootstrap-scope.outputs.exact_candidate == 'true'
     steps:
-      - name: Checkout pull request
+      - name: Checkout branch HEAD
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
 
       - name: Install Rust and restore cache
         uses: ./.github/actions/rust-setup
@@ -122,16 +134,20 @@ jobs:
       - name: Hermetic contracts then ad-hoc candidate (no shipping tier)
         env:
           IRIN_CANDIDATE_ROOT: ${{ runner.temp }}/irin-candidates
+          BRANCH_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           set -euo pipefail
           mkdir -p "$IRIN_CANDIDATE_ROOT"
+          test "$(git rev-parse HEAD)" = "$BRANCH_HEAD_SHA"
           bash packaging/test-candidate-store.sh
           bash scripts/test-export-import-candidate.sh
           out="$(bash scripts/ci-build-adhoc-candidate.sh \
-            --export-dir "$IRIN_CANDIDATE_ROOT/.exports/${{ github.sha }}")"
+            --source-sha "$BRANCH_HEAD_SHA" \
+            --export-dir "$IRIN_CANDIDATE_ROOT/.exports/${BRANCH_HEAD_SHA}")"
           printf '%s\n' "$out"
           echo "$out" | grep -q '^verification=PASS$'
           echo "$out" | grep -q '^shipping_tier_claim=none$'
+          echo "$out" | grep -q "^source_sha=${BRANCH_HEAD_SHA}$"
           if echo "$out" | grep -qi 'Candidate verified'; then
             echo "ERROR: bootstrap must not claim Candidate verified" >&2
             exit 1
@@ -139,6 +155,7 @@ jobs:
           {
             echo "## W4 isolation bootstrap (hosted only; no shipping tier)"
             echo ""
+            echo "Branch HEAD: \`$BRANCH_HEAD_SHA\` (not the PR merge SHA)."
             echo "Base-controlled \`ci.yml@main\` does not yet own this lane on unmerged"
             echo "graphs. This job runs only on GitHub-hosted macos-15."
             echo '```'
@@ -150,12 +167,13 @@ jobs:
           {
             echo "ARCHIVE_PATH=$archive"
             echo "EXPORT_MANIFEST=$manifest"
+            echo "BRANCH_HEAD_SHA=$BRANCH_HEAD_SHA"
           } >> "$GITHUB_ENV"
 
       - name: Upload bootstrap isolation archive
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: candidate-isolation-bootstrap-${{ github.sha }}
+          name: candidate-isolation-bootstrap-${{ env.BRANCH_HEAD_SHA }}
           path: |
             ${{ env.ARCHIVE_PATH }}
             ${{ env.ARCHIVE_PATH }}.sha256
@@ -163,6 +181,9 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+  # Required check context name (must be listed in branch protection on main
+  # during the W4 bootstrap window). After W4 lands on main and isolation is
+  # part of `ci / CI required`, this context may be demoted.
   w4-isolation-bootstrap-required:
     name: W4 isolation bootstrap required
     runs-on: ubuntu-latest

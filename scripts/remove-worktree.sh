@@ -176,25 +176,35 @@ for scan in scan_roots:
                 note(parent, f"proof:{name}")
 
         app_path = os.path.join(dirpath, "IRIN.app")
-        if os.path.isdir(app_path) or os.path.islink(app_path):
+        # Top-level IRIN.app marker: real dir only for "complete"; still note
+        # install/IRIN.app (witness) or a loose app dir for incomplete refuse.
+        if os.path.isdir(app_path) and not os.path.islink(app_path):
             if install_belongs_to_parent:
                 note(install_parent, "install:IRIN.app")
             else:
                 note(dirpath, "IRIN.app")
+        elif os.path.islink(app_path) or (
+            os.path.lexists(app_path) and not os.path.isdir(app_path)
+        ):
+            # Symlink / non-dir app is recognized incomplete residue (refuse).
+            if install_belongs_to_parent:
+                note(install_parent, "install:IRIN.app-symlink")
+            else:
+                note(dirpath, "IRIN.app-symlink")
 
 def is_complete(path: str) -> bool:
     try:
         names = os.listdir(path)
     except OSError:
         return False
+    app = os.path.join(path, "IRIN.app")
+    # Complete requires a real non-symlink IRIN.app directory (store law).
+    if os.path.islink(app) or not os.path.isdir(app):
+        return False
     return (
         os.path.isfile(os.path.join(path, "candidate.json"))
         and os.path.isfile(os.path.join(path, "HASHES.txt"))
         and os.path.isfile(os.path.join(path, "bundle-manifest.txt"))
-        and (
-            os.path.isdir(os.path.join(path, "IRIN.app"))
-            or os.path.islink(os.path.join(path, "IRIN.app"))
-        )
         and sum(
             1
             for n in names
@@ -203,18 +213,10 @@ def is_complete(path: str) -> bool:
         == 1
     )
 
-# Collapse: any incomplete cluster nested under a complete candidate root is
-# install/proof residue of that candidate, not a separate incomplete spill.
-complete_roots = [p for p in clusters if is_complete(p)]
-for path in list(clusters):
-    if is_complete(path):
-        continue
-    for croot in complete_roots:
-        if path == croot or path.startswith(croot + os.sep):
-            # Absorb nested markers into the complete parent.
-            clusters[croot].update(clusters[path])
-            del clusters[path]
-            break
+# No blanket collapse of nested incomplete clusters. Install witnesses are
+# attached to the parent during scan (install_belongs_to_parent). Any other
+# nested incomplete residue (e.g. legacy HASHES under a spill) remains its own
+# incomplete cluster and blocks removal.
 
 # Emit machine-readable lines: STATUS\tPATH\tmarkers...
 for path in sorted(clusters):

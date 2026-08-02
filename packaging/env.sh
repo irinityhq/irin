@@ -449,35 +449,90 @@ PY
 # Assert store path components cannot escape IRIN_CANDIDATE_ROOT.
 # semver: single path component (no slashes, no ..); source_sha: 40 lowercase hex;
 # candidate_id: 64 lowercase hex. Returns absolute DEST; dies on escape.
+#
+# Containment is validated on the nearest existing ancestor *before* any mkdir,
+# so an intermediate symlink out of the store cannot create directories outside
+# IRIN_CANDIDATE_ROOT and then only fail afterwards.
 irin_assert_safe_candidate_dest() {
   local root="$1" semver="$2" source_sha="$3" candidate_id="$4"
-  local dest dest_parent dest_real root_real
+  local dest root_real cursor rel next_comp resolved_parent
   [[ -n "$root" && "$root" == /* ]] || irin_env_die "candidate root must be absolute"
   # Single-component semver: digits/letters/dot/plus/hyphen only (e.g. 0.1.2, 0.1.2-rc.1).
+  # Refuse slash and backslash via character class (no literal \ in the pattern).
   [[ "$semver" =~ ^[0-9A-Za-z][0-9A-Za-z.+-]*$ ]] \
     || irin_env_die "unsafe or invalid semver component: $semver"
-  [[ "$semver" != *".."* && "$semver" != *'/'* && "$semver" != *'\\'* ]] \
+  [[ "$semver" != *".."* ]] \
     || irin_env_die "semver must be a single path component: $semver"
   [[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] \
     || irin_env_die "source_sha must be 40 lowercase hex chars: $source_sha"
   [[ "$candidate_id" =~ ^[0-9a-f]{64}$ ]] \
     || irin_env_die "candidate_id must be 64 lowercase hex chars: $candidate_id"
-  dest="${root}/${semver}/${source_sha}/${candidate_id}"
-  dest_parent="$(dirname "$dest")"
-  mkdir -p "$dest_parent" || irin_env_die "could not create candidate parent: $dest_parent"
+
   root_real="$(cd "$root" && pwd -P)" || irin_env_die "could not resolve candidate root: $root"
-  dest_real="$(cd "$dest_parent" && pwd -P)/$(basename "$dest")" \
-    || irin_env_die "could not resolve candidate dest parent: $dest_parent"
-  case "$dest_real" in
-    "$root_real"/*) ;;
-    *) irin_env_die "candidate dest escapes IRIN_CANDIDATE_ROOT ($root_real): $dest_real" ;;
-  esac
-  # Also refuse if any intermediate component is a symlink that walks out.
-  case "$(cd "$dest_parent" && pwd -P)" in
-    "$root_real"|"$root_real"/*) ;;
-    *) irin_env_die "candidate dest parent escapes store root: $dest_parent" ;;
-  esac
-  printf '%s' "$dest_real"
+  dest="${root_real}/${semver}/${source_sha}/${candidate_id}"
+
+  # Walk components from the store root; refuse any existing path component that
+  # is a symlink or resolves outside root_real *before* creating missing dirs.
+  cursor="$root_real"
+  for next_comp in "$semver" "$source_sha"; do
+    rel="${cursor}/${next_comp}"
+    if [[ -e "$rel" || -L "$rel" ]]; then
+      if [[ -L "$rel" ]]; then
+        irin_env_die "candidate path component is a symlink (refusing escape): $rel"
+      fi
+      if [[ ! -d "$rel" ]]; then
+        irin_env_die "candidate path component exists but is not a directory: $rel"
+      fi
+      resolved_parent="$(cd "$rel" && pwd -P)" \
+        || irin_env_die "could not resolve path component: $rel"
+      case "$resolved_parent" in
+        "$root_real"|"$root_real"/*) ;;
+        *) irin_env_die "candidate path component escapes store root: $rel -> $resolved_parent" ;;
+      esac
+      cursor="$resolved_parent"
+    else
+      # Missing segment: create only after parent is known to be inside the root.
+      case "$cursor" in
+        "$root_real"|"$root_real"/*) ;;
+        *) irin_env_die "candidate path parent escapes store root: $cursor" ;;
+      esac
+      mkdir -p "$rel" || irin_env_die "could not create candidate path: $rel"
+      # Refuse if mkdir followed a race-created symlink out of the root.
+      if [[ -L "$rel" ]]; then
+        irin_env_die "candidate path became a symlink after create: $rel"
+      fi
+      resolved_parent="$(cd "$rel" && pwd -P)" \
+        || irin_env_die "could not resolve created path: $rel"
+      case "$resolved_parent" in
+        "$root_real"|"$root_real"/*) ;;
+        *) irin_env_die "created candidate path escapes store root: $rel -> $resolved_parent" ;;
+      esac
+      cursor="$resolved_parent"
+    fi
+  done
+
+  # Final leaf is candidate_id (must not exist as a symlink out; promote creates it).
+  dest="${cursor}/${candidate_id}"
+  if [[ -e "$dest" || -L "$dest" ]]; then
+    if [[ -L "$dest" ]]; then
+      irin_env_die "candidate dest is a symlink (refusing escape): $dest"
+    fi
+    if [[ ! -d "$dest" ]]; then
+      irin_env_die "candidate dest exists but is not a directory: $dest"
+    fi
+    dest="$(cd "$dest" && pwd -P)" || irin_env_die "could not resolve candidate dest: $dest"
+    case "$dest" in
+      "$root_real"/*) ;;
+      *) irin_env_die "candidate dest escapes IRIN_CANDIDATE_ROOT ($root_real): $dest" ;;
+    esac
+  else
+    case "$cursor" in
+      "$root_real"|"$root_real"/*) ;;
+      *) irin_env_die "candidate dest parent escapes store root: $cursor" ;;
+    esac
+    dest="${cursor}/${candidate_id}"
+  fi
+  printf '%s' "$dest"
 }
 
 # Assert a candidate directory's on-disk payload matches candidate.json identity.
@@ -636,7 +691,7 @@ if not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{40}", source_s
     errs.append("identity source_sha must be 40 lowercase hex")
 if not isinstance(semver, str) or not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z.+-]*", semver or ""):
     errs.append("identity semver is not a safe single path component")
-elif ".." in (semver or "") or "/" in (semver or "") or "\\" in (semver or ""):
+elif ".." in (semver or "") or "/" in (semver or "") or "\\" in str(semver or ""):
     errs.append("identity semver must be a single path component")
 
 dmgs = sorted(
@@ -686,13 +741,31 @@ else:
             errs.append(f"HASHES {key} != identity ({got!r} vs {expected!r})")
 
 app = os.path.join(cand, "IRIN.app")
-if not (os.path.isdir(app) or os.path.islink(app)):
+# Top-level IRIN.app must be a real directory physically under the candidate.
+# Framework-style symlinks *inside* the app remain valid (manifest-bound).
+# A top-level symlink would let harvest promote a mutable external pointer.
+if os.path.islink(app):
+    errs.append(
+        "IRIN.app must not be a symlink (top-level app must be a real directory "
+        "physically contained in the candidate; internal framework symlinks are OK)"
+    )
+elif not os.path.isdir(app):
     errs.append("IRIN.app missing")
-elif not os.path.isfile(bm_path):
-    pass  # already recorded
 else:
-    stored_bm_text = open(bm_path, encoding="utf-8").read()
-    errs.extend(app_content_matches_manifest(app, stored_bm_text))
+    app_real = os.path.realpath(app)
+    cand_real = os.path.realpath(cand)
+    if app_real != os.path.join(cand_real, "IRIN.app") and not app_real.startswith(
+        cand_real + os.sep
+    ):
+        errs.append(
+            f"IRIN.app is not physically contained under the candidate "
+            f"(app={app_real}, candidate={cand_real})"
+        )
+    elif not os.path.isfile(bm_path):
+        pass  # already recorded
+    else:
+        stored_bm_text = open(bm_path, encoding="utf-8").read()
+        errs.extend(app_content_matches_manifest(app, stored_bm_text))
 
 if errs:
     raise SystemExit("payload assert failed:\n  - " + "\n  - ".join(errs))
