@@ -222,14 +222,15 @@ set -e
 [[ "$out" == *"corruption"* ]] || fail "expected corruption message: $out"
 pass "payload mismatch under same candidate-id refuses (corruption)"
 
-# --- concurrent promote cannot nest ---------------------------------------
+# --- concurrent claim / incomplete dest / atomic rename -------------------
 SHA_B="$(sha40 b)"
 make_staging "$S1" "signed-rc" "$SHA_B" "dmg-B"
 CIDB="$(irin_sha256_file "$S1/candidate.json")"
 DESTB="$IRIN_CANDIDATE_ROOT/0.1.2/$SHA_B/$CIDB"
-# Pre-create DESTB as if a concurrent claim won.
+CLAIMB="${DESTB}.claim"
+
+# Incomplete final path (legacy/non-atomic residue) must refuse without nesting.
 mkdir -p "$DESTB"
-# Incomplete dest must refuse (not nest staging into it).
 make_staging "$S2" "signed-rc" "$SHA_B" "dmg-B"
 set +e
 out="$(irin_promote_candidate_from_staging "$S2" "$DESTB" 2>&1)"
@@ -237,10 +238,34 @@ ec=$?
 set -e
 [[ $ec -ne 0 ]] || fail "incomplete concurrent dest should refuse"
 [[ "$out" == *"incomplete"* ]] || fail "expected incomplete message: $out"
-# Ensure staging was not nested under DESTB.
 [[ ! -d "$DESTB/$CIDB" ]] || fail "staging was nested under existing dest"
 [[ ! -e "$DESTB/IRIN.app" ]] || fail "staging contents leaked into incomplete dest"
-pass "concurrent/incomplete dest refuses without nesting"
+rm -rf "$DESTB"
+pass "incomplete dest refuses without nesting"
+
+# Stale/concurrent sibling claim with no final path blocks promote.
+mkdir -p "$CLAIMB"
+make_staging "$S2" "signed-rc" "$SHA_B" "dmg-B"
+set +e
+out="$(irin_promote_candidate_from_staging "$S2" "$DESTB" 2>&1)"
+ec=$?
+set -e
+[[ $ec -ne 0 ]] || fail "stale claim should refuse"
+[[ "$out" == *"claim"* ]] || fail "expected claim message: $out"
+[[ ! -e "$DESTB" ]] || fail "final path must not appear under a blocking claim"
+rm -rf "$CLAIMB"
+pass "concurrent/stale sibling claim refuses without creating final path"
+
+# Atomic rename: final path appears only as the full staging tree (not empty shell).
+make_staging "$S1" "signed-rc" "$SHA_B" "dmg-B"
+# After successful promote, dest must contain candidate.json and claim must be gone.
+R_AT="$(irin_promote_candidate_from_staging "$S1" "$DESTB")"
+[[ "$R_AT" == "created" ]] || fail "atomic promote expected created, got $R_AT"
+[[ -f "$DESTB/candidate.json" && -d "$DESTB/IRIN.app" && -f "$DESTB/HASHES.txt" ]] \
+  || fail "atomic rename did not yield a full candidate tree"
+[[ ! -e "$CLAIMB" ]] || fail "claim must be released after successful promote"
+[[ ! -d "$S1" ]] || fail "staging path must be gone after atomic rename (became dest)"
+pass "atomic rename yields full candidate; claim released; staging path gone"
 
 # --- two same-version different-SHA coexist; two modes one SHA ------------
 SHA_C="$(sha40 c)"

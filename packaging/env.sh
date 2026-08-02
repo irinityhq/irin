@@ -303,45 +303,94 @@ irin_freeze_immutable_payload() {
   fi
 }
 
-# Promote staging → dest with exclusive mkdir claim (never mv onto an existing
-# directory — Darwin nests in that case). Prints "created" or "idempotent".
-# On payload mismatch under the same candidate-id: hard refuse (corruption).
-irin_promote_candidate_from_staging() {
-  local staging="$1" dest="$2" dest_parent payload_hash existing item
-  [[ -d "$staging" ]] || irin_env_die "promote: staging missing: $staging"
-  [[ -f "$staging/candidate.json" ]] || irin_env_die "promote: staging incomplete: $staging"
-  dest_parent="$(dirname "$dest")"
-  mkdir -p "$dest_parent" || irin_env_die "promote: could not create parent: $dest_parent"
-  payload_hash="$(irin_payload_tree_hash "$staging")"
-
-  if mkdir "$dest" 2>/dev/null; then
-    # Exclusive owner of dest. Move top-level staging children in (not dest rename).
-    while IFS= read -r -d '' item; do
-      mv "$item" "$dest/" || {
-        # Leave a partial dest for diagnosis; never nest a second attempt into it.
-        irin_env_die "promote: failed moving $(basename "$item") into $dest"
-      }
-    done < <(find "$staging" -mindepth 1 -maxdepth 1 -print0)
-    rmdir "$staging" 2>/dev/null || rm -rf "$staging"
-    irin_freeze_immutable_payload "$dest"
-    printf '%s' "created"
-    return 0
+# Handle an already-present final candidate path during promote.
+# Prints "idempotent" on payload match; dies on incomplete or corruption.
+# bash 3.2 compatible (no nested functions).
+irin_promote_handle_existing_dest() {
+  local d="$1" expected_hash="$2" claim_path="$3" got
+  if [[ ! -d "$d" ]]; then
+    irin_env_die "promote: dest path exists but is not a directory: $d"
   fi
-
-  # Dest already exists (prior success or concurrent claim).
-  if [[ ! -d "$dest" ]]; then
-    irin_env_die "promote: dest path exists but is not a directory: $dest"
-  fi
-  if [[ ! -f "$dest/candidate.json" ]]; then
+  if [[ ! -f "$d/candidate.json" ]]; then
     irin_env_die \
-      "promote: dest exists but is incomplete (concurrent or crashed promote): $dest"
+      "promote: dest exists but is incomplete (crashed or non-atomic promote): $d"
   fi
-  existing="$(irin_payload_tree_hash "$dest")"
-  if [[ "$existing" == "$payload_hash" ]]; then
+  got="$(irin_payload_tree_hash "$d")"
+  if [[ "$got" == "$expected_hash" ]]; then
+    # Prior success may have left a claim after a crash post-rename.
+    rm -rf "$claim_path" 2>/dev/null || true
     printf '%s' "idempotent"
     return 0
   fi
-  irin_env_die "candidate-id collision with different payload tree (corruption): $dest"
+  irin_env_die "candidate-id collision with different payload tree (corruption): $d"
+}
+
+# Promote staging → dest with plan atomicity:
+#   exclusive sibling claim  +  one same-filesystem rename of the whole
+#   staging directory onto the still-absent final path.
+#
+# Never mkdir the final path and fill it child-by-child (observers would see a
+# half-built candidate; a crash would strand a partial final directory).
+# Never `mv staging existing-dir` on Darwin (that nests staging inside dest).
+#
+# Prints "created" or "idempotent". Payload mismatch under the same
+# candidate-id is hard refuse (corruption).
+irin_promote_candidate_from_staging() {
+  local staging="$1" dest="$2" dest_parent claim payload_hash
+  [[ -d "$staging" ]] || irin_env_die "promote: staging missing: $staging"
+  [[ -f "$staging/candidate.json" ]] || irin_env_die "promote: staging incomplete: $staging"
+  [[ "$staging" == /* && "$dest" == /* ]] \
+    || irin_env_die "promote: staging and dest must be absolute paths"
+  dest_parent="$(dirname "$dest")"
+  # Sibling claim: <candidate-id>.claim next to the still-absent final path.
+  claim="${dest}.claim"
+  mkdir -p "$dest_parent" || irin_env_die "promote: could not create parent: $dest_parent"
+  payload_hash="$(irin_payload_tree_hash "$staging")"
+
+  # Fast path: final candidate already present (exact retry / concurrent winner).
+  if [[ -e "$dest" ]]; then
+    irin_promote_handle_existing_dest "$dest" "$payload_hash" "$claim"
+    return 0
+  fi
+
+  # Exclusive sibling claim. Holds the right to rename into the still-absent dest.
+  if ! mkdir "$claim" 2>/dev/null; then
+    # Another promote holds the claim, or a prior crash left it.
+    if [[ -e "$dest" ]]; then
+      irin_promote_handle_existing_dest "$dest" "$payload_hash" "$claim"
+      return 0
+    fi
+    irin_env_die \
+      "promote: concurrent or stale claim exists (no final candidate yet): $claim"
+  fi
+
+  # We hold the claim. Re-check dest is still absent, then one atomic rename.
+  if [[ -e "$dest" ]]; then
+    # Lost the race after claim; release claim and treat as existing.
+    rmdir "$claim" 2>/dev/null || rm -rf "$claim"
+    irin_promote_handle_existing_dest "$dest" "$payload_hash" "$claim"
+    return 0
+  fi
+
+  # Same-filesystem directory rename: staging becomes dest in one step.
+  # Dest must not exist (guaranteed above under claim). If rename fails, release
+  # claim and refuse — never fall back to child-by-child copy into dest.
+  if ! mv "$staging" "$dest"; then
+    rmdir "$claim" 2>/dev/null || rm -rf "$claim"
+    irin_env_die \
+      "promote: atomic rename failed (cross-device or IO): $staging -> $dest"
+  fi
+
+  # Final path is the full candidate tree. Freeze immutable payload, drop claim.
+  if ! irin_freeze_immutable_payload "$dest"; then
+    # Dest is complete on disk; leave it for diagnosis. Drop claim so retries
+    # can take the existing-dest path rather than block forever.
+    rmdir "$claim" 2>/dev/null || rm -rf "$claim"
+    irin_env_die "promote: freeze failed after atomic rename: $dest"
+  fi
+  rmdir "$claim" 2>/dev/null || rm -rf "$claim"
+  printf '%s' "created"
+  return 0
 }
 
 # Atomically write a tier-bearing proof envelope under proofs/.
