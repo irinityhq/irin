@@ -258,14 +258,32 @@ pass "concurrent/stale sibling claim refuses without creating final path"
 
 # Atomic rename: final path appears only as the full staging tree (not empty shell).
 make_staging "$S1" "signed-rc" "$SHA_B" "dmg-B"
-# After successful promote, dest must contain candidate.json and claim must be gone.
+# Staging must be frozen before rename — after created, payload is non-writable.
 R_AT="$(irin_promote_candidate_from_staging "$S1" "$DESTB")"
 [[ "$R_AT" == "created" ]] || fail "atomic promote expected created, got $R_AT"
 [[ -f "$DESTB/candidate.json" && -d "$DESTB/IRIN.app" && -f "$DESTB/HASHES.txt" ]] \
   || fail "atomic rename did not yield a full candidate tree"
 [[ ! -e "$CLAIMB" ]] || fail "claim must be released after successful promote"
 [[ ! -d "$S1" ]] || fail "staging path must be gone after atomic rename (became dest)"
-pass "atomic rename yields full candidate; claim released; staging path gone"
+if [[ -w "$DESTB/candidate.json" || -w "$DESTB/IRIN.app/Contents/MacOS/council" ]]; then
+  fail "payload must be non-writable immediately after promote (freeze-before-rename)"
+fi
+pass "atomic rename yields full frozen candidate; claim released; staging path gone"
+
+# Crash residue: complete-but-writable final path is healed on idempotent retry.
+make_staging "$S2" "signed-rc" "$SHA_B" "dmg-B"
+# Simulate pre-freeze crash residue: force payload writable while keeping bytes.
+chmod -R u+w "$DESTB/IRIN.app" "$DESTB/candidate.json" "$DESTB/HASHES.txt" \
+  "$DESTB/bundle-manifest.txt" "$DESTB"/*.dmg 2>/dev/null || true
+if [[ ! -w "$DESTB/candidate.json" ]]; then
+  fail "setup: expected writable crash-residue candidate.json"
+fi
+R_HEAL="$(irin_promote_candidate_from_staging "$S2" "$DESTB")"
+[[ "$R_HEAL" == "idempotent" ]] || fail "expected idempotent heal, got $R_HEAL"
+if [[ -w "$DESTB/candidate.json" || -w "$DESTB/IRIN.app/Contents/MacOS/council" ]]; then
+  fail "idempotent path must re-freeze crash-residue writable payload"
+fi
+pass "idempotent path re-freezes complete-but-writable crash residue"
 
 # --- two same-version different-SHA coexist; two modes one SHA ------------
 SHA_C="$(sha40 c)"

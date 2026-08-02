@@ -286,8 +286,9 @@ print(f"gateway source binding ok: pack_mode={pack_mode} source_sha={expected_sh
 PY
 }
 
-# Freeze immutable payload bytes after promote. proofs/ smoke/ install/ logs/
-# remain writable for later tier evidence.
+# Freeze immutable payload bytes (candidate.json, HASHES, bundle-manifest, DMG,
+# IRIN.app). proofs/ smoke/ install/ logs/ remain writable for tier evidence.
+# Idempotent: safe to re-run on an already-frozen tree (heals crash residue).
 irin_freeze_immutable_payload() {
   local dest="$1" dmg
   [[ -d "$dest" ]] || irin_env_die "freeze: not a directory: $dest"
@@ -305,6 +306,7 @@ irin_freeze_immutable_payload() {
 
 # Handle an already-present final candidate path during promote.
 # Prints "idempotent" on payload match; dies on incomplete or corruption.
+# Re-applies freeze so a prior rename-then-crash leaves no writable residue.
 # bash 3.2 compatible (no nested functions).
 irin_promote_handle_existing_dest() {
   local d="$1" expected_hash="$2" claim_path="$3" got
@@ -317,6 +319,9 @@ irin_promote_handle_existing_dest() {
   fi
   got="$(irin_payload_tree_hash "$d")"
   if [[ "$got" == "$expected_hash" ]]; then
+    # Heal freeze if a prior crash left complete-but-writable payload bytes.
+    irin_freeze_immutable_payload "$d" \
+      || irin_env_die "promote: could not re-freeze existing candidate: $d"
     # Prior success may have left a claim after a crash post-rename.
     rm -rf "$claim_path" 2>/dev/null || true
     printf '%s' "idempotent"
@@ -326,12 +331,16 @@ irin_promote_handle_existing_dest() {
 }
 
 # Promote staging → dest with plan atomicity:
-#   exclusive sibling claim  +  one same-filesystem rename of the whole
-#   staging directory onto the still-absent final path.
+#   exclusive sibling claim  +  freeze staging payload  +  one same-filesystem
+#   rename of the whole staging directory onto the still-absent final path.
 #
-# Never mkdir the final path and fill it child-by-child (observers would see a
-# half-built candidate; a crash would strand a partial final directory).
-# Never `mv staging existing-dir` on Darwin (that nests staging inside dest).
+# Payload is frozen *before* rename so the final path becomes visible already
+# immutable (plan: payload bytes immutable after the atomic move). A crash
+# between freeze and rename only leaves frozen bytes under staging, never a
+# complete-but-writable final candidate. Idempotent existing-dest also freezes.
+#
+# Never mkdir the final path and fill it child-by-child. Never `mv staging
+# existing-dir` on Darwin (that nests staging inside dest).
 #
 # Prints "created" or "idempotent". Payload mismatch under the same
 # candidate-id is hard refuse (corruption).
@@ -345,6 +354,7 @@ irin_promote_candidate_from_staging() {
   # Sibling claim: <candidate-id>.claim next to the still-absent final path.
   claim="${dest}.claim"
   mkdir -p "$dest_parent" || irin_env_die "promote: could not create parent: $dest_parent"
+  # Content hash before freeze (mode bits are not in the payload tree hash).
   payload_hash="$(irin_payload_tree_hash "$staging")"
 
   # Fast path: final candidate already present (exact retry / concurrent winner).
@@ -364,7 +374,7 @@ irin_promote_candidate_from_staging() {
       "promote: concurrent or stale claim exists (no final candidate yet): $claim"
   fi
 
-  # We hold the claim. Re-check dest is still absent, then one atomic rename.
+  # We hold the claim. Re-check dest is still absent, then freeze + rename.
   if [[ -e "$dest" ]]; then
     # Lost the race after claim; release claim and treat as existing.
     rmdir "$claim" 2>/dev/null || rm -rf "$claim"
@@ -372,22 +382,22 @@ irin_promote_candidate_from_staging() {
     return 0
   fi
 
+  # Freeze *before* rename so the final path appears already immutable.
+  if ! irin_freeze_immutable_payload "$staging"; then
+    rmdir "$claim" 2>/dev/null || rm -rf "$claim"
+    irin_env_die "promote: freeze failed on staging before rename: $staging"
+  fi
+
   # Same-filesystem directory rename: staging becomes dest in one step.
   # Dest must not exist (guaranteed above under claim). If rename fails, release
   # claim and refuse — never fall back to child-by-child copy into dest.
+  # Staging remains frozen under its original path if rename fails.
   if ! mv "$staging" "$dest"; then
     rmdir "$claim" 2>/dev/null || rm -rf "$claim"
     irin_env_die \
       "promote: atomic rename failed (cross-device or IO): $staging -> $dest"
   fi
 
-  # Final path is the full candidate tree. Freeze immutable payload, drop claim.
-  if ! irin_freeze_immutable_payload "$dest"; then
-    # Dest is complete on disk; leave it for diagnosis. Drop claim so retries
-    # can take the existing-dest path rather than block forever.
-    rmdir "$claim" 2>/dev/null || rm -rf "$claim"
-    irin_env_die "promote: freeze failed after atomic rename: $dest"
-  fi
   rmdir "$claim" 2>/dev/null || rm -rf "$claim"
   printf '%s' "created"
   return 0
