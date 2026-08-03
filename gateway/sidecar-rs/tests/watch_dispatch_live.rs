@@ -1461,47 +1461,72 @@ fn main_rs_spawns_live_dispatcher_after_hydration() {
     );
 }
 
+/// Innermost free-function call name after stripping `.await` / `?` wrappers.
+fn free_fn_call_name(expr: &syn::Expr) -> Option<&syn::Ident> {
+    match expr {
+        syn::Expr::Try(t) => free_fn_call_name(&t.expr),
+        syn::Expr::Await(a) => free_fn_call_name(&a.base),
+        syn::Expr::Call(c) => match c.func.as_ref() {
+            syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+                Some(&p.path.segments[0].ident)
+            }
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Phase helper invoked by one orchestrator statement, if any.
+fn phase_call_from_stmt(stmt: &syn::Stmt) -> Option<&syn::Ident> {
+    match stmt {
+        syn::Stmt::Local(local) => local
+            .init
+            .as_ref()
+            .and_then(|init| free_fn_call_name(&init.expr)),
+        // Tail expression (e.g. `await_shutdown(...).await` without `;`).
+        syn::Stmt::Expr(expr, _) => free_fn_call_name(expr),
+        _ => None,
+    }
+}
+
 #[test]
 fn boot_phases_are_named_and_ordered() {
-    // PR5: pin the orchestrator's five phase statements by exact rustfmt line
-    // equality (trimmed). Substring/brace parsing would accept comments and
-    // string literals as executable order; whole-line equality rejects that
-    // without an AST dependency.
-    let boot_lines: Vec<&str> = include_str!("../src/boot.rs")
-        .lines()
-        .map(str::trim)
+    // PR5: pin orchestrator runtime phase order from the AST, not source text.
+    // Comments and string/raw-string literals are not statements, so they cannot
+    // spoof or shadow executable call order the way line/substring matching can.
+    let file: syn::File =
+        syn::parse_file(include_str!("../src/boot.rs")).expect("boot.rs must parse as a Rust file");
+
+    let orch = file
+        .items
+        .into_iter()
+        .find_map(|item| match item {
+            syn::Item::Fn(f) if f.sig.ident == "load_config_build_state_and_serve" => Some(f),
+            _ => None,
+        })
+        .expect("orchestrator load_config_build_state_and_serve must exist in boot.rs");
+
+    let expected = [
+        "load_configuration",
+        "initialize_authority",
+        "hydrate_runtime_state",
+        "start_listener_and_background",
+        "await_shutdown",
+    ];
+    let observed: Vec<String> = orch
+        .block
+        .stmts
+        .iter()
+        .filter_map(phase_call_from_stmt)
+        .filter(|id| expected.iter().any(|name| id == name))
+        .map(|id| id.to_string())
         .collect();
 
-    // Complete rustfmt-formatted statements from load_config_build_state_and_serve.
-    // The final call is a tail expression (no semicolon).
-    let statements = [
-        "let config = load_configuration();",
-        "let authority = initialize_authority(config).await;",
-        "let hydrated = hydrate_runtime_state(authority).await?;",
-        "let serving = start_listener_and_background(hydrated).await;",
-        "await_shutdown(serving, otel_provider).await",
-    ];
-
-    let mut last_line = 0usize;
-    for stmt in statements {
-        let matches: Vec<usize> = boot_lines
-            .iter()
-            .enumerate()
-            .filter_map(|(i, line)| (*line == stmt).then_some(i))
-            .collect();
-        assert_eq!(
-            matches.len(),
-            1,
-            "statement must occur exactly once as a trimmed source line: `{stmt}` (found {})",
-            matches.len()
-        );
-        let line = matches[0];
-        assert!(
-            line > last_line,
-            "statement `{stmt}` at line {line} must appear after prior orchestrator statements (last={last_line})"
-        );
-        last_line = line;
-    }
+    assert_eq!(
+        observed, expected,
+        "orchestrator must invoke the five phases as statements in this order \
+         (AST statement order, not textual line matching)"
+    );
 }
 
 // ==========================================================================
