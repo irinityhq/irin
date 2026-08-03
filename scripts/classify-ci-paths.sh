@@ -74,7 +74,7 @@ for path in "${paths[@]}"; do
       set_full_matrix
       ;;
 
-    __*__|.github/workflows/*|.github/actions/*|*/.github/workflows/*|*/.github/actions/*|scripts/classify-ci-paths.sh|scripts/test-classify-ci-paths.sh)
+    __*__|.github/workflows/*|.github/actions/*|*/.github/workflows/*|*/.github/actions/*|scripts/classify-ci-paths.sh|scripts/test-classify-ci-paths.sh|scripts/test-ci-control-plane.sh|scripts/test-ci-candidate-observability.sh|scripts/run-actionlint.sh|scripts/bootstrap-actionlint.sh)
       set_full_matrix
       ;;
 

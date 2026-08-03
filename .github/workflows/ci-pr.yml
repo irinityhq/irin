@@ -9,12 +9,20 @@ on:
 permissions:
   contents: read
 
+# Superseded PR SHAs cancel here only. The reusable ci.yml graph uses a
+# non-cancelling main queue (queue:max) and must never set cancel-in-progress
+# true. Cancelling this caller cancels its called reusable-workflow job.
+concurrency:
+  group: irin-ci-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
 jobs:
   # Base-controlled graph: runner selection predicates live in reviewed main.
   # Do not switch this to `uses: ./.github/workflows/ci.yml` — a PR could then
   # rewrite runs-on and the trusted self-hosted guard in one commit.
   #
-  # Permanent candidate isolation is owned by ci.yml@main
+  # Ordinary PR CI therefore executes ci.yml@main, not the PR-head revision.
+  # Permanent candidate isolation is owned by that pin
   # (`candidate-isolation-proof` → `ci / CI required`). Temporary W4 bootstrap
   # jobs in this dispatcher have been retired.
   ci:

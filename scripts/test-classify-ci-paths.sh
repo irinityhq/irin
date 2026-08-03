@@ -41,6 +41,7 @@ cases=(
   "root Makefile conservatively selects the full matrix|$full_pr|Makefile"
   "cargo-deny bootstrap selects supply-chain validation|false false false false false false true true false false false|scripts/bootstrap-dev-tools.sh"
   "classifier scripts still force full|$full_pr|scripts/classify-ci-paths.sh"
+  "control-plane contract scripts force full|$full_pr|scripts/test-ci-control-plane.sh scripts/run-actionlint.sh"
   "gateway Rust source|false true false false false false false false false false false|gateway/sidecar-rs/src/main.rs"
   "gateway manifest|false true false false false false true false false false false|gateway/sidecar-rs/Cargo.toml"
   "gateway non-Rust runtime|false true false false false false false false false false false|gateway/docker-compose.yml gateway/lua/auth.lua"
