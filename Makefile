@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help release-check worktree worktree-remove tools lint-crypto preflight check ship-check verify verify-down verify-formal docker-cache-prune warroom dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction candidate-status install-verify record-acceptance export-candidate import-candidate link-ship-board shipping-method-smoke worktree-gc lint-security opengrep lint-lua gateway-prepare-config cli-proxies-up cli-proxies-down cli-proxies-status
+.PHONY: help release-check worktree worktree-remove tools lint-crypto preflight check ship-check verify verify-down verify-formal docker-cache-prune warroom dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction candidate-status install-verify record-acceptance export-candidate import-candidate link-ship-board link-agent-context shipping-method-smoke worktree-gc lint-security opengrep lint-lua gateway-prepare-config cli-proxies-up cli-proxies-down cli-proxies-status
 
 release-check: ## Verify public source-tree boundaries
 	bash scripts/check-public-tree.sh
@@ -119,6 +119,9 @@ release-transaction: ## Prepare or publish (ARGS=--prepare-production --t1-packe
 
 link-ship-board: ## Link durable ship-board into this worktree (operator-owned SSOT)
 	bash scripts/link-ship-board.sh
+
+link-agent-context: ## Link private agent doctrine into this worktree (ARGS=--status|--all-worktrees|...)
+	bash scripts/link-agent-context.sh $(ARGS)
 
 shipping-method-smoke: ## Hermetic shipping-method rehearsal (refuses + fake-gh; no Apple/network)
 	bash scripts/shipping-method-smoke.sh

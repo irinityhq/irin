@@ -7,6 +7,25 @@ ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
   exit 1
 }
 
+# Doctrine + ProjectMem SSOT live only on the canonical operator checkout (real
+# files, not worktree symlinks). Creating a worktree from a sibling worktree
+# would pass that tree as --from and fail closed later; refuse up front.
+is_canonical_irin_checkout() {
+  local root="$1" name
+  for name in AGENTS.md CLAUDE.md RTK.md; do
+    [[ -f "$root/$name" && ! -L "$root/$name" ]] || return 1
+  done
+  [[ -d "$root/.projectmem" && ! -L "$root/.projectmem" ]] || return 1
+  [[ -f "$root/.projectmem/summary.md" ]] || return 1
+  return 0
+}
+if ! is_canonical_irin_checkout "$ROOT"; then
+  printf 'ERROR: make worktree / new-worktree.sh must run from the canonical IRIN checkout\n' >&2
+  printf 'ERROR: need real AGENTS.md, CLAUDE.md, RTK.md, and .projectmem/ (not worktree symlinks)\n' >&2
+  printf 'ERROR: current toplevel: %s\n' "$ROOT" >&2
+  exit 1
+fi
+
 branch="${1:-}"
 [[ -n "$branch" ]] || {
   printf 'usage: %s <branch> [destination]\n' "$0" >&2
@@ -111,6 +130,10 @@ chmod 600 "$destination/.irin-worktree.env"
 rmdir "$slot_lock"
 slot_lock=""
 
+# Attach private agent doctrine (symlinks only). ProjectMem stays canonical via MCP.
+# Fail closed: incomplete trees are removed by the EXIT trap above.
+bash "$ROOT/scripts/link-agent-context.sh" --from "$ROOT" --worktree "$destination"
+
 # Invoke the creator checkout's preflight so this works before these files have
 # landed on origin/main.
 (cd "$destination" && bash "$ROOT/scripts/dev-preflight.sh")
@@ -124,4 +147,5 @@ printf 'Council: http://127.0.0.1:%d\n' "$((20000 + slot))"
 printf 'War Room: http://127.0.0.1:%d\n' "$((22000 + slot))"
 printf 'Gateway: http://127.0.0.1:%d\n' "$((24000 + slot))"
 printf 'Tailscale Serve: disabled for this worktree\n'
+printf 'Agent doctrine: AGENTS.md CLAUDE.md RTK.md → %s (ProjectMem MCP --root %s)\n' "$ROOT" "$ROOT"
 printf 'Next: cd %s && make check\n' "$destination"
