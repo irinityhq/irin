@@ -30,9 +30,11 @@ cd ../irin-wt-fix-example
 ```
 
 The creator fetches `origin/main`, creates the branch from that exact commit,
-writes a collision-checked ignored worktree runtime profile, and runs the
-initial preflight. If setup fails, it removes the incomplete worktree rather
-than leaving a half-configured checkout.
+writes a collision-checked ignored worktree runtime profile, attaches private
+operator agent guidance from the creator checkout when present (ignored
+symlinks only; never product memory state), and runs the initial preflight. If
+setup fails, it removes the incomplete worktree rather than leaving a
+half-configured checkout.
 
 Remove a finished clean worktree while retaining its branch:
 
