@@ -1,9 +1,11 @@
 name: IRIN CI
 
 on:
-  # Pull requests enter through ci-pr.yml, which calls this workflow from the
-  # same revision under review. That keeps workflow changes self-testing while
-  # the runner predicate below keeps public and untrusted code on hosted runners.
+  # Pull requests enter through ci-pr.yml, which calls this file from the
+  # reviewed base pin (`ci.yml@main`), not from the PR head. Ordinary PR CI
+  # therefore executes main's workflow revision; branch workflow_dispatch on
+  # the PR tip is the explicit same-revision receipt for CI-changing PRs.
+  # The runner predicate below keeps public and untrusted code on hosted runners.
   workflow_call:
   push:
     branches: ["main"]
@@ -20,9 +22,21 @@ on:
 permissions:
   contents: read
 
+# Concurrency split (PR B / #0008):
+# - Main pushes share one non-cancelling group with queue:max so merge
+#   receipts are retained up to GitHub's pending cap (100). Overflow beyond
+#   that cap is cancelled; keep held-fix landing serial and watch the queue.
+#   (Default pending depth without queue:max is 1 — a burst replaces older
+#   pending path-scoped receipts.)
+# - Superseded-PR cancellation lives on ci-pr.yml only. This reusable graph
+#   never sets cancel-in-progress true — GitHub forbids combining that with
+#   queue:max.
+# - Schedule, manual, workflow_call, and non-main events use unique groups and
+#   never join the main-push queue.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}-main-push', github.workflow) || format('{0}-{1}-{2}-{3}', github.workflow, github.event_name, github.ref, github.run_id) }}
+  cancel-in-progress: false
+  queue: max
 
 jobs:
   actionlint:
@@ -37,7 +51,9 @@ jobs:
         run: scripts/bootstrap-actionlint.sh
 
       - name: Validate GitHub Actions workflows
-        run: .irin-tools/bin/actionlint -color
+        # Wrapper ignores the pre-queue actionlint schema gap for concurrency.queue
+        # while still failing closed on every other lint finding.
+        run: scripts/run-actionlint.sh
 
   detect-changes:
     name: Detect CI scope
@@ -113,9 +129,14 @@ jobs:
           esac
 
           scripts/test-classify-ci-paths.sh
-          # Opt into exact_* so post-merge path-scoped candidate jobs see them.
-          # PRs still enter via ci.yml@main until this lands; classic nine keys
-          # remain the default under Actions without this flag.
+          # Hosted control-plane contracts (concurrency split, force-full,
+          # exact-policy binding). Must run here so PR CI and branch
+          # workflow_dispatch cannot go green without exercising them.
+          scripts/test-ci-control-plane.sh
+          # Opt into exact_* so path-scoped candidate jobs see them. Classic
+          # nine keys remain the default under Actions without this flag so a
+          # base-controlled ci.yml@main that has not yet learned exact_* can
+          # still classify a PR that adds the outputs.
           export IRIN_CLASSIFIER_INCLUDE_EXACT=1
           classifier_output="$(scripts/classify-ci-paths.sh "${changed[@]}")"
           expected_keys=(
@@ -130,8 +151,9 @@ jobs:
 
           # Base-controlled exact_* overlay (workflow-inline). Do not trust the
           # PR checkout's classifier alone for isolation/exact gates — a PR can
-          # rewrite that script to emit exact_candidate=false. Keep in sync with
-          # ci-pr.yml bootstrap path_requires_exact_candidate.
+          # rewrite that script to emit exact_candidate=false. Keep the case
+          # arms in sync with scripts/classify-ci-paths.sh (enforced by
+          # scripts/test-ci-control-plane.sh).
           path_requires_exact_candidate() {
             case "$1" in
               packaging/*|\
@@ -160,6 +182,7 @@ jobs:
               scripts/test-export-import-candidate.sh|\
               scripts/classify-ci-paths.sh|\
               scripts/test-classify-ci-paths.sh|\
+              scripts/test-ci-control-plane.sh|\
               .github/workflows/ci.yml|\
               .github/workflows/ci-pr.yml|\
               Makefile|\
@@ -194,11 +217,33 @@ jobs:
             esac
             return 1
           }
+          # Base-controlled full non-SBOM matrix when CI policy surfaces change.
+          # Computed from the changed-path list in this workflow (base pin for
+          # ordinary PRs), not from PR-produced classifier booleans — a hostile
+          # classifier rewrite cannot suppress required lanes.
+          path_forces_full_non_sbom_matrix() {
+            case "$1" in
+              .github/workflows/*|.github/actions/*|\
+              */.github/workflows/*|*/.github/actions/*|\
+              scripts/classify-ci-paths.sh|\
+              scripts/test-classify-ci-paths.sh|\
+              scripts/test-ci-control-plane.sh|\
+              scripts/test-ci-candidate-observability.sh|\
+              scripts/run-actionlint.sh|\
+              scripts/bootstrap-actionlint.sh|\
+              __manual_dispatch__|__scheduled_proof__|__integrated_main__|__unknown_base__|__unknown_event__)
+                return 0
+                ;;
+            esac
+            return 1
+          }
           exact_candidate=false
           exact_install=false
+          force_full_non_sbom=false
           for path in "${changed[@]}"; do
             path_requires_exact_candidate "$path" && exact_candidate=true
             path_requires_exact_install "$path" && exact_install=true
+            path_forces_full_non_sbom_matrix "$path" && force_full_non_sbom=true
           done
           # Overlay: workflow policy wins over PR-supplied classifier values.
           classifier_output="$(
@@ -206,6 +251,21 @@ jobs:
               | sed -e "s/^exact_candidate=.*/exact_candidate=${exact_candidate}/" \
                     -e "s/^exact_install=.*/exact_install=${exact_install}/"
           )"
+          if [[ "$force_full_non_sbom" == true ]]; then
+            classifier_output="$(
+              printf '%s\n' "$classifier_output" \
+                | sed -e 's/^full_matrix=.*/full_matrix=true/' \
+                      -e 's/^gateway_rust=.*/gateway_rust=true/' \
+                      -e 's/^council_rust=.*/council_rust=true/' \
+                      -e 's/^sentinel_rust=.*/sentinel_rust=true/' \
+                      -e 's/^warroom_web=.*/warroom_web=true/' \
+                      -e 's/^warroom_tauri=.*/warroom_tauri=true/' \
+                      -e 's/^workspace_supply_chain=.*/workspace_supply_chain=true/' \
+                      -e 's/^tauri_supply_chain=.*/tauri_supply_chain=true/' \
+                      -e 's/^exact_candidate=.*/exact_candidate=true/' \
+                      -e 's/^exact_install=.*/exact_install=true/'
+            )"
+          fi
 
           printf '%s\n' "$classifier_output" | tee -a "$GITHUB_OUTPUT"
           {

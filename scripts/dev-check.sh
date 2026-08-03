@@ -227,6 +227,10 @@ if [[ "$mode" == "check" ]]; then
   if printf '%s\n' "${paths[@]}" | grep -Eq '^\.github/workflows/|^scripts/test-ci-candidate-observability\.sh$'; then
     run "Candidate CI observability contracts" bash scripts/test-ci-candidate-observability.sh
   fi
+  # Concurrency / force-full / exact-policy contracts when CI control plane moves.
+  if printf '%s\n' "${paths[@]}" | grep -Eq '^\.github/workflows/|^scripts/test-ci-control-plane\.sh$|^scripts/run-actionlint\.sh$|^scripts/classify-ci-paths\.sh$'; then
+    run "CI control-plane contracts" bash scripts/test-ci-control-plane.sh
+  fi
   run "Diff whitespace" git diff --check origin/main --
   exit 0
 fi
@@ -234,12 +238,12 @@ fi
 run "Current-base preflight" scripts/dev-preflight.sh ship
 run "Classifier self-test" scripts/test-classify-ci-paths.sh
 run "Candidate CI observability contracts" bash scripts/test-ci-candidate-observability.sh
+run "CI control-plane contracts" bash scripts/test-ci-control-plane.sh
 run "Candidate store contracts" bash packaging/test-candidate-store.sh
 # W5 hermetic method contracts (self-contained; no board/Apple/network).
 run "W5 remove-worktree evidence contracts" bash scripts/test-remove-worktree-evidence.sh
 run "W5 fake-gh publication contracts" bash scripts/test-publish-fake-gh.sh
-run "Pinned actionlint" scripts/bootstrap-actionlint.sh
-run "GitHub Actions lint" .irin-tools/bin/actionlint -color
+run "GitHub Actions lint" bash scripts/run-actionlint.sh
 
 if [[ "$any_rust" == true ]]; then
   run_rust_ship_proof
