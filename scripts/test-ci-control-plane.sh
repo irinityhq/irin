@@ -92,15 +92,119 @@ else
   pass "main push diffs before...head"
 fi
 # __integrated_main__ is only acceptable as a fail-safe when before is
-# zero/missing, not as an unconditional default arm.
-if file_has_fixed 'changed=(__integrated_main__)' "$CI_YML"; then
-  if ! file_has_ere 'before.*0\+|__integrated_main__' "$CI_YML"; then
-    fail "unexpected unconditional __integrated_main__"
-  else
-    pass "integrated_main retained only as fail-safe sentinel"
-  fi
+# zero/missing, not as an unconditional default arm. The checker verifies
+# every assignment sits directly under the zero/missing-before guard, then
+# proves its own teeth on two mutants (an unconditional assignment and a
+# deleted fail-safe) that must both be rejected.
+if python3 - "$CI_YML" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+GUARD = re.compile(r'if \[\[ -z "\$before" \|\| "\$before" =~ \^0\+\$ \]\]')
+ASSIGN = "changed=(__integrated_main__)"
+
+
+def indentation(line):
+    return len(line) - len(line.lstrip())
+
+
+def guarded_body_ranges(lines):
+    ranges = []
+    for start, line in enumerate(lines):
+        if not GUARD.search(line):
+            continue
+        guard_indent = indentation(line)
+        then_line = next(
+            (
+                i
+                for i in range(start, min(start + 4, len(lines)))
+                if re.search(r"\bthen\s*$", lines[i])
+            ),
+            None,
+        )
+        if then_line is None:
+            continue
+        end = next(
+            (
+                i
+                for i in range(then_line + 1, len(lines))
+                if indentation(lines[i]) == guard_indent
+                and lines[i].strip() in {"else", "fi"}
+            ),
+            None,
+        )
+        if end is not None:
+            ranges.append((then_line + 1, end, guard_indent))
+    return ranges
+
+
+def guard_problems(text):
+    lines = text.splitlines()
+    hits = [i for i, line in enumerate(lines) if line.strip() == ASSIGN]
+    if not hits:
+        return ["missing zero/missing-before fail-safe " + ASSIGN]
+    ranges = guarded_body_ranges(lines)
+    return [
+        f"line {i + 1}: {ASSIGN} outside the zero/missing-before guard body"
+        for i in hits
+        if not any(start <= i < end and indentation(lines[i]) > guard_indent
+                   for start, end, guard_indent in ranges)
+    ]
+
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+problems = guard_problems(text)
+if problems:
+    print("\n".join(problems), file=sys.stderr)
+    sys.exit(1)
+
+lines = text.splitlines()
+push_arms = [i for i, line in enumerate(lines) if line.strip() == "push)"]
+if not push_arms:
+    print("could not locate push) arm for mutation self-test", file=sys.stderr)
+    sys.exit(1)
+mutant_unconditional = "\n".join(
+    lines[: push_arms[0] + 1] + ["              " + ASSIGN] + lines[push_arms[0] + 1 :]
+)
+if not guard_problems(mutant_unconditional):
+    print("mutation escape: unconditional __integrated_main__ accepted", file=sys.stderr)
+    sys.exit(1)
+
+ranges = guarded_body_ranges(lines)
+if not ranges:
+    print("could not locate zero/missing-before guard body", file=sys.stderr)
+    sys.exit(1)
+_, _, guard_indent = ranges[0]
+fi_line = next(
+    (
+        i
+        for i in range(ranges[0][1], len(lines))
+        if indentation(lines[i]) == guard_indent and lines[i].strip() == "fi"
+    ),
+    None,
+)
+if fi_line is None:
+    print("could not locate zero/missing-before closing fi", file=sys.stderr)
+    sys.exit(1)
+mutant_near_guard = "\n".join(
+    lines[: fi_line + 1]
+    + [" " * guard_indent + ASSIGN]
+    + lines[fi_line + 1 :]
+)
+if not guard_problems(mutant_near_guard):
+    print("mutation escape: post-fi __integrated_main__ accepted", file=sys.stderr)
+    sys.exit(1)
+
+mutant_missing = text.replace(ASSIGN, "changed=()")
+if not guard_problems(mutant_missing):
+    print("mutation escape: deleted fail-safe accepted", file=sys.stderr)
+    sys.exit(1)
+PY
+then
+  pass "integrated_main only as guarded fail-safe (mutants rejected)"
 else
-  pass "no unconditional integrated_main default"
+  fail "integrated_main zero-before guard contract"
 fi
 
 # ---------------------------------------------------------------------------
