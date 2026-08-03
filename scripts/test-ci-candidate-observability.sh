@@ -53,8 +53,9 @@ fi
 if ! python3 - "$CI_YML" <<'PY'
 import re
 import sys
+from pathlib import Path
 
-text = open(sys.argv[1], encoding="utf-8").read()
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
 jobs = re.split(r"\n  ([a-z0-9-]+):\n", text)
 bodies = {}
 for i in range(1, len(jobs), 2):
