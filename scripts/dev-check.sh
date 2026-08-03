@@ -230,6 +230,9 @@ fi
 run "Current-base preflight" scripts/dev-preflight.sh ship
 run "Classifier self-test" scripts/test-classify-ci-paths.sh
 run "Candidate store contracts" bash packaging/test-candidate-store.sh
+# W5 hermetic method contracts (self-contained; no board/Apple/network).
+run "W5 remove-worktree evidence contracts" bash scripts/test-remove-worktree-evidence.sh
+run "W5 fake-gh publication contracts" bash scripts/test-publish-fake-gh.sh
 run "Pinned actionlint" scripts/bootstrap-actionlint.sh
 run "GitHub Actions lint" .irin-tools/bin/actionlint -color
 

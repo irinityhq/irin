@@ -159,6 +159,16 @@ make candidate-status ARGS="--candidate $CANDIDATE --require Published"
 Ship board (after `make link-ship-board` + `select-candidate`) renders the same
 JSON; it never derives tiers from `packaging/artifacts/` or raw PASS text.
 
+### Method rehearsal (hermetic)
+
+```bash
+make link-ship-board          # durable board home → tools/ship-board
+make shipping-method-smoke    # refuses + fake-gh; zero Apple/network
+```
+
+Proves fail-closed method contracts only. Not product green. Never runs
+`--prepare-production`, notary, or real GitHub/registry transport.
+
 ## Rollback
 
 A bad draft is deleted before publication. A bad published release is marked
