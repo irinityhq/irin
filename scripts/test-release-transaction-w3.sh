@@ -580,7 +580,7 @@ pass "link-ship-board does not write shared global .irin-root"
 # --- public commands listed in Makefile help -------------------------------
 help_out="$(make -C "$ROOT" help 2>/dev/null || true)"
 echo "$help_out" | grep -q 'release-transaction' || fail "Makefile help missing release-transaction"
-echo "$help_out" | grep -q 'install-verify\|candidate-status\|record-acceptance\|link-ship-board' \
+echo "$help_out" | grep -q 'install-verify\|candidate-status\|record-acceptance\|link-ship-board\|shipping-method-smoke' \
   || fail "Makefile help missing W3 public commands"
 pass "Makefile help lists W3 public commands"
 

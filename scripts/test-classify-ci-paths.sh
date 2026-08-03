@@ -37,6 +37,7 @@ cases=(
   "unknown forces full|$full_pr|new-surface/config.json"
   "development scripts stay light|$all_false|scripts/dev-check.sh scripts/new-worktree.sh scripts/dev-preflight.sh"
   "export/import scripts stay light (no product rebuild)|$all_false|scripts/export-candidate.sh scripts/import-candidate.sh"
+  "shipping-method-smoke stays light (no product rebuild)|$all_false|scripts/shipping-method-smoke.sh scripts/test-publish-fake-gh.sh scripts/test-remove-worktree-evidence.sh"
   "root Makefile conservatively selects the full matrix|$full_pr|Makefile"
   "cargo-deny bootstrap selects supply-chain validation|false false false false false false true true false false false|scripts/bootstrap-dev-tools.sh"
   "classifier scripts still force full|$full_pr|scripts/classify-ci-paths.sh"

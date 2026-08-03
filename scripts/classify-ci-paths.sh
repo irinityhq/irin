@@ -93,7 +93,7 @@ for path in "${paths[@]}"; do
     # not tax product lanes (Rust matrix, War Room, Tauri visual) for script-only edits.
     # Exception: candidate export/import and worktree evidence scripts are
     # method surface — light checks only (no product candidate rebuild).
-    scripts/dev-*.sh|scripts/new-worktree.sh|scripts/remove-worktree.sh|scripts/worktree-gc.sh|scripts/check-*.sh|scripts/with-test-ports.sh|scripts/export-candidate.sh|scripts/import-candidate.sh|scripts/test-export-import-candidate.sh)
+    scripts/dev-*.sh|scripts/new-worktree.sh|scripts/remove-worktree.sh|scripts/worktree-gc.sh|scripts/check-*.sh|scripts/with-test-ports.sh|scripts/export-candidate.sh|scripts/import-candidate.sh|scripts/test-export-import-candidate.sh|scripts/shipping-method-smoke.sh|scripts/test-publish-fake-gh.sh|scripts/test-remove-worktree-evidence.sh|scripts/link-ship-board.sh)
       ;;
 
     # Root workspace manifests affect every member. The standalone Tauri crate
