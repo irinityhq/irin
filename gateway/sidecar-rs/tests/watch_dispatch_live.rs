@@ -1461,6 +1461,39 @@ fn main_rs_spawns_live_dispatcher_after_hydration() {
     );
 }
 
+#[test]
+fn boot_phases_are_named_and_ordered() {
+    // PR5: load_config_build_state_and_serve is split into five domain-named
+    // phases. Pin the names and source order so a later merge cannot collapse
+    // them back into an opaque monolith without updating this contract.
+    let boot_src = include_str!("../src/boot.rs");
+    let phases = [
+        "fn load_configuration",
+        "fn initialize_authority",
+        "fn hydrate_runtime_state",
+        "fn start_listener_and_background",
+        "fn await_shutdown",
+    ];
+    let mut last = 0usize;
+    for name in phases {
+        let pos = boot_src
+            .find(name)
+            .unwrap_or_else(|| panic!("boot phase `{name}` must exist in boot.rs"));
+        assert!(
+            pos > last,
+            "boot phase `{name}` must appear after prior phases (pos={pos}, last={last})"
+        );
+        last = pos;
+    }
+    let orchestrator = boot_src
+        .find("pub(crate) async fn load_config_build_state_and_serve")
+        .expect("orchestrator load_config_build_state_and_serve must remain");
+    assert!(
+        orchestrator > last,
+        "orchestrator must call the five phases after they are defined"
+    );
+}
+
 // ==========================================================================
 // Council P0 closure tests (f6d802f8-155 pre-smoke)
 // ==========================================================================
