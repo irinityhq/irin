@@ -73,7 +73,8 @@ not the shipping claim.
 
 ### `make ship-check`
 
-Run immediately before claiming completion or updating the pull request. It:
+Run immediately before opening or updating the pull request. This is **source
+proof only** — not Candidate verified, Installed, Accepted, or Published. It:
 
 - refuses a receipt based on an older `origin/main`;
 - runs the local equivalents for every selected CI lane only (documentation
@@ -101,7 +102,9 @@ installation, then rechecks the cached executable on every use. Actionlint
 validates every GitHub Actions workflow as part of the ship receipt. `make
 tools` performs both bootstraps explicitly.
 
-No current passing receipt means no `done`, `ready`, or `safe to merge` claim.
+No current passing receipt means no source-proof claim for that PR tip.
+`make ship-check` never means Installed, Accepted, Published, or product-green;
+those tiers come only from `scripts/candidate-status.sh` on a durable candidate.
 If another pull request merges first, update from `origin/main`, rerun
 `make preflight`, then rerun the ship check. The integrated `main` workflow
 repeats the complete code matrix after merge so individually green branches

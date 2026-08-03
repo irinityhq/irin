@@ -76,5 +76,5 @@ else
 fi
 
 if [[ "$mode" == "start" ]]; then
-  printf 'Next: edit in this worktree, run make check while iterating, and make ship-check before claiming done.\n'
+  printf 'Next: edit in this worktree, run make check while iterating, and make ship-check before opening or updating the PR (source proof only; not a shipping tier).\n'
 fi
