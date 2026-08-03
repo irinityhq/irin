@@ -29,12 +29,13 @@ make worktree BRANCH=fix/example
 cd ../irin-wt-fix-example
 ```
 
-The creator fetches `origin/main`, creates the branch from that exact commit,
-writes a collision-checked ignored worktree runtime profile, attaches private
-operator agent guidance from the creator checkout when present (ignored
-symlinks only; never product memory state), and runs the initial preflight. If
-setup fails, it removes the incomplete worktree rather than leaving a
-half-configured checkout.
+The creator must be the canonical operator checkout (real private agent guidance
+files and an initialized private project-memory ledger). It fetches
+`origin/main`, creates the branch from that exact commit, writes a
+collision-checked ignored worktree runtime profile, attaches private operator
+agent guidance as ignored symlinks only (never product memory state in the
+worktree), and runs the initial preflight. If setup fails, it removes the
+incomplete worktree rather than leaving a half-configured checkout.
 
 Remove a finished clean worktree while retaining its branch:
 

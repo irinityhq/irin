@@ -148,6 +148,30 @@ require_ignored() {
   done
 }
 
+# Destination must be an IRIN worktree root of the same monorepo as source.
+# Rejects arbitrary Git dirs, subdirectories, and foreign checkouts.
+require_same_repo_worktree_root() {
+  local dest="$1" source="$2" dest_top source_common dest_common dest_phys top_phys
+  git -C "$dest" rev-parse --is-inside-work-tree >/dev/null 2>&1 \
+    || die "destination is not a Git worktree: $dest"
+  dest_top="$(git -C "$dest" rev-parse --show-toplevel)"
+  dest_phys="$(cd "$dest" && pwd -P)"
+  top_phys="$(cd "$dest_top" && pwd -P)"
+  [[ "$dest_phys" == "$top_phys" ]] \
+    || die "destination must be a worktree root, not a subdirectory: $dest (toplevel is $dest_top)"
+  source_common="$(git -C "$source" rev-parse --path-format=absolute --git-common-dir)"
+  dest_common="$(git -C "$dest" rev-parse --path-format=absolute --git-common-dir)"
+  [[ "$source_common" == "$dest_common" ]] \
+    || die "destination is not a worktree of the same repository as the canonical source"
+}
+
+require_no_worktree_projectmem() {
+  local dest="$1"
+  if [[ -e "$dest/.projectmem" || -L "$dest/.projectmem" ]]; then
+    die "refusing to attach while $dest/.projectmem exists (ProjectMem stays canonical-only; remove the worktree-local path)"
+  fi
+}
+
 status_one() {
   local dest="$1" source="$2" name link
   note "target=$dest"
@@ -190,6 +214,8 @@ link_one() {
   fi
 
   require_source "$source"
+  require_same_repo_worktree_root "$dest" "$source"
+  require_no_worktree_projectmem "$dest"
   require_ignored "$dest"
 
   # Phase 1: validate every destination in this shell (not a subshell — die must
@@ -237,6 +263,16 @@ link_one() {
   return 0
 }
 
+# Run one attach in an isolated shell so die/exit and set -e failures stay local.
+# Parent captures status without disabling errexit for the function body (if ! fn).
+try_link_one() {
+  local dest="$1" source="$2"
+  (
+    set -euo pipefail
+    link_one "$dest" "$source"
+  )
+}
+
 SOURCE="$(resolve_source_root)" || die "could not resolve canonical doctrine source (pass --from)"
 require_source "$SOURCE"
 
@@ -254,7 +290,10 @@ if [[ "$MODE" == "all" ]]; then
   while IFS= read -r wt; do
     [[ -d "$wt" ]] || continue
     note "--- $wt ---"
-    if ! link_one "$wt" "$SOURCE"; then
+    # Subshell isolate: one bad worktree must not abort remaining attaches.
+    if try_link_one "$wt" "$SOURCE"; then
+      :
+    else
       note "FAILED $wt"
       failures=$((failures + 1))
     fi
