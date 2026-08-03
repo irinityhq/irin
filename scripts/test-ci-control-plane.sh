@@ -232,6 +232,7 @@ simulate_overlays() {
       scripts/test-ci-control-plane.sh|\
       scripts/test-ci-candidate-observability.sh|\
       scripts/run-actionlint.sh|\
+      scripts/bootstrap-actionlint.sh|\
       __manual_dispatch__|__scheduled_proof__|__integrated_main__|__unknown_base__|__unknown_event__)
         force_full_non_sbom=true
         ;;
