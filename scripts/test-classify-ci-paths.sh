@@ -24,6 +24,9 @@ keys=(
 # 11 booleans: full gateway council sentinel web tauri ws_sc tauri_sc sbom exact_cand exact_inst
 all_false='false false false false false false false false false false false'
 full_pr='true true true true true true true true false true true'
+# Unknown real paths: full product lanes without exact_* (exact is explicit-path
+# + base force-full only; see classify-ci-paths.sh set_full_product_lanes).
+full_pr_no_exact='true true true true true true true true false false false'
 full_proof='true true true true true true true true true true true'
 
 cases=(
@@ -34,7 +37,7 @@ cases=(
   "manual forces full|$full_proof|__manual_dispatch__"
   "schedule forces full|$full_proof|__scheduled_proof__"
   "integrated main forces full|$full_pr|__integrated_main__"
-  "unknown forces full|$full_pr|new-surface/config.json"
+  "unknown forces full product lanes without exact|$full_pr_no_exact|new-surface/config.json"
   "development scripts stay light|$all_false|scripts/dev-check.sh scripts/new-worktree.sh scripts/dev-preflight.sh"
   "export/import scripts stay light (no product rebuild)|$all_false|scripts/export-candidate.sh scripts/import-candidate.sh"
   "shipping-method-smoke stays light (no product rebuild)|$all_false|scripts/shipping-method-smoke.sh scripts/test-publish-fake-gh.sh scripts/test-remove-worktree-evidence.sh"

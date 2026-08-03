@@ -43,7 +43,11 @@ sbom=false
 exact_candidate=false
 exact_install=false
 
-set_full_matrix() {
+# Full product/proof lanes without exact candidate/install. Used for unknown
+# real paths so the base-controlled exact overlay in ci.yml is not forced to
+# strip a classifier-only exact bit (inline exact is a conservative superset of
+# explicit exact rules + control-plane force-full, not of the unknown catch-all).
+set_full_product_lanes() {
   full_matrix=true
   gateway_rust=true
   council_rust=true
@@ -52,8 +56,11 @@ set_full_matrix() {
   warroom_tauri=true
   workspace_supply_chain=true
   tauri_supply_chain=true
-  # Fail-safe: full synthetic matrices also select exact candidate+install so
-  # unknown surfaces and manual/scheduled proof never skip durable rebuilds.
+}
+
+# Synthetic tokens and CI-policy surfaces also select exact candidate+install.
+set_full_matrix() {
+  set_full_product_lanes
   exact_candidate=true
   exact_install=true
 }
@@ -75,8 +82,8 @@ for path in "${paths[@]}"; do
       ;;
 
     __*__|.github/workflows/*|.github/actions/*|*/.github/workflows/*|*/.github/actions/*|scripts/classify-ci-paths.sh|scripts/test-classify-ci-paths.sh|scripts/test-ci-control-plane.sh|scripts/test-ci-candidate-observability.sh|scripts/run-actionlint.sh|scripts/bootstrap-actionlint.sh)
-      # CI control-plane surface: full non-SBOM matrix (bootstrap wrapper included
-      # so queue:max schema allowance stays covered when the pin changes).
+      # CI control-plane surface: full non-SBOM matrix + exact (bootstrap wrapper
+      # included so queue:max schema allowance stays covered when the pin changes).
       set_full_matrix
       ;;
 
@@ -229,7 +236,10 @@ for path in "${paths[@]}"; do
       ;;
 
     *)
-      set_full_matrix
+      # Unknown real path: full product lanes, but exact_* stay false here.
+      # Durable candidate/install remain explicit-path + base force-full only so
+      # the inline exact overlay cannot under-select relative to the classifier.
+      set_full_product_lanes
       ;;
   esac
 done

@@ -55,12 +55,18 @@ tier, install acceptance, publication, or deployment from a green lightweight
 main run.
 
 Main pushes share one non-cancelling concurrency group with `queue: max` so
-every merge retains its own path-scoped receipt. GitHub's default concurrency
-queue keeps only one pending run; without `queue: max`, a burst of merges can
-replace an earlier pending receipt while the next path-scoped run examines only
-its own `before...sha` and never covers the discarded merge. Superseded-PR
-cancellation lives only on `ci-pr.yml` (per-PR group, `cancel-in-progress:
-true`) and never shares a concurrency mapping with `queue: max`.
+merge receipts are retained up to GitHub's pending cap of **100** runs in that
+group. Additional runs beyond the cap are cancelled (not a lossless infinite
+queue). GitHub's default concurrency queue keeps only one pending run; without
+`queue: max`, a smaller burst can already replace an earlier pending receipt
+while the next path-scoped run examines only its own `before...sha` and never
+covers the discarded merge. Operator recovery if the cap is approached or
+overflow cancels a run: stop the held-fix merge cadence, let the queue drain,
+re-run the cancelled main SHA (or re-push an empty commit only when necessary),
+and do not treat a later path-scoped run as covering a missing receipt.
+Superseded-PR cancellation lives only on `ci-pr.yml` (per-PR group,
+`cancel-in-progress: true`) and never shares a concurrency mapping with
+`queue: max`.
 
 Scheduled and manual runs use the full integrated matrix and unique concurrency
 groups; they do not join the main-push queue. Full-matrix proof is also
@@ -208,8 +214,9 @@ For the public repository:
 - confirm the self-hosted runner group does not allow public repositories;
 - keep the trusted author and same-repository predicate enforced;
 - revisit runner ephemerality when untrusted code can enter the trusted path;
-- confirm main pushes are path-scoped and that the main concurrency queue
-  retains every merge receipt (`queue: max`, no cancel on that group);
+- confirm main pushes are path-scoped and that the main concurrency queue uses
+  `queue: max` with no cancel on that group (bounded retention: 100 pending;
+  overflow cancelled; serial held-fix cadence);
 - for CI-workflow changes, retain a branch `workflow_dispatch` same-revision
   receipt in addition to ordinary PR CI against `ci.yml@main`;
 - register required check names before changing branch protection;

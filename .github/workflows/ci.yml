@@ -23,8 +23,11 @@ permissions:
   contents: read
 
 # Concurrency split (PR B / #0008):
-# - Main pushes share one non-cancelling group with queue:max so every merge
-#   keeps its own path-scoped receipt (GitHub's default pending depth is 1).
+# - Main pushes share one non-cancelling group with queue:max so merge
+#   receipts are retained up to GitHub's pending cap (100). Overflow beyond
+#   that cap is cancelled; keep held-fix landing serial and watch the queue.
+#   (Default pending depth without queue:max is 1 — a burst replaces older
+#   pending path-scoped receipts.)
 # - Superseded-PR cancellation lives on ci-pr.yml only. This reusable graph
 #   never sets cancel-in-progress true — GitHub forbids combining that with
 #   queue:max.
@@ -126,6 +129,10 @@ jobs:
           esac
 
           scripts/test-classify-ci-paths.sh
+          # Hosted control-plane contracts (concurrency split, force-full,
+          # exact-policy binding). Must run here so PR CI and branch
+          # workflow_dispatch cannot go green without exercising them.
+          scripts/test-ci-control-plane.sh
           # Opt into exact_* so path-scoped candidate jobs see them. Classic
           # nine keys remain the default under Actions without this flag so a
           # base-controlled ci.yml@main that has not yet learned exact_* can

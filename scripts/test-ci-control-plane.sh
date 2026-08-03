@@ -122,9 +122,13 @@ done
 pass "force-full policy path list includes workflows + classifier contracts"
 
 # ---------------------------------------------------------------------------
-# Behavioral: exact_* inline overlay matches classifier for product paths
+# Behavioral: base-composed exact_* is a conservative superset of classifier
 # ---------------------------------------------------------------------------
-# Extract the two path_requires_* functions from ci.yml and evaluate them.
+# Final base-controlled exact selection in detect-changes is:
+#   base = path_requires_exact_* || path_forces_full_non_sbom
+# (force-full raises both exact bits). That composition must never under-select
+# relative to the classifier (cls true ⇒ base true). Base may over-select
+# (intentional conservative supersets, listed below).
 tmp="$(mktemp -d "${TMPDIR:-/tmp}/irin-ci-control.XXXXXX")"
 cleanup() { rm -rf "$tmp"; }
 trap cleanup EXIT INT TERM
@@ -137,9 +141,11 @@ from pathlib import Path
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
 out = Path(sys.argv[2])
 parts = []
-for name in ("path_requires_exact_candidate", "path_requires_exact_install"):
-    # YAML run block indents the function with 10 spaces; body closes at the
-    # same indent. Non-greedy match stops at the first same-indent closing brace.
+for name in (
+    "path_requires_exact_candidate",
+    "path_requires_exact_install",
+    "path_forces_full_non_sbom_matrix",
+):
     m = re.search(
         rf"({name}\(\) \{{.*?\n          \}})",
         text,
@@ -149,7 +155,6 @@ for name in ("path_requires_exact_candidate", "path_requires_exact_install"):
         raise SystemExit(f"could not extract {name} from ci.yml")
     parts.append(m.group(1))
 body = "\n".join(parts)
-# Dedent the leading 10 spaces used inside the YAML run block.
 body = "\n".join(
     line[10:] if line.startswith("          ") else line for line in body.splitlines()
 )
@@ -159,55 +164,116 @@ PY
 # shellcheck source=/dev/null
 source "$tmp/exact_fns.sh"
 
-fixture_paths=(
-  packaging/env.sh
-  packaging/build-dmg.sh
-  packaging/gateway-pack/docker-compose.yml
-  council-rs/warroom/web/app/page.tsx
-  council-rs/warroom-tauri/src-tauri/src/lib.rs
-  council-rs/warroom-tauri/src-tauri/resources/gateway-pack/docker-compose.yml
-  scripts/smoke-macos-tauri-app.sh
-  scripts/stage-gateway-pack.sh
-  scripts/release-transaction.sh
-  scripts/install-verify-candidate.sh
-  scripts/classify-ci-paths.sh
-  scripts/test-classify-ci-paths.sh
-  .github/workflows/ci.yml
-  .github/workflows/ci-pr.yml
-  Makefile
-  README.md
-  docs/architecture.md
-  gateway/sidecar-rs/src/main.rs
-  __manual_dispatch__
-  __scheduled_proof__
+base_exact_cand() {
+  path_requires_exact_candidate "$1" && return 0
+  path_forces_full_non_sbom_matrix "$1" && return 0
+  return 1
+}
+base_exact_inst() {
+  path_requires_exact_install "$1" && return 0
+  path_forces_full_non_sbom_matrix "$1" && return 0
+  return 1
+}
+
+# Intentional conservative supersets: base exact_candidate true, classifier false.
+# These method scripts stay light in the classifier (no product rebuild lanes)
+# but the base-controlled overlay still forces candidate isolation.
+intentional_superset_cand=(
+  scripts/export-candidate.sh
+  scripts/import-candidate.sh
+  scripts/test-export-import-candidate.sh
 )
 
-exact_sync_failures=0
-for path in "${fixture_paths[@]}"; do
+# Comprehensive path universe: classifier fixtures + tracked packaging/app/CI
+# surfaces + intentional supersets + synthetic tokens.
+path_universe_file="$tmp/path-universe.txt"
+{
+  printf '%s\n' \
+    README.md CONTRIBUTING.md docs/architecture.md \
+    gateway/docs/runbook.md \
+    .github/workflows/ci.yml .github/workflows/ci-pr.yml \
+    .github/workflows/codeql.yml .github/actions/rust-setup/action.yml \
+    __manual_dispatch__ __scheduled_proof__ __integrated_main__ \
+    __unknown_base__ __unknown_event__ \
+    new-surface/config.json \
+    scripts/dev-check.sh scripts/new-worktree.sh \
+    scripts/export-candidate.sh scripts/import-candidate.sh \
+    scripts/test-export-import-candidate.sh \
+    scripts/classify-ci-paths.sh scripts/test-classify-ci-paths.sh \
+    scripts/test-ci-control-plane.sh scripts/test-ci-candidate-observability.sh \
+    scripts/run-actionlint.sh scripts/bootstrap-actionlint.sh \
+    scripts/stage-gateway-pack.sh scripts/release-transaction.sh \
+    scripts/test-release-transaction-w3.sh scripts/install-verify-candidate.sh \
+    scripts/candidate-status.sh scripts/ci-build-adhoc-candidate.sh \
+    scripts/record-acceptance.sh scripts/smoke-macos-tauri-app.sh \
+    packaging/env.sh packaging/build-dmg.sh packaging/gateway-pack/docker-compose.yml \
+    council-rs/warroom/web/app/page.tsx \
+    council-rs/warroom-tauri/src-tauri/src/lib.rs \
+    council-rs/warroom-tauri/src-tauri/resources/gateway-pack/docker-compose.yml \
+    council-rs/scripts/warroom-tauri-dev.sh \
+    gateway/sidecar-rs/src/main.rs Makefile
+  git -C "$ROOT" ls-files \
+    'packaging/*' \
+    'scripts/*' \
+    '.github/workflows/*' \
+    '.github/actions/*' \
+    'council-rs/warroom/web/*' \
+    'council-rs/warroom-tauri/*' \
+    'council-rs/src-tauri/*' \
+    'council-rs/scripts/warroom*' \
+    2>/dev/null || true
+} | sort -u >"$path_universe_file"
+
+underlay_failures=0
+path_count=0
+while IFS= read -r path; do
+  [[ -z "$path" ]] && continue
+  path_count=$((path_count + 1))
   out="$("$CLASSIFIER" "$path")"
   cls_cand="$(sed -n 's/^exact_candidate=//p' <<<"$out")"
   cls_inst="$(sed -n 's/^exact_install=//p' <<<"$out")"
-  if path_requires_exact_candidate "$path"; then inline_cand=true; else inline_cand=false; fi
-  if path_requires_exact_install "$path"; then inline_inst=true; else inline_inst=false; fi
-  # For workflow / classifier / Makefile paths the classifier may force the full
-  # matrix (exact true) while the inline exact functions are the runtime
-  # authority. Compare only product packaging/app paths here; policy paths are
-  # covered by the force-full contract below.
-  case "$path" in
-    .github/*|scripts/classify-ci-paths.sh|scripts/test-classify-ci-paths.sh|Makefile|__*)
-      continue
-      ;;
-  esac
-  if [[ "$cls_cand" != "$inline_cand" || "$cls_inst" != "$inline_inst" ]]; then
-    printf 'FAIL: exact sync %s: classifier cand=%s inst=%s; inline cand=%s inst=%s\n' \
-      "$path" "$cls_cand" "$cls_inst" "$inline_cand" "$inline_inst" >&2
-    exact_sync_failures=$((exact_sync_failures + 1))
+  if base_exact_cand "$path"; then base_cand=true; else base_cand=false; fi
+  if base_exact_inst "$path"; then base_inst=true; else base_inst=false; fi
+
+  if [[ "$cls_cand" == true && "$base_cand" != true ]]; then
+    printf 'FAIL: exact underlay cand %s: classifier=true base=false\n' "$path" >&2
+    underlay_failures=$((underlay_failures + 1))
+  fi
+  if [[ "$cls_inst" == true && "$base_inst" != true ]]; then
+    printf 'FAIL: exact underlay inst %s: classifier=true base=false\n' "$path" >&2
+    underlay_failures=$((underlay_failures + 1))
+  fi
+done <"$path_universe_file"
+
+if (( underlay_failures > 0 )); then
+  fail "base exact composition under-selects classifier ($underlay_failures)"
+else
+  pass "base exact composition never under-selects classifier ($path_count paths)"
+fi
+
+# Every intentional superset path must still be a real base>cls cand pair.
+superset_missing=0
+for path in "${intentional_superset_cand[@]}"; do
+  out="$("$CLASSIFIER" "$path")"
+  cls_cand="$(sed -n 's/^exact_candidate=//p' <<<"$out")"
+  if base_exact_cand "$path"; then base_cand=true; else base_cand=false; fi
+  if [[ "$cls_cand" != false || "$base_cand" != true ]]; then
+    printf 'FAIL: intentional superset %s: want cls_cand=false base_cand=true, got %s/%s\n' \
+      "$path" "$cls_cand" "$base_cand" >&2
+    superset_missing=$((superset_missing + 1))
   fi
 done
-if (( exact_sync_failures > 0 )); then
-  fail "exact_* inline overlay vs classifier ($exact_sync_failures path(s))"
+if (( superset_missing > 0 )); then
+  fail "intentional exact_candidate supersets not as modeled"
 else
-  pass "exact_* inline overlay matches classifier on product fixtures"
+  pass "intentional exact_candidate supersets modeled (${#intentional_superset_cand[@]} paths)"
+fi
+
+# Hosted invocation: detect-changes must call this script (not only path lists).
+if ! rg -n '^\s+scripts/test-ci-control-plane\.sh\s*$' "$CI_YML" >/dev/null; then
+  fail "ci.yml must run scripts/test-ci-control-plane.sh as a hosted step"
+else
+  pass "ci.yml hosts test-ci-control-plane.sh in detect-changes"
 fi
 
 # ---------------------------------------------------------------------------

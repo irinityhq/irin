@@ -64,11 +64,26 @@ exec "$real_destination" -ignore '$queue_ignore' "\$@"
 EOF
 )"
 
+write_wrapper() {
+  # Always rewrite the wrapper from the exact expected body (no substring trust).
+  printf '%s\n' "$wrapper_body" >"$wrapper_destination"
+  chmod 0755 "$wrapper_destination"
+}
+
+wrapper_matches() {
+  [[ -f "$wrapper_destination" ]] || return 1
+  # Exact byte compare against the generated body (including final newline).
+  local actual
+  actual="$(cat "$wrapper_destination")"
+  [[ "$actual" == "$wrapper_body" ]]
+}
+
 if [[ -x "$real_destination" ]] \
-  && [[ "$(file_sha256 "$real_destination")" == "$binary_sha" ]] \
-  && [[ -x "$wrapper_destination" ]] \
-  && grep -Fq "$queue_ignore" "$wrapper_destination" \
-  && grep -Fq "$real_destination" "$wrapper_destination"; then
+  && [[ "$(file_sha256 "$real_destination")" == "$binary_sha" ]]; then
+  if ! wrapper_matches; then
+    write_wrapper
+    printf 'actionlint %s: refreshed wrapper to exact expected body\n' "$version"
+  fi
   printf 'actionlint %s: ready (%s → %s)\n' "$version" "$wrapper_destination" "$real_destination"
   exit 0
 fi
@@ -99,8 +114,6 @@ tar -xzf "$archive" -C "$tmp" actionlint
 }
 mkdir -p "$bin_dir"
 install -m 0755 "$tmp/actionlint" "$real_destination"
-# Replace any prior raw binary that lived at the wrapper path.
-printf '%s\n' "$wrapper_body" >"$wrapper_destination"
-chmod 0755 "$wrapper_destination"
+write_wrapper
 "$wrapper_destination" -version
 printf 'actionlint %s: installed wrapper with queue-schema ignore\n' "$version"
