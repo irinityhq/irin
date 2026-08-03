@@ -123,14 +123,18 @@ set -e
 pass "prepare-production refuses without T1 packet"
 
 # --- dry-run-rc name is retired (not a silent no-op or alias) --------------
+# Require retirement wording + migration target. Flag-name alone is not enough:
+# generic "unknown argument: --dry-run-rc" would also contain the flag.
 set +e
 out="$("$TX" --dry-run-rc 2>&1)"
 ec=$?
 set -e
 [[ $ec -ne 0 ]] || fail "retired --dry-run-rc must refuse"
-[[ "$out" == *"--prepare-production"* || "$out" == *"removed"* || "$out" == *"dry-run-rc"* ]] \
-  || fail "expected --dry-run-rc retirement message: $out"
-pass "retired --dry-run-rc refuses (use --prepare-production)"
+[[ "$out" == *"removed"* ]] \
+  || fail "expected retirement wording (removed), not generic unknown-arg: $out"
+[[ "$out" == *"--prepare-production"* ]] \
+  || fail "expected migration to --prepare-production: $out"
+pass "retired --dry-run-rc refuses with remove+migrate contract"
 
 # --- publish without --candidate dies --------------------------------------
 set +e
