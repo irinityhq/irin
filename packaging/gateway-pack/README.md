@@ -75,11 +75,11 @@ the stable Developer ID bundle identity. Items provisioned by the retired
 "Council War Room" identity (`com.sovereign.council.warroom`) are copied
 forward on first launch and never deleted by migration; if a copy is refused
 by Keychain ACL, Enable simply re-provisions. Developer ID continuity across
-app upgrades is proven before any release ships: the production dry-run gate
-(`scripts/release-transaction.sh --dry-run-rc`) exercises first-run migration
-and Keychain continuity under the real signed identity, and the PR may not
-merge without it. Ad-hoc signed local builds may not retain Keychain access
-across identity changes.
+app upgrades is proven before any release ships: T1-authorized
+`--prepare-production` exercises first-run migration and Keychain continuity
+under the real signed identity (irreversible GHCR/notary effects; not a dry
+run). Ad-hoc signed local builds may not retain Keychain access across identity
+changes.
 
 ## Operator flow (installed release)
 

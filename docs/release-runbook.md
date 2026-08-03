@@ -91,9 +91,9 @@ This is **not** a no-effect simulation. It:
    `IRIN_CANDIDATE_ROOT` and prints `candidate_path=`
 5. Verifies and promotion-smokes that candidate
 
-It does **not** create, upload to, or publish a GitHub Release. A temporary
-`--dry-run-rc` alias still works but prints the same irreversible effects and
-requires the same T1 packet.
+It does **not** create, upload to, or publish a GitHub Release. There is no
+`--dry-run-rc` alias; that name was removed because it implied a no-effect
+simulation.
 
 ### 2) Install proof + T2 acceptance
 

@@ -13,7 +13,8 @@
 #       draft/public state → labels (create only for draft path) → tag → attach
 #       → publish → unauthenticated re-download → proofs/publication.json.
 #
-# Temporary alias: --dry-run-rc requires the same T1 packet and prints real effects.
+# The misleading --dry-run-rc name is removed. Use --prepare-production only;
+# that path has irreversible GHCR/notary effects and is not a no-effect simulation.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -29,7 +30,6 @@ TAG=""
 CANDIDATE_ARG=""
 T1_PACKET=""
 T2_PACKET=""
-DRY_RUN_ALIAS=0
 
 usage() {
   cat <<'EOF'
@@ -38,8 +38,9 @@ Usage:
   release-transaction.sh --publish --tag vX.Y.Z \
       --candidate ABSOLUTE_STORE_PATH --t2-packet CANDIDATE/proofs/t2.json
 
-  (legacy alias) --dry-run-rc --t1-packet PATH
-      Same as --prepare-production; prints irreversible effects and requires T1.
+  --prepare-production is T1-authorized RC preparation with irreversible
+  external effects (rc-* GHCR push, Apple notary once per attempt). It is not
+  a no-effect simulation. There is no --dry-run-rc alias.
 
 Required env (both modes):
   APPLE_SIGNING_IDENTITY   Developer ID Application identity
@@ -77,7 +78,9 @@ if [[ "${IRIN_RELEASE_TX_LIB:-}" != "1" ]]; then
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --prepare-production) MODE="prepare"; shift ;;
-      --dry-run-rc) MODE="prepare"; DRY_RUN_ALIAS=1; shift ;;
+      --dry-run-rc)
+        die "--dry-run-rc was removed; use --prepare-production --t1-packet PATH (irreversible; not a dry run)"
+        ;;
       --publish) MODE="publish"; shift ;;
       --tag) TAG="${2:-}"; shift 2 ;;
       --candidate) CANDIDATE_ARG="${2:-}"; shift 2 ;;
@@ -487,18 +490,6 @@ gh_release_has_asset() {
 # --prepare-production
 # ---------------------------------------------------------------------------
 do_prepare() {
-  if [[ "$DRY_RUN_ALIAS" == "1" ]]; then
-    cat <<'EOF' >&2
-WARNING: --dry-run-rc is a legacy alias for --prepare-production.
-It is NOT a no-effect simulation. Irreversible external effects:
-  - push/overwrite rc-<sha12> GHCR images (gateway + sidecar) — once per attempt
-  - Apple notary submission + staple for one production DMG — once per attempt
-  - durable candidate store write under IRIN_CANDIDATE_ROOT
-It does NOT create, upload to, or publish a GitHub Release.
-Migrate callers to: --prepare-production --t1-packet PATH
-EOF
-  fi
-
   eval "$(validate_t1_packet "$T1_PACKET")"
   preflight_machine
   preflight_source_tree

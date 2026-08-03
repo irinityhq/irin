@@ -37,7 +37,7 @@ preflight: ## Prove branch, base, and worktree isolation before editing
 check: ## Run fast tests selected from the current diff
 	bash scripts/dev-check.sh
 
-ship-check: ## Run the complete diff-selected product proof and emit a receipt
+ship-check: ## Diff-selected source proof + receipt (not a shipping tier)
 	bash scripts/dev-check.sh --ship
 
 verify: ## Prove the loop ($0, no keys): one signed directive lands in the outbox
