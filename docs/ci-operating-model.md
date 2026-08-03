@@ -41,7 +41,7 @@ Do not switch the dispatcher to `uses: ./.github/workflows/ci.yml` without a
 design that proves same-SHA execution and base-controlled runner trust at the
 same time.
 
-### Main push: path-scoped proof and lossless queue
+### Main push: path-scoped proof and bounded queue
 
 Ordinary pushes to `main` classify from the event's exact `before...github.sha`
 diff. Lightweight merges therefore run only the selected lanes; packaging-
