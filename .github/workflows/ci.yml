@@ -896,10 +896,12 @@ jobs:
           bash scripts/test-remove-worktree-evidence.sh
           bash scripts/test-publish-fake-gh.sh
 
-      # Stream helper output live (no command substitution). Retain
-      # .ci-build-<sha>.log on failure via the next step. Parse summary keys
-      # only after a zero exit. When exact_install=true, pass --install so
-      # install-sensitive PRs get pre-merge install verification.
+      # Stream the full helper invocation into one non-hidden outer log
+      # (ci-build-<sha>.log). Do not upload the helper-internal hidden
+      # .ci-build-<sha>.log — upload-artifact excludes hidden files by
+      # default, and early/late failures never land there. Parse summary
+      # keys only after a zero exit. When exact_install=true, pass
+      # --install so install-sensitive PRs get pre-merge install verification.
       - name: Build ad-hoc candidate from branch HEAD (no shipping tier)
         env:
           IRIN_CANDIDATE_ROOT: ${{ runner.temp }}/irin-candidates
@@ -910,10 +912,10 @@ jobs:
           mkdir -p "$IRIN_CANDIDATE_ROOT"
           test "$(git rev-parse HEAD)" = "$BRANCH_HEAD_SHA"
           # Isolation contracts prove cross-SHA refuse; the build binds branch HEAD.
-          build_log="$IRIN_CANDIDATE_ROOT/.ci-build-${BRANCH_HEAD_SHA}.log"
-          summary_file="$IRIN_CANDIDATE_ROOT/.ci-build-summary-${BRANCH_HEAD_SHA}.txt"
+          # Non-hidden outer log: full helper stdout/stderr for success parse + failure artifact.
+          outer_log="$IRIN_CANDIDATE_ROOT/ci-build-${BRANCH_HEAD_SHA}.log"
           {
-            echo "CI_BUILD_LOG=$build_log"
+            echo "CI_BUILD_LOG=$outer_log"
             echo "CI_BUILD_SOURCE_SHA=$BRANCH_HEAD_SHA"
             echo "BRANCH_HEAD_SHA=$BRANCH_HEAD_SHA"
           } >> "$GITHUB_ENV"
@@ -925,18 +927,18 @@ jobs:
             args+=(--install)
           fi
           set +e
-          bash scripts/ci-build-adhoc-candidate.sh "${args[@]}" 2>&1 | tee "$summary_file"
+          bash scripts/ci-build-adhoc-candidate.sh "${args[@]}" 2>&1 | tee "$outer_log"
           build_ec=${PIPESTATUS[0]}
           set -e
           if [[ "$build_ec" -ne 0 ]]; then
-            echo "ERROR: ci-build-adhoc-candidate failed (exit $build_ec); log=$build_log" >&2
-            if [[ -f "$build_log" ]]; then
-              echo "---- tail of retained build log ----" >&2
-              tail -n 200 "$build_log" >&2 || true
+            echo "ERROR: ci-build-adhoc-candidate failed (exit $build_ec); log=$outer_log" >&2
+            if [[ -f "$outer_log" ]]; then
+              echo "---- tail of retained outer build log ----" >&2
+              tail -n 200 "$outer_log" >&2 || true
             fi
             exit "$build_ec"
           fi
-          out="$(cat "$summary_file")"
+          out="$(cat "$outer_log")"
           echo "$out" | grep -q '^verification=PASS$'
           echo "$out" | grep -q '^shipping_tier_claim=none$'
           echo "$out" | grep -q "^source_sha=${BRANCH_HEAD_SHA}$"
@@ -966,13 +968,15 @@ jobs:
             echo "ARCHIVE_SHA256=$(kv "$out" archive_sha256)"
           } >> "$GITHUB_ENV"
 
+      # Only when the build step published CI_BUILD_LOG (skip if earlier steps failed).
+      # Fail closed if the path was set but the outer log is missing.
       - name: Upload candidate build log on failure
-        if: failure()
+        if: failure() && env.CI_BUILD_LOG != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ci-build-log-${{ env.CI_BUILD_SOURCE_SHA || github.event.pull_request.head.sha }}
           path: ${{ env.CI_BUILD_LOG }}
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 14
 
       - name: Upload isolation candidate archive
@@ -1018,9 +1022,9 @@ jobs:
           bash scripts/test-remove-worktree-evidence.sh
           bash scripts/test-publish-fake-gh.sh
 
-      # Stream helper output live (no command substitution). Retain
-      # .ci-build-<sha>.log on failure via the next step. Parse summary keys
-      # only after a zero exit.
+      # Stream the full helper invocation into one non-hidden outer log
+      # (ci-build-<sha>.log). Do not upload the helper-internal hidden
+      # .ci-build-<sha>.log. Parse summary keys only after a zero exit.
       - name: Build exact merged-SHA candidate and export durable bundle
         env:
           IRIN_CANDIDATE_ROOT: ${{ runner.temp }}/irin-candidates
@@ -1029,10 +1033,10 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$IRIN_CANDIDATE_ROOT"
-          build_log="$IRIN_CANDIDATE_ROOT/.ci-build-${MERGED_SHA}.log"
-          summary_file="$IRIN_CANDIDATE_ROOT/.ci-build-summary-${MERGED_SHA}.txt"
+          # Non-hidden outer log: full helper stdout/stderr for success parse + failure artifact.
+          outer_log="$IRIN_CANDIDATE_ROOT/ci-build-${MERGED_SHA}.log"
           {
-            echo "CI_BUILD_LOG=$build_log"
+            echo "CI_BUILD_LOG=$outer_log"
             echo "CI_BUILD_SOURCE_SHA=$MERGED_SHA"
           } >> "$GITHUB_ENV"
           args=(--export-dir "$IRIN_CANDIDATE_ROOT/.exports/${MERGED_SHA}" --source-sha "$MERGED_SHA")
@@ -1040,18 +1044,18 @@ jobs:
             args+=(--install)
           fi
           set +e
-          bash scripts/ci-build-adhoc-candidate.sh "${args[@]}" 2>&1 | tee "$summary_file"
+          bash scripts/ci-build-adhoc-candidate.sh "${args[@]}" 2>&1 | tee "$outer_log"
           build_ec=${PIPESTATUS[0]}
           set -e
           if [[ "$build_ec" -ne 0 ]]; then
-            echo "ERROR: ci-build-adhoc-candidate failed (exit $build_ec); log=$build_log" >&2
-            if [[ -f "$build_log" ]]; then
-              echo "---- tail of retained build log ----" >&2
-              tail -n 200 "$build_log" >&2 || true
+            echo "ERROR: ci-build-adhoc-candidate failed (exit $build_ec); log=$outer_log" >&2
+            if [[ -f "$outer_log" ]]; then
+              echo "---- tail of retained outer build log ----" >&2
+              tail -n 200 "$outer_log" >&2 || true
             fi
             exit "$build_ec"
           fi
-          out="$(cat "$summary_file")"
+          out="$(cat "$outer_log")"
           echo "$out" | grep -q '^verification=PASS$'
           # Do not print Candidate verified: CI required includes this job and
           # is not green yet. After aggregate + import, candidate-status owns tier.
@@ -1096,13 +1100,15 @@ jobs:
             echo "ARCHIVE_SHA256=$asha"
           } >> "$GITHUB_ENV"
 
+      # Only when the build step published CI_BUILD_LOG (skip if earlier steps failed).
+      # Fail closed if the path was set but the outer log is missing.
       - name: Upload candidate build log on failure
-        if: failure()
+        if: failure() && env.CI_BUILD_LOG != ''
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: ci-build-log-${{ env.CI_BUILD_SOURCE_SHA || github.sha }}
           path: ${{ env.CI_BUILD_LOG }}
-          if-no-files-found: ignore
+          if-no-files-found: error
           retention-days: 14
 
       - name: Upload exact merged candidate bundle (90-day retention)

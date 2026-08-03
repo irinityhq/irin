@@ -2,10 +2,11 @@
 # Contract tests for PR A candidate observability + install selection.
 #
 # 1) Static workflow wiring: no command-substitution of the CI helper;
-#    failure-log artifact steps exist; PR isolation honors exact_install;
-#    W4 bootstrap retired from the dispatcher while @main pin remains.
-# 2) Deterministic failure fixture: stream helper output live, retain log path,
-#    preserve non-zero exit — without making a live red PR.
+#    non-hidden outer failure log; fail-closed artifact upload; PR isolation
+#    honors exact_install; W4 bootstrap retired from the dispatcher while
+#    @main pin remains.
+# 2) Deterministic failure fixtures: early helper failure (before any
+#    helper-internal log) still lands in the outer non-hidden tee log.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -69,13 +70,44 @@ for name in wanted:
         print(f"missing failure upload in {name}", file=sys.stderr)
         sys.exit(1)
     if not re.search(
-        r"if:\s*failure\(\)\s*\n\s*uses:\s*actions/upload-artifact",
+        r"if:\s*failure\(\)\s*&&\s*env\.CI_BUILD_LOG\s*!=\s*''",
         body,
     ):
-        print(f"missing if: failure() upload-artifact in {name}", file=sys.stderr)
+        print(
+            f"upload must guard on failure() && env.CI_BUILD_LOG != '' in {name}",
+            file=sys.stderr,
+        )
         sys.exit(1)
-    if "CI_BUILD_LOG" not in body or ".ci-build-" not in body:
-        print(f"missing CI_BUILD_LOG / .ci-build- wiring in {name}", file=sys.stderr)
+    if not re.search(
+        r"if-no-files-found:\s*error",
+        body,
+    ):
+        print(f"failure log upload must use if-no-files-found: error in {name}", file=sys.stderr)
+        sys.exit(1)
+    if re.search(r"if-no-files-found:\s*ignore", body):
+        print(f"failure log upload must not use if-no-files-found: ignore in {name}", file=sys.stderr)
+        sys.exit(1)
+    # Outer non-hidden log assignment: ci-build-<sha>.log (not .ci-build-*)
+    if not re.search(
+        r'outer_log="\$IRIN_CANDIDATE_ROOT/ci-build-\$\{[^}]+}\.log"',
+        body,
+    ):
+        print(f"missing non-hidden outer_log=.../ci-build-<sha>.log in {name}", file=sys.stderr)
+        sys.exit(1)
+    # CI_BUILD_LOG must point at outer_log, not a hidden .ci-build path
+    if re.search(r'CI_BUILD_LOG=\$IRIN_CANDIDATE_ROOT/\.ci-build-', body):
+        print(f"CI_BUILD_LOG must not target hidden .ci-build- path in {name}", file=sys.stderr)
+        sys.exit(1)
+    if not re.search(r"CI_BUILD_LOG=\$outer_log", body):
+        print(f"CI_BUILD_LOG must be set from outer_log in {name}", file=sys.stderr)
+        sys.exit(1)
+    # Must tee into outer_log (the artifact file), not a separate hidden summary
+    if not re.search(r'\|\s*tee\s+"\$outer_log"', body):
+        print(f"helper must tee into \$outer_log in {name}", file=sys.stderr)
+        sys.exit(1)
+    # Must not assign CI_BUILD_LOG to hidden helper-internal path pattern for upload
+    if re.search(r'CI_BUILD_LOG=.*\.ci-build-', body):
+        print(f"CI_BUILD_LOG still references .ci-build- in {name}", file=sys.stderr)
         sys.exit(1)
     if "args+=(--install)" not in body:
         print(f"missing conditional --install in {name}", file=sys.stderr)
@@ -83,7 +115,6 @@ for name in wanted:
     if "EXACT_INSTALL" not in body:
         print(f"missing EXACT_INSTALL env in {name}", file=sys.stderr)
         sys.exit(1)
-    # install only when exact_install is true
     if not re.search(
         r'if \[\[ "\$EXACT_INSTALL" == "true" \]\]; then\s*\n\s*args\+=\(--install\)',
         body,
@@ -110,65 +141,110 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Deterministic failure fixture: observable invoke pattern
+# Deterministic failure fixtures: outer non-hidden log contract
 # ---------------------------------------------------------------------------
 fixture_dir="$(mktemp -d "${TMPDIR:-/tmp}/irin-ci-obs.XXXXXX")"
 cleanup() { rm -rf "$fixture_dir"; }
 trap cleanup EXIT
 
-fake_helper="$fixture_dir/fake-ci-build.sh"
-cat >"$fake_helper" <<'EOF'
+export IRIN_CANDIDATE_ROOT="$fixture_dir/candidates"
+mkdir -p "$IRIN_CANDIDATE_ROOT"
+SHA="$(python3 -c 'print("ab" * 20)')"
+# Non-hidden outer log — the artifact contract under test
+outer_log="$IRIN_CANDIDATE_ROOT/ci-build-${SHA}.log"
+# Hidden helper-internal path the OLD (broken) design uploaded — must not be required
+hidden_internal="$IRIN_CANDIDATE_ROOT/.ci-build-${SHA}.log"
+
+# Fixture A: early failure BEFORE any helper-internal log is created.
+# This is the case upload-artifact+hidden-log silently dropped.
+fake_early="$fixture_dir/fake-ci-build-early-fail.sh"
+cat >"$fake_early" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+# Fail before writing any internal log (no tee to .ci-build-*).
+echo "ERROR: early validation failed (no internal log yet)" >&2
+exit 1
+EOF
+chmod +x "$fake_early"
+
+set +e
+bash "$fake_early" --source-sha "$SHA" 2>&1 | tee "$outer_log"
+build_ec=${PIPESTATUS[0]}
+set -e
+
+if [[ "$build_ec" -eq 0 ]]; then
+  fail "early-fail fixture should exit non-zero"
+else
+  pass "early-fail fixture preserved non-zero exit ($build_ec)"
+fi
+
+if [[ ! -f "$outer_log" ]]; then
+  fail "outer non-hidden ci-build-<sha>.log missing after early failure"
+elif ! grep -q 'early validation failed' "$outer_log"; then
+  fail "outer log missing early-failure diagnostics"
+else
+  pass "outer non-hidden log retains early-failure diagnostics"
+fi
+
+if [[ -f "$hidden_internal" ]]; then
+  fail "early-fail fixture must not create hidden helper-internal log"
+else
+  pass "early-fail fixture never created hidden .ci-build-<sha>.log"
+fi
+
+# Basename must not start with '.' (upload-artifact default excludes hidden files)
+outer_base="$(basename "$outer_log")"
+if [[ "$outer_base" == .* ]]; then
+  fail "outer artifact log basename is hidden: $outer_base"
+else
+  pass "outer artifact log basename is non-hidden ($outer_base)"
+fi
+
+# Fixture B: mid-stream failure still captured entirely in outer log
+fake_mid="$fixture_dir/fake-ci-build-mid-fail.sh"
+cat >"$fake_mid" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
 SOURCE_SHA=""
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --source-sha) SOURCE_SHA="$2"; shift 2 ;;
-    --install) shift ;;
-    --export-dir) shift 2 ;;
     *) shift ;;
   esac
 done
 : "${SOURCE_SHA:?}"
 : "${IRIN_CANDIDATE_ROOT:?}"
-log="$IRIN_CANDIDATE_ROOT/.ci-build-${SOURCE_SHA}.log"
-echo "=== building (fake) ==="
-echo "line-from-build" | tee "$log"
-echo "ERROR: build-dmg failed (exit 1)" >&2
+# Optionally write a helper-internal hidden log (real helper does this for build-dmg).
+# Artifact contract must NOT depend on it.
+internal="$IRIN_CANDIDATE_ROOT/.ci-build-${SOURCE_SHA}.log"
+echo "=== building (fake mid) ==="
+echo "progress-line"
+echo "line-from-build" | tee "$internal"
+echo "ERROR: verify failed after build" >&2
 exit 1
 EOF
-chmod +x "$fake_helper"
+chmod +x "$fake_mid"
 
-export IRIN_CANDIDATE_ROOT="$fixture_dir/candidates"
-mkdir -p "$IRIN_CANDIDATE_ROOT"
-SHA="$(python3 -c 'print("ab" * 20)')"
-build_log="$IRIN_CANDIDATE_ROOT/.ci-build-${SHA}.log"
-summary_file="$IRIN_CANDIDATE_ROOT/.ci-build-summary-${SHA}.txt"
-
+outer_log_mid="$IRIN_CANDIDATE_ROOT/ci-build-mid-${SHA}.log"
 set +e
-bash "$fake_helper" --source-sha "$SHA" --export-dir "$IRIN_CANDIDATE_ROOT/.exports/$SHA" 2>&1 \
-  | tee "$summary_file"
-build_ec=${PIPESTATUS[0]}
+bash "$fake_mid" --source-sha "$SHA" 2>&1 | tee "$outer_log_mid"
+mid_ec=${PIPESTATUS[0]}
 set -e
 
-if [[ "$build_ec" -eq 0 ]]; then
-  fail "fixture helper should exit non-zero"
+if [[ "$mid_ec" -eq 0 ]]; then
+  fail "mid-fail fixture should exit non-zero"
 else
-  pass "fixture helper preserved non-zero exit ($build_ec)"
+  pass "mid-fail fixture preserved non-zero exit ($mid_ec)"
 fi
 
-if [[ ! -f "$summary_file" ]] || ! grep -q '=== building (fake) ===' "$summary_file"; then
-  fail "streamed summary file missing live helper output"
+if ! grep -q 'progress-line' "$outer_log_mid" \
+  || ! grep -q 'verify failed after build' "$outer_log_mid"; then
+  fail "outer log must capture full stream including post-build failures"
 else
-  pass "streamed summary file retained live helper output"
+  pass "outer log captures pre- and post-build failure stream"
 fi
 
-if [[ ! -f "$build_log" ]] || ! grep -q 'line-from-build' "$build_log"; then
-  fail "retained .ci-build-<sha>.log missing expected content"
-else
-  pass "retained .ci-build-<sha>.log has build diagnostics"
-fi
-
+# Install selection unit (pure bash)
 select_install_args() {
   local exact_install="$1"
   local args=()
