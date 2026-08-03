@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # Contract tests for PR B CI control-plane: concurrency split, exact-path
 # policy sync, and base-controlled force-full matrix guard.
+#
+# Hosted detect-changes runs this on clean ubuntu-latest images. Depend only
+# on POSIX-ish tools (bash, python3, grep, sed, git) — not ripgrep.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -11,6 +14,10 @@ failures=0
 
 pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; failures=$((failures + 1)); }
+
+# grep helpers (no ripgrep): return 0 if match, 1 if not. Safe under set -e in if.
+file_has_ere() { grep -Eq -- "$1" "$2"; }
+file_has_fixed() { grep -Fq -- "$1" "$2"; }
 
 export IRIN_CLASSIFIER_INCLUDE_EXACT=1
 
@@ -74,19 +81,20 @@ fi
 # ---------------------------------------------------------------------------
 # Static: path-scoped main push still uses before...sha (not full-matrix always)
 # ---------------------------------------------------------------------------
-if ! rg -n 'before="\$\{\{ github\.event\.before \}\}"' "$CI_YML" >/dev/null; then
+if ! file_has_ere 'before="\$\{\{ github\.event\.before \}\}"' "$CI_YML"; then
   fail "main push must still classify from github.event.before"
 else
   pass "main push remains path-scoped via before...sha"
 fi
-if ! rg -n 'git diff --name-only "\$before\.\.\.\$head"' "$CI_YML" >/dev/null; then
+if ! file_has_ere 'git diff --name-only "\$before\.\.\.\$head"' "$CI_YML"; then
   fail "main push must diff before...head"
 else
   pass "main push diffs before...head"
 fi
-if rg -n "changed=\(__integrated_main__\)" "$CI_YML" | rg -v '^\d+:\s*#' >/dev/null; then
-  # Only acceptable as fail-safe when before is zero/missing, not as the default arm.
-  if ! rg -n 'before.*0\+|__integrated_main__' "$CI_YML" >/dev/null; then
+# __integrated_main__ is only acceptable as a fail-safe when before is
+# zero/missing, not as an unconditional default arm.
+if file_has_fixed 'changed=(__integrated_main__)' "$CI_YML"; then
+  if ! file_has_ere 'before.*0\+|__integrated_main__' "$CI_YML"; then
     fail "unexpected unconditional __integrated_main__"
   else
     pass "integrated_main retained only as fail-safe sentinel"
@@ -98,12 +106,12 @@ fi
 # ---------------------------------------------------------------------------
 # Static: force-full guard present and base-controlled
 # ---------------------------------------------------------------------------
-if ! rg -n 'path_forces_full_non_sbom_matrix' "$CI_YML" >/dev/null; then
+if ! file_has_fixed 'path_forces_full_non_sbom_matrix' "$CI_YML"; then
   fail "missing path_forces_full_non_sbom_matrix base-controlled guard"
 else
   pass "force-full non-SBOM guard present"
 fi
-if ! rg -n 'force_full_non_sbom=true' "$CI_YML" >/dev/null; then
+if ! file_has_fixed 'force_full_non_sbom=true' "$CI_YML"; then
   fail "force_full_non_sbom must be applied in detect-changes"
 else
   pass "force_full_non_sbom applied after classifier"
@@ -115,7 +123,7 @@ for needle in \
   'scripts/test-classify-ci-paths.sh' \
   'scripts/test-ci-control-plane.sh'
 do
-  if ! rg -F "$needle" "$CI_YML" >/dev/null; then
+  if ! file_has_fixed "$needle" "$CI_YML"; then
     fail "force-full policy path missing: $needle"
   fi
 done
@@ -270,7 +278,7 @@ else
 fi
 
 # Hosted invocation: detect-changes must call this script (not only path lists).
-if ! rg -n '^\s+scripts/test-ci-control-plane\.sh\s*$' "$CI_YML" >/dev/null; then
+if ! grep -Eq '^[[:space:]]+scripts/test-ci-control-plane\.sh[[:space:]]*$' "$CI_YML"; then
   fail "ci.yml must run scripts/test-ci-control-plane.sh as a hosted step"
 else
   pass "ci.yml hosts test-ci-control-plane.sh in detect-changes"
@@ -368,22 +376,22 @@ fi
 # ---------------------------------------------------------------------------
 # Comments / trust-boundary honesty (static text)
 # ---------------------------------------------------------------------------
-if rg -n 'same revision under review' "$CI_YML" >/dev/null; then
+if file_has_fixed 'same revision under review' "$CI_YML"; then
   fail "ci.yml still claims ordinary PR executes same revision under review"
 else
   pass "ci.yml no longer claims same-revision ordinary PR execution"
 fi
-if rg -n 'PRs still enter via ci.yml@main until this lands' "$CI_YML" >/dev/null; then
+if file_has_fixed 'PRs still enter via ci.yml@main until this lands' "$CI_YML"; then
   fail "stale 'until this lands' wording remains"
 else
   pass "stale until-this-lands wording removed"
 fi
-if rg -n 'keep in sync with ci-pr.yml bootstrap' "$CI_YML" >/dev/null; then
+if file_has_fixed 'keep in sync with ci-pr.yml bootstrap' "$CI_YML"; then
   fail "dangling ci-pr.yml bootstrap sync comment remains"
 else
   pass "dangling bootstrap sync comment removed"
 fi
-if ! rg -n 'ci\.yml@main' "$CI_PR" >/dev/null; then
+if ! file_has_ere 'ci\.yml@main' "$CI_PR"; then
   fail "ci-pr.yml must document/use @main pin"
 else
   pass "ci-pr.yml retains @main pin"
