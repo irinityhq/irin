@@ -47,7 +47,8 @@ while [[ $# -gt 0 ]]; do
       shift 2
       ;;
     -h|--help)
-      sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'
+      # Header comments only (lines 2–18). Do not print shell options below them.
+      sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'
       exit 0
       ;;
     *) die "unknown argument: $1" ;;
@@ -77,14 +78,18 @@ is_exact_symlink_to() {
 }
 
 list_worktree_paths() {
-  local root="$1" line
+  local root="$1" line out
+  # Fail closed: never treat a git failure as "zero worktrees".
+  if ! out="$(git -C "$root" worktree list --porcelain 2>&1)"; then
+    die "git worktree list failed for $root: $out"
+  fi
   while IFS= read -r line; do
     case "$line" in
       worktree\ *)
         printf '%s\n' "${line#worktree }"
         ;;
     esac
-  done < <(git -C "$root" worktree list --porcelain 2>/dev/null || true)
+  done <<< "$out"
 }
 
 resolve_source_root() {
@@ -173,32 +178,47 @@ require_no_worktree_projectmem() {
 }
 
 status_one() {
-  local dest="$1" source="$2" name link
+  local dest="$1" source="$2" name link target
+  local status_errors=0
   note "target=$dest"
   note "source=$source"
   for name in "${DOCTRINE_NAMES[@]}"; do
     link="$dest/$name"
+    target="$source/$name"
     if [[ -L "$link" ]]; then
-      note "$name: symlink → $(readlink "$link")"
+      if is_exact_symlink_to "$link" "$target"; then
+        note "$name: symlink → $(readlink "$link")"
+      else
+        note "$name: ERROR symlink → $(readlink "$link") (expected $target)"
+        status_errors=$((status_errors + 1))
+      fi
     elif is_regular_file "$link"; then
       if [[ "$dest" == "$source" ]]; then
         note "$name: canonical regular file"
       else
         note "$name: ERROR real file (refusing to overwrite)"
+        status_errors=$((status_errors + 1))
       fi
     elif [[ -e "$link" ]]; then
       note "$name: ERROR unexpected path type"
+      status_errors=$((status_errors + 1))
     else
       note "$name: ABSENT"
+      if [[ "$dest" != "$source" ]]; then
+        status_errors=$((status_errors + 1))
+      fi
     fi
   done
   if [[ "$dest" == "$source" ]]; then
     note ".projectmem: canonical ledger present (not linked into worktrees)"
   elif [[ -e "$dest/.projectmem" || -L "$dest/.projectmem" ]]; then
     note "WARNING: .projectmem present in target (must remain canonical-only; do not link)"
+    status_errors=$((status_errors + 1))
   else
     note ".projectmem: absent in target (correct)"
   fi
+  [[ "$status_errors" -eq 0 ]] || return 1
+  return 0
 }
 
 link_one() {
@@ -254,8 +274,13 @@ link_one() {
   # Fail closed if anything private became trackable dirt.
   require_ignored "$dest"
   # Named private paths must not appear as untracked/tracked dirt.
-  local dirty
-  dirty="$(git -C "$dest" status --porcelain --untracked-files=normal -- AGENTS.md CLAUDE.md RTK.md .projectmem 2>/dev/null || true)"
+  # Do not swallow git status failures (|| true would fail open).
+  local dirty status_rc=0
+  dirty="$(git -C "$dest" status --porcelain --untracked-files=normal -- AGENTS.md CLAUDE.md RTK.md .projectmem 2>&1)" || status_rc=$?
+  if [[ "$status_rc" -ne 0 ]]; then
+    printf 'ERROR: git status failed in %s (exit %s):\n%s\n' "$dest" "$status_rc" "$dirty" >&2
+    exit 1
+  fi
   if [[ -n "$dirty" ]]; then
     printf 'ERROR: private doctrine paths dirty after link:\n%s\n' "$dirty" >&2
     exit 1
@@ -278,17 +303,19 @@ require_source "$SOURCE"
 
 if [[ "$MODE" == "status" ]]; then
   if [[ -n "$TARGET_ROOT" ]]; then
-    status_one "$TARGET_ROOT" "$SOURCE"
+    status_one "$TARGET_ROOT" "$SOURCE" || die "agent-context status reported problems"
   else
-    status_one "$(cd "$DISCOVER_ROOT" && pwd)" "$SOURCE"
+    status_one "$(cd "$DISCOVER_ROOT" && pwd)" "$SOURCE" || die "agent-context status reported problems"
   fi
   exit 0
 fi
 
 if [[ "$MODE" == "all" ]]; then
   failures=0
+  seen=0
   while IFS= read -r wt; do
     [[ -d "$wt" ]] || continue
+    seen=$((seen + 1))
     note "--- $wt ---"
     # Subshell isolate: one bad worktree must not abort remaining attaches.
     if try_link_one "$wt" "$SOURCE"; then
@@ -298,6 +325,7 @@ if [[ "$MODE" == "all" ]]; then
       failures=$((failures + 1))
     fi
   done < <(list_worktree_paths "$DISCOVER_ROOT")
+  [[ "$seen" -gt 0 ]] || die "no worktrees discovered under $DISCOVER_ROOT"
   [[ "$failures" -eq 0 ]] || die "link-agent-context failed for $failures worktree(s)"
   exit 0
 fi

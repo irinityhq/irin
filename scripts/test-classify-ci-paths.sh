@@ -73,6 +73,7 @@ cases=(
   # W4 negative: docs/tooling must not build a candidate
   "docs-only tooling negative|$all_false|docs/architecture.md docs/development-workflow.md"
   "worktree scripts stay light|$all_false|scripts/remove-worktree.sh scripts/worktree-gc.sh"
+  "link-agent-context stays light|$all_false|scripts/link-agent-context.sh scripts/test-link-agent-context.sh"
 )
 
 failures=0
