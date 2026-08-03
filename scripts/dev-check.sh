@@ -223,12 +223,17 @@ if [[ "$mode" == "check" ]]; then
   if printf '%s\n' "${paths[@]}" | grep -Eq '^(packaging/|Makefile$)'; then
     run "Candidate store contracts" bash packaging/test-candidate-store.sh
   fi
+  # Candidate observability / W4-retirement contracts when CI workflows move.
+  if printf '%s\n' "${paths[@]}" | grep -Eq '^\.github/workflows/|^scripts/test-ci-candidate-observability\.sh$'; then
+    run "Candidate CI observability contracts" bash scripts/test-ci-candidate-observability.sh
+  fi
   run "Diff whitespace" git diff --check origin/main --
   exit 0
 fi
 
 run "Current-base preflight" scripts/dev-preflight.sh ship
 run "Classifier self-test" scripts/test-classify-ci-paths.sh
+run "Candidate CI observability contracts" bash scripts/test-ci-candidate-observability.sh
 run "Candidate store contracts" bash packaging/test-candidate-store.sh
 # W5 hermetic method contracts (self-contained; no board/Apple/network).
 run "W5 remove-worktree evidence contracts" bash scripts/test-remove-worktree-evidence.sh
