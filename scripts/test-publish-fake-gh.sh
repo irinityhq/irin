@@ -494,7 +494,7 @@ run_publish() {
   "$TX" --publish --tag "$TAG" --candidate "$cand" --t2-packet "$cand/proofs/t2.json"
 }
 
-# Dual gate: HERMETIC alone / wrong confirm must refuse (Greptile P1).
+# Dual gate: HERMETIC alone / wrong confirm must refuse (review P1).
 # Run in a subshell so sourcing TX does not clobber TAG/CANDIDATE_ARG in this shell.
 python3 - "$TX" <<'PY' || fail "hermetic dual-gate contract failed"
 import os, subprocess, sys
