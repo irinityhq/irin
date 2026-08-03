@@ -48,14 +48,28 @@ Required env (both modes):
 Hermetic tests may source this file with IRIN_RELEASE_TX_LIB=1 to load helpers
 only (no mode dispatch).
 
-Publish hermetic rehearsal (W5, zero network):
+Publish hermetic rehearsal (W5, zero network) — dual gate required:
   IRIN_PUBLISH_HERMETIC=1
+  IRIN_PUBLISH_HERMETIC_CONFIRM=shipping-method-smoke
+    - both must match exactly; either alone is ignored / refused
     - remote tag peel uses IRIN_PUBLISH_REMOTE_TAG_SHA (empty = absent)
     - skips git tag create/push (no local mutation, no network)
     - skips docker login (fake docker/gh on PATH supply GHCR + release I/O)
   IRIN_RELEASE_DRAFT_WAIT_ATTEMPTS / IRIN_RELEASE_DRAFT_WAIT_SLEEP
     - bound the draft-release poll (defaults 30 / 2s)
 EOF
+}
+
+# Hermetic publish is test-only. Require a deliberate confirm string so an
+# inherited IRIN_PUBLISH_HERMETIC=1 cannot skip live tag/GHCR safeguards.
+publish_hermetic_active() {
+  if [[ "${IRIN_PUBLISH_HERMETIC:-}" != "1" ]]; then
+    return 1
+  fi
+  if [[ "${IRIN_PUBLISH_HERMETIC_CONFIRM:-}" != "shipping-method-smoke" ]]; then
+    die "IRIN_PUBLISH_HERMETIC=1 requires IRIN_PUBLISH_HERMETIC_CONFIRM=shipping-method-smoke (test-only dual gate)"
+  fi
+  return 0
 }
 
 # Skip CLI parse/dispatch when sourced as a library for tests.
@@ -829,7 +843,11 @@ PY
 
   # ---- remote tag (peeled) before any mutation ----------------------------
   note "check remote tag peeled commit vs candidate source (before any mutation)"
-  if [[ "${IRIN_PUBLISH_HERMETIC:-}" == "1" ]]; then
+  local hermetic=0
+  if publish_hermetic_active; then
+    hermetic=1
+  fi
+  if [[ "$hermetic" == "1" ]]; then
     # Empty (unset or "") = tag absent. Set to a full SHA to simulate a peel.
     REMOTE_PEELED="${IRIN_PUBLISH_REMOTE_TAG_SHA-}"
     note "hermetic: remote tag peel override (empty=absent)"
@@ -841,7 +859,7 @@ PY
       || die "remote tag $TAG peels to $REMOTE_PEELED, candidate wants $SOURCE_SHA; refusing"
     note "remote tag $TAG peels to candidate source $SOURCE_SHA"
   fi
-  if [[ "${IRIN_PUBLISH_HERMETIC:-}" == "1" ]]; then
+  if [[ "$hermetic" == "1" ]]; then
     # Never inspect or mutate real tags under hermetic rehearsal.
     LOCAL_TAG_SHA=""
   else
@@ -872,7 +890,7 @@ PY
   fi
   [[ -n "${GHCR_USERNAME:-}" && -n "${GHCR_TOKEN:-}" ]] \
     || die "publish requires gh auth (write:packages) or GHCR_USERNAME + GHCR_TOKEN"
-  if [[ "${IRIN_PUBLISH_HERMETIC:-}" == "1" ]]; then
+  if [[ "$hermetic" == "1" ]]; then
     note "hermetic: skip docker login (fake docker on PATH handles imagetools)"
   else
     echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${GHCR_USERNAME}" --password-stdin \
@@ -888,7 +906,7 @@ PY
     note "promote Gateway/sidecar digests to immutable $TAG labels"
     promote_version_labels "$GW_REF" "$SC_REF" "$TAG" 1
 
-    if [[ "${IRIN_PUBLISH_HERMETIC:-}" == "1" ]]; then
+    if [[ "$hermetic" == "1" ]]; then
       note "hermetic: skip git tag create/push (workflow wait uses SOURCE_SHA only)"
       # Simulate remote tag present at source after the (skipped) push so a second
       # peel check would agree if it ran; workflow wait still binds SHA.

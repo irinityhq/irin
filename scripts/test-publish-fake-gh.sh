@@ -470,6 +470,7 @@ chmod +x "$FAKEBIN/curl"
 export IRIN_FAKE_GH_STATE="$STATE"
 export PATH="$FAKEBIN:$PATH"
 export IRIN_PUBLISH_HERMETIC=1
+export IRIN_PUBLISH_HERMETIC_CONFIRM=shipping-method-smoke
 export IRIN_PUBLISH_REMOTE_TAG_SHA=""
 export IRIN_RELEASE_WORKFLOW_WAIT_ATTEMPTS=3
 export IRIN_RELEASE_WORKFLOW_WAIT_SLEEP=0
@@ -487,10 +488,64 @@ run_publish() {
   IRIN_CANDIDATE_STATUS_SOURCE_ON_MAIN=true \
   IRIN_CANDIDATE_STATUS_CI_REQUIRED=true \
   IRIN_PUBLISH_HERMETIC=1 \
+  IRIN_PUBLISH_HERMETIC_CONFIRM=shipping-method-smoke \
   IRIN_PUBLISH_REMOTE_TAG_SHA="${IRIN_PUBLISH_REMOTE_TAG_SHA-}" \
   PATH="$FAKEBIN:$PATH" \
   "$TX" --publish --tag "$TAG" --candidate "$cand" --t2-packet "$cand/proofs/t2.json"
 }
+
+# Dual gate: HERMETIC alone / wrong confirm must refuse (Greptile P1).
+# Run in a subshell so sourcing TX does not clobber TAG/CANDIDATE_ARG in this shell.
+python3 - "$TX" <<'PY' || fail "hermetic dual-gate contract failed"
+import os, subprocess, sys
+tx = sys.argv[1]
+
+def run(env_extra):
+    env = os.environ.copy()
+    env.update(env_extra)
+    env["IRIN_RELEASE_TX_LIB"] = "1"
+    script = r'''
+set -euo pipefail
+IRIN_RELEASE_TX_LIB=1 source "$1"
+if publish_hermetic_active; then
+  echo ACTIVE
+  exit 0
+else
+  echo INACTIVE
+  exit 1
+fi
+'''
+    return subprocess.run(
+        ["bash", "-c", script, "bash", tx],
+        env=env, capture_output=True, text=True,
+    )
+
+# No confirm → die (nonzero, message)
+r = run({"IRIN_PUBLISH_HERMETIC": "1", "IRIN_PUBLISH_HERMETIC_CONFIRM": ""})
+assert r.returncode != 0, r.stdout + r.stderr
+blob = r.stdout + r.stderr
+assert "CONFIRM" in blob or "shipping-method-smoke" in blob or "test-only" in blob, blob
+
+# Wrong confirm → die
+r = run({"IRIN_PUBLISH_HERMETIC": "1", "IRIN_PUBLISH_HERMETIC_CONFIRM": "wrong"})
+assert r.returncode != 0, r.stdout + r.stderr
+
+# Exact dual gate → active
+r = run({
+    "IRIN_PUBLISH_HERMETIC": "1",
+    "IRIN_PUBLISH_HERMETIC_CONFIRM": "shipping-method-smoke",
+})
+assert r.returncode == 0 and "ACTIVE" in r.stdout, r.stdout + r.stderr
+
+# Confirm alone → inactive (no die)
+r = run({
+    "IRIN_PUBLISH_HERMETIC": "",
+    "IRIN_PUBLISH_HERMETIC_CONFIRM": "shipping-method-smoke",
+})
+assert r.returncode != 0 and "INACTIVE" in (r.stdout + r.stderr), r.stdout + r.stderr
+print("dual-gate ok")
+PY
+pass "hermetic publish dual-gate refuses without exact confirm"
 
 # --- static: upload path never uses --clobber ------------------------------
 grep -n 'gh release upload' "$TX" | grep -q -- '--clobber' \
