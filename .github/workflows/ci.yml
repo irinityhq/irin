@@ -888,10 +888,12 @@ jobs:
           cache: npm
           cache-dependency-path: council-rs/warroom/web/package-lock.json
 
-      - name: Hermetic packaging + export/import contracts
+      - name: Hermetic packaging + export/import + W5 method contracts
         run: |
           bash packaging/test-candidate-store.sh
           bash scripts/test-export-import-candidate.sh
+          bash scripts/test-remove-worktree-evidence.sh
+          bash scripts/test-publish-fake-gh.sh
 
       - name: Build ad-hoc candidate from branch HEAD (no shipping tier)
         env:
@@ -971,10 +973,12 @@ jobs:
           cache: npm
           cache-dependency-path: council-rs/warroom/web/package-lock.json
 
-      - name: Hermetic packaging + export/import contracts
+      - name: Hermetic packaging + export/import + W5 method contracts
         run: |
           bash packaging/test-candidate-store.sh
           bash scripts/test-export-import-candidate.sh
+          bash scripts/test-remove-worktree-evidence.sh
+          bash scripts/test-publish-fake-gh.sh
 
       - name: Build exact merged-SHA candidate and export durable bundle
         env:

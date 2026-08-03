@@ -145,7 +145,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: Hermetic W4 export/import + classifier contracts
+      - name: Hermetic W4/W5 method contracts + classifier
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha }}"
@@ -159,6 +159,9 @@ jobs:
             echo "ERROR: hermetic bootstrap must not claim Candidate verified" >&2
             exit 1
           fi
+          # W5 self-contained hermetics (no board, no Apple, no network).
+          bash scripts/test-remove-worktree-evidence.sh
+          bash scripts/test-publish-fake-gh.sh
 
   w4-isolation-bootstrap-macos:
     name: Candidate isolation proof (PR bootstrap; macos-15 hosted only)
@@ -197,6 +200,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "$BRANCH_HEAD_SHA"
           bash packaging/test-candidate-store.sh
           bash scripts/test-export-import-candidate.sh
+          bash scripts/test-remove-worktree-evidence.sh
+          bash scripts/test-publish-fake-gh.sh
           out="$(bash scripts/ci-build-adhoc-candidate.sh \
             --source-sha "$BRANCH_HEAD_SHA" \
             --export-dir "$IRIN_CANDIDATE_ROOT/.exports/${BRANCH_HEAD_SHA}")"
