@@ -103,7 +103,7 @@ for name in wanted:
         sys.exit(1)
     # Must tee into outer_log (the artifact file), not a separate hidden summary
     if not re.search(r'\|\s*tee\s+"\$outer_log"', body):
-        print(f"helper must tee into \$outer_log in {name}", file=sys.stderr)
+        print(f'helper must tee into $outer_log in {name}', file=sys.stderr)
         sys.exit(1)
     # Must not assign CI_BUILD_LOG to hidden helper-internal path pattern for upload
     if re.search(r'CI_BUILD_LOG=.*\.ci-build-', body):
