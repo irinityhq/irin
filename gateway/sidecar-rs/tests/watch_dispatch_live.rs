@@ -1463,79 +1463,44 @@ fn main_rs_spawns_live_dispatcher_after_hydration() {
 
 #[test]
 fn boot_phases_are_named_and_ordered() {
-    // PR5: load_config_build_state_and_serve is split into five domain-named
-    // phases. Pin definition order AND the orchestrator's runtime call order so
-    // a reordered or omitted phase call fails this contract (definitions alone
-    // are not enough).
-    let boot_src = include_str!("../src/boot.rs");
-    let definitions = [
-        "fn load_configuration",
-        "fn initialize_authority",
-        "fn hydrate_runtime_state",
-        "fn start_listener_and_background",
-        "fn await_shutdown",
-    ];
-    let mut last = 0usize;
-    for name in definitions {
-        let pos = boot_src
-            .find(name)
-            .unwrap_or_else(|| panic!("boot phase `{name}` must exist in boot.rs"));
-        assert!(
-            pos > last,
-            "boot phase `{name}` must appear after prior phases (pos={pos}, last={last})"
-        );
-        last = pos;
-    }
+    // PR5: pin the orchestrator's five phase statements by exact rustfmt line
+    // equality (trimmed). Substring/brace parsing would accept comments and
+    // string literals as executable order; whole-line equality rejects that
+    // without an AST dependency.
+    let boot_lines: Vec<&str> = include_str!("../src/boot.rs")
+        .lines()
+        .map(str::trim)
+        .collect();
 
-    let orch_sig = "pub(crate) async fn load_config_build_state_and_serve";
-    let orch_start = boot_src
-        .find(orch_sig)
-        .expect("orchestrator load_config_build_state_and_serve must remain");
-    assert!(
-        orch_start > last,
-        "orchestrator must be defined after the five phase helpers"
-    );
-
-    // Isolate the orchestrator body (opening brace of the function → matching close).
-    let after_sig = &boot_src[orch_start..];
-    let body_open = after_sig
-        .find('{')
-        .expect("orchestrator body opening brace");
-    let body = &after_sig[body_open..];
-    let mut depth = 0i32;
-    let mut body_end = None;
-    for (i, ch) in body.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    body_end = Some(i + 1);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let body = &body[..body_end.expect("orchestrator body must close")];
-
-    // Runtime call order inside the orchestrator (not mere definitions).
-    let calls = [
-        "load_configuration()",
-        "initialize_authority(config).await",
-        "hydrate_runtime_state(authority).await?",
-        "start_listener_and_background(hydrated).await",
+    // Complete rustfmt-formatted statements from load_config_build_state_and_serve.
+    // The final call is a tail expression (no semicolon).
+    let statements = [
+        "let config = load_configuration();",
+        "let authority = initialize_authority(config).await;",
+        "let hydrated = hydrate_runtime_state(authority).await?;",
+        "let serving = start_listener_and_background(hydrated).await;",
         "await_shutdown(serving, otel_provider).await",
     ];
-    let mut call_last = 0usize;
-    for token in calls {
-        let pos = body[call_last..]
-            .find(token)
-            .map(|p| call_last + p)
-            .unwrap_or_else(|| {
-                panic!("orchestrator must call `{token}` in runtime order; body was:\n{body}")
-            });
-        call_last = pos + token.len();
+
+    let mut last_line = 0usize;
+    for stmt in statements {
+        let matches: Vec<usize> = boot_lines
+            .iter()
+            .enumerate()
+            .filter_map(|(i, line)| (*line == stmt).then_some(i))
+            .collect();
+        assert_eq!(
+            matches.len(),
+            1,
+            "statement must occur exactly once as a trimmed source line: `{stmt}` (found {})",
+            matches.len()
+        );
+        let line = matches[0];
+        assert!(
+            line > last_line,
+            "statement `{stmt}` at line {line} must appear after prior orchestrator statements (last={last_line})"
+        );
+        last_line = line;
     }
 }
 
