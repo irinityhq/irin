@@ -404,20 +404,36 @@ fn try_start_council_server(
     )
 }
 
-fn try_start_council_server_with_credentials(
-    app: &AppHandle,
-    server_port: Option<u16>,
-    auth_token: Option<&str>,
-    via_gateway: Option<bool>,
-    librarian_base: Option<&str>,
-    preloaded_gateway_creds: Option<&GatewayChildCredentials>,
-) -> Result<String, String> {
-    let state = app.state::<CouncilServer>();
-    let mut guard = state.0.lock().map_err(|e| e.to_string())?;
-    if guard.child.is_some() {
-        return Ok("council server already tracked as running".to_string());
-    }
+// ---------------------------------------------------------------------------
+// Council start phases — named extraction of try_start_council_server_with_credentials.
+// Ordering and authority checks are unchanged; each phase is a pure move of
+// the prior sequential block into a domain-named function.
+// ---------------------------------------------------------------------------
 
+/// Phase 1 product: port + packaging identity for this start attempt.
+struct CouncilStartPlan {
+    port: u16,
+    packaged: bool,
+    expected_sha: &'static str,
+    expected_dirty: bool,
+}
+
+/// Phase 3 product: binary and writable layout for the owned child.
+struct CouncilSpawnLayout {
+    effective: String,
+    spawn_base_str: String,
+    child_cwd: String,
+    sessions_dir_env: Option<String>,
+}
+
+/// Phase 4 product: Gateway mode + Keychain-sourced child credentials.
+struct CouncilGatewayAuthority {
+    via_gateway: Option<bool>,
+    gateway_creds: Option<GatewayChildCredentials>,
+}
+
+/// Phase 1 — resolve start plan (port validation + packaging identity).
+fn resolve_start_plan(server_port: Option<u16>) -> Result<CouncilStartPlan, String> {
     let port = match server_port {
         Some(port) => port,
         None => default_serve_port()?,
@@ -427,33 +443,47 @@ fn try_start_council_server_with_credentials(
 
     let packaged = is_packaged_install();
     let (expected_sha, expected_dirty) = bundled_build_identity();
+    Ok(CouncilStartPlan {
+        port,
+        packaged,
+        expected_sha,
+        expected_dirty,
+    })
+}
+
+/// Phase 2 — ensure the Council port is free (never adopt an external process).
+fn ensure_council_port_available(
+    plan: &CouncilStartPlan,
+    auth_token: Option<&str>,
+) -> Result<(), String> {
+    let port = plan.port;
     match probe_council_server(
         port,
         Duration::from_millis(750),
-        expected_sha,
-        expected_dirty,
+        plan.expected_sha,
+        plan.expected_dirty,
         auth_token,
     ) {
-        CouncilServerProbe::MatchingBuild => {
-            return Err(format!(
-                "port {port} is already occupied by a Council process; free the port before launching this app (this app will not adopt or kill it)"
-            ));
-        }
-        CouncilServerProbe::DifferentBuild => {
-            return Err(format!(
-                "Council on :{port} has a different source identity; quit the other Council \
-                 process or free the port before launching this app (this app will not kill it)"
-            ));
-        }
+        CouncilServerProbe::MatchingBuild => Err(format!(
+            "port {port} is already occupied by a Council process; free the port before launching this app (this app will not adopt or kill it)"
+        )),
+        CouncilServerProbe::DifferentBuild => Err(format!(
+            "Council on :{port} has a different source identity; quit the other Council \
+             process or free the port before launching this app (this app will not kill it)"
+        )),
         CouncilServerProbe::Unavailable => {
             if !wait_for_port_release(port, Duration::from_millis(0)) {
                 return Err(format!(
                     "port {port} is occupied by a non-canonical or unhealthy process"
                 ));
             }
+            Ok(())
         }
     }
+}
 
+/// Phase 3 — resolve spawn layout (self-start gate, binary, base-dir, cwd).
+fn resolve_spawn_layout(packaged: bool) -> Result<CouncilSpawnLayout, String> {
     // Packaged release owns the bundled sidecar. Debug owns a repo-built sidecar.
     // Unpackaged release (dev shell without bundle) cannot self-start Council.
     if !packaged && !cfg!(debug_assertions) {
@@ -496,6 +526,20 @@ fn try_start_council_server_with_credentials(
         )
     };
 
+    Ok(CouncilSpawnLayout {
+        effective,
+        spawn_base_str,
+        child_cwd,
+        sessions_dir_env,
+    })
+}
+
+/// Phase 4 — resolve Gateway authority (mode default + Keychain credentials).
+fn resolve_gateway_authority(
+    packaged: bool,
+    via_gateway: Option<bool>,
+    preloaded_gateway_creds: Option<&GatewayChildCredentials>,
+) -> Result<CouncilGatewayAuthority, String> {
     // Packaged installs default Gateway off so missing Docker cannot break core War Room.
     let via_gateway = if packaged {
         Some(via_gateway.unwrap_or(false))
@@ -575,6 +619,34 @@ fn try_start_council_server_with_credentials(
     } else {
         None
     };
+
+    Ok(CouncilGatewayAuthority {
+        via_gateway,
+        gateway_creds,
+    })
+}
+
+/// Phase 5 — compose env/args, spawn the owned child, register ownership, notify.
+fn spawn_and_register_council(
+    app: &AppHandle,
+    mut guard: std::sync::MutexGuard<'_, TrackedChild>,
+    plan: &CouncilStartPlan,
+    layout: CouncilSpawnLayout,
+    gateway: CouncilGatewayAuthority,
+    auth_token: Option<&str>,
+    librarian_base: Option<&str>,
+) -> Result<String, String> {
+    let CouncilStartPlan { port, packaged, .. } = *plan;
+    let CouncilSpawnLayout {
+        effective,
+        spawn_base_str,
+        child_cwd,
+        sessions_dir_env,
+    } = layout;
+    let CouncilGatewayAuthority {
+        via_gateway,
+        gateway_creds,
+    } = gateway;
 
     let cors_origins = build_cors_origins(port);
     // Packaged: pass bundled War Room export via --web-dist when present so the
@@ -738,6 +810,40 @@ fn try_start_council_server_with_credentials(
         "council --serve started on :{port} (bin: {effective}, base-dir: {spawn_base_str}). \
          WS/REST should be reachable from Tauri webview"
     ))
+}
+
+/// Spawn an app-owned `council --serve` child.
+///
+/// Implemented as five named phases (start plan → port availability → spawn
+/// layout → Gateway authority → spawn/register). Inputs, outputs, ordering,
+/// and authority checks are unchanged from the pre-split monolithic start path.
+fn try_start_council_server_with_credentials(
+    app: &AppHandle,
+    server_port: Option<u16>,
+    auth_token: Option<&str>,
+    via_gateway: Option<bool>,
+    librarian_base: Option<&str>,
+    preloaded_gateway_creds: Option<&GatewayChildCredentials>,
+) -> Result<String, String> {
+    let state = app.state::<CouncilServer>();
+    let guard = state.0.lock().map_err(|e| e.to_string())?;
+    if guard.child.is_some() {
+        return Ok("council server already tracked as running".to_string());
+    }
+
+    let plan = resolve_start_plan(server_port)?;
+    ensure_council_port_available(&plan, auth_token)?;
+    let layout = resolve_spawn_layout(plan.packaged)?;
+    let gateway = resolve_gateway_authority(plan.packaged, via_gateway, preloaded_gateway_creds)?;
+    spawn_and_register_council(
+        app,
+        guard,
+        &plan,
+        layout,
+        gateway,
+        auth_token,
+        librarian_base,
+    )
 }
 
 /// Start an app-owned Council for debug/source desktop shells.
@@ -1882,5 +1988,78 @@ mod runtime_mode_tests {
             "secondary",
             PageLoadEvent::Finished
         ));
+    }
+}
+
+#[cfg(test)]
+mod council_start_phase_tests {
+    /// Innermost free-function call name after stripping `.await` / `?` wrappers.
+    fn free_fn_call_name(expr: &syn::Expr) -> Option<&syn::Ident> {
+        match expr {
+            syn::Expr::Try(t) => free_fn_call_name(&t.expr),
+            syn::Expr::Await(a) => free_fn_call_name(&a.base),
+            syn::Expr::Call(c) => match c.func.as_ref() {
+                syn::Expr::Path(p) if p.qself.is_none() && p.path.segments.len() == 1 => {
+                    Some(&p.path.segments[0].ident)
+                }
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+
+    /// Phase helper invoked by one orchestrator statement, if any.
+    fn phase_call_from_stmt(stmt: &syn::Stmt) -> Option<&syn::Ident> {
+        match stmt {
+            syn::Stmt::Local(local) => local
+                .init
+                .as_ref()
+                .and_then(|init| free_fn_call_name(&init.expr)),
+            // Tail expression (e.g. bare call without `;`).
+            syn::Stmt::Expr(expr, _) => free_fn_call_name(expr),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn council_start_phases_are_named_and_ordered() {
+        // PR6: pin orchestrator runtime phase order from the AST, not source text.
+        // Comments and string/raw-string literals are not statements, so they cannot
+        // spoof or shadow executable call order the way line/substring matching can.
+        let file: syn::File =
+            syn::parse_file(include_str!("lib.rs")).expect("lib.rs must parse as a Rust file");
+
+        let orch = file
+            .items
+            .into_iter()
+            .find_map(|item| match item {
+                syn::Item::Fn(f) if f.sig.ident == "try_start_council_server_with_credentials" => {
+                    Some(f)
+                }
+                _ => None,
+            })
+            .expect("orchestrator try_start_council_server_with_credentials must exist in lib.rs");
+
+        let expected = [
+            "resolve_start_plan",
+            "ensure_council_port_available",
+            "resolve_spawn_layout",
+            "resolve_gateway_authority",
+            "spawn_and_register_council",
+        ];
+        let observed: Vec<String> = orch
+            .block
+            .stmts
+            .iter()
+            .filter_map(phase_call_from_stmt)
+            .filter(|id| expected.iter().any(|name| id == name))
+            .map(|id| id.to_string())
+            .collect();
+
+        assert_eq!(
+            observed, expected,
+            "orchestrator must invoke the five phases as statements in this order \
+             (AST statement order, not textual line matching)"
+        );
     }
 }
