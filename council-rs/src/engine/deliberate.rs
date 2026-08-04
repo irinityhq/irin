@@ -280,6 +280,60 @@ mod budget_tests {
     }
 }
 
+#[cfg(test)]
+mod specops_enable_tests {
+    use super::specops_auto_escalate_enabled;
+    use crate::types::SessionOrigin;
+
+    #[test]
+    fn api_origin_suppresses_even_when_grok_available() {
+        // Capability forced true — this is the contract Copilot correctly
+        // noted was untested by an integration run without Grok present.
+        assert!(!specops_auto_escalate_enabled(
+            true,
+            false,
+            SessionOrigin::Api
+        ));
+    }
+
+    #[test]
+    fn api_origin_allows_when_auto_escalate_opted_in() {
+        assert!(specops_auto_escalate_enabled(
+            true,
+            true,
+            SessionOrigin::Api
+        ));
+    }
+
+    #[test]
+    fn non_api_origin_allows_when_grok_available() {
+        assert!(specops_auto_escalate_enabled(
+            true,
+            false,
+            SessionOrigin::Cli
+        ));
+        assert!(specops_auto_escalate_enabled(
+            true,
+            false,
+            SessionOrigin::Warroom
+        ));
+    }
+
+    #[test]
+    fn no_grok_never_enables() {
+        assert!(!specops_auto_escalate_enabled(
+            false,
+            true,
+            SessionOrigin::Cli
+        ));
+        assert!(!specops_auto_escalate_enabled(
+            false,
+            true,
+            SessionOrigin::Api
+        ));
+    }
+}
+
 /// Shared budget gate for CLI engine and War Room stream (v9.12.0).
 ///
 /// Pauses when running cost has reached the cap before all planned rounds finish.
@@ -359,6 +413,9 @@ pub async fn run(
 ///     surfaced in the API response, never indexed for precedent.
 ///   - v0.1.1 will thread `CancellationToken` into `reqwest::send` to
 ///     eliminate the in-flight HTTP waste.
+///
+/// Orchestration is a thin sequence of domain-named phases (PR7). Inputs,
+/// outputs, ordering, and authority checks are unchanged.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_with_cancel(
     config: &Config,
@@ -375,16 +432,113 @@ pub async fn run_with_cancel(
     validate_provider: &str,
     validate_gate: bool,
     origin: SessionOrigin,
-    mut req_ctx: RequestContext,
+    req_ctx: RequestContext,
     worker_provenance: Option<sovereign_protocol::types::WorkerProvenanceGuard>,
     cancel: Option<CancellationToken>,
 ) -> Result<CouncilSession> {
+    let prepared = prepare_deliberation(
+        config,
+        cabinet_name,
+        topic,
+        mode,
+        blind,
+        frame_check,
+        verbose,
+        budget_max_usd,
+        validate,
+        req_ctx,
+    )
+    .await?;
+
+    let rounds = execute_deliberation_rounds(
+        config,
+        &prepared,
+        cabinet_name,
+        topic,
+        context,
+        mode,
+        frame_check,
+        verbose,
+        budget_max_usd,
+        tier,
+        validate,
+        validate_provider,
+        validate_gate,
+        origin,
+        cancel.as_ref(),
+    )
+    .await?;
+
+    let rounds = maybe_escalate_specops(config, &prepared, rounds, topic, verbose, origin).await;
+
+    synthesize_and_persist(
+        config,
+        prepared,
+        rounds,
+        cabinet_name,
+        topic,
+        context,
+        mode,
+        verbose,
+        budget_max_usd,
+        tier,
+        origin,
+        worker_provenance,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
+// Deliberation phases — named extraction of run_with_cancel.
+// Ordering and authority checks are unchanged; each phase is a pure move of
+// the prior sequential block into a domain-named function.
+// ---------------------------------------------------------------------------
+
+/// Phase 1 product: cabinet, session identity, transport, precedent, BATS.
+struct PreparedDeliberation {
+    cabinet: Cabinet,
+    session_id: String,
+    req_ctx: RequestContext,
+    effective_via_gateway: bool,
+    effective_sensitivity: String,
+    budget_signal: String,
+    precedent_text: String,
+    precedent_ids: Vec<String>,
+    evidence_cache: sheldon::EvidenceCache,
+}
+
+/// Phase 2/3 product: completed rounds, running totals, budget pause, SpecOps.
+struct RoundExecution {
+    rounds: Vec<RoundResult>,
+    total_tokens: u32,
+    total_latency_ms: u64,
+    total_cost: f64,
+    budget_paused: bool,
+    budget_action: Option<String>,
+    specops_triggered: bool,
+    specops_cost_usd: f64,
+    specops_signal_text: Option<String>,
+}
+
+/// Phase 1 — resolve cabinet, mint session id, gateway preflight, BATS + precedent.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_deliberation(
+    config: &Config,
+    cabinet_name: &str,
+    topic: &str,
+    mode: Mode,
+    blind: bool,
+    frame_check: bool,
+    verbose: bool,
+    budget_max_usd: Option<f64>,
+    validate: bool,
+    mut req_ctx: RequestContext,
+) -> Result<PreparedDeliberation> {
     // resolve_cabinet_owned (feature contract): registry hit clones; a miss falls back to
     // <base_dir>/cabinets/<name>.yaml so cabinets saved after startup are
     // launchable by name. Bound by reference below to keep downstream usage
     // (fan_out, synthesize, cabinet.rounds, …) unchanged.
-    let cabinet_owned = config.resolve_cabinet_owned(cabinet_name)?;
-    let cabinet = &cabinet_owned;
+    let cabinet = config.resolve_cabinet_owned(cabinet_name)?;
     let session_id = Uuid::new_v4().to_string()[..12].to_string();
     req_ctx.council_session_id = Some(session_id.clone());
     let effective_via_gateway = req_ctx
@@ -396,7 +550,7 @@ pub async fn run_with_cancel(
         .unwrap_or_else(provider::default_sensitivity);
 
     if effective_via_gateway {
-        let required_models = governed_required_transport_models(cabinet);
+        let required_models = governed_required_transport_models(&cabinet);
         let alternatives =
             governed_alternative_transport_model_groups(config, frame_check, validate);
         if let Err(error) =
@@ -423,14 +577,6 @@ pub async fn run_with_cancel(
         eprintln!("════════════════════════════════════════════════════════════\n");
         print_role_cascades(&config.roles);
     }
-
-    let mut rounds: Vec<RoundResult> = Vec::new();
-    let mut total_tokens: u32 = 0;
-    let mut total_latency_ms: u64 = 0;
-    let mut total_cost: f64 = 0.0;
-    let mut prev_flip_hash: Option<String> = None;
-    let mut budget_paused = false;
-    let mut budget_action: Option<String> = None;
 
     // Session-scoped evidence cache (one per deliberation) for Sheldon --validate
     // dedup across rounds. Passed only to validator path.
@@ -499,6 +645,47 @@ pub async fn run_with_cancel(
         }
     };
 
+    Ok(PreparedDeliberation {
+        cabinet,
+        session_id,
+        req_ctx,
+        effective_via_gateway,
+        effective_sensitivity,
+        budget_signal,
+        precedent_text,
+        precedent_ids,
+        evidence_cache,
+    })
+}
+
+/// Phase 2 — fan-out rounds with judge, validation/gate, cancel, budget, convergence.
+#[allow(clippy::too_many_arguments)]
+async fn execute_deliberation_rounds(
+    config: &Config,
+    prepared: &PreparedDeliberation,
+    cabinet_name: &str,
+    topic: &str,
+    context: &str,
+    mode: Mode,
+    frame_check: bool,
+    verbose: bool,
+    budget_max_usd: Option<f64>,
+    tier: &str,
+    validate: bool,
+    validate_provider: &str,
+    validate_gate: bool,
+    origin: SessionOrigin,
+    cancel: Option<&CancellationToken>,
+) -> Result<RoundExecution> {
+    let cabinet = &prepared.cabinet;
+    let mut rounds: Vec<RoundResult> = Vec::new();
+    let mut total_tokens: u32 = 0;
+    let mut total_latency_ms: u64 = 0;
+    let mut total_cost: f64 = 0.0;
+    let mut prev_flip_hash: Option<String> = None;
+    let mut budget_paused = false;
+    let mut budget_action: Option<String> = None;
+
     for round_num in 1..=cabinet.rounds {
         if verbose {
             eprintln!(
@@ -510,10 +697,10 @@ pub async fn run_with_cancel(
         let mut round_prompt = build_round_prompt(
             topic,
             context,
-            &precedent_text,
+            &prepared.precedent_text,
             &rounds,
             round_num,
-            &budget_signal,
+            &prepared.budget_signal,
         );
 
         if round_num == 1 && frame_check {
@@ -522,17 +709,17 @@ pub async fn run_with_cancel(
                 verbose,
                 &config.roles,
                 &config.models,
-                &req_ctx,
+                &prepared.req_ctx,
             )
             .await;
         }
 
         // Phase 0.5 §4.5: pre-round cancel check (cheap escape before fan-out).
-        if let Some(c) = cancel.as_ref()
+        if let Some(c) = cancel
             && c.is_cancelled()
         {
             write_cancelled_partial(
-                &session_id,
+                &prepared.session_id,
                 cabinet_name,
                 topic,
                 tier,
@@ -542,7 +729,7 @@ pub async fn run_with_cancel(
                 total_latency_ms,
                 total_cost,
                 verbose,
-                req_ctx.parent_request_id.clone(),
+                prepared.req_ctx.parent_request_id.clone(),
             );
             anyhow::bail!("cancelled");
         }
@@ -554,8 +741,8 @@ pub async fn run_with_cancel(
             round_num,
             mode,
             verbose,
-            &req_ctx,
-            cancel.as_ref(),
+            &prepared.req_ctx,
+            cancel,
         )
         .await;
 
@@ -573,7 +760,14 @@ pub async fn run_with_cancel(
 
         // v9.12.0: Structured judge replaces naked float
         let judge = if round_num < cabinet.rounds && responses.len() >= 2 {
-            judge_round(&responses, topic, &req_ctx, &config.roles, &config.models).await
+            judge_round(
+                &responses,
+                topic,
+                &prepared.req_ctx,
+                &config.roles,
+                &config.models,
+            )
+            .await
         } else {
             JudgeRoundResult::skipped()
         };
@@ -675,8 +869,8 @@ pub async fn run_with_cancel(
                         context,
                         round_num,
                         &vcfg,
-                        &req_ctx,
-                        Some(&evidence_cache),
+                        &prepared.req_ctx,
+                        Some(&prepared.evidence_cache),
                     )
                     .await;
                     match val_result {
@@ -745,11 +939,11 @@ pub async fn run_with_cancel(
         // Phase 0.5 §4.5: post-round cancel check. Persist a partial diagnostic
         // file with origin=ApiCancelled (private side-channel — never returned
         // to the API response, never indexed for precedent) and bail.
-        if let Some(c) = cancel.as_ref()
+        if let Some(c) = cancel
             && c.is_cancelled()
         {
             write_cancelled_partial(
-                &session_id,
+                &prepared.session_id,
                 cabinet_name,
                 topic,
                 tier,
@@ -759,7 +953,7 @@ pub async fn run_with_cancel(
                 total_latency_ms,
                 total_cost,
                 verbose,
-                req_ctx.parent_request_id.clone(),
+                prepared.req_ctx.parent_request_id.clone(),
             );
             anyhow::bail!("cancelled");
         }
@@ -782,18 +976,52 @@ pub async fn run_with_cancel(
         }
     }
 
+    Ok(RoundExecution {
+        rounds,
+        total_tokens,
+        total_latency_ms,
+        total_cost,
+        budget_paused,
+        budget_action,
+        specops_triggered: false,
+        specops_cost_usd: 0.0,
+        specops_signal_text: None,
+    })
+}
+
+/// Whether SpecOps auto-escalation is allowed for this origin/capability pair.
+///
+/// Grok availability is probed separately. API origin requires an explicit
+/// `council_auto_escalate` opt-in (POST /api/deliberate default is false).
+pub(crate) fn specops_auto_escalate_enabled(
+    grok_available: bool,
+    council_auto_escalate: bool,
+    origin: SessionOrigin,
+) -> bool {
+    grok_available && (council_auto_escalate || origin != SessionOrigin::Api)
+}
+
+/// Phase 3 — SpecOps auto-escalation for non-converging runs (API-default suppressed).
+async fn maybe_escalate_specops(
+    config: &Config,
+    prepared: &PreparedDeliberation,
+    mut rounds: RoundExecution,
+    topic: &str,
+    verbose: bool,
+    origin: SessionOrigin,
+) -> RoundExecution {
     // Phase 0.5 §4.x: SpecOps auto-escalation for non-converging runs.
     // Now accepts grok OAuth CLI in addition to (or instead of) XAI_API_KEY.
     // Empty XAI_API_KEY= placeholders must not count as configured.
-    let grok_api = crate::provider::env_nonempty("XAI_API_KEY");
-    let grok_cli = crate::provider::is_grok_cli_available();
-    let enable_specops =
-        (grok_api || grok_cli) && (req_ctx.council_auto_escalate || origin != SessionOrigin::Api);
-    let mut specops_triggered = false;
-    let mut specops_cost_usd = 0.0;
-    let mut specops_signal_text = None;
-    let final_converged = rounds.last().map(|r| r.converged).unwrap_or(false);
-    let specops_ready = if enable_specops && !final_converged && effective_via_gateway {
+    let grok_available =
+        crate::provider::env_nonempty("XAI_API_KEY") || crate::provider::is_grok_cli_available();
+    let enable_specops = specops_auto_escalate_enabled(
+        grok_available,
+        prepared.req_ctx.council_auto_escalate,
+        origin,
+    );
+    let final_converged = rounds.rounds.last().map(|r| r.converged).unwrap_or(false);
+    let specops_ready = if enable_specops && !final_converged && prepared.effective_via_gateway {
         let required = crate::engine::direct_fire::spec("specops")
             .map(|spec| {
                 vec![provider::gateway::TransportModel::new(
@@ -823,24 +1051,45 @@ pub async fn run_with_cancel(
         let sig = crate::stream::deliberate::run_escalation(
             config,
             topic,
-            &rounds,
+            &rounds.rounds,
             "specops",
             &available_set,
-            &req_ctx,
+            &prepared.req_ctx,
         )
         .await;
-        specops_triggered = true;
-        specops_cost_usd = sig.cost_usd;
-        specops_signal_text = Some(sig.text.clone());
-        total_cost += sig.cost_usd;
-        total_tokens = total_tokens.saturating_add(sig.tokens_in + sig.tokens_out);
-        total_latency_ms += sig.latency_ms;
+        rounds.specops_triggered = true;
+        rounds.specops_cost_usd = sig.cost_usd;
+        rounds.specops_signal_text = Some(sig.text.clone());
+        rounds.total_cost += sig.cost_usd;
+        rounds.total_tokens = rounds
+            .total_tokens
+            .saturating_add(sig.tokens_in + sig.tokens_out);
+        rounds.total_latency_ms += sig.latency_ms;
 
         if verbose {
             eprintln!("   🚨 SPECOPS: {}", sig.text);
         }
     }
 
+    rounds
+}
+
+/// Phase 4 — chair synthesis, session record, save.
+#[allow(clippy::too_many_arguments)]
+async fn synthesize_and_persist(
+    config: &Config,
+    prepared: PreparedDeliberation,
+    mut rounds: RoundExecution,
+    cabinet_name: &str,
+    topic: &str,
+    context: &str,
+    mode: Mode,
+    verbose: bool,
+    budget_max_usd: Option<f64>,
+    tier: &str,
+    origin: SessionOrigin,
+    worker_provenance: Option<sovereign_protocol::types::WorkerProvenanceGuard>,
+) -> Result<CouncilSession> {
     // Chair synthesis
     if verbose {
         eprintln!("── Synthesis ────────────────────────────────────────────");
@@ -851,61 +1100,65 @@ pub async fn run_with_cancel(
     // (`estimate_cost(model, 0, 0, 0)`), silently undercounting end-to-end.
     let chair = synthesize(
         config,
-        cabinet,
+        &prepared.cabinet,
         topic,
         context,
-        &rounds,
+        &rounds.rounds,
         mode,
         verbose,
-        &req_ctx,
-        specops_signal_text.as_deref(),
+        &prepared.req_ctx,
+        rounds.specops_signal_text.as_deref(),
     )
     .await?;
-    total_cost += chair.cost_usd;
-    total_tokens = total_tokens.saturating_add(chair.tokens_in + chair.tokens_out);
+    rounds.total_cost += chair.cost_usd;
+    rounds.total_tokens = rounds
+        .total_tokens
+        .saturating_add(chair.tokens_in + chair.tokens_out);
 
     let budget_record = budget_max_usd.map(|max| BudgetRecord {
         max_usd: max,
-        paused: budget_paused,
-        action_taken: budget_action,
+        paused: rounds.budget_paused,
+        action_taken: rounds.budget_action,
     });
 
     let session = CouncilSession {
-        session_id: session_id.clone(),
+        session_id: prepared.session_id.clone(),
         topic: crate::scrub::redact(topic),
         cabinet_name: cabinet_name.to_string(),
-        rounds,
+        rounds: rounds.rounds,
         synthesis: Some(crate::scrub::redact(&chair.text)),
         synthesis_model: Some(chair.model),
-        total_tokens,
-        total_latency_ms,
-        total_cost_usd: total_cost,
+        total_tokens: rounds.total_tokens,
+        total_latency_ms: rounds.total_latency_ms,
+        total_cost_usd: rounds.total_cost,
         mode: match mode {
             Mode::TearDown => SessionMode::TearDown,
             Mode::Harden => SessionMode::Harden,
             Mode::Pathfind => SessionMode::Pathfind,
         },
-        specops_triggered,
-        specops_cost_usd,
-        precedent_ids,
+        specops_triggered: rounds.specops_triggered,
+        specops_cost_usd: rounds.specops_cost_usd,
+        precedent_ids: prepared.precedent_ids,
         timestamp: Utc::now(),
         schema_version: 2,
         tier: tier.to_string(),
         budget: budget_record,
         context_sources: vec![],
         origin,
-        execution_route: if effective_via_gateway {
+        execution_route: if prepared.effective_via_gateway {
             ExecutionRoute::Governed
         } else {
             ExecutionRoute::Direct
         },
-        gateway_sensitivity: effective_via_gateway.then_some(effective_sensitivity),
+        gateway_sensitivity: prepared
+            .effective_via_gateway
+            .then_some(prepared.effective_sensitivity),
         chair_tokens_in: chair.tokens_in,
         chair_tokens_out: chair.tokens_out,
         chair_cost_usd: chair.cost_usd,
         chair_provider_provenance: chair.provider_provenance,
         chair_gateway_provenance: chair.gateway_provenance,
-        parent_request_id: req_ctx.parent_request_id.clone(),
+        parent_request_id: prepared.req_ctx.parent_request_id.clone(),
         worker_provenance,
         worker_metrics: None,
     };
@@ -916,7 +1169,7 @@ pub async fn run_with_cancel(
         eprintln!("\n────────────────────────────────────────────────────────────");
         eprintln!(
             "  Session: {} | Tokens: {} | Cost: ${:.4} | Mode: {}",
-            session_id, total_tokens, total_cost, mode
+            prepared.session_id, rounds.total_tokens, rounds.total_cost, mode
         );
         eprintln!("────────────────────────────────────────────────────────────\n");
     }

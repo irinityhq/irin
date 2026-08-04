@@ -517,25 +517,45 @@ pub async fn ask_with_opts_and_context(
             let resolved = agy_route::resolve_agy_model(model);
             agent_cli::ask_agy(prompt, system, &resolved).await
         }
-        "mock" => ProviderResponse {
-            text: format!(
-                "Mock response from {} for prompt: {}",
-                model,
-                prompt.chars().take(20).collect::<String>()
-            ),
-            model: model.to_string(),
-            tokens_in: 10,
-            tokens_out: 10,
-            cached_in: 0,
-            latency_ms: 5,
-            cost_usd: 0.0,
-            error: None,
-            gateway_provenance: None,
-            gateway_attempts: Vec::new(),
-            provider_provenance: Some(crate::types::ProviderProvenance::new(
-                "mock", "mock", "none", "none",
-            )),
-        },
+        // Deterministic no-spend fixtures used by engine orchestration tests.
+        // `mock-claim-validator` returns a parseable Sheldon report; `mock-gated-seat`
+        // embeds the claim string so gate redaction can be observed when applied.
+        "mock" => {
+            let text = match model {
+                "mock-claim-validator" => {
+                    r#"[{"claim":"UNIQUE_CONTRADICTED_CLAIM_XYZ_12345","seat":"seat_a","verdict":"CONTRADICTED","evidence_citations":["fixture evidence"],"reasoning":"no-spend fixture","confidence":0.95,"impact":"HIGH"}]"#
+                        .to_string()
+                }
+                "mock-gated-seat" => {
+                    "Seat analysis states UNIQUE_CONTRADICTED_CLAIM_XYZ_12345 with certainty."
+                        .to_string()
+                }
+                // Opposite polarity fixtures so the keyword judge does not
+                // early-converge a multi-round characterization run.
+                "mock-seat-agree" => "I agree and support this approach.".to_string(),
+                "mock-seat-disagree" => "I disagree and reject this approach.".to_string(),
+                _ => format!(
+                    "Mock response from {} for prompt: {}",
+                    model,
+                    prompt.chars().take(20).collect::<String>()
+                ),
+            };
+            ProviderResponse {
+                text,
+                model: model.to_string(),
+                tokens_in: 10,
+                tokens_out: 10,
+                cached_in: 0,
+                latency_ms: 5,
+                cost_usd: 0.0,
+                error: None,
+                gateway_provenance: None,
+                gateway_attempts: Vec::new(),
+                provider_provenance: Some(crate::types::ProviderProvenance::new(
+                    "mock", "mock", "none", "none",
+                )),
+            }
+        }
 
         "deepseek" => deepseek::ask(prompt, system, model, max_tokens).await,
         "together" => together::ask(prompt, system, model, max_tokens).await,
