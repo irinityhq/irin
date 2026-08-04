@@ -118,6 +118,8 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 # to the main `features = ["full"]` for dev/test builds only; release builds
 # stay free of test-util shims.
 tokio = { version = "1", features = ["test-util"] }
+# AST parse for boot-orchestrator source-order contracts (not used in production).
+syn = { version = "2", features = ["full"] }
 # Compile-fail tests for HydrationToken typestate.
 trybuild = "1"
 

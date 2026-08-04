@@ -77,10 +77,56 @@ pub(crate) fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProv
     otel_provider
 }
 
-/// Load config, open DBs, construct AppState, assemble router, bind UDS, serve.
-pub(crate) async fn load_config_build_state_and_serve(
-    otel_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
-) -> anyhow::Result<()> {
+// ---------------------------------------------------------------------------
+// Boot phases — named extraction of load_config_build_state_and_serve.
+// Ordering and authority checks are unchanged; each phase is a pure move of
+// the prior sequential block into a domain-named function.
+// ---------------------------------------------------------------------------
+
+/// Phase 1 product: models/router configuration resolved from env/YAML.
+struct BootConfig {
+    redis_url: Option<String>,
+    smart_router: router::SmartRouter,
+}
+
+/// Phase 2 product: ledger keys, durable cache/budget, auth, provider tokens.
+struct BootAuthority {
+    smart_router: router::SmartRouter,
+    audit_ledger: ledger::AuditLedger,
+    gw_cache: cache::GatewayCache,
+    budget_enforcer: budget::BudgetEnforcer,
+    auth_service: auth::AuthService,
+    vertex_token: vertex_auth::VertexTokenProvider,
+    ledger_sk: ed25519_dalek::SigningKey,
+    root_pubkey: Option<ed25519_dalek::VerifyingKey>,
+}
+
+/// Phase 3 product: watch DBs hydrated, AppState built, background sweeper live.
+struct BootHydrated {
+    state: Arc<AppState>,
+    watch_db: Arc<watch::db::WatchDb>,
+    watch_quarantine: Arc<watch::quarantine::QuarantineState>,
+    watch_runtime: tokio::runtime::Runtime,
+    sentinels: Vec<Arc<dyn watch::Sentinel>>,
+    arm_principals: Arc<watch::api::ArmPrincipals>,
+    arm_stage_ttl: Duration,
+    arm_notifier: Arc<watch::api::ArmNotifier>,
+    arm_deviation: Arc<watch::api::ArmDeviationTags>,
+    attest_keys: Arc<watch::attest::AttestKeyRegistry>,
+    watch_admin_token: String,
+}
+
+/// Phase 4 product: UDS serving, watch runner, optional dispatcher/worker.
+struct BootServing {
+    server_handle: tokio::task::JoinHandle<anyhow::Result<()>>,
+    watch_runner_handles: watch::runner::WatchRunnerHandles,
+    _watch_runtime_keepalive: tokio::runtime::Runtime,
+    _dispatcher_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+    _worker_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+/// Phase 1 — configuration load (unified YAML, models, smart router).
+fn load_configuration() -> BootConfig {
     let redis_url = std::env::var("REDIS_URL").ok();
 
     rustls::crypto::ring::default_provider()
@@ -128,6 +174,19 @@ pub(crate) async fn load_config_build_state_and_serve(
 
     let smart_router = router::SmartRouter::from_models_json(&models_json)
         .expect("failed to initialize smart router");
+
+    BootConfig {
+        redis_url,
+        smart_router,
+    }
+}
+
+/// Phase 2 — authority initialization (ledger keys, durable state, auth, tokens).
+async fn initialize_authority(config: BootConfig) -> BootAuthority {
+    let BootConfig {
+        redis_url,
+        smart_router,
+    } = config;
 
     // Initialize Cryptographic Ledger with persistent Ed25519 signing key.
     // Fails closed (panics) if the key file is missing, wrong size, or has
@@ -210,6 +269,31 @@ pub(crate) async fn load_config_build_state_and_serve(
         "council idempotency: in-memory only — replays before this PID may bill twice. \
          SQLite-backed in v0.1.1."
     );
+
+    BootAuthority {
+        smart_router,
+        audit_ledger,
+        gw_cache,
+        budget_enforcer,
+        auth_service,
+        vertex_token,
+        ledger_sk,
+        root_pubkey,
+    }
+}
+
+/// Phase 3 — state hydration (watch.db, sentinels, arm registry, AppState).
+async fn hydrate_runtime_state(authority: BootAuthority) -> anyhow::Result<BootHydrated> {
+    let BootAuthority {
+        smart_router,
+        audit_ledger,
+        gw_cache,
+        budget_enforcer,
+        auth_service,
+        vertex_token,
+        ledger_sk,
+        root_pubkey,
+    } = authority;
 
     // Phase 2 §4 — open the append-only watch.db (hash-chained per tenant).
     // Fatal at boot if it can't open; the chain MUST persist so verify-chain
@@ -593,6 +677,37 @@ pub(crate) async fn load_config_build_state_and_serve(
     // Runs every 30s; reclaims any granted_at older than PENDING_TTL + 30s.
     // Spawned ONCE at startup; cancelled when the process exits.
     council::spawn_active_sweeper(state.clone());
+
+    Ok(BootHydrated {
+        state,
+        watch_db,
+        watch_quarantine,
+        watch_runtime,
+        sentinels,
+        arm_principals,
+        arm_stage_ttl,
+        arm_notifier,
+        arm_deviation,
+        attest_keys,
+        watch_admin_token,
+    })
+}
+
+/// Phase 4 — listener startup (router, UDS, probe, hydration sweep, dispatcher).
+async fn start_listener_and_background(hydrated: BootHydrated) -> BootServing {
+    let BootHydrated {
+        state,
+        watch_db,
+        watch_quarantine,
+        watch_runtime,
+        sentinels,
+        arm_principals,
+        arm_stage_ttl,
+        arm_notifier,
+        arm_deviation,
+        attest_keys,
+        watch_admin_token,
+    } = hydrated;
 
     let app = routes::build_router(routes::BuildRouterParts {
         state: state.clone(),
@@ -990,6 +1105,28 @@ pub(crate) async fn load_config_build_state_and_serve(
         None
     };
 
+    BootServing {
+        server_handle,
+        watch_runner_handles,
+        _watch_runtime_keepalive,
+        _dispatcher_shutdown,
+        _worker_shutdown,
+    }
+}
+
+/// Phase 5 — shutdown (SIGTERM/SIGINT runner release, OTEL flush).
+async fn await_shutdown(
+    serving: BootServing,
+    otel_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+) -> anyhow::Result<()> {
+    let BootServing {
+        server_handle,
+        watch_runner_handles,
+        _watch_runtime_keepalive,
+        _dispatcher_shutdown,
+        _worker_shutdown,
+    } = serving;
+
     // Graceful shutdown (restart regression): a Docker
     // `compose recreate` sends SIGTERM. Previously the process only handled
     // SIGHUP, so SIGTERM killed it WITHOUT firing the runner shutdown channel —
@@ -1040,4 +1177,19 @@ pub(crate) async fn load_config_build_state_and_serve(
     }
 
     server_result
+}
+
+/// Load config, open DBs, construct AppState, assemble router, bind UDS, serve.
+///
+/// Implemented as five named phases (configuration → authority → hydration →
+/// listener → shutdown). Inputs, outputs, ordering, and authority checks are
+/// unchanged from the pre-split monolithic boot path.
+pub(crate) async fn load_config_build_state_and_serve(
+    otel_provider: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+) -> anyhow::Result<()> {
+    let config = load_configuration();
+    let authority = initialize_authority(config).await;
+    let hydrated = hydrate_runtime_state(authority).await?;
+    let serving = start_listener_and_background(hydrated).await;
+    await_shutdown(serving, otel_provider).await
 }

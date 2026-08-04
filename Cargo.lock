@@ -1419,6 +1419,7 @@ dependencies = [
  "sha2 0.10.9",
  "sovereign-protocol",
  "subtle",
+ "syn",
  "tempfile",
  "thiserror",
  "tokio",
