@@ -653,7 +653,8 @@ pub fn is_valid_arm_principal_token(token: &str) -> bool {
 }
 
 /// Host-adapter shared secret: 64 lowercase hex chars (32 random bytes).
-/// Same shape `setup-local.sh` mints for `CLAUDE_PROXY_TOKEN` / `CODEX_PROXY_TOKEN`.
+/// Same shape the app-owned adapter path mints for `CLAUDE_PROXY_TOKEN` /
+/// `CODEX_PROXY_TOKEN`.
 pub fn is_valid_proxy_token(token: &str) -> bool {
     let b = token.as_bytes();
     b.len() == 64 && b.iter().all(|c| c.is_ascii_hexdigit())

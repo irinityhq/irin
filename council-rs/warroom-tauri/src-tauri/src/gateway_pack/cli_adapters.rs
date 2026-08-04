@@ -38,17 +38,16 @@ pub const CODEX_HOST_PROXY_URL: &str = "http://host.docker.internal:9091";
 /// IPv4 all-interfaces bind host for owned adapters.
 ///
 /// Contract for the macOS DMG + Gateway Pack path:
-/// - Source runtime launches Python proxies with `--bind 0.0.0.0`
-///   (`scripts/irin-runtime.sh`). That is AF_INET all-interfaces, not dual-stack.
+/// - Owned adapters bind `0.0.0.0` (AF_INET all-interfaces, not dual-stack).
 /// - Compose injects `host.docker.internal:host-gateway` (IPv4) into the pack
 ///   container hosts file, so the container reaches the host over IPv4.
 /// - Binding `127.0.0.1` alone makes `host.docker.internal` / host-gateway
 ///   unreachable from the container (Kimi F1).
 /// - Dual-stack `::` is not required for this pack path: host-gateway forces
-///   an IPv4 entry, matching production Python's `0.0.0.0` launch. Python's
+///   an IPv4 entry, matching the adapters' `0.0.0.0` bind. Python's
 ///   dual-stack helper only activates when `--bind` is an IPv6 form (`::`).
 /// - Security: token is always required before listen (`ensure_one` refuses an
-///   empty token), matching Python's non-loopback requires-token gate.
+///   empty token), matching the non-loopback requires-token gate.
 pub const ADAPTER_BIND_HOST: &str = "0.0.0.0";
 const LOOPBACK_CLAUDE: &str = "http://127.0.0.1:9090";
 const LOOPBACK_CODEX: &str = "http://127.0.0.1:9091";
