@@ -6,7 +6,7 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::OnceLock;
 
 use council_rs::config::Config;
 use council_rs::engine::context::RequestContext;
@@ -16,12 +16,14 @@ use council_rs::types::{
     Cabinet, Chair, ExecutionRoute, RoleCascadeStep, RoleDefinition, RolesConfig, Seat,
     SessionOrigin,
 };
+use tokio::sync::{Mutex, MutexGuard};
 use tokio_util::sync::CancellationToken;
 
 /// Serialize tests that mutate process env (sessions dir, evidence switches).
-fn env_lock() -> MutexGuard<'static, ()> {
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+/// Async-aware so clippy await_holding_lock stays clean under ship-check.
+async fn env_lock() -> MutexGuard<'static, ()> {
+    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    ENV_LOCK.get_or_init(|| Mutex::new(())).lock().await
 }
 
 fn mock_step(model: &str) -> RoleCascadeStep {
@@ -152,7 +154,7 @@ fn api_ctx(parent: &str) -> RequestContext {
 
 #[tokio::test]
 async fn run_with_cancel_happy_path_binds_session_contract() {
-    let _guard = env_lock();
+    let _guard = env_lock().await;
     let dirs = SessionDirs::install();
     // Two polar seats so the keyword judge does not early-converge (score 0.5).
     let config = mock_config(
@@ -223,7 +225,7 @@ async fn run_with_cancel_happy_path_binds_session_contract() {
 
 #[tokio::test]
 async fn run_with_cancel_pre_cancelled_writes_only_api_cancelled_partial() {
-    let _guard = env_lock();
+    let _guard = env_lock().await;
     let dirs = SessionDirs::install();
     let config = mock_config("quick", 2, vec![mock_seat("seat_a", "mock-model")]);
     let cancel = CancellationToken::new();
@@ -280,7 +282,7 @@ async fn run_with_cancel_pre_cancelled_writes_only_api_cancelled_partial() {
 
 #[tokio::test]
 async fn run_with_cancel_zero_budget_ends_after_round_one() {
-    let _guard = env_lock();
+    let _guard = env_lock().await;
     let dirs = SessionDirs::install();
     let config = mock_config("budgeted", 3, vec![mock_seat("seat_a", "mock-model")]);
 
@@ -326,7 +328,7 @@ async fn run_with_cancel_zero_budget_ends_after_round_one() {
 
 #[tokio::test]
 async fn run_with_cancel_terminating_round_skips_gate_redaction() {
-    let _guard = env_lock();
+    let _guard = env_lock().await;
     let dirs = SessionDirs::install();
     // Two seats so validate_round does not skip for insufficient responses.
     let config = mock_config(
@@ -388,7 +390,7 @@ async fn run_with_cancel_terminating_round_skips_gate_redaction() {
 
 #[tokio::test]
 async fn run_with_cancel_api_default_suppresses_specops() {
-    let _guard = env_lock();
+    let _guard = env_lock().await;
     let dirs = SessionDirs::install();
     let config = mock_config("specops", 1, vec![mock_seat("seat_a", "mock-model")]);
 
