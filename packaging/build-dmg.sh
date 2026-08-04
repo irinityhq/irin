@@ -66,7 +66,7 @@ verify_developer_id_signature() {
     || die "$label TeamIdentifier does not match the outer app"
   entitlements="$(codesign -d --entitlements :- "$artifact" 2>/dev/null || true)"
   if grep -q '<key>' <<<"$entitlements"; then
-    die "$label contains entitlements, but IRIN 0.1.2 declares none; review and document before shipping"
+    die "$label contains entitlements, but IRIN declares none; review and document before shipping"
   fi
 }
 
