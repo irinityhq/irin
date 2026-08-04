@@ -186,12 +186,19 @@ async fn run_with_cancel_happy_path_binds_session_contract() {
     .await
     .expect("happy path");
 
-    assert_eq!(session.rounds.len(), 2, "exact planned round count (no early stop)");
+    assert_eq!(
+        session.rounds.len(),
+        2,
+        "exact planned round count (no early stop)"
+    );
     assert!(session.synthesis.is_some(), "chair synthesis required");
     assert_eq!(session.synthesis_model.as_deref(), Some("mock-chair"));
     assert_eq!(session.origin, SessionOrigin::Api);
     assert_eq!(session.execution_route, ExecutionRoute::Direct);
-    assert_eq!(session.parent_request_id.as_deref(), Some("parent-req-happy"));
+    assert_eq!(
+        session.parent_request_id.as_deref(),
+        Some("parent-req-happy")
+    );
     assert_eq!(session.tier, "best");
     assert!(!session.specops_triggered);
     assert!(!session.session_id.is_empty());
@@ -218,11 +225,7 @@ async fn run_with_cancel_happy_path_binds_session_contract() {
 async fn run_with_cancel_pre_cancelled_writes_only_api_cancelled_partial() {
     let _guard = env_lock();
     let dirs = SessionDirs::install();
-    let config = mock_config(
-        "quick",
-        2,
-        vec![mock_seat("seat_a", "mock-model")],
-    );
+    let config = mock_config("quick", 2, vec![mock_seat("seat_a", "mock-model")]);
     let cancel = CancellationToken::new();
     cancel.cancel();
 
@@ -279,11 +282,7 @@ async fn run_with_cancel_pre_cancelled_writes_only_api_cancelled_partial() {
 async fn run_with_cancel_zero_budget_ends_after_round_one() {
     let _guard = env_lock();
     let dirs = SessionDirs::install();
-    let config = mock_config(
-        "budgeted",
-        3,
-        vec![mock_seat("seat_a", "mock-model")],
-    );
+    let config = mock_config("budgeted", 3, vec![mock_seat("seat_a", "mock-model")]);
 
     let session = deliberate::run_with_cancel(
         &config,
@@ -312,8 +311,15 @@ async fn run_with_cancel_zero_budget_ends_after_round_one() {
     assert!(budget.paused, "paused must be true");
     assert_eq!(budget.action_taken.as_deref(), Some("end_early"));
     assert!((budget.max_usd - 0.0).abs() < f64::EPSILON);
-    assert!(session.synthesis.is_some(), "still synthesizes after early end");
-    assert_eq!(list_json(&dirs.sessions).len(), 1, "canonical session saved");
+    assert!(
+        session.synthesis.is_some(),
+        "still synthesizes after early end"
+    );
+    assert_eq!(
+        list_json(&dirs.sessions).len(),
+        1,
+        "canonical session saved"
+    );
 
     dirs.cleanup();
 }
@@ -344,9 +350,9 @@ async fn run_with_cancel_terminating_round_skips_gate_redaction() {
         false,
         Some(0.0), // budget terminates after round 1
         "best",
-        true,  // validate
+        true, // validate
         "mock",
-        true,  // validate_gate
+        true, // validate_gate
         SessionOrigin::Api,
         api_ctx("parent-req-gate"),
         None,
@@ -384,11 +390,7 @@ async fn run_with_cancel_terminating_round_skips_gate_redaction() {
 async fn run_with_cancel_api_default_suppresses_specops() {
     let _guard = env_lock();
     let dirs = SessionDirs::install();
-    let config = mock_config(
-        "specops",
-        1,
-        vec![mock_seat("seat_a", "mock-model")],
-    );
+    let config = mock_config("specops", 1, vec![mock_seat("seat_a", "mock-model")]);
 
     // API origin + council_auto_escalate=false is the product default from
     // POST /api/deliberate. SpecOps must not fire even if a grok CLI is present.

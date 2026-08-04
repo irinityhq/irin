@@ -415,15 +415,7 @@ pub async fn run_with_cancel(
     )
     .await?;
 
-    let rounds = maybe_escalate_specops(
-        config,
-        &prepared,
-        rounds,
-        topic,
-        verbose,
-        origin,
-    )
-    .await;
+    let rounds = maybe_escalate_specops(config, &prepared, rounds, topic, verbose, origin).await;
 
     synthesize_and_persist(
         config,
@@ -960,28 +952,27 @@ async fn maybe_escalate_specops(
     let enable_specops = (grok_api || grok_cli)
         && (prepared.req_ctx.council_auto_escalate || origin != SessionOrigin::Api);
     let final_converged = rounds.rounds.last().map(|r| r.converged).unwrap_or(false);
-    let specops_ready =
-        if enable_specops && !final_converged && prepared.effective_via_gateway {
-            let required = crate::engine::direct_fire::spec("specops")
-                .map(|spec| {
-                    vec![provider::gateway::TransportModel::new(
-                        spec.provider,
-                        spec.model,
-                    )]
-                })
-                .unwrap_or_default();
-            match provider::gateway::preflight_pairs(&required).await {
-                Ok(()) => true,
-                Err(error) => {
-                    if verbose {
-                        eprintln!("   ⚠️  Skipping unavailable governed SpecOps: {error}");
-                    }
-                    false
+    let specops_ready = if enable_specops && !final_converged && prepared.effective_via_gateway {
+        let required = crate::engine::direct_fire::spec("specops")
+            .map(|spec| {
+                vec![provider::gateway::TransportModel::new(
+                    spec.provider,
+                    spec.model,
+                )]
+            })
+            .unwrap_or_default();
+        match provider::gateway::preflight_pairs(&required).await {
+            Ok(()) => true,
+            Err(error) => {
+                if verbose {
+                    eprintln!("   ⚠️  Skipping unavailable governed SpecOps: {error}");
                 }
+                false
             }
-        } else {
-            true
-        };
+        }
+    } else {
+        true
+    };
 
     if enable_specops && !final_converged && specops_ready {
         if verbose {
