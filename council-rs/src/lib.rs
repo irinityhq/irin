@@ -3,6 +3,7 @@
 //! Multi-model deliberation engine in Rust.
 //! Shared types with Gateway (Aegis) and Librarian (mlx-rs).
 
+pub mod cli;
 pub mod config;
 pub mod engine;
 pub mod evidence;

@@ -18,15 +18,11 @@
 
 use anyhow::Result;
 use clap::Parser;
-use std::io::Read;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use council_rs::cli::{self, DeliberationCliArgs};
 use council_rs::config::Config;
-use council_rs::engine::deliberate;
-use council_rs::engine::direct_fire;
-
-use council_rs::mode::Mode;
 use council_rs::precedent;
 use council_rs::provider;
 use council_rs::registry::ProviderRegistry;
@@ -272,28 +268,6 @@ struct Cli {
     base_dir: PathBuf,
 }
 
-fn smoke_default_model(provider: &str) -> Option<&'static str> {
-    match provider {
-        "claude_code" | "claude_api" => Some("claude-opus-4-6"),
-        "codex_cli" | "openai_api" => Some("gpt-5.6-sol"),
-        "gemini_agy" => Some("agy-default"),
-        "gemini_vertex" => Some("gemini-3.1-pro-preview"),
-        "grok_api" | "grok_hermes" => Some("grok-4.3"),
-        "grok_build" => Some("grok-4.5"),
-        // Legacy transport aliases remain accepted during migration.
-        "claude" => Some("claude-opus-4-6"),
-        "gpt" => Some("gpt-5.6-sol"),
-        "gemini" => Some("agy-default"), // agy preferred; falls back in dispatch
-        "gemini_cli" => Some("gemini-3.1-pro-preview"),
-        "grok" => Some("grok-4.3"),
-        "grok_cli" => Some("grok-build"),
-        "hermes_cli" => Some("grok-4.3"),
-        "nvidia" | "nim" => Some("mistralai/mistral-small-4-119b-2603"),
-        "nous" => Some("Hermes-4-70B"),
-        _ => None,
-    }
-}
-
 async fn run_discover() -> Result<()> {
     // Discovery performs bounded blocking CLI, TCP, and HTTP probes. Keep
     // reqwest's blocking runtime off the async main thread, matching the
@@ -490,312 +464,38 @@ fn run_recall(cli: &Cli) -> Result<()> {
     Ok(())
 }
 
-async fn run_deliberation_cli(
-    cli: Cli,
-    config: Arc<Config>,
-    via_gateway: bool,
-    loaded_cabinet_key: Option<String>,
-) -> Result<()> {
-    // Topic is required for deliberation and direct-fire
-    let topic = match cli.topic {
-        Some(t) => t,
-        None => {
-            eprintln!("Error: <TOPIC> is required for deliberation.");
-            eprintln!("Usage: council [OPTIONS] <TOPIC>");
-            eprintln!("       council --discover");
-            eprintln!("       council --recall \"search terms\"");
-            eprintln!("       council --reindex");
-            std::process::exit(1);
-        }
-    };
-
-    // Load context from files (supports - for stdin)
-    let mut context = String::new();
-    for path in &cli.context {
-        if path.to_str() == Some("-") {
-            let mut stdin = String::new();
-            std::io::stdin().read_to_string(&mut stdin)?;
-            context.push_str(&stdin);
-        } else {
-            let content = std::fs::read_to_string(path)?;
-            context.push_str(&content);
-        }
-        context.push_str("\n\n");
+fn deliberation_args_from_cli(cli: Cli) -> DeliberationCliArgs {
+    DeliberationCliArgs {
+        topic: cli.topic,
+        context: cli.context,
+        map: cli.map,
+        quiet: cli.quiet,
+        smoke_provider: cli.smoke_provider,
+        smoke_model: cli.smoke_model,
+        contrarian: cli.contrarian,
+        munger: cli.munger,
+        kiss_review: cli.kiss_review,
+        specops: cli.specops,
+        premortem: cli.premortem,
+        wargame: cli.wargame,
+        quick: cli.quick,
+        heritage: cli.heritage,
+        warroom: cli.warroom,
+        reflection: cli.reflection,
+        duo: cli.duo,
+        triad: cli.triad,
+        cabinet: cli.cabinet,
+        harden: cli.harden,
+        pathfind: cli.pathfind,
+        then_tear_down: cli.then_tear_down,
+        blind: cli.blind,
+        no_frame_check: cli.no_frame_check,
+        budget: cli.budget,
+        tier: cli.tier,
+        validate: cli.validate,
+        validate_provider: cli.validate_provider,
+        validate_gate: cli.validate_gate,
     }
-
-    // Mapmaker — allowlisted scan (same helper as War Room WS map_dir)
-    if let Some(ref map_dir) = cli.map {
-        match council_rs::warroom::safe_map::gather_map_context_for_deliberation(
-            &map_dir.to_string_lossy(),
-        ) {
-            Ok(map_context) => {
-                if !context.is_empty() {
-                    context.push_str("\n\n---\n\n");
-                }
-                context.push_str(&map_context);
-            }
-            Err(e) => {
-                if !cli.quiet {
-                    eprintln!("⚠️  --map: {e}");
-                }
-            }
-        }
-    }
-
-    // ── Direct-fire modes ──
-    // Personas live in engine::direct_fire — shared with the WS direct_fire
-    // path and streaming escalations (feature contract).
-    if let Some(ref prov) = cli.smoke_provider {
-        let provider = prov.trim();
-        if provider.is_empty() {
-            anyhow::bail!("--smoke-provider requires a provider name (e.g. claude)");
-        }
-        let model = cli.smoke_model.clone().unwrap_or_else(|| {
-            smoke_default_model(provider)
-                .unwrap_or_default()
-                .to_string()
-        });
-        if model.is_empty() {
-            anyhow::bail!("--smoke-model required for provider '{provider}' (no built-in default)");
-        }
-        if !cli.quiet {
-            eprintln!("\n🔬 provider smoke — {provider}/{model} (no session)");
-            // T24: scrub secret shapes from the operator-facing topic echo.
-            eprintln!("   Prompt: {}\n", council_rs::scrub::redact(&topic));
-        }
-        let resp = provider::ask(provider, &topic, "", &model).await;
-        if let Some(err) = &resp.error {
-            eprintln!("❌ Error: {err}");
-            std::process::exit(1);
-        }
-        let cost = config.models.estimate_cost(
-            &resp.model,
-            resp.tokens_in,
-            resp.tokens_out,
-            resp.cached_in,
-        );
-        if !cli.quiet {
-            eprintln!(
-                "   ✅ {}ms | model={} | tok {}→{} | ${:.4}\n",
-                resp.latency_ms, resp.model, resp.tokens_in, resp.tokens_out, cost
-            );
-        }
-        println!("{}", resp.text);
-        return Ok(());
-    }
-
-    let direct_fire =
-        cli.contrarian || cli.munger || cli.kiss_review || cli.specops || cli.premortem;
-    if direct_fire {
-        let slug = if cli.premortem {
-            "premortem"
-        } else if cli.contrarian {
-            "contrarian"
-        } else if cli.munger {
-            "munger"
-        } else if cli.kiss_review {
-            "kiss"
-        } else {
-            "specops"
-        };
-        let spec = direct_fire::spec(slug).expect("direct-fire spec for CLI flag");
-
-        if via_gateway
-            && let Err(error) =
-                provider::gateway::preflight_pairs(&[provider::gateway::TransportModel::new(
-                    spec.provider,
-                    spec.model,
-                )])
-                .await
-        {
-            anyhow::bail!("Governed Gateway preflight failed: {error}");
-        }
-
-        if !cli.quiet {
-            eprintln!("\n⚡ {} — direct-fire mode (no council)", spec.display);
-            eprintln!("   Provider: {}/{}", spec.provider, spec.model);
-            // T24: scrub secret shapes from the operator-facing topic echo.
-            eprintln!("   Topic: {}\n", council_rs::scrub::redact(&topic));
-        }
-
-        let prompt = direct_fire::build_prompt(&topic, &context);
-
-        let resp = provider::ask(spec.provider, &prompt, spec.system, spec.model).await;
-        if let Some(err) = &resp.error {
-            eprintln!("❌ Error: {}", err);
-            std::process::exit(1);
-        }
-
-        let cost = config.models.estimate_cost(
-            &resp.model,
-            resp.tokens_in,
-            resp.tokens_out,
-            resp.cached_in,
-        );
-
-        if !cli.quiet {
-            eprintln!(
-                "   Latency: {}ms | Tokens: {}→{} | Cost: ${:.4}\n",
-                resp.latency_ms, resp.tokens_in, resp.tokens_out, cost
-            );
-        }
-
-        println!("{}", resp.text);
-        return Ok(());
-    }
-
-    // ── Full deliberation ──
-
-    // Determine cabinet from shortcut flags or --cabinet
-    let cabinet_override: Option<String> = if cli.wargame {
-        Some("wargame".into())
-    } else if cli.quick {
-        Some("quick".into())
-    } else if cli.heritage {
-        Some("heritage".into())
-    } else if cli.warroom {
-        Some("warroom".into())
-    } else if cli.reflection {
-        Some("reflection".into())
-    } else if cli.duo {
-        Some("duo".into())
-    } else if let Some(ref domain) = cli.triad {
-        let valid = [
-            "strategy",
-            "architecture",
-            "debugging",
-            "product",
-            "risk",
-            "shipping",
-        ];
-        if !valid.contains(&domain.as_str()) {
-            anyhow::bail!(
-                "Unknown triad domain: '{}'. Valid: {}",
-                domain,
-                valid.join(", ")
-            );
-        }
-        Some(format!("triad-{}", domain))
-    } else {
-        None
-    };
-    let cabinet_name = cabinet_override
-        .as_deref()
-        .or(loaded_cabinet_key.as_deref())
-        .unwrap_or(&cli.cabinet);
-
-    // Determine mode. Precedence: --harden > --pathfind/--then-tear-down > default tear-down.
-    // --harden is incompatible with --then-tear-down (the constructive phase IS the review,
-    // not a precursor to a kill review).
-    if cli.harden && cli.then_tear_down {
-        anyhow::bail!("--harden cannot be combined with --then-tear-down; harden IS the review");
-    }
-    let use_pathfind = cli.pathfind || cli.then_tear_down;
-    let mode = if cli.harden {
-        Mode::Harden
-    } else if use_pathfind {
-        Mode::Pathfind
-    } else {
-        Mode::TearDown
-    };
-
-    let cabinet_policy = config.get_cabinet(cabinet_name)?;
-
-    // Frame check: on by default, skip with --no-frame-check, --quick, or
-    // local-code-only cabinets where global provider preflights violate policy.
-    let do_frame_check = !cli.no_frame_check && !cli.quick && !cabinet_policy.local_code_only;
-
-    // Run deliberation (Phase 1)
-    let session = deliberate::run(
-        &config,
-        cabinet_name,
-        &topic,
-        &context,
-        mode,
-        cli.blind,
-        do_frame_check,
-        !cli.quiet,
-        cli.budget,
-        &cli.tier,
-        cli.validate,
-        &cli.validate_provider,
-        cli.validate_gate,
-    )
-    .await?;
-
-    // Print synthesis
-    if let Some(synthesis) = &session.synthesis {
-        println!("{}", synthesis);
-    }
-
-    // Index for precedent engine
-    if let Err(e) = precedent::index_session(&session) {
-        eprintln!("⚠️  Precedent indexing failed: {}", e);
-    }
-
-    // Flight recorder
-    match precedent::write_flight_record(&session) {
-        Ok(path) => {
-            if !cli.quiet {
-                eprintln!("📋 Flight record: {}", path);
-            }
-        }
-        Err(e) => eprintln!("⚠️  Flight record failed: {}", e),
-    }
-
-    // Phase 2: --then-tear-down
-    if cli.then_tear_down && mode == Mode::Pathfind {
-        if !cli.quiet {
-            eprintln!("\n\n═══════════════════════════════════════════════════════════════");
-            eprintln!("  PHASE 2: TEAR-DOWN — Stress-testing the pathfinder's plan");
-            eprintln!("═══════════════════════════════════════════════════════════════\n");
-        }
-
-        // Use the synthesis as context for the tear-down pass
-        let teardown_context = format!(
-            "## PATHFINDER OUTPUT TO STRESS-TEST\n\n{}\n\n---\n\n{}",
-            session.synthesis.as_deref().unwrap_or(""),
-            context
-        );
-
-        let teardown_topic = format!(
-            "STRESS-TEST the following plan produced by a Pathfinder deliberation on: {}",
-            topic
-        );
-
-        let session2 = deliberate::run(
-            &config,
-            cabinet_name,
-            &teardown_topic,
-            &teardown_context,
-            Mode::TearDown,
-            cli.blind,
-            do_frame_check,
-            !cli.quiet,
-            cli.budget,
-            &cli.tier,
-            cli.validate,
-            &cli.validate_provider,
-            cli.validate_gate,
-        )
-        .await?;
-
-        if let Some(synthesis) = &session2.synthesis {
-            println!("\n---\n## TEAR-DOWN ASSESSMENT\n\n{}", synthesis);
-        }
-
-        // Index phase 2 too
-        if let Err(e) = precedent::index_session(&session2) {
-            eprintln!("⚠️  Phase 2 indexing failed: {}", e);
-        }
-        if let Ok(path) = precedent::write_flight_record(&session2)
-            && !cli.quiet
-        {
-            eprintln!("📋 Phase 2 flight record: {}", path);
-        }
-    }
-
-    Ok(())
 }
 
 #[tokio::main]
@@ -902,5 +602,11 @@ async fn main() -> Result<()> {
     }
 
     // Topic-required check, context load, direct-fire, full deliberation
-    run_deliberation_cli(cli, config, via_gateway, loaded_cabinet_key).await
+    cli::run_deliberation_cli(
+        deliberation_args_from_cli(cli),
+        config,
+        via_gateway,
+        loaded_cabinet_key,
+    )
+    .await
 }
