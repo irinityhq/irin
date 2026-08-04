@@ -280,6 +280,60 @@ mod budget_tests {
     }
 }
 
+#[cfg(test)]
+mod specops_enable_tests {
+    use super::specops_auto_escalate_enabled;
+    use crate::types::SessionOrigin;
+
+    #[test]
+    fn api_origin_suppresses_even_when_grok_available() {
+        // Capability forced true — this is the contract Copilot correctly
+        // noted was untested by an integration run without Grok present.
+        assert!(!specops_auto_escalate_enabled(
+            true,
+            false,
+            SessionOrigin::Api
+        ));
+    }
+
+    #[test]
+    fn api_origin_allows_when_auto_escalate_opted_in() {
+        assert!(specops_auto_escalate_enabled(
+            true,
+            true,
+            SessionOrigin::Api
+        ));
+    }
+
+    #[test]
+    fn non_api_origin_allows_when_grok_available() {
+        assert!(specops_auto_escalate_enabled(
+            true,
+            false,
+            SessionOrigin::Cli
+        ));
+        assert!(specops_auto_escalate_enabled(
+            true,
+            false,
+            SessionOrigin::Warroom
+        ));
+    }
+
+    #[test]
+    fn no_grok_never_enables() {
+        assert!(!specops_auto_escalate_enabled(
+            false,
+            true,
+            SessionOrigin::Cli
+        ));
+        assert!(!specops_auto_escalate_enabled(
+            false,
+            true,
+            SessionOrigin::Api
+        ));
+    }
+}
+
 /// Shared budget gate for CLI engine and War Room stream (v9.12.0).
 ///
 /// Pauses when running cost has reached the cap before all planned rounds finish.
@@ -935,6 +989,18 @@ async fn execute_deliberation_rounds(
     })
 }
 
+/// Whether SpecOps auto-escalation is allowed for this origin/capability pair.
+///
+/// Grok availability is probed separately. API origin requires an explicit
+/// `council_auto_escalate` opt-in (POST /api/deliberate default is false).
+pub(crate) fn specops_auto_escalate_enabled(
+    grok_available: bool,
+    council_auto_escalate: bool,
+    origin: SessionOrigin,
+) -> bool {
+    grok_available && (council_auto_escalate || origin != SessionOrigin::Api)
+}
+
 /// Phase 3 — SpecOps auto-escalation for non-converging runs (API-default suppressed).
 async fn maybe_escalate_specops(
     config: &Config,
@@ -947,10 +1013,13 @@ async fn maybe_escalate_specops(
     // Phase 0.5 §4.x: SpecOps auto-escalation for non-converging runs.
     // Now accepts grok OAuth CLI in addition to (or instead of) XAI_API_KEY.
     // Empty XAI_API_KEY= placeholders must not count as configured.
-    let grok_api = crate::provider::env_nonempty("XAI_API_KEY");
-    let grok_cli = crate::provider::is_grok_cli_available();
-    let enable_specops = (grok_api || grok_cli)
-        && (prepared.req_ctx.council_auto_escalate || origin != SessionOrigin::Api);
+    let grok_available =
+        crate::provider::env_nonempty("XAI_API_KEY") || crate::provider::is_grok_cli_available();
+    let enable_specops = specops_auto_escalate_enabled(
+        grok_available,
+        prepared.req_ctx.council_auto_escalate,
+        origin,
+    );
     let final_converged = rounds.rounds.last().map(|r| r.converged).unwrap_or(false);
     let specops_ready = if enable_specops && !final_converged && prepared.effective_via_gateway {
         let required = crate::engine::direct_fire::spec("specops")

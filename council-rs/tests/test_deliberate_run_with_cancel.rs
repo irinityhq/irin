@@ -392,10 +392,26 @@ async fn run_with_cancel_terminating_round_skips_gate_redaction() {
 async fn run_with_cancel_api_default_suppresses_specops() {
     let _guard = env_lock().await;
     let dirs = SessionDirs::install();
-    let config = mock_config("specops", 1, vec![mock_seat("seat_a", "mock-model")]);
+    // Force Grok capability true. Without this, enable_specops is false for
+    // lack of capability and the API-origin guard is never exercised.
+    let prev_xai = std::env::var("XAI_API_KEY").ok();
+    unsafe {
+        std::env::set_var("XAI_API_KEY", "pr7-fixture-xai-capability-only");
+    }
+
+    // Non-converging early exit (polar seats + zero budget) so final_converged
+    // is false — SpecOps would fire without the API-origin guard.
+    let config = mock_config(
+        "specops",
+        3,
+        vec![
+            mock_seat("seat_a", "mock-seat-agree"),
+            mock_seat("seat_b", "mock-seat-disagree"),
+        ],
+    );
 
     // API origin + council_auto_escalate=false is the product default from
-    // POST /api/deliberate. SpecOps must not fire even if a grok CLI is present.
+    // POST /api/deliberate.
     let session = deliberate::run_with_cancel(
         &config,
         "specops",
@@ -405,7 +421,7 @@ async fn run_with_cancel_api_default_suppresses_specops() {
         true,
         false,
         false,
-        None,
+        Some(0.0),
         "best",
         false,
         "mock",
@@ -418,12 +434,21 @@ async fn run_with_cancel_api_default_suppresses_specops() {
     .await
     .expect("api run");
 
+    assert_eq!(session.rounds.len(), 1, "budget ends after round one");
+    assert!(
+        !session.rounds[0].converged,
+        "must leave non-converged so SpecOps would otherwise be eligible"
+    );
     assert!(
         !session.specops_triggered,
-        "API default must suppress SpecOps auto-escalation"
+        "API default must suppress SpecOps even when Grok capability is present"
     );
     assert_eq!(session.specops_cost_usd, 0.0);
     assert_eq!(session.origin, SessionOrigin::Api);
 
+    match prev_xai {
+        Some(v) => unsafe { std::env::set_var("XAI_API_KEY", v) },
+        None => unsafe { std::env::remove_var("XAI_API_KEY") },
+    }
     dirs.cleanup();
 }
