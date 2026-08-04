@@ -89,24 +89,21 @@ case "$PACK_MODE" in
 esac
 export IRIN_GATEWAY_PACK_MODE="$GATEWAY_PACK_MODE"
 
-# Release version names the DMG artifact. local-dev defaults to 0.1.2 for
-# backward compatibility; production must set IRIN_RELEASE_VERSION explicitly
-# (the release transaction exports it from the tag). signed-rc defaults from
-# tauri.conf.json. Non-local modes must equal the Tauri bundle version.
+# Release version names the DMG artifact and candidate store path. Defaults from
+# tauri.conf.json for local-dev and signed-rc. Production must set
+# IRIN_RELEASE_VERSION explicitly (the release transaction exports it from the
+# tag). Every mode must equal the Tauri bundle version so candidate identity
+# matches the app About/version surface.
 TAURI_CONF="$TAURI_DIR/src-tauri/tauri.conf.json"
 TAURI_BUNDLE_VERSION="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["version"])' "$TAURI_CONF")" \
   || die "could not read version from $TAURI_CONF (python3 required)"
 if [[ "$PACK_MODE" == "production" && -z "${IRIN_RELEASE_VERSION:-}" ]]; then
   die "production DMG requires IRIN_RELEASE_VERSION set explicitly (the release transaction exports it from the tag)"
 fi
-if [[ "$PACK_MODE" == "local-dev" ]]; then
-  IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-0.1.2}"
-else
-  IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-$TAURI_BUNDLE_VERSION}"
-fi
+IRIN_RELEASE_VERSION="${IRIN_RELEASE_VERSION:-$TAURI_BUNDLE_VERSION}"
 export IRIN_RELEASE_VERSION
-if [[ "$PACK_MODE" != "local-dev" && "$IRIN_RELEASE_VERSION" != "$TAURI_BUNDLE_VERSION" ]]; then
-  die "IRIN_RELEASE_VERSION=$IRIN_RELEASE_VERSION != tauri.conf.json version=$TAURI_BUNDLE_VERSION; bump the version in council-rs/warroom-tauri/src-tauri/tauri.conf.json in its own commit before running the release transaction"
+if [[ "$IRIN_RELEASE_VERSION" != "$TAURI_BUNDLE_VERSION" ]]; then
+  die "IRIN_RELEASE_VERSION=$IRIN_RELEASE_VERSION != tauri.conf.json version=$TAURI_BUNDLE_VERSION; bump the version in council-rs/warroom-tauri/src-tauri/tauri.conf.json in its own commit before building a candidate"
 fi
 
 REQUIRE_CLEAN="${IRIN_DMG_REQUIRE_CLEAN:-1}"
