@@ -58,12 +58,15 @@ else:
     block = m.group(1)
     if "queue:" in block:
         errors.append("ci-pr.yml must not set queue (cancel surface only)")
-    if not re.search(r"cancel-in-progress:\s*true", block):
-        errors.append("ci-pr.yml must set cancel-in-progress: true")
+    # PR updates cancel; merge_group must not cancel (expression form).
+    if "cancel-in-progress:" not in block:
+        errors.append("ci-pr.yml must set cancel-in-progress")
     if "github.event.pull_request.number" not in block:
         errors.append("ci-pr.yml concurrency group must be per-PR number")
     if "irin-ci-pr-" not in block:
         errors.append("ci-pr.yml concurrency group should be namespaced irin-ci-pr-*")
+    if "merge_group" not in block or "irin-ci-merge-group-" not in block:
+        errors.append("ci-pr.yml concurrency must key merge_group on head SHA")
 
 if "uses: irinityhq/irin/.github/workflows/ci.yml@main" not in pr:
     errors.append("ci-pr.yml must keep the @main dispatcher pin")
@@ -76,6 +79,85 @@ then
   pass "concurrency split: main queue:max + PR cancel, no illegal combo"
 else
   fail "concurrency structure"
+fi
+
+# ---------------------------------------------------------------------------
+# merge_group wiring: every required-check producer + real SHA classification
+# ---------------------------------------------------------------------------
+CODEQL_YML="$ROOT/.github/workflows/codeql.yml"
+DEP_REVIEW_YML="$ROOT/.github/workflows/dependency-review.yml"
+on_has_merge_group() {
+  # Top-level workflow trigger (indented under `on:`), not a shell case arm.
+  grep -E '^[[:space:]]{2}merge_group:' "$1" >/dev/null
+}
+if ! on_has_merge_group "$CI_PR"; then
+  fail "ci-pr.yml must trigger on merge_group (produces ci / CI required)"
+else
+  pass "ci-pr.yml triggers on merge_group"
+fi
+if on_has_merge_group "$CI_YML"; then
+  # Dual trigger would report unprotected job names alongside the ci/ prefix.
+  fail "ci.yml must not top-level trigger merge_group (caller is ci-pr.yml)"
+else
+  pass "ci.yml does not dual-trigger merge_group"
+fi
+if ! file_has_fixed 'merge_group)' "$CI_YML" \
+  || ! file_has_fixed 'github.event.merge_group.base_sha' "$CI_YML" \
+  || ! file_has_fixed 'github.event.merge_group.head_sha' "$CI_YML"; then
+  fail "detect-changes must classify merge_group via base_sha/head_sha"
+else
+  pass "detect-changes classifies merge_group base/head SHAs"
+fi
+# Permanent full-matrix fallback must not be the only merge_group path.
+if ! python3 - "$CI_YML" <<'PY'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+m = re.search(r"merge_group\)\s*\n(.*?\n\s*;;)", text, re.S)
+if not m:
+    sys.stderr.write("missing merge_group case arm\n")
+    sys.exit(1)
+arm = m.group(1)
+if re.search(r"changed=\(__unknown_event__\)", arm):
+    sys.stderr.write("merge_group arm must not assign __unknown_event__\n")
+    sys.exit(1)
+if "base_sha" not in arm or "head_sha" not in arm:
+    sys.stderr.write("merge_group arm must use base_sha and head_sha\n")
+    sys.exit(1)
+if "git diff --name-only" not in arm:
+    sys.stderr.write("merge_group arm must path-diff base...head\n")
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+  fail "merge_group case arm contract"
+else
+  pass "merge_group case arm uses real SHAs (not __unknown_event__)"
+fi
+if ! on_has_merge_group "$CODEQL_YML"; then
+  fail "codeql.yml must trigger on merge_group (CodeQL required)"
+else
+  pass "codeql.yml triggers on merge_group"
+fi
+if ! on_has_merge_group "$DEP_REVIEW_YML"; then
+  fail "dependency-review.yml must trigger on merge_group"
+else
+  pass "dependency-review.yml triggers on merge_group"
+fi
+if ! file_has_fixed 'base-ref:' "$DEP_REVIEW_YML" \
+  || ! file_has_fixed 'head-ref:' "$DEP_REVIEW_YML" \
+  || ! file_has_fixed 'github.event.merge_group.base_sha' "$DEP_REVIEW_YML" \
+  || ! file_has_fixed 'github.event.merge_group.head_sha' "$DEP_REVIEW_YML"; then
+  fail "dependency-review must pass base-ref/head-ref on merge_group"
+else
+  pass "dependency-review passes base-ref/head-ref for merge_group"
+fi
+# Required check job name must remain "Dependency Review" (protected context).
+if ! grep -E '^[[:space:]]+name: Dependency Review[[:space:]]*$' "$DEP_REVIEW_YML" >/dev/null; then
+  fail "dependency-review job name must stay 'Dependency Review'"
+else
+  pass "dependency-review protected job name preserved"
 fi
 
 # ---------------------------------------------------------------------------
