@@ -1,0 +1,62 @@
+{
+  "files": [
+    {
+      "path": "docs/architecture.md",
+      "description": "Authoritative product architecture: Council, War Room, Gateway, Sentinel lanes and what not to conflate."
+    },
+    {
+      "path": "docs/security-claims-vs-reality.md",
+      "description": "Current security claims vs enforced boundaries — public wording must not outrun this table.",
+      "scope": [
+        "gateway/**",
+        "sentinel/**",
+        "council-rs/warroom-tauri/**",
+        "**/signing*",
+        "**/watch/**",
+        "**/keymgmt*",
+        "**/outbox*",
+        "docs/security*",
+        "SECURITY.md",
+        "README.md"
+      ]
+    },
+    {
+      "path": "docs/cross-process-boundaries.md",
+      "description": "Process and language boundaries: who talks to whom, wire contracts, stringly-typed seams.",
+      "scope": [
+        "council-rs/**",
+        "gateway/**",
+        "sentinel/**",
+        "council-rs/warroom-tauri/**"
+      ]
+    },
+    {
+      "path": "docs/ci-operating-model.md",
+      "description": "CI aggregate, scoped proof lanes, and local-first control plane. Use when judging path-filter vs executable reachability.",
+      "scope": [
+        ".github/**",
+        "scripts/classify-ci-paths.sh",
+        "scripts/test-ci-*.sh",
+        "scripts/dev-check.sh",
+        "scripts/*ci*",
+        "Makefile",
+        "**/Makefile"
+      ]
+    },
+    {
+      "path": "docs/SHIP-SPINE.md",
+      "description": "Release transaction spine (T1/T2/T3), packaging, and publication boundaries — not source-proof substitutes.",
+      "scope": [
+        "scripts/release-transaction.sh",
+        "scripts/*release*",
+        "scripts/*ship*",
+        "packaging/**",
+        "docs/SHIP-SPINE.md",
+        "docs/release*",
+        "docs/DMG*",
+        ".github/workflows/*release*",
+        ".github/workflows/*publish*"
+      ]
+    }
+  ]
+}

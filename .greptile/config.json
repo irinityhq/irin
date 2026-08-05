@@ -1,3 +1,113 @@
 {
-  "skipReview": "AUTOMATIC"
+  "skipReview": "AUTOMATIC",
+  "strictness": 2,
+  "commentTypes": ["logic", "syntax"],
+  "triggerOnUpdates": false,
+  "statusCheck": true,
+  "ignorePatterns": "target/\nnode_modules/\n.next/\nruns/\nsessions/\n*.jsonl\n_archive/\n*.lock",
+  "summarySection": {
+    "included": true
+  },
+  "issuesTableSection": {
+    "included": true
+  },
+  "confidenceScoreSection": {
+    "included": true
+  },
+  "sequenceDiagramSection": {
+    "included": true
+  },
+  "instructions": "IRIN is a local-first mono-repo: council-rs/ (deliberation engine + War Room Web + Tauri shell), gateway/ (OpenResty Lua + Rust sidecar: routing, signing, watch), sentinel/ (sovereign-protocol wire + docs). Also review Bash release/packaging scripts, GitHub Actions workflows, and CI control-plane scripts when they change.\n\nSurface candidate issues for a maintainer to judge; do not claim merge approval, install acceptance, or publication.\n\nThis codebase is often agent-authored. Prioritize these defect classes:\n1. Inert logic: guards, gates, validators, or filters that can never fire; verify producer and consumer agree on real keys/schema/names.\n2. Resource ownership: callee closing caller-owned handles; broken ownership in finally/defer paths.\n3. Fail-open error paths: catch/except that swallows errors and returns success where fail-closed is required.\n4. Cross-file self-consistency: constants, paths, env names, or proof hooks that nothing else reads or writes.\n5. Secrets: credentials live outside source (operator config/env). Flag hardcoded keys/tokens/credentials; never instruct printing or reading secret material during review.\n6. Prefer the authoritative existing product path; flag parallel workflows, compatibility shims, and duplicated state machines when the existing path can own the behavior.\n7. Verify producer/consumer, caller/callee, and proof-wiring relationships — not only the changed lines.\n\nDeprioritize style nits, naming preferences, and docstring completeness. IRIN already has deterministic format/lint/test proof.\n\nDo not recommend live provider smokes, signing/arming against real keys, publication workflows, or credential-bearing actions.",
+  "rules": [
+    {
+      "id": "contract-stability",
+      "severity": "high",
+      "rule": "Preserve public, wire, and storage contracts unless the PR explicitly changes them. Field add/remove/rename, envelope version bumps, signing/capability-token changes, and on-disk ledger shapes need an explicit callout for human review. Do not assert adjacent components are safe."
+    },
+    {
+      "id": "comms-spine-contracts",
+      "severity": "high",
+      "scope": [
+        "sentinel/sovereign-protocol/**",
+        "**/*envelope*",
+        "**/*comms*",
+        "**/*outbox*",
+        "**/*directive*",
+        "**/*escalation*"
+      ],
+      "rule": "Comms-spine wire shapes (envelope irin.comms.v0.1, directive outbox signing, capability tokens, escalation/directive shapes) are contracts. Any field add/remove/rename, signing change, or capability-token change is a POSSIBLE breaking change — require an explicit callout. Do not assert sibling components remain compatible."
+    },
+    {
+      "id": "fail-closed-gates",
+      "severity": "high",
+      "scope": [
+        "gateway/sidecar-rs/src/watch/**",
+        "gateway/sidecar-rs/src/keymgmt.rs",
+        "gateway/sidecar-rs/src/budget.rs",
+        "gateway/sidecar-rs/src/arm*",
+        "**/signing*",
+        "**/outbox*"
+      ],
+      "rule": "Signing, arming, attestation, watch, outbox, capability-token, and directive-envelope paths are fail-closed by doctrine. Flag any change that widens a gate, adds a bypass env var, removes re-verification, or converts a hard error into a warning/success default."
+    },
+    {
+      "id": "sibling-guards",
+      "severity": "high",
+      "scope": [
+        "gateway/sidecar-rs/src/routes/**",
+        "gateway/sidecar-rs/src/watch/api/**",
+        "gateway/lua/**",
+        "gateway/nginx.conf",
+        "council-rs/src/server.rs",
+        "council-rs/src/server/**"
+      ],
+      "rule": "Fail-closed sibling-guard doctrine: a route registered without the guard its siblings already possess is a security regression. Flag (1) new/changed management or watch-mutation routes that omit admin_token_matches / ArmPrincipals::authenticate / equivalent while siblings keep it, (2) debug introspection routes without GATEWAY_DEBUG_* env gating at registration time, (3) removal or bypass of the UDS global_rate_limit layer, (4) nginx locations that newly expose previously UDS-internal probes without an auth gate, (5) auth bypass env vars (COUNCIL_DEV_NO_AUTH and kin) that widen beyond localhost/dev. Do not accept canary-tenant alone as authorization for policy mutation."
+    },
+    {
+      "id": "security-claims",
+      "severity": "high",
+      "scope": [
+        "README.md",
+        "SECURITY.md",
+        "docs/security-claims-vs-reality.md",
+        "docs/**"
+      ],
+      "rule": "Public security claims must not outrun docs/security-claims-vs-reality.md. Flag wording that upgrades a Partially-enforced or Documented-gap claim to Enforced without code receipts in the same PR."
+    },
+    {
+      "id": "ci-executable-reachability",
+      "severity": "high",
+      "scope": [
+        ".github/workflows/**",
+        "scripts/classify-ci-paths.sh",
+        "scripts/test-ci-*.sh",
+        "scripts/dev-check.sh",
+        "scripts/*ci*"
+      ],
+      "rule": "For CI wiring, prove executable reachability. Filename mentions, path-filter inclusion, comments, echo/heredoc fixture text, and grep subject strings are not execution. Flag tests or scripts that are only path-filter triggers or mentioned in non-command position without a real workflow/make invocation path."
+    },
+    {
+      "id": "refactor-callers",
+      "severity": "medium",
+      "rule": "For refactors and deletions, look for remaining callers, alternate entry points, and behavior-characterization coverage before declaring a path unused. Flag removal of a surface that is still reachable via make targets, CI jobs, Tauri commands, or Lua routes."
+    },
+    {
+      "id": "proof-vocabulary",
+      "severity": "medium",
+      "scope": [
+        "docs/**",
+        "scripts/**",
+        "packaging/**",
+        ".github/**",
+        "**/README*"
+      ],
+      "rule": "Keep source, test, build, package, install, acceptance, and publication claims distinct. make check / ship-check prove source only — not installed-app, Touch ID arm, notarization, or publication. Flag language that collapses these tiers."
+    },
+    {
+      "id": "vocabulary-docs",
+      "severity": "low",
+      "scope": ["**/*.md", "docs/**"],
+      "rule": "Vocabulary for architecture prose only (not code): 'AI agent' should be 'Worker' (ephemeral) or 'Sentinel' (continuous); 'heartbeat'/'always-on' should be 'watch'/'sentinel-gated'. A sentinel described as firing on a clock regardless of state is a heartbeat — flag it."
+    }
+  ]
 }
