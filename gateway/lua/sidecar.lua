@@ -711,21 +711,6 @@ function _M.watch_stats()
 end
 
 -- ---------------------------------------------------------------------------
--- Health
--- ---------------------------------------------------------------------------
-
-function _M.health()
-    local httpc = http.new()
-    httpc:set_timeout(SIDECAR_TIMEOUT_MS)
-    local uri = "http://" .. SIDECAR_ADDR .. "/health"
-    local res, err = httpc:request_uri(uri, { method = "GET" })
-    if not res then
-        return nil, err
-    end
-    return cjson.decode(res.body), nil
-end
-
--- ---------------------------------------------------------------------------
 -- Admin proxy — transparently forwards /admin/* requests to the sidecar.
 -- Auth is enforced at the sidecar level (admin_key in request body or
 -- BOOTSTRAP_TOKEN match). The nginx layer just proxies.

@@ -9,9 +9,9 @@
 --
 -- DISCIPLINE: asserts the SECURITY INVARIANT (no raw secret survives) and the
 -- FALSE-POSITIVE INVARIANT (clean text untouched). It deliberately does NOT
--- assert per-matcher attribution counts, because matcher ORDER shadows names
--- (openai_key `sk-` runs before anthropic_key `sk-ant-`, so `sk-ant-...`
--- redacts as openai_key). Attribution is fragile; non-leakage is the contract.
+-- assert per-matcher attribution counts: the generic openai_key `sk-` pattern
+-- also covers `sk-ant-...` shapes. Attribution is fragile; non-leakage is the
+-- contract.
 --
 -- RUN: `lua test/credential_scrub_test.lua` from the gateway repo root
 --      (or `make lua-unit`). No nginx/openresty runtime needed — _M.scrub
