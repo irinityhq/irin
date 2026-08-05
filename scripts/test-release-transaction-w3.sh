@@ -274,6 +274,59 @@ set -e
 [[ $ec -ne 0 ]] || fail "invalid T1 should refuse"
 pass "prepare refuses incomplete T1 packet"
 
+# --- T1 length-only IDs that are non-hex must refuse (#0041) ----------------
+# Error text already claimed hex; validator used to check only 64/40 length.
+NONHEX_CID="$(python3 -c 'print("g" * 64)')"
+NONHEX_SHA="$(python3 -c 'print("z" * 40)')"
+HEX_CID="$(python3 -c 'print("a" * 64)')"
+HEX_SHA="$(python3 -c 'print("b" * 40)')"
+EFFECTS='["ghcr-rc-push","apple-rc-notarization","one-production-cycle"]'
+BAD_CID_T1="$TEST_HOME/bad-t1-nonhex-cid.json"
+BAD_SHA_T1="$TEST_HOME/bad-t1-nonhex-sha.json"
+python3 - "$BAD_CID_T1" "$NONHEX_CID" "$HEX_SHA" "$EFFECTS" <<'PY'
+import json, sys
+path, cid, sha, effects = sys.argv[1], sys.argv[2], sys.argv[3], json.loads(sys.argv[4])
+json.dump({
+    "schema_version": 1,
+    "packet_kind": "t1",
+    "signed_rc_candidate_id": cid,
+    "source_sha": sha,
+    "production_attempt_id": "attempt-nonhex-cid",
+    "authorized_effects": effects,
+    "expiry": "2099-01-01T00:00:00Z",
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
+python3 - "$BAD_SHA_T1" "$HEX_CID" "$NONHEX_SHA" "$EFFECTS" <<'PY'
+import json, sys
+path, cid, sha, effects = sys.argv[1], sys.argv[2], sys.argv[3], json.loads(sys.argv[4])
+json.dump({
+    "schema_version": 1,
+    "packet_kind": "t1",
+    "signed_rc_candidate_id": cid,
+    "source_sha": sha,
+    "production_attempt_id": "attempt-nonhex-sha",
+    "authorized_effects": effects,
+    "expiry": "2099-01-01T00:00:00Z",
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
+set +e
+out="$("$TX" --prepare-production --t1-packet "$BAD_CID_T1" 2>&1)"
+ec=$?
+set -e
+[[ $ec -ne 0 ]] || fail "non-hex candidate id of length 64 must refuse"
+[[ "$out" == *"hex"* || "$out" == *"signed_rc_candidate_id"* ]] \
+  || fail "expected hex candidate refuse: $out"
+set +e
+out="$("$TX" --prepare-production --t1-packet "$BAD_SHA_T1" 2>&1)"
+ec=$?
+set -e
+[[ $ec -ne 0 ]] || fail "non-hex source_sha of length 40 must refuse"
+[[ "$out" == *"hex"* || "$out" == *"source_sha"* ]] \
+  || fail "expected hex source_sha refuse: $out"
+pass "T1 refuses non-hex candidate/source IDs at correct length"
+
 # --- [P1] gh asset lookup uses jq --arg, never gh --arg --------------------
 # Static: no gh --arg in the publish path (gh does not support it).
 if grep -nE 'gh (release view|api) .*--arg' "$TX"; then

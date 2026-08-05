@@ -214,7 +214,7 @@ validate_t1_packet() {
   [[ "$path" == /* ]] || path="$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
   [[ -f "$path" ]] || die "T1 packet missing: $path"
   python3 - "$path" <<'PY'
-import json, sys
+import json, re, sys
 from datetime import datetime, timezone
 path = sys.argv[1]
 d = json.load(open(path))
@@ -223,11 +223,11 @@ if d.get("schema_version") != 1:
 if d.get("packet_kind") != "t1":
     raise SystemExit("T1 packet_kind must be 't1'")
 cid = d.get("signed_rc_candidate_id")
-if not isinstance(cid, str) or len(cid) != 64:
+if not isinstance(cid, str) or not re.fullmatch(r"[0-9a-fA-F]{64}", cid):
     raise SystemExit("T1 signed_rc_candidate_id must be 64-char hex candidate id")
 sha = d.get("source_sha")
-if not isinstance(sha, str) or len(sha) != 40:
-    raise SystemExit("T1 source_sha must be 40-char full git SHA")
+if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+    raise SystemExit("T1 source_sha must be 40-char full git SHA (hex)")
 attempt = d.get("production_attempt_id")
 if not attempt:
     raise SystemExit("T1 production_attempt_id missing")
