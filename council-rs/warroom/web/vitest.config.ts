@@ -9,10 +9,13 @@ export default defineConfig({
     alias: { "@": path.dirname(fileURLToPath(import.meta.url)) },
   },
   test: {
+    // Include both .test.ts (pure hooks/helpers under components/) and
+    // .test.tsx (component markup). The prior .tsx-only components glob
+    // silently skipped components/**/*.test.ts (idle hook unit tests).
     include: [
-      "lib/**/*.test.ts",
-      "hooks/**/*.test.ts",
-      "components/**/*.test.tsx",
+      "lib/**/*.{test,spec}.{ts,tsx}",
+      "hooks/**/*.{test,spec}.{ts,tsx}",
+      "components/**/*.{test,spec}.{ts,tsx}",
     ],
     exclude: ["e2e/**", "node_modules/**"],
   },
