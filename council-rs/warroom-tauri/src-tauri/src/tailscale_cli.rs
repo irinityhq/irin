@@ -231,6 +231,16 @@ fn cli_answers_status_json(bin: &Path) -> bool {
     }
 }
 
+/// Outcome of allow-list CLI selection (path + whether `status --json` passed).
+///
+/// `json_verified == false` means a present-but-unproved fallback. Callers that
+/// process-cache must not store those (ProjectMem #0049).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TailscaleCliSelection {
+    pub path: PathBuf,
+    pub json_verified: bool,
+}
+
 /// Select a Tailscale CLI from an ordered candidate list.
 ///
 /// **Policy (ProjectMem #0040 / Settings false-red):**
@@ -239,6 +249,7 @@ fn cli_answers_status_json(bin: &Path) -> bool {
 ///    true (can answer `status --json` with parseable node status).
 /// 3. If every present candidate fails the JSON probe, fall back to the first
 ///    present path so downstream errors stay path-bound (not "CLI not found").
+///    That fallback is marked `json_verified: false`.
 /// 4. If none are present, return install-guidance error text.
 ///
 /// Production wires default allow-list order, executable presence, and a live
@@ -248,7 +259,7 @@ pub fn resolve_tailscale_cli_from<'a, I, P, J>(
     candidates: I,
     is_present: P,
     answers_status_json: J,
-) -> Result<PathBuf, String>
+) -> Result<TailscaleCliSelection, String>
 where
     I: IntoIterator<Item = &'a Path>,
     P: Fn(&Path) -> bool,
@@ -263,13 +274,37 @@ where
             first_present = Some(candidate.to_path_buf());
         }
         if answers_status_json(candidate) {
-            return Ok(candidate.to_path_buf());
+            return Ok(TailscaleCliSelection {
+                path: candidate.to_path_buf(),
+                json_verified: true,
+            });
         }
     }
     if let Some(path) = first_present {
-        return Ok(path);
+        return Ok(TailscaleCliSelection {
+            path,
+            json_verified: false,
+        });
     }
     Err(tailscale_cli_not_found_error())
+}
+
+/// Cache a selection only when it passed the status-json probe.
+///
+/// Unverified fallbacks are returned as-is without writing the cache so a
+/// later poll can recover after a transient probe failure (ProjectMem #0049).
+/// When the cache already holds a path, that path wins (verified stickiness).
+pub(crate) fn store_json_verified_cli(
+    cache: &OnceLock<PathBuf>,
+    selection: TailscaleCliSelection,
+) -> PathBuf {
+    if let Some(cached) = cache.get() {
+        return cached.clone();
+    }
+    if selection.json_verified {
+        let _ = cache.set(selection.path.clone());
+    }
+    selection.path
 }
 
 /// Resolve an allow-listed Tailscale CLI binary for product use.
@@ -279,22 +314,21 @@ where
 /// that answers `status --json` as parseable JSON so a broken App CLI wrapper
 /// does not force Settings false-red while Homebrew works.
 ///
-/// Successful resolutions are process-cached (`OnceLock`) so status polls do
-/// not re-probe every call. Misses are not cached (install mid-session can
-/// recover). Restart after installing a better CLI if a non-JSON fallback was
-/// cached earlier in the process.
+/// Only JSON-verified selections are process-cached (`OnceLock`). Present-but
+/// unverified fallbacks and total misses are not cached, so a later poll can
+/// recover after a transient probe failure or mid-session install (ProjectMem
+/// #0049). A verified path sticks for the process lifetime.
 pub fn resolve_tailscale_cli() -> Result<PathBuf, String> {
     static RESOLVED_OK: OnceLock<PathBuf> = OnceLock::new();
     if let Some(path) = RESOLVED_OK.get() {
         return Ok(path.clone());
     }
-    let resolved = resolve_tailscale_cli_from(
+    let selection = resolve_tailscale_cli_from(
         TAILSCALE_CLI_ALLOWLIST.iter().map(|s| Path::new(*s)),
         path_is_executable_cli,
         cli_answers_status_json,
     )?;
-    let _ = RESOLVED_OK.set(resolved.clone());
-    Ok(resolved)
+    Ok(store_json_verified_cli(&RESOLVED_OK, selection))
 }
 
 /// Reject any path that is not on the allow-list.
@@ -1130,7 +1164,8 @@ mod tests {
         let present = |p: &Path| p == app || p == brew;
         let answers = |p: &Path| p == app; // App answers JSON → wins despite later brew.
         let got = resolve_tailscale_cli_from(candidates, present, answers).unwrap();
-        assert_eq!(got, app);
+        assert_eq!(got.path, app);
+        assert!(got.json_verified);
     }
 
     #[test]
@@ -1143,7 +1178,8 @@ mod tests {
         let present = |p: &Path| p == good;
         let answers = |_: &Path| true;
         let got = resolve_tailscale_cli_from(candidates, present, answers).unwrap();
-        assert_eq!(got, good);
+        assert_eq!(got.path, good);
+        assert!(got.json_verified);
     }
 
     /// #0040 regression: App CLI present but non-JSON (CLIError) while Homebrew
@@ -1158,7 +1194,8 @@ mod tests {
         // CLIError (first_byte=0x54), not parseable status JSON.
         let answers = |p: &Path| p == brew;
         let got = resolve_tailscale_cli_from(candidates, present, answers).unwrap();
-        assert_eq!(got, brew);
+        assert_eq!(got.path, brew);
+        assert!(got.json_verified);
     }
 
     #[test]
@@ -1169,7 +1206,46 @@ mod tests {
         let present = |p: &Path| p == app || p == brew;
         let answers = |_: &Path| false;
         let got = resolve_tailscale_cli_from(candidates, present, answers).unwrap();
-        assert_eq!(got, app);
+        assert_eq!(got.path, app);
+        assert!(!got.json_verified);
+    }
+
+    /// #0049 regression: unverified fallback must not pin the cache; a later
+    /// poll that sees JSON-capable brew must recover without process restart.
+    #[test]
+    fn unverified_fallback_not_cached_so_later_json_ok_recovers() {
+        let app = Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        let brew = Path::new("/opt/homebrew/bin/tailscale");
+        let candidates = [app, brew];
+        let present = |p: &Path| p == app || p == brew;
+        let cache = OnceLock::new();
+
+        // Transient: every probe fails → first-present App, uncached.
+        let fail = resolve_tailscale_cli_from(candidates, present, |_| false).unwrap();
+        assert_eq!(fail.path, app);
+        assert!(!fail.json_verified);
+        let out1 = store_json_verified_cli(&cache, fail);
+        assert_eq!(out1, app);
+        assert!(
+            cache.get().is_none(),
+            "unverified fallback must not write OnceLock"
+        );
+
+        // Recover: brew answers JSON → verified, cache brew.
+        let ok = resolve_tailscale_cli_from(candidates, present, |p| p == brew).unwrap();
+        assert_eq!(ok.path, brew);
+        assert!(ok.json_verified);
+        let out2 = store_json_verified_cli(&cache, ok);
+        assert_eq!(out2, brew);
+        assert_eq!(cache.get().map(PathBuf::as_path), Some(brew));
+
+        // Verified stickiness: later worse selection does not replace cache.
+        let worse = resolve_tailscale_cli_from(candidates, present, |p| p == app).unwrap();
+        assert!(worse.json_verified);
+        assert_eq!(worse.path, app);
+        let out3 = store_json_verified_cli(&cache, worse);
+        assert_eq!(out3, brew);
+        assert_eq!(cache.get().map(PathBuf::as_path), Some(brew));
     }
 
     #[test]
@@ -1235,7 +1311,8 @@ mod tests {
         let got =
             resolve_tailscale_cli_from(candidates, path_is_executable_cli, cli_answers_status_json)
                 .unwrap();
-        assert_eq!(got, good);
+        assert_eq!(got.path, good);
+        assert!(got.json_verified);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
