@@ -441,23 +441,38 @@ if i_claim < 0 or i_ghcr < 0 or i_claim > i_ghcr:
     raise SystemExit(1)
 sys.exit(0)
 PY
-# Live helper: cycle ledger + T3 words gate (subshell — do not clobber IRIN_CANDIDATE_ROOT)
+# Live helper: cycle ledger + T3 single-use + recover + CAS (#0056/#0058)
 (
   set -euo pipefail
   # shellcheck disable=SC1090
   IRIN_RELEASE_TX_LIB=1 source "$TX"
   export IRIN_CANDIDATE_ROOT="$TEST_HOME/cycle-root"
-  mkdir -p "$IRIN_CANDIDATE_ROOT/.attempts"
+  mkdir -p "$IRIN_CANDIDATE_ROOT/.attempts/t3-spent"
   CYCLE_SHA="$(python3 -c 'print("c" * 40)')"
-  # Exclusive reserve then consume
-  reserve_production_cycle "$CYCLE_SHA" "attempt-1" "" >/dev/null
+  HEAD="$CYCLE_SHA"
+  write_t3() {
+    local path="$1" sha="$2" words="$3"
+    python3 - "$path" "$sha" "$words" <<'PY'
+import json, sys
+path, sha, words = sys.argv[1:]
+json.dump({
+    "schema_version": 1,
+    "packet_kind": "t3",
+    "source_sha": sha,
+    "words": words,
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
+  }
+  # First cycle: exclusive reserve + consume with clean T1 bind
+  reserve_production_cycle "$CYCLE_SHA" "attempt-1" "" "$HEAD" "false" "false" >/dev/null
   [[ "$(production_cycle_state "$CYCLE_SHA")" == "reserved" ]]
   record_production_cycle_consumed "$CYCLE_SHA" "attempt-1" "$TEST_HOME/cand-a"
   production_cycle_consumed "$CYCLE_SHA" || {
     printf 'cycle must report consumed after record\n' >&2
     exit 1
   }
-  # Malformed ledger must fail closed (not "unconsumed")
+  # Malformed ledger must fail closed
   BAD_LEDGER="$(production_cycle_path "$CYCLE_SHA")"
   printf '%s\n' '{"kind":"production-cycle","source_sha":"deadbeef"}' >"$BAD_LEDGER"
   set +e
@@ -468,19 +483,32 @@ PY
     printf 'malformed ledger must die, got: %s\n' "$bad_out" >&2
     exit 1
   }
-  # Restore consumed ledger for T3 override path
-  record_production_cycle_consumed "$CYCLE_SHA" "attempt-1" "$TEST_HOME/cand-a"
+  # Restore consumed with bind fields for T3 path
+  python3 - "$BAD_LEDGER" "$CYCLE_SHA" <<'PY'
+import json, sys
+path, sha = sys.argv[1:]
+json.dump({
+    "schema_version": 1,
+    "kind": "production-cycle",
+    "source_sha": sha,
+    "status": "consumed",
+    "notarization_consumed": True,
+    "production_attempt_id": "attempt-1",
+    "checkout_head": sha,
+    "scripts_dirty": False,
+    "packaging_dirty": False,
+    "spent_t3_digests": [],
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
+  # Empty / object words refuse
   BAD_T3="$TEST_HOME/bad-t3.json"
   printf '%s\n' "{\"schema_version\":1,\"packet_kind\":\"t3\",\"source_sha\":\"$CYCLE_SHA\",\"words\":\"\"}" >"$BAD_T3"
   set +e
   validate_t3_exception "$BAD_T3" "$CYCLE_SHA" >/dev/null 2>&1
   t3_ec=$?
   set -e
-  [[ $t3_ec -ne 0 ]] || {
-    printf 'empty T3 words must refuse\n' >&2
-    exit 1
-  }
-  # Non-string words refuse
+  [[ $t3_ec -ne 0 ]] || { printf 'empty T3 words must refuse\n' >&2; exit 1; }
   OBJ_T3="$TEST_HOME/obj-t3.json"
   python3 - "$OBJ_T3" "$CYCLE_SHA" <<'PY'
 import json, sys
@@ -497,47 +525,78 @@ PY
   validate_t3_exception "$OBJ_T3" "$CYCLE_SHA" >/dev/null 2>&1
   t3_ec=$?
   set -e
-  [[ $t3_ec -ne 0 ]] || {
-    printf 'object T3 words must refuse\n' >&2
+  [[ $t3_ec -ne 0 ]] || { printf 'object T3 words must refuse\n' >&2; exit 1; }
+  # Second cycle with T3-A
+  T3A="$TEST_HOME/t3-a.json"
+  write_t3 "$T3A" "$CYCLE_SHA" "Authorize second apple notary cycle for source $CYCLE_SHA"
+  DIGEST_A="$(validate_t3_exception "$T3A" "$CYCLE_SHA")"
+  reserve_production_cycle "$CYCLE_SHA" "attempt-2" "$T3A" "$HEAD" "false" "false" >/dev/null
+  [[ "$(production_cycle_state "$CYCLE_SHA")" == "reserved" ]]
+  record_production_cycle_consumed "$CYCLE_SHA" "attempt-2" "$TEST_HOME/cand-b"
+  # Same T3-A must not authorize a third cycle
+  set +e
+  reuse_out="$(reserve_production_cycle "$CYCLE_SHA" "attempt-3" "$T3A" "$HEAD" "false" "false" 2>&1)"
+  reuse_ec=$?
+  set -e
+  [[ $reuse_ec -ne 0 ]] || {
+    printf 'reused T3 must refuse third cycle, got: %s\n' "$reuse_out" >&2
     exit 1
   }
-  GOOD_T3="$TEST_HOME/good-t3.json"
-  python3 - "$GOOD_T3" "$CYCLE_SHA" <<'PY'
+  [[ "$reuse_out" == *"already spent"* ]] || {
+    printf 'expected spent message, got: %s\n' "$reuse_out" >&2
+    exit 1
+  }
+  # Foreign reserved recovery requires T3; without T3 refuses
+  python3 - "$(production_cycle_path "$CYCLE_SHA")" "$CYCLE_SHA" "$DIGEST_A" <<'PY'
 import json, sys
-path, sha = sys.argv[1:]
+path, sha, dig = sys.argv[1:]
 json.dump({
     "schema_version": 1,
-    "packet_kind": "t3",
+    "kind": "production-cycle",
     "source_sha": sha,
-    "words": f"Authorize second apple notary cycle for source {sha}",
+    "status": "reserved",
+    "notarization_consumed": False,
+    "production_attempt_id": "attempt-zombie",
+    "checkout_head": sha,
+    "scripts_dirty": False,
+    "packaging_dirty": False,
+    "spent_t3_digests": [dig],
 }, open(path, "w"), indent=2)
 open(path, "a").write("\n")
 PY
-  validate_t3_exception "$GOOD_T3" "$CYCLE_SHA" >/dev/null
-  # T3 override can re-reserve after consumed
-  reserve_production_cycle "$CYCLE_SHA" "attempt-2" "$GOOD_T3" >/dev/null
+  set +e
+  fr_out="$(reserve_production_cycle "$CYCLE_SHA" "attempt-4" "" "$HEAD" "false" "false" 2>&1)"
+  fr_ec=$?
+  set -e
+  [[ $fr_ec -ne 0 ]] || {
+    printf 'foreign reserved without T3 must refuse\n' >&2
+    exit 1
+  }
+  # Fresh T3-B recovers abandoned reserved
+  T3B="$TEST_HOME/t3-b.json"
+  write_t3 "$T3B" "$CYCLE_SHA" "Authorize abandoned recovery apple cycle for source $CYCLE_SHA"
+  reserve_production_cycle "$CYCLE_SHA" "attempt-4" "$T3B" "$HEAD" "false" "false" >/dev/null
   [[ "$(production_cycle_state "$CYCLE_SHA")" == "reserved" ]]
+  # Wrong SHA T3
   WRONG_T3="$TEST_HOME/wrong-t3.json"
-  python3 - "$WRONG_T3" <<'PY'
-import json, sys
-json.dump({
-    "schema_version": 1,
-    "packet_kind": "t3",
-    "source_sha": "d" * 40,
-    "words": "Authorize second apple notary cycle for source " + ("d" * 40),
-}, open(sys.argv[1], "w"), indent=2)
-open(sys.argv[1], "a").write("\n")
-PY
+  write_t3 "$WRONG_T3" "$(python3 -c 'print("d"*40)')" \
+    "Authorize second apple notary cycle for source $(python3 -c 'print("d"*40)')"
   set +e
   validate_t3_exception "$WRONG_T3" "$CYCLE_SHA" >/dev/null 2>&1
   t3_ec=$?
   set -e
-  [[ $t3_ec -ne 0 ]] || {
-    printf 'T3 for wrong SHA must refuse\n' >&2
-    exit 1
-  }
+  [[ $t3_ec -ne 0 ]] || { printf 'T3 for wrong SHA must refuse\n' >&2; exit 1; }
 ) || fail "production-cycle/T3 live helper failed"
 pass "production-cycle ledger + T3 exception + checkout binding (#0056)"
+# Static: T3 spent + flock serialization + publish uses recorded dirty
+grep -q 't3-spent\|t3_packet_sha256\|spent_t3_digests' "$TX" \
+  || fail "T3 must be single-use by digest"
+grep -q 'fcntl.flock\|LOCK_EX' "$TX" || fail "ledger transitions must use flock"
+grep -q 'refuse unknowable history\|lacks checkout_head' "$TX" \
+  || fail "legacy receipts without bind fields must refuse"
+grep -q 'recorded scripts_dirty must be false\|scripts_dirty must be false at T1' "$TX" \
+  || fail "publish must require recorded T1 dirty flags false"
+pass "production-cycle serialization + T3 single-use + publish T1 bind (#0058)"
 
 # --- [P1] prepare requires Candidate verified + runtime preflight ----------
 grep -q 'Candidate verified' "$TX" || fail "prepare must require Candidate verified"
