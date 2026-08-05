@@ -882,6 +882,7 @@ ALLOW_LIST = {
     "scripts/test-cargo-target-policy.sh": "local cargo-target-policy helper",
     "scripts/test-ci-candidate-observability.sh": "local make check/ship-check only",
     "scripts/test-gateway-pack-desktop-ownership.sh": "local Makefile gateway-pack ownership",
+    "scripts/test-gateway-pack-integration-smoke.sh": "local Makefile / desktop-ownership only",
     "scripts/test-gateway-prepare-config.sh": "local gateway config via make check",
     "scripts/test-link-agent-context.sh": "private doctrine linker hermetic",
 }
@@ -916,18 +917,17 @@ def workflow_invokes(code: str):
 
 
 def script_invokes(code: str):
-    """Real executions only — not path-list fixtures or classifier cases."""
+    """Real executions only — not path-list fixtures, classifier cases, or
+    bare path arguments to grep/other tools (e.g. isolation.sh grepping the
+    integration-smoke source for flag strings without running it)."""
     code = code.strip()
     if not code or path_filterish(code):
         return []
     out = []
+    # Require an explicit bash runner. A quoted "$ROOT/scripts/test-*.sh"
+    # alone is often a file operand (grep path list), not a command.
     for m in re.finditer(
         r"""bash\s+["']?(?:\$\{?ROOT\}?/)?scripts/(test-[\w-]+\.sh)["']?""",
-        code,
-    ):
-        out.append(f"scripts/{m.group(1)}")
-    for m in re.finditer(
-        r"""(?:^|[\s;|&])["']\$\{?ROOT\}?/scripts/(test-[\w-]+\.sh)["']""",
         code,
     ):
         out.append(f"scripts/{m.group(1)}")
@@ -1037,11 +1037,6 @@ def script_invokes(code: str):
         code,
     ):
         out.append(f"scripts/{m.group(1)}")
-    for m in re.finditer(
-        r"""(?:^|[\s;|&])["']\$\{?ROOT\}?/scripts/(test-[\w-]+\.sh)["']""",
-        code,
-    ):
-        out.append(f"scripts/{m.group(1)}")
     return out
 
 
@@ -1068,11 +1063,11 @@ must_reach = [
     "scripts/test-candidate-status.sh",
     "scripts/test-release-transaction-w3.sh",
     "scripts/test-production-image-provenance.sh",  # transitive via pack assets
-    "scripts/test-gateway-pack-integration-smoke.sh",  # transitive via isolation
 ]
 must_not = [
     "scripts/test-cargo-target-policy.sh",
     "scripts/test-link-agent-context.sh",  # classifier fixture only
+    "scripts/test-gateway-pack-integration-smoke.sh",  # local only; isolation greps it
     "scripts/test-__orphan_unwired_guard__.sh",
 ]
 errors = []
@@ -1087,6 +1082,14 @@ if workflow_invokes("              scripts/test-cargo-target-policy.sh|\\"):
     errors.append("path-filter line wrongly counted as invocation")
 if not workflow_invokes("          scripts/test-candidate-status.sh"):
     errors.append("bare detect-changes step not counted as invocation")
+# Isolation-style grep operand must not create a transitive edge.
+grep_arg = '  "$ROOT/scripts/test-gateway-pack-integration-smoke.sh" || die'
+if script_invokes(grep_arg):
+    errors.append("grep file-operand path wrongly counted as invocation")
+if not script_invokes(
+    'bash "$ROOT/scripts/test-production-image-provenance.sh" ||'
+):
+    errors.append("bash-prefixed transitive run not counted as invocation")
 if errors:
     for e in errors:
         print(e, file=sys.stderr)
