@@ -387,6 +387,15 @@ if ! grep -Eq '^[[:space:]]+scripts/test-ci-control-plane\.sh[[:space:]]*$' "$CI
 else
   pass "ci.yml hosts test-ci-control-plane.sh in detect-changes"
 fi
+# Shipping-method hermetics must also be bare hosted steps (not path-filter-only).
+# Regression guard for #0043 / #0018 shape: filter triggers without execution.
+if ! grep -Eq '^[[:space:]]+scripts/test-candidate-status\.sh[[:space:]]*$' "$CI_YML"; then
+  fail "ci.yml must run scripts/test-candidate-status.sh as a hosted step"
+fi
+if ! grep -Eq '^[[:space:]]+scripts/test-release-transaction-w3\.sh[[:space:]]*$' "$CI_YML"; then
+  fail "ci.yml must run scripts/test-release-transaction-w3.sh as a hosted step"
+fi
+pass "ci.yml hosts test-candidate-status.sh + test-release-transaction-w3.sh"
 
 # ---------------------------------------------------------------------------
 # Behavioral: force-full cannot be suppressed by an all-false classifier

@@ -133,6 +133,12 @@ jobs:
           # exact-policy binding). Must run here so PR CI and branch
           # workflow_dispatch cannot go green without exercising them.
           scripts/test-ci-control-plane.sh
+          # Hosted shipping-method hermetics (W2/W3). Path filters alone used
+          # to select exact_candidate without ever executing these; same class
+          # of defect as unhosted test-ci-control-plane.sh (#0018/#0043).
+          # Zero network/Apple/provider — safe on every detect-changes run.
+          scripts/test-candidate-status.sh
+          scripts/test-release-transaction-w3.sh
           # Opt into exact_* so path-scoped candidate jobs see them. Classic
           # nine keys remain the default under Actions without this flag so a
           # base-controlled ci.yml@main that has not yet learned exact_* can
