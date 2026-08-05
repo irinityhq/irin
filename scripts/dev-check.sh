@@ -326,14 +326,19 @@ if [[ -n "$receipt" ]]; then
     { git diff --name-only origin/main --; git ls-files --others --exclude-standard; } \
       | awk '!seen[$0]++'
   )
-  end_path_manifest="$(printf '%s\n' "${end_paths[@]}" | LC_ALL=C sort)"
+  # bash 3.2 + set -u: empty "${arr[@]}" is unbound; ${arr[@]+"${arr[@]}"} is safe.
+  end_path_manifest="$(printf '%s\n' ${end_paths[@]+"${end_paths[@]}"} | LC_ALL=C sort)"
   [[ "$end_path_manifest" == "$start_path_manifest" ]] || {
     printf 'ERROR: changed-file scope moved during ship-check\n' >&2
     exit 1
   }
   sorted_end_paths=()
-  while IFS= read -r path; do sorted_end_paths+=("$path"); done <<<"$end_path_manifest"
-  end_fingerprint="$(fingerprint_paths "${sorted_end_paths[@]}")"
+  if [[ -n "$end_path_manifest" ]]; then
+    while IFS= read -r path; do
+      [[ -n "$path" ]] && sorted_end_paths+=("$path")
+    done <<<"$end_path_manifest"
+  fi
+  end_fingerprint="$(fingerprint_paths ${sorted_end_paths[@]+"${sorted_end_paths[@]}"})"
   [[ "$end_fingerprint" == "$tested_tree_fingerprint" ]] || {
     printf 'ERROR: tested tree changed during ship-check (start=%s end=%s)\n' \
       "$tested_tree_fingerprint" "$end_fingerprint" >&2

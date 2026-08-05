@@ -559,6 +559,39 @@ do
 done
 pass "dev-check wires Gateway OpenResty static proofs"
 
+# ---------------------------------------------------------------------------
+# #0055: ship-check receipt finalization must survive empty arrays under
+# macOS bash 3.2 + set -u (raw "${end_paths[@]}" is unbound when empty).
+# ---------------------------------------------------------------------------
+if grep -nE 'end_path_manifest=.*\$\{end_paths\[@\]\}' "$DEV_CHECK" \
+  | grep -vE 'end_paths\[@\]\+' >/dev/null; then
+  fail "dev-check receipt must not expand raw \${end_paths[@]} (bash 3.2 set -u)"
+fi
+if ! grep -qE 'end_paths\[@\]\+\"\$\{end_paths\[@\]\}\"' "$DEV_CHECK"; then
+  fail "dev-check receipt must use set -u-safe \${end_paths[@]+\"\${end_paths[@]}\"}"
+fi
+if ! grep -qE 'sorted_end_paths\[@\]\+\"\$\{sorted_end_paths\[@\]\}\"' "$DEV_CHECK"; then
+  fail "dev-check receipt must use set -u-safe \${sorted_end_paths[@]+...}"
+fi
+# Live: empty-array expansion used by receipt path must not abort under set -u.
+set +e
+live_out="$(
+  /bin/bash -c '
+    set -euo pipefail
+    end_paths=()
+    sorted_end_paths=()
+    end_path_manifest="$(printf "%s\n" ${end_paths[@]+"${end_paths[@]}"} | LC_ALL=C sort)"
+    : "$(printf "%s\n" ${sorted_end_paths[@]+"${sorted_end_paths[@]}"})"
+    printf "ok manifest_len=%s\n" "${#end_path_manifest}"
+  ' 2>&1
+)"
+live_ec=$?
+set -e
+[[ $live_ec -eq 0 ]] || fail "bash 3.2 set -u empty end_paths expansion failed: $live_out"
+[[ "$live_out" == *"ok manifest_len=0"* ]] \
+  || fail "expected empty-manifest live proof, got: $live_out"
+pass "dev-check receipt empty-array expansions are set -u safe (#0055)"
+
 # Hosted gateway-rust: timer-closure + lua-unit + contract-check + models-validate.
 GATEWAY_RUST_JOB="$(python3 - "$CI_YML" <<'PY'
 from pathlib import Path
