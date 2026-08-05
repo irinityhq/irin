@@ -58,15 +58,28 @@ else:
     block = m.group(1)
     if "queue:" in block:
         errors.append("ci-pr.yml must not set queue (cancel surface only)")
-    # PR updates cancel; merge_group must not cancel (expression form).
-    if "cancel-in-progress:" not in block:
-        errors.append("ci-pr.yml must set cancel-in-progress")
+    # PR updates cancel; merge_group must not cancel.
+    # Reject literal true/false and reversed event comparisons.
+    if not re.search(
+        r"cancel-in-progress:\s*\$\{\{\s*github\.event_name\s*!=\s*'merge_group'\s*\}\}",
+        block,
+    ):
+        errors.append(
+            "ci-pr.yml cancel-in-progress must be "
+            "${{ github.event_name != 'merge_group' }} "
+            "(PR cancels; merge_group does not)"
+        )
     if "github.event.pull_request.number" not in block:
         errors.append("ci-pr.yml concurrency group must be per-PR number")
     if "irin-ci-pr-" not in block:
         errors.append("ci-pr.yml concurrency group should be namespaced irin-ci-pr-*")
-    if "merge_group" not in block or "irin-ci-merge-group-" not in block:
-        errors.append("ci-pr.yml concurrency must key merge_group on head SHA")
+    if "irin-ci-merge-group-" not in block:
+        errors.append("ci-pr.yml concurrency must namespace merge_group runs")
+    if "github.event.merge_group.head_sha" not in block:
+        errors.append(
+            "ci-pr.yml merge_group concurrency group must key on "
+            "github.event.merge_group.head_sha"
+        )
 
 if "uses: irinityhq/irin/.github/workflows/ci.yml@main" not in pr:
     errors.append("ci-pr.yml must keep the @main dispatcher pin")
