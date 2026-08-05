@@ -30,17 +30,25 @@ TAG=""
 CANDIDATE_ARG=""
 T1_PACKET=""
 T2_PACKET=""
+T3_EXCEPTION=""
 
 usage() {
   cat <<'EOF'
 Usage:
-  release-transaction.sh --prepare-production --t1-packet PATH
+  release-transaction.sh --prepare-production --t1-packet PATH \
+      [--t3-exception PATH]
   release-transaction.sh --publish --tag vX.Y.Z \
       --candidate ABSOLUTE_STORE_PATH --t2-packet CANDIDATE/proofs/t2.json
 
   --prepare-production is T1-authorized RC preparation with irreversible
   external effects (rc-* GHCR push, Apple notary once per attempt). It is not
   a no-effect simulation. There is no --dry-run-rc alias.
+
+  One production notarization consumes the T1 production cycle for that source
+  SHA. A second prepare for the same SHA requires --t3-exception PATH (words
+  must name the SHA and mention apple). Prepare records checkout HEAD and
+  whether scripts/ or packaging/ is dirty; publish requires that same HEAD and
+  a clean scripts/+packaging/ tree.
 
 Required env (both modes):
   APPLE_SIGNING_IDENTITY   Developer ID Application identity
@@ -86,12 +94,380 @@ if [[ "${IRIN_RELEASE_TX_LIB:-}" != "1" ]]; then
       --candidate) CANDIDATE_ARG="${2:-}"; shift 2 ;;
       --t1-packet) T1_PACKET="${2:-}"; shift 2 ;;
       --t2-packet) T2_PACKET="${2:-}"; shift 2 ;;
+      --t3-exception) T3_EXCEPTION="${2:-}"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown argument: $1 (try --help)" ;;
     esac
   done
   [[ -n "$MODE" ]] || { usage >&2; die "mode required"; }
 fi
+
+# ---------------------------------------------------------------------------
+# Checkout control-plane binding (HEAD + scripts/packaging dirty)
+# ---------------------------------------------------------------------------
+# Sets CHECKOUT_HEAD, SCRIPTS_DIRTY, PACKAGING_DIRTY (true/false strings).
+# Do not parse porcelain path display (C-quoting breaks on spaces); query each
+# pathspec and treat any non-empty porcelain as dirty. Fail closed on git error.
+snapshot_checkout_control() {
+  CHECKOUT_HEAD="$(git rev-parse HEAD)"
+  SCRIPTS_DIRTY=false
+  PACKAGING_DIRTY=false
+  local status_out
+  if ! status_out="$(git status --porcelain --untracked-files=normal -- scripts 2>&1)"; then
+    die "git status failed for scripts/: $status_out"
+  fi
+  [[ -n "$status_out" ]] && SCRIPTS_DIRTY=true
+  if ! status_out="$(git status --porcelain --untracked-files=normal -- packaging 2>&1)"; then
+    die "git status failed for packaging/: $status_out"
+  fi
+  [[ -n "$status_out" ]] && PACKAGING_DIRTY=true
+}
+
+# ---------------------------------------------------------------------------
+# Production-cycle ledger: notarization spends one cycle per source SHA
+# ---------------------------------------------------------------------------
+# States: missing | reserved | consumed. Invalid ledger always aborts.
+# All mutations take an exclusive flock on production-cycle-<sha>.json.lock
+# and compare-and-swap expected status. Each T3 is single-use by packet digest
+# (global .attempts/t3-spent/<digest>.json + per-source spent_t3_digests).
+production_cycle_path() {
+  local sha="$1"
+  printf '%s/.attempts/production-cycle-%s.json\n' "$IRIN_CANDIDATE_ROOT" "$sha"
+}
+
+t3_spent_path() {
+  local digest="$1"
+  printf '%s/.attempts/t3-spent/%s.json\n' "$IRIN_CANDIDATE_ROOT" "$digest"
+}
+
+# Prints: missing | reserved | consumed
+# Dies if the ledger file exists but is malformed / wrong SHA.
+production_cycle_state() {
+  local sha="$1" path
+  path="$(production_cycle_path "$sha")"
+  if [[ ! -f "$path" ]]; then
+    printf 'missing\n'
+    return 0
+  fi
+  python3 - "$path" "$sha" <<'PY' || die "production-cycle ledger invalid for $sha (see stderr)"
+import json, sys
+path, sha = sys.argv[1:]
+try:
+    d = json.load(open(path))
+except Exception as e:
+    print(f"ledger unreadable: {e}", file=sys.stderr)
+    sys.exit(1)
+if d.get("kind") not in (None, "production-cycle"):
+    print(f"ledger kind invalid: {d.get('kind')!r}", file=sys.stderr)
+    sys.exit(1)
+if d.get("source_sha") != sha:
+    print(
+        f"ledger source_sha mismatch: {d.get('source_sha')!r} != {sha!r}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+status = d.get("status")
+if status in ("reserved", "consumed"):
+    print(status)
+    sys.exit(0)
+if d.get("notarization_consumed") is True:
+    print("consumed")
+    sys.exit(0)
+print(f"ledger status invalid: {status!r}", file=sys.stderr)
+sys.exit(1)
+PY
+}
+
+# Returns 0 if state is consumed (or reserved — budget already claimed).
+production_cycle_consumed() {
+  local sha="$1" state
+  state="$(production_cycle_state "$sha")"
+  [[ "$state" == "consumed" || "$state" == "reserved" ]]
+}
+
+# Validate T3 packet shape. Prints sha256 digest of packet bytes on success.
+# Does not record spend — reserve_production_cycle claims the digest under lock.
+validate_t3_exception() {
+  local path="$1" want_sha="$2"
+  [[ -n "$path" ]] || die "--t3-exception PATH is required for a second production cycle"
+  [[ "$path" == /* ]] || path="$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
+  [[ -f "$path" ]] || die "T3 exception missing: $path"
+  python3 - "$path" "$want_sha" <<'PY'
+import hashlib, json, re, sys
+path, want_sha = sys.argv[1:]
+raw = open(path, "rb").read()
+d = json.loads(raw.decode("utf-8"))
+if d.get("schema_version") != 1:
+    raise SystemExit("T3 schema_version must be 1")
+if d.get("packet_kind") != "t3":
+    raise SystemExit("T3 packet_kind must be 't3'")
+sha = d.get("source_sha")
+if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+    raise SystemExit("T3 source_sha must be 40-char full git SHA (hex)")
+if sha.lower() != want_sha.lower():
+    raise SystemExit(f"T3 source_sha {sha} does not match prepare source {want_sha}")
+words = d.get("words")
+if not isinstance(words, str) or not words.strip():
+    raise SystemExit("T3 words must be a non-empty string (must name the SHA and mention apple)")
+low = words.lower()
+if "apple" not in low:
+    raise SystemExit("T3 words must mention apple (Apple notary cycle override)")
+if want_sha.lower() not in low and sha.lower() not in low:
+    raise SystemExit("T3 words must name the source SHA")
+print(hashlib.sha256(raw).hexdigest())
+PY
+}
+
+# Exclusive claim before first external effect.
+# Args: sha attempt [t3_path] checkout_head scripts_dirty packaging_dirty
+# - missing → reserved (O_EXCL under flock)
+# - reserved same attempt → ok
+# - reserved foreign / consumed → require unused T3 digest; CAS under flock
+# - binds T1 checkout fields onto the cycle ledger for publish
+reserve_production_cycle() {
+  local sha="$1" attempt="$2" t3_path="${3:-}" head="$4" scripts_dirty="$5" packaging_dirty="$6"
+  local path t3_digest=""
+  path="$(production_cycle_path "$sha")"
+  mkdir -p "$(dirname "$path")" "$(dirname "$(t3_spent_path x)")"
+  if [[ -n "$t3_path" ]]; then
+    [[ "$t3_path" == /* ]] || t3_path="$(cd "$(dirname "$t3_path")" && pwd)/$(basename "$t3_path")"
+    t3_digest="$(validate_t3_exception "$t3_path" "$sha")" \
+      || die "T3 exception invalid for $sha"
+  fi
+  python3 - "$path" "$sha" "$attempt" "$t3_path" "$t3_digest" \
+    "$head" "$scripts_dirty" "$packaging_dirty" "$IRIN_CANDIDATE_ROOT" \
+    <<'PY' || die "cannot reserve production cycle for $sha"
+import fcntl, hashlib, json, os, sys
+from datetime import datetime, timezone
+
+(
+    out,
+    sha,
+    attempt,
+    t3_path,
+    t3_digest,
+    checkout_head,
+    scripts_dirty,
+    packaging_dirty,
+    cand_root,
+) = sys.argv[1:]
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+lock_path = out + ".lock"
+spent_dir = os.path.join(cand_root, ".attempts", "t3-spent")
+os.makedirs(os.path.dirname(out), exist_ok=True)
+os.makedirs(spent_dir, exist_ok=True)
+
+def spent_path(digest: str) -> str:
+    return os.path.join(spent_dir, f"{digest}.json")
+
+def normalize_status(d):
+    status = d.get("status")
+    if status in ("reserved", "consumed"):
+        return status
+    if d.get("notarization_consumed") is True:
+        return "consumed"
+    return status
+
+def atomic_write(path, doc):
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, sort_keys=True, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+
+def claim_t3(digest, source_sha, attempt_id):
+    if not digest:
+        raise SystemExit("T3 digest missing for cycle override")
+    sp = spent_path(digest)
+    if os.path.exists(sp):
+        raise SystemExit(
+            f"T3 packet digest {digest} already spent; authorize a new T3 exception"
+        )
+    # O_EXCL global spend record (single-use identity).
+    payload = json.dumps(
+        {
+            "schema_version": 1,
+            "kind": "t3-spent",
+            "t3_packet_sha256": digest,
+            "source_sha": source_sha,
+            "production_attempt_id": attempt_id,
+            "spent_at": now,
+        },
+        sort_keys=True,
+        indent=2,
+    ) + "\n"
+    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+    try:
+        fd = os.open(sp, flags, 0o644)
+    except FileExistsError:
+        raise SystemExit(
+            f"T3 packet digest {digest} already spent (race); authorize a new T3"
+        )
+    try:
+        os.write(fd, payload.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+def base_reserved_doc(prev, t3_digest=None):
+    spent = list((prev or {}).get("spent_t3_digests") or [])
+    if t3_digest and t3_digest not in spent:
+        spent.append(t3_digest)
+    return {
+        "schema_version": 1,
+        "kind": "production-cycle",
+        "source_sha": sha,
+        "status": "reserved",
+        "notarization_consumed": False,
+        "production_attempt_id": attempt,
+        "reserved_at": now,
+        "checkout_head": checkout_head,
+        "scripts_dirty": scripts_dirty == "true",
+        "packaging_dirty": packaging_dirty == "true",
+        "t3_exception_path": t3_path or None,
+        "t3_packet_sha256": t3_digest or None,
+        "spent_t3_digests": spent,
+        "prior_consumed_attempt_id": (prev or {}).get("production_attempt_id")
+        if (prev or {}).get("status") == "consumed"
+        or (prev or {}).get("notarization_consumed") is True
+        else (prev or {}).get("prior_consumed_attempt_id"),
+        "prior_reserved_attempt_id": (prev or {}).get("production_attempt_id")
+        if (prev or {}).get("status") == "reserved"
+        and (prev or {}).get("production_attempt_id") != attempt
+        else (prev or {}).get("prior_reserved_attempt_id"),
+    }
+
+with open(lock_path, "a+", encoding="utf-8") as lockf:
+    fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+    if not os.path.exists(out):
+        # First cycle: no T3 required; exclusive create under lock.
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        doc = base_reserved_doc(None, None)
+        payload = json.dumps(doc, sort_keys=True, indent=2) + "\n"
+        try:
+            fd = os.open(out, flags, 0o644)
+        except FileExistsError:
+            raise SystemExit("race: cycle ledger appeared during reserve")
+        try:
+            os.write(fd, payload.encode("utf-8"))
+        finally:
+            os.close(fd)
+        print("reserved_new")
+        sys.exit(0)
+
+    try:
+        d = json.load(open(out))
+    except Exception as e:
+        raise SystemExit(f"ledger unreadable: {e}")
+    if d.get("source_sha") != sha:
+        raise SystemExit(f"ledger source_sha mismatch: {d.get('source_sha')!r}")
+    status = normalize_status(d)
+    if status == "reserved" and d.get("production_attempt_id") == attempt:
+        # Same-attempt resume; refuse mismatched checkout binding.
+        if d.get("checkout_head") not in (None, checkout_head):
+            raise SystemExit(
+                f"reserved cycle checkout_head {d.get('checkout_head')!r} != {checkout_head!r}"
+            )
+        print("reserved_same_attempt")
+        sys.exit(0)
+
+    if status == "reserved" and d.get("production_attempt_id") != attempt:
+        if not t3_digest:
+            raise SystemExit(
+                f"production cycle reserved by attempt "
+                f"{d.get('production_attempt_id')!r}; provide --t3-exception "
+                f"to recover an abandoned reservation"
+            )
+    elif status == "consumed":
+        if not t3_digest:
+            raise SystemExit(
+                "production notarization already consumed; "
+                "authorize a T3 exception naming that SHA (--t3-exception PATH)"
+            )
+    else:
+        raise SystemExit(f"ledger status invalid: {status!r}")
+
+    # T3 path: single-use digest + CAS reserved write under flock.
+    if t3_digest in (d.get("spent_t3_digests") or []):
+        raise SystemExit(
+            f"T3 packet digest {t3_digest} already spent for source {sha}"
+        )
+    claim_t3(t3_digest, sha, attempt)
+    d2 = json.load(open(out))
+    st2 = normalize_status(d2)
+    if st2 not in ("consumed", "reserved"):
+        raise SystemExit(f"CAS failed: unexpected status {st2!r}")
+    if st2 == "reserved" and d2.get("production_attempt_id") == attempt:
+        print("reserved_same_attempt")
+        sys.exit(0)
+    # Expected pre-state for this transition: still reserved-by-other or consumed.
+    if st2 == "reserved" and d2.get("production_attempt_id") != d.get("production_attempt_id"):
+        raise SystemExit(
+            f"CAS failed: reservation holder changed "
+            f"{d.get('production_attempt_id')!r} -> {d2.get('production_attempt_id')!r}"
+        )
+    if st2 == "consumed" and status != "consumed":
+        raise SystemExit("CAS failed: status flipped to consumed during T3 recover")
+    atomic_write(out, base_reserved_doc(d2, t3_digest))
+    print("reserved_t3_override" if st2 == "consumed" else "reserved_t3_recover")
+    sys.exit(0)
+PY
+}
+
+record_production_cycle_consumed() {
+  local sha="$1" attempt="$2" candidate="$3" path
+  path="$(production_cycle_path "$sha")"
+  mkdir -p "$(dirname "$path")"
+  python3 - "$path" "$sha" "$attempt" "$candidate" <<'PY' || die "cannot mark production cycle consumed for $sha"
+import fcntl, json, os, sys
+from datetime import datetime, timezone
+out, sha, attempt, cand = sys.argv[1:]
+lock_path = out + ".lock"
+os.makedirs(os.path.dirname(out), exist_ok=True)
+with open(lock_path, "a+", encoding="utf-8") as lockf:
+    fcntl.flock(lockf.fileno(), fcntl.LOCK_EX)
+    prev = {}
+    if os.path.exists(out):
+        try:
+            prev = json.load(open(out))
+        except Exception as e:
+            raise SystemExit(f"ledger unreadable: {e}")
+    if prev and prev.get("source_sha") not in (None, sha):
+        raise SystemExit(f"ledger source_sha mismatch: {prev.get('source_sha')!r}")
+    # Only the reserving attempt may consume (or legacy missing status).
+    if prev.get("status") == "reserved" and prev.get("production_attempt_id") not in (
+        None,
+        attempt,
+    ):
+        raise SystemExit(
+            f"cannot consume: reserved by {prev.get('production_attempt_id')!r}, "
+            f"not {attempt!r}"
+        )
+    doc = {
+        "schema_version": 1,
+        "kind": "production-cycle",
+        "source_sha": sha,
+        "status": "consumed",
+        "notarization_consumed": True,
+        "production_attempt_id": attempt,
+        "production_candidate_path": cand,
+        "reserved_at": prev.get("reserved_at"),
+        "t3_exception_path": prev.get("t3_exception_path"),
+        "t3_packet_sha256": prev.get("t3_packet_sha256"),
+        "spent_t3_digests": prev.get("spent_t3_digests") or [],
+        "checkout_head": prev.get("checkout_head"),
+        "scripts_dirty": prev.get("scripts_dirty"),
+        "packaging_dirty": prev.get("packaging_dirty"),
+        "prior_consumed_attempt_id": prev.get("prior_consumed_attempt_id"),
+        "prior_reserved_attempt_id": prev.get("prior_reserved_attempt_id"),
+        "consumed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    }
+    tmp = out + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(doc, fh, sort_keys=True, indent=2)
+        fh.write("\n")
+    os.replace(tmp, out)
+PY
+}
 
 # ---------------------------------------------------------------------------
 # Helpers: attempt-effect ledger (atomic complete records; skip on verified reuse)
@@ -512,6 +888,9 @@ do_prepare() {
   SHA="$(git rev-parse HEAD)"
   [[ "$SHA" == "$T1_SOURCE_SHA" ]] \
     || die "HEAD ($SHA) does not match T1 source_sha ($T1_SOURCE_SHA)"
+  snapshot_checkout_control
+  [[ "$CHECKOUT_HEAD" == "$SHA" ]] \
+    || die "checkout snapshot HEAD mismatch ($CHECKOUT_HEAD vs $SHA)"
 
   note "resolve signed-rc candidate from T1"
   SIGNED_RC_PATH="$(
@@ -554,10 +933,11 @@ PY
   PACKET_HASH="$(irin_sha256_file "$T1_PACKET_PATH")"
   if [[ -f "$ATTEMPT_RECEIPT" ]]; then
     note "resuming prior prepare attempt under same T1: $T1_ATTEMPT_ID"
-    python3 - "$ATTEMPT_RECEIPT" "$T1_SOURCE_SHA" "$T1_SIGNED_RC_ID" "$PACKET_HASH" <<'PY' \
+    python3 - "$ATTEMPT_RECEIPT" "$T1_SOURCE_SHA" "$T1_SIGNED_RC_ID" "$PACKET_HASH" \
+      "$SCRIPTS_DIRTY" "$PACKAGING_DIRTY" <<'PY' \
       || die "prior attempt receipt conflicts with current T1 inputs; authorize a new attempt"
-import json, sys
-path, sha, cid, phash = sys.argv[1:]
+import json, os, sys
+path, sha, cid, phash, scripts_dirty, packaging_dirty = sys.argv[1:]
 prev = json.load(open(path))
 if prev.get("source_sha") != sha:
     raise SystemExit("prior attempt source_sha differs")
@@ -568,19 +948,36 @@ if prev.get("t1_packet_sha256") and prev["t1_packet_sha256"] != phash:
 if prev.get("result") == "PASS" and prev.get("production_candidate_path"):
     # Fully complete attempt — still allow re-entry to re-verify and print path.
     pass
+# Require T1-time binding fields; do not backfill from present state (#0058).
+if prev.get("checkout_head") is None:
+    raise SystemExit(
+        "prior attempt receipt lacks checkout_head; refuse unknowable history"
+    )
+if prev.get("checkout_head") != sha:
+    raise SystemExit(
+        f"prior attempt checkout_head {prev.get('checkout_head')!r} != HEAD {sha!r}"
+    )
+if "scripts_dirty" not in prev or "packaging_dirty" not in prev:
+    raise SystemExit(
+        "prior attempt receipt lacks scripts_dirty/packaging_dirty; "
+        "refuse unknowable history"
+    )
 print("resume_ok")
 PY
   else
     python3 - "$ATTEMPT_RECEIPT" "$T1_ATTEMPT_ID" "$SHA" "$T1_SIGNED_RC_ID" \
-      "$PACKET_HASH" "$T1_EXPIRY" <<'PY'
+      "$PACKET_HASH" "$T1_EXPIRY" "$SCRIPTS_DIRTY" "$PACKAGING_DIRTY" <<'PY'
 import json, sys
 from datetime import datetime, timezone
-out, attempt, sha, cid, phash, expiry = sys.argv[1:]
+out, attempt, sha, cid, phash, expiry, scripts_dirty, packaging_dirty = sys.argv[1:]
 doc = {
   "schema_version": 1,
   "kind": "prepare-production-attempt",
   "production_attempt_id": attempt,
   "source_sha": sha,
+  "checkout_head": sha,
+  "scripts_dirty": scripts_dirty == "true",
+  "packaging_dirty": packaging_dirty == "true",
   "signed_rc_candidate_id": cid,
   "t1_packet_sha256": phash,
   "expiry": expiry,
@@ -596,6 +993,7 @@ import os
 os.replace(tmp, out)
 PY
     note "wrote attempt receipt before external effects: $ATTEMPT_RECEIPT"
+    note "checkout binding: head=$SHA scripts_dirty=$SCRIPTS_DIRTY packaging_dirty=$PACKAGING_DIRTY"
   fi
 
   IMAGES_TAG="rc-$(printf '%s' "$SHA" | cut -c1-12)"
@@ -606,6 +1004,59 @@ PY
   echo "source_sha=$SHA images_tag=$IMAGES_TAG mode=prepare release_version=$IRIN_RELEASE_VERSION"
   echo "signed_rc=$SIGNED_RC_PATH"
   echo "t1_attempt=$T1_ATTEMPT_ID"
+
+  # ---- production-cycle claim before first irreversible effect (#0056) ----
+  # Peek production-build status: complete/recoverable skip re-reserve; fresh
+  # needs exclusive reservation (T3 if already consumed) before GHCR/notary.
+  PROD_ST_EARLY="$(effect_status "$ATTEMPT_RECEIPT" "production-build")"
+  PROD_PATH_EARLY=""
+  if [[ "$PROD_ST_EARLY" == "complete" || "$PROD_ST_EARLY" == "starting" ]]; then
+    PROD_PATH_EARLY="$(python3 -c 'import json,sys; e=(json.load(open(sys.argv[1])).get("effects") or {}).get("production-build") or {}; print(e.get("candidate_path") or "")' "$ATTEMPT_RECEIPT")"
+  fi
+  NEED_FRESH_PROD=1
+  if [[ "$PROD_ST_EARLY" == "complete" && -n "$PROD_PATH_EARLY" && -d "$PROD_PATH_EARLY" ]]; then
+    NEED_FRESH_PROD=0
+  elif [[ "$PROD_ST_EARLY" == "starting" && -n "$PROD_PATH_EARLY" && -d "$PROD_PATH_EARLY" ]]; then
+    NEED_FRESH_PROD=0
+  elif [[ "$PROD_ST_EARLY" == "starting" && -z "$PROD_PATH_EARLY" ]]; then
+    # Interrupted mid-notary without path: refuse before GHCR re-entry.
+    die "production-build was interrupted without a candidate path (Apple cycle may have been spent); authorize a new T1 attempt — refusing silent re-notary"
+  fi
+  if [[ "$NEED_FRESH_PROD" == "1" ]]; then
+    CYCLE_STATE="$(production_cycle_state "$SHA")"
+    T3_PATH_ABS=""
+    if [[ "$CYCLE_STATE" == "consumed" || "$CYCLE_STATE" == "reserved" ]]; then
+      # reserved may be same-attempt (reserve handles) or foreign abandoned
+      # (requires T3). consumed always requires a fresh single-use T3.
+      if [[ -n "$T3_EXCEPTION" ]]; then
+        T3_PATH_ABS="$T3_EXCEPTION"
+        [[ "$T3_PATH_ABS" == /* ]] || T3_PATH_ABS="$(cd "$(dirname "$T3_PATH_ABS")" && pwd)/$(basename "$T3_PATH_ABS")"
+        # Shape check early for clear errors; spend/CAS happens in reserve.
+        validate_t3_exception "$T3_PATH_ABS" "$SHA" >/dev/null \
+          || die "T3 exception invalid for source $SHA"
+        note "T3 exception provided for cycle claim on $SHA (state=$CYCLE_STATE)"
+      fi
+    elif [[ -n "$T3_EXCEPTION" ]]; then
+      T3_PATH_ABS="$T3_EXCEPTION"
+      [[ "$T3_PATH_ABS" == /* ]] || T3_PATH_ABS="$(cd "$(dirname "$T3_PATH_ABS")" && pwd)/$(basename "$T3_PATH_ABS")"
+      validate_t3_exception "$T3_PATH_ABS" "$SHA" >/dev/null || die "T3 exception invalid"
+    fi
+    # Bind T1-time dirty flags from the attempt receipt (authoritative).
+    eval "$(python3 - "$ATTEMPT_RECEIPT" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(f'BIND_HEAD={json.dumps(d.get("checkout_head") or "")}')
+print(f'BIND_SCRIPTS={json.dumps("true" if d.get("scripts_dirty") else "false")}')
+print(f'BIND_PACKAGING={json.dumps("true" if d.get("packaging_dirty") else "false")}')
+PY
+)"
+    [[ "$BIND_HEAD" == "$SHA" ]] \
+      || die "attempt receipt checkout_head missing/mismatched ($BIND_HEAD vs $SHA)"
+    reserve_production_cycle "$SHA" "$T1_ATTEMPT_ID" "$T3_PATH_ABS" \
+      "$BIND_HEAD" "$BIND_SCRIPTS" "$BIND_PACKAGING" \
+      || die "failed to reserve production cycle for $SHA"
+    note "production-cycle reserved for attempt $T1_ATTEMPT_ID (before external effects)"
+  fi
 
   # ---- effect: ghcr-rc-push (once) ----------------------------------------
   GHCR_ST="$(effect_status "$ATTEMPT_RECEIPT" "ghcr-rc-push")"
@@ -678,6 +1129,8 @@ PY
     && die "manifest contains placeholder/local refs"
 
   # ---- effect: production-build / apple notary (once) ---------------------
+  # Cycle already reserved before GHCR when NEED_FRESH_PROD=1. Complete path
+  # updates reserved → consumed after candidate_path is known.
   PROD_ST="$(effect_status "$ATTEMPT_RECEIPT" "production-build")"
   CANDIDATE_PATH=""
   SKIP_PROD=0
@@ -693,6 +1146,10 @@ print("ok")
 PY
       note "production-build already complete; reusing $CANDIDATE_PATH"
       SKIP_PROD=1
+      # Bind/upgrade cycle ledger if an older attempt predated status field.
+      if [[ "$(production_cycle_state "$SHA")" != "consumed" ]]; then
+        record_production_cycle_consumed "$SHA" "$T1_ATTEMPT_ID" "$CANDIDATE_PATH"
+      fi
     else
       die "completed production-build path missing; authorize a new attempt"
     fi
@@ -706,12 +1163,17 @@ PY
         "candidate_path": "'"$CANDIDATE_PATH"'",
       }))')"
       SKIP_PROD=1
+      if [[ "$(production_cycle_state "$SHA")" != "consumed" ]]; then
+        record_production_cycle_consumed "$SHA" "$T1_ATTEMPT_ID" "$CANDIDATE_PATH"
+      fi
     else
       die "production-build was interrupted without a candidate path (Apple cycle may have been spent); authorize a new T1 attempt — refusing silent re-notary"
     fi
   fi
 
   if [[ "$SKIP_PROD" != "1" ]]; then
+    # Reservation was claimed before GHCR; mark attempt effect starting, then
+    # build. Consumption is recorded as soon as candidate_path is known.
     attempt_set_effect "$ATTEMPT_RECEIPT" "production-build" \
       '{"status":"starting"}'
     note "dmg: production build (sign + notarize + staple) into candidate store — one cycle"
@@ -730,6 +1192,8 @@ PY
       "status": "complete",
       "candidate_path": "'"$CANDIDATE_PATH"'",
     }))')"
+    record_production_cycle_consumed "$SHA" "$T1_ATTEMPT_ID" "$CANDIDATE_PATH"
+    note "recorded production-cycle consumption for $SHA"
   fi
 
   note "verify + smoke the production candidate"
@@ -805,6 +1269,53 @@ PY
   [[ "$PACK_MODE" == "production" ]] || die "publish requires production pack_mode (got $PACK_MODE)"
   [[ "$STAPLED" == "true" ]] || die "publish requires stapled production candidate"
   [[ "v$SEMVER" == "$TAG" ]] || die "tag $TAG does not match candidate semver v$SEMVER"
+
+  # Publish binds to T1-time control-plane fields recorded on the production-
+  # cycle ledger (and requires both dirty flags recorded false). Hermetic
+  # rehearsal skips live binding (#0056/#0058).
+  if ! publish_hermetic_active; then
+    snapshot_checkout_control
+    [[ "$CHECKOUT_HEAD" == "$SOURCE_SHA" ]] \
+      || die "publish requires checkout HEAD=$SOURCE_SHA (got $CHECKOUT_HEAD)"
+    CYCLE_LEDGER="$(production_cycle_path "$SOURCE_SHA")"
+    [[ -f "$CYCLE_LEDGER" ]] \
+      || die "publish requires production-cycle ledger for $SOURCE_SHA (missing T1 bind)"
+    python3 - "$CYCLE_LEDGER" "$SOURCE_SHA" "$CHECKOUT_HEAD" <<'PY' \
+      || die "publish T1 checkout binding refused (see stderr)"
+import json, sys
+path, want_sha, head = sys.argv[1:]
+d = json.load(open(path))
+if d.get("source_sha") != want_sha:
+    raise SystemExit(f"cycle ledger source_sha mismatch: {d.get('source_sha')!r}")
+if "checkout_head" not in d or "scripts_dirty" not in d or "packaging_dirty" not in d:
+    raise SystemExit(
+        "cycle ledger lacks checkout_head/scripts_dirty/packaging_dirty; "
+        "refuse legacy unknowable history"
+    )
+if d.get("checkout_head") != head:
+    raise SystemExit(
+        f"recorded checkout_head {d.get('checkout_head')!r} != HEAD {head!r}"
+    )
+if d.get("checkout_head") != want_sha:
+    raise SystemExit(
+        f"recorded checkout_head {d.get('checkout_head')!r} != source {want_sha!r}"
+    )
+if d.get("scripts_dirty") is not False:
+    raise SystemExit(
+        f"recorded scripts_dirty must be false at T1 (got {d.get('scripts_dirty')!r})"
+    )
+if d.get("packaging_dirty") is not False:
+    raise SystemExit(
+        f"recorded packaging_dirty must be false at T1 (got {d.get('packaging_dirty')!r})"
+    )
+# Live tree must also be clean at publish (current state).
+print("publish_bind_ok")
+PY
+    [[ "$SCRIPTS_DIRTY" == "false" && "$PACKAGING_DIRTY" == "false" ]] \
+      || die "publish requires clean scripts/ and packaging/ now (scripts_dirty=$SCRIPTS_DIRTY packaging_dirty=$PACKAGING_DIRTY)"
+  else
+    note "hermetic: skip live checkout HEAD/dirty bind"
+  fi
 
   python3 - "$T2_PATH" "$CANDIDATE_ID" "$SOURCE_SHA" <<'PY' || die "T2 packet invalid for publication"
 import json, sys

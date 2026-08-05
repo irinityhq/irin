@@ -410,6 +410,194 @@ grep -q 'not eligible for a fresh push' "$TX" \
   || fail "fresh push must be gated on empty effect status"
 pass "attempt ledger refuses interrupted GHCR re-push and silent re-notary"
 
+# --- #0056 production-cycle + checkout binding -----------------------------
+grep -q 'production_cycle_consumed\|production-cycle-' "$TX" \
+  || fail "prepare must track production-cycle consumption per source SHA"
+grep -q 'notarization already consumed\|authorize a T3 exception' "$TX" \
+  || fail "second production cycle must refuse without T3"
+grep -q 'validate_t3_exception\|--t3-exception' "$TX" \
+  || fail "prepare must accept --t3-exception for a second cycle"
+grep -q 'reserve_production_cycle' "$TX" \
+  || fail "must exclusive-reserve production cycle before external effects"
+grep -q 'snapshot_checkout_control' "$TX" \
+  || fail "must snapshot checkout HEAD + scripts/packaging dirtiness"
+grep -q 'checkout_head' "$TX" || fail "attempt receipt must record checkout_head"
+grep -q 'scripts_dirty' "$TX" || fail "attempt receipt must record scripts_dirty"
+grep -q 'packaging_dirty' "$TX" || fail "attempt receipt must record packaging_dirty"
+# Both publish safeguards must be present independently (no OR alternation).
+grep -q 'publish requires checkout HEAD' "$TX" \
+  || fail "publish must require same checkout HEAD"
+grep -q 'publish requires clean scripts' "$TX" \
+  || fail "publish must require clean scripts/packaging"
+# Cycle claim must be scheduled before GHCR push effect.
+python3 - "$TX" <<'PY' || fail "production-cycle claim must precede ghcr-rc-push effect"
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+# Locate do_prepare body roughly via unique markers.
+i_claim = text.find("production-cycle claim before first irreversible effect")
+i_ghcr = text.find('# ---- effect: ghcr-rc-push (once)')
+if i_claim < 0 or i_ghcr < 0 or i_claim > i_ghcr:
+    raise SystemExit(1)
+sys.exit(0)
+PY
+# Live helper: cycle ledger + T3 single-use + recover + CAS (#0056/#0058)
+(
+  set -euo pipefail
+  # shellcheck disable=SC1090
+  IRIN_RELEASE_TX_LIB=1 source "$TX"
+  export IRIN_CANDIDATE_ROOT="$TEST_HOME/cycle-root"
+  mkdir -p "$IRIN_CANDIDATE_ROOT/.attempts/t3-spent"
+  CYCLE_SHA="$(python3 -c 'print("c" * 40)')"
+  HEAD="$CYCLE_SHA"
+  write_t3() {
+    local path="$1" sha="$2" words="$3"
+    python3 - "$path" "$sha" "$words" <<'PY'
+import json, sys
+path, sha, words = sys.argv[1:]
+json.dump({
+    "schema_version": 1,
+    "packet_kind": "t3",
+    "source_sha": sha,
+    "words": words,
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
+  }
+  # First cycle: exclusive reserve + consume with clean T1 bind
+  reserve_production_cycle "$CYCLE_SHA" "attempt-1" "" "$HEAD" "false" "false" >/dev/null
+  [[ "$(production_cycle_state "$CYCLE_SHA")" == "reserved" ]]
+  record_production_cycle_consumed "$CYCLE_SHA" "attempt-1" "$TEST_HOME/cand-a"
+  production_cycle_consumed "$CYCLE_SHA" || {
+    printf 'cycle must report consumed after record\n' >&2
+    exit 1
+  }
+  # Malformed ledger must fail closed
+  BAD_LEDGER="$(production_cycle_path "$CYCLE_SHA")"
+  printf '%s\n' '{"kind":"production-cycle","source_sha":"deadbeef"}' >"$BAD_LEDGER"
+  set +e
+  bad_out="$(production_cycle_state "$CYCLE_SHA" 2>&1)"
+  bad_ec=$?
+  set -e
+  [[ $bad_ec -ne 0 ]] || {
+    printf 'malformed ledger must die, got: %s\n' "$bad_out" >&2
+    exit 1
+  }
+  # Restore consumed with bind fields for T3 path
+  python3 - "$BAD_LEDGER" "$CYCLE_SHA" <<'PY'
+import json, sys
+path, sha = sys.argv[1:]
+json.dump({
+    "schema_version": 1,
+    "kind": "production-cycle",
+    "source_sha": sha,
+    "status": "consumed",
+    "notarization_consumed": True,
+    "production_attempt_id": "attempt-1",
+    "checkout_head": sha,
+    "scripts_dirty": False,
+    "packaging_dirty": False,
+    "spent_t3_digests": [],
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
+  # Empty / object words refuse
+  BAD_T3="$TEST_HOME/bad-t3.json"
+  printf '%s\n' "{\"schema_version\":1,\"packet_kind\":\"t3\",\"source_sha\":\"$CYCLE_SHA\",\"words\":\"\"}" >"$BAD_T3"
+  set +e
+  validate_t3_exception "$BAD_T3" "$CYCLE_SHA" >/dev/null 2>&1
+  t3_ec=$?
+  set -e
+  [[ $t3_ec -ne 0 ]] || { printf 'empty T3 words must refuse\n' >&2; exit 1; }
+  OBJ_T3="$TEST_HOME/obj-t3.json"
+  python3 - "$OBJ_T3" "$CYCLE_SHA" <<'PY'
+import json, sys
+path, sha = sys.argv[1:]
+json.dump({
+    "schema_version": 1,
+    "packet_kind": "t3",
+    "source_sha": sha,
+    "words": {"apple": sha},
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
+  set +e
+  validate_t3_exception "$OBJ_T3" "$CYCLE_SHA" >/dev/null 2>&1
+  t3_ec=$?
+  set -e
+  [[ $t3_ec -ne 0 ]] || { printf 'object T3 words must refuse\n' >&2; exit 1; }
+  # Second cycle with T3-A
+  T3A="$TEST_HOME/t3-a.json"
+  write_t3 "$T3A" "$CYCLE_SHA" "Authorize second apple notary cycle for source $CYCLE_SHA"
+  DIGEST_A="$(validate_t3_exception "$T3A" "$CYCLE_SHA")"
+  reserve_production_cycle "$CYCLE_SHA" "attempt-2" "$T3A" "$HEAD" "false" "false" >/dev/null
+  [[ "$(production_cycle_state "$CYCLE_SHA")" == "reserved" ]]
+  record_production_cycle_consumed "$CYCLE_SHA" "attempt-2" "$TEST_HOME/cand-b"
+  # Same T3-A must not authorize a third cycle
+  set +e
+  reuse_out="$(reserve_production_cycle "$CYCLE_SHA" "attempt-3" "$T3A" "$HEAD" "false" "false" 2>&1)"
+  reuse_ec=$?
+  set -e
+  [[ $reuse_ec -ne 0 ]] || {
+    printf 'reused T3 must refuse third cycle, got: %s\n' "$reuse_out" >&2
+    exit 1
+  }
+  [[ "$reuse_out" == *"already spent"* ]] || {
+    printf 'expected spent message, got: %s\n' "$reuse_out" >&2
+    exit 1
+  }
+  # Foreign reserved recovery requires T3; without T3 refuses
+  python3 - "$(production_cycle_path "$CYCLE_SHA")" "$CYCLE_SHA" "$DIGEST_A" <<'PY'
+import json, sys
+path, sha, dig = sys.argv[1:]
+json.dump({
+    "schema_version": 1,
+    "kind": "production-cycle",
+    "source_sha": sha,
+    "status": "reserved",
+    "notarization_consumed": False,
+    "production_attempt_id": "attempt-zombie",
+    "checkout_head": sha,
+    "scripts_dirty": False,
+    "packaging_dirty": False,
+    "spent_t3_digests": [dig],
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
+  set +e
+  fr_out="$(reserve_production_cycle "$CYCLE_SHA" "attempt-4" "" "$HEAD" "false" "false" 2>&1)"
+  fr_ec=$?
+  set -e
+  [[ $fr_ec -ne 0 ]] || {
+    printf 'foreign reserved without T3 must refuse\n' >&2
+    exit 1
+  }
+  # Fresh T3-B recovers abandoned reserved
+  T3B="$TEST_HOME/t3-b.json"
+  write_t3 "$T3B" "$CYCLE_SHA" "Authorize abandoned recovery apple cycle for source $CYCLE_SHA"
+  reserve_production_cycle "$CYCLE_SHA" "attempt-4" "$T3B" "$HEAD" "false" "false" >/dev/null
+  [[ "$(production_cycle_state "$CYCLE_SHA")" == "reserved" ]]
+  # Wrong SHA T3
+  WRONG_T3="$TEST_HOME/wrong-t3.json"
+  write_t3 "$WRONG_T3" "$(python3 -c 'print("d"*40)')" \
+    "Authorize second apple notary cycle for source $(python3 -c 'print("d"*40)')"
+  set +e
+  validate_t3_exception "$WRONG_T3" "$CYCLE_SHA" >/dev/null 2>&1
+  t3_ec=$?
+  set -e
+  [[ $t3_ec -ne 0 ]] || { printf 'T3 for wrong SHA must refuse\n' >&2; exit 1; }
+) || fail "production-cycle/T3 live helper failed"
+pass "production-cycle ledger + T3 exception + checkout binding (#0056)"
+# Static: T3 spent + flock serialization + publish uses recorded dirty
+grep -q 't3-spent\|t3_packet_sha256\|spent_t3_digests' "$TX" \
+  || fail "T3 must be single-use by digest"
+grep -q 'fcntl.flock\|LOCK_EX' "$TX" || fail "ledger transitions must use flock"
+grep -q 'refuse unknowable history\|lacks checkout_head' "$TX" \
+  || fail "legacy receipts without bind fields must refuse"
+grep -q 'recorded scripts_dirty must be false\|scripts_dirty must be false at T1' "$TX" \
+  || fail "publish must require recorded T1 dirty flags false"
+pass "production-cycle serialization + T3 single-use + publish T1 bind (#0058)"
+
 # --- [P1] prepare requires Candidate verified + runtime preflight ----------
 grep -q 'Candidate verified' "$TX" || fail "prepare must require Candidate verified"
 grep -q 'preflight_runtime_bounds\|free :8765\|port :8765' "$TX" \
