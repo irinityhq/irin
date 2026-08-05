@@ -417,13 +417,30 @@ grep -q 'notarization already consumed\|authorize a T3 exception' "$TX" \
   || fail "second production cycle must refuse without T3"
 grep -q 'validate_t3_exception\|--t3-exception' "$TX" \
   || fail "prepare must accept --t3-exception for a second cycle"
+grep -q 'reserve_production_cycle' "$TX" \
+  || fail "must exclusive-reserve production cycle before external effects"
 grep -q 'snapshot_checkout_control' "$TX" \
   || fail "must snapshot checkout HEAD + scripts/packaging dirtiness"
 grep -q 'checkout_head' "$TX" || fail "attempt receipt must record checkout_head"
 grep -q 'scripts_dirty' "$TX" || fail "attempt receipt must record scripts_dirty"
 grep -q 'packaging_dirty' "$TX" || fail "attempt receipt must record packaging_dirty"
-grep -q 'publish requires checkout HEAD\|publish requires clean scripts' "$TX" \
-  || fail "publish must require same HEAD and clean scripts/packaging"
+# Both publish safeguards must be present independently (no OR alternation).
+grep -q 'publish requires checkout HEAD' "$TX" \
+  || fail "publish must require same checkout HEAD"
+grep -q 'publish requires clean scripts' "$TX" \
+  || fail "publish must require clean scripts/packaging"
+# Cycle claim must be scheduled before GHCR push effect.
+python3 - "$TX" <<'PY' || fail "production-cycle claim must precede ghcr-rc-push effect"
+from pathlib import Path
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+# Locate do_prepare body roughly via unique markers.
+i_claim = text.find("production-cycle claim before first irreversible effect")
+i_ghcr = text.find('# ---- effect: ghcr-rc-push (once)')
+if i_claim < 0 or i_ghcr < 0 or i_claim > i_ghcr:
+    raise SystemExit(1)
+sys.exit(0)
+PY
 # Live helper: cycle ledger + T3 words gate (subshell — do not clobber IRIN_CANDIDATE_ROOT)
 (
   set -euo pipefail
@@ -432,11 +449,27 @@ grep -q 'publish requires checkout HEAD\|publish requires clean scripts' "$TX" \
   export IRIN_CANDIDATE_ROOT="$TEST_HOME/cycle-root"
   mkdir -p "$IRIN_CANDIDATE_ROOT/.attempts"
   CYCLE_SHA="$(python3 -c 'print("c" * 40)')"
+  # Exclusive reserve then consume
+  reserve_production_cycle "$CYCLE_SHA" "attempt-1" "" >/dev/null
+  [[ "$(production_cycle_state "$CYCLE_SHA")" == "reserved" ]]
   record_production_cycle_consumed "$CYCLE_SHA" "attempt-1" "$TEST_HOME/cand-a"
   production_cycle_consumed "$CYCLE_SHA" || {
     printf 'cycle must report consumed after record\n' >&2
     exit 1
   }
+  # Malformed ledger must fail closed (not "unconsumed")
+  BAD_LEDGER="$(production_cycle_path "$CYCLE_SHA")"
+  printf '%s\n' '{"kind":"production-cycle","source_sha":"deadbeef"}' >"$BAD_LEDGER"
+  set +e
+  bad_out="$(production_cycle_state "$CYCLE_SHA" 2>&1)"
+  bad_ec=$?
+  set -e
+  [[ $bad_ec -ne 0 ]] || {
+    printf 'malformed ledger must die, got: %s\n' "$bad_out" >&2
+    exit 1
+  }
+  # Restore consumed ledger for T3 override path
+  record_production_cycle_consumed "$CYCLE_SHA" "attempt-1" "$TEST_HOME/cand-a"
   BAD_T3="$TEST_HOME/bad-t3.json"
   printf '%s\n' "{\"schema_version\":1,\"packet_kind\":\"t3\",\"source_sha\":\"$CYCLE_SHA\",\"words\":\"\"}" >"$BAD_T3"
   set +e
@@ -445,6 +478,27 @@ grep -q 'publish requires checkout HEAD\|publish requires clean scripts' "$TX" \
   set -e
   [[ $t3_ec -ne 0 ]] || {
     printf 'empty T3 words must refuse\n' >&2
+    exit 1
+  }
+  # Non-string words refuse
+  OBJ_T3="$TEST_HOME/obj-t3.json"
+  python3 - "$OBJ_T3" "$CYCLE_SHA" <<'PY'
+import json, sys
+path, sha = sys.argv[1:]
+json.dump({
+    "schema_version": 1,
+    "packet_kind": "t3",
+    "source_sha": sha,
+    "words": {"apple": sha},
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
+  set +e
+  validate_t3_exception "$OBJ_T3" "$CYCLE_SHA" >/dev/null 2>&1
+  t3_ec=$?
+  set -e
+  [[ $t3_ec -ne 0 ]] || {
+    printf 'object T3 words must refuse\n' >&2
     exit 1
   }
   GOOD_T3="$TEST_HOME/good-t3.json"
@@ -460,6 +514,9 @@ json.dump({
 open(path, "a").write("\n")
 PY
   validate_t3_exception "$GOOD_T3" "$CYCLE_SHA" >/dev/null
+  # T3 override can re-reserve after consumed
+  reserve_production_cycle "$CYCLE_SHA" "attempt-2" "$GOOD_T3" >/dev/null
+  [[ "$(production_cycle_state "$CYCLE_SHA")" == "reserved" ]]
   WRONG_T3="$TEST_HOME/wrong-t3.json"
   python3 - "$WRONG_T3" <<'PY'
 import json, sys

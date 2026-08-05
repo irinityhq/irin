@@ -106,45 +106,167 @@ fi
 # Checkout control-plane binding (HEAD + scripts/packaging dirty)
 # ---------------------------------------------------------------------------
 # Sets CHECKOUT_HEAD, SCRIPTS_DIRTY, PACKAGING_DIRTY (true/false strings).
+# Do not parse porcelain path display (C-quoting breaks on spaces); query each
+# pathspec and treat any non-empty porcelain as dirty. Fail closed on git error.
 snapshot_checkout_control() {
   CHECKOUT_HEAD="$(git rev-parse HEAD)"
   SCRIPTS_DIRTY=false
   PACKAGING_DIRTY=false
-  local line path
-  while IFS= read -r line; do
-    [[ -n "$line" ]] || continue
-    # porcelain: XY SPACE path  (or rename: XY SPACE old -> new)
-    path="${line:3}"
-    path="${path%% -> *}"
-    case "$path" in
-      scripts|scripts/*) SCRIPTS_DIRTY=true ;;
-      packaging|packaging/*) PACKAGING_DIRTY=true ;;
-    esac
-  done < <(git status --porcelain --untracked-files=normal -- scripts packaging 2>/dev/null || true)
+  local status_out
+  if ! status_out="$(git status --porcelain --untracked-files=normal -- scripts 2>&1)"; then
+    die "git status failed for scripts/: $status_out"
+  fi
+  [[ -n "$status_out" ]] && SCRIPTS_DIRTY=true
+  if ! status_out="$(git status --porcelain --untracked-files=normal -- packaging 2>&1)"; then
+    die "git status failed for packaging/: $status_out"
+  fi
+  [[ -n "$status_out" ]] && PACKAGING_DIRTY=true
 }
 
 # ---------------------------------------------------------------------------
 # Production-cycle ledger: notarization spends one cycle per source SHA
 # ---------------------------------------------------------------------------
+# States: missing | reserved | consumed. Invalid ledger always aborts.
 production_cycle_path() {
   local sha="$1"
   printf '%s/.attempts/production-cycle-%s.json\n' "$IRIN_CANDIDATE_ROOT" "$sha"
 }
 
-# Returns 0 if a notarization cycle is already consumed for this source SHA.
-production_cycle_consumed() {
+# Prints: missing | reserved | consumed
+# Dies if the ledger file exists but is malformed / wrong SHA.
+production_cycle_state() {
   local sha="$1" path
   path="$(production_cycle_path "$sha")"
-  [[ -f "$path" ]] || return 1
-  python3 - "$path" "$sha" <<'PY'
+  if [[ ! -f "$path" ]]; then
+    printf 'missing\n'
+    return 0
+  fi
+  python3 - "$path" "$sha" <<'PY' || die "production-cycle ledger invalid for $sha (see stderr)"
 import json, sys
 path, sha = sys.argv[1:]
-d = json.load(open(path))
+try:
+    d = json.load(open(path))
+except Exception as e:
+    print(f"ledger unreadable: {e}", file=sys.stderr)
+    sys.exit(1)
+if d.get("kind") not in (None, "production-cycle"):
+    print(f"ledger kind invalid: {d.get('kind')!r}", file=sys.stderr)
+    sys.exit(1)
 if d.get("source_sha") != sha:
-    raise SystemExit(2)
+    print(
+        f"ledger source_sha mismatch: {d.get('source_sha')!r} != {sha!r}",
+        file=sys.stderr,
+    )
+    sys.exit(1)
+status = d.get("status")
+if status in ("reserved", "consumed"):
+    print(status)
+    sys.exit(0)
+# Legacy shape: notarization_consumed true without status
 if d.get("notarization_consumed") is True:
-    raise SystemExit(0)
-raise SystemExit(1)
+    print("consumed")
+    sys.exit(0)
+print(f"ledger status invalid: {status!r}", file=sys.stderr)
+sys.exit(1)
+PY
+}
+
+# Returns 0 if state is consumed (or reserved by anyone — budget already claimed).
+production_cycle_consumed() {
+  local sha="$1" state
+  state="$(production_cycle_state "$sha")"
+  [[ "$state" == "consumed" || "$state" == "reserved" ]]
+}
+
+# Exclusive claim before first external effect. Same-attempt reserved is ok.
+# Consumed requires a validated T3 path already in T3_EXCEPTION (caller gates).
+# Uses O_EXCL for the missing→reserved race; T3 override uses atomic replace.
+reserve_production_cycle() {
+  local sha="$1" attempt="$2" t3_path="${3:-}" path
+  path="$(production_cycle_path "$sha")"
+  mkdir -p "$(dirname "$path")"
+  python3 - "$path" "$sha" "$attempt" "$t3_path" <<'PY' || die "cannot reserve production cycle for $sha"
+import json, os, sys
+from datetime import datetime, timezone
+
+out, sha, attempt, t3_path = sys.argv[1:]
+now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def write_doc(doc, *, exclusive: bool) -> None:
+    payload = json.dumps(doc, sort_keys=True, indent=2) + "\n"
+    if exclusive:
+        flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
+        try:
+            fd = os.open(out, flags, 0o644)
+        except FileExistsError:
+            raise SystemExit("race: cycle ledger appeared during reserve")
+        try:
+            os.write(fd, payload.encode("utf-8"))
+        finally:
+            os.close(fd)
+        return
+    tmp = out + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        fh.write(payload)
+    os.replace(tmp, out)
+
+if not os.path.exists(out):
+    write_doc(
+        {
+            "schema_version": 1,
+            "kind": "production-cycle",
+            "source_sha": sha,
+            "status": "reserved",
+            "notarization_consumed": False,
+            "production_attempt_id": attempt,
+            "reserved_at": now,
+            "t3_exception_path": t3_path or None,
+        },
+        exclusive=True,
+    )
+    print("reserved_new")
+    sys.exit(0)
+
+try:
+    d = json.load(open(out))
+except Exception as e:
+    raise SystemExit(f"ledger unreadable: {e}")
+if d.get("source_sha") != sha:
+    raise SystemExit(f"ledger source_sha mismatch: {d.get('source_sha')!r}")
+status = d.get("status")
+if status is None and d.get("notarization_consumed") is True:
+    status = "consumed"
+if status == "reserved":
+    if d.get("production_attempt_id") == attempt:
+        print("reserved_same_attempt")
+        sys.exit(0)
+    raise SystemExit(
+        f"production cycle already reserved by attempt "
+        f"{d.get('production_attempt_id')!r}; refuse concurrent prepare"
+    )
+if status == "consumed":
+    if not t3_path:
+        raise SystemExit(
+            "production notarization already consumed; "
+            "authorize a T3 exception naming that SHA (--t3-exception PATH)"
+        )
+    write_doc(
+        {
+            "schema_version": 1,
+            "kind": "production-cycle",
+            "source_sha": sha,
+            "status": "reserved",
+            "notarization_consumed": False,
+            "production_attempt_id": attempt,
+            "reserved_at": now,
+            "prior_consumed_attempt_id": d.get("production_attempt_id"),
+            "t3_exception_path": t3_path,
+        },
+        exclusive=False,
+    )
+    print("reserved_t3_override")
+    sys.exit(0)
+raise SystemExit(f"ledger status invalid: {status!r}")
 PY
 }
 
@@ -156,13 +278,22 @@ record_production_cycle_consumed() {
 import json, os, sys
 from datetime import datetime, timezone
 out, sha, attempt, cand = sys.argv[1:]
+prev = {}
+if os.path.exists(out):
+    try:
+        prev = json.load(open(out))
+    except Exception:
+        prev = {}
 doc = {
     "schema_version": 1,
     "kind": "production-cycle",
     "source_sha": sha,
+    "status": "consumed",
     "notarization_consumed": True,
     "production_attempt_id": attempt,
     "production_candidate_path": cand,
+    "reserved_at": prev.get("reserved_at"),
+    "t3_exception_path": prev.get("t3_exception_path"),
     "consumed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
 }
 tmp = out + ".tmp"
@@ -192,9 +323,9 @@ if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
     raise SystemExit("T3 source_sha must be 40-char full git SHA (hex)")
 if sha.lower() != want_sha.lower():
     raise SystemExit(f"T3 source_sha {sha} does not match prepare source {want_sha}")
-words = str(d.get("words") or "")
-if not words.strip():
-    raise SystemExit("T3 words missing (must name the SHA and mention apple)")
+words = d.get("words")
+if not isinstance(words, str) or not words.strip():
+    raise SystemExit("T3 words must be a non-empty string (must name the SHA and mention apple)")
 low = words.lower()
 if "apple" not in low:
     raise SystemExit("T3 words must mention apple (Apple notary cycle override)")
@@ -668,10 +799,11 @@ PY
   PACKET_HASH="$(irin_sha256_file "$T1_PACKET_PATH")"
   if [[ -f "$ATTEMPT_RECEIPT" ]]; then
     note "resuming prior prepare attempt under same T1: $T1_ATTEMPT_ID"
-    python3 - "$ATTEMPT_RECEIPT" "$T1_SOURCE_SHA" "$T1_SIGNED_RC_ID" "$PACKET_HASH" <<'PY' \
+    python3 - "$ATTEMPT_RECEIPT" "$T1_SOURCE_SHA" "$T1_SIGNED_RC_ID" "$PACKET_HASH" \
+      "$SCRIPTS_DIRTY" "$PACKAGING_DIRTY" <<'PY' \
       || die "prior attempt receipt conflicts with current T1 inputs; authorize a new attempt"
-import json, sys
-path, sha, cid, phash = sys.argv[1:]
+import json, os, sys
+path, sha, cid, phash, scripts_dirty, packaging_dirty = sys.argv[1:]
 prev = json.load(open(path))
 if prev.get("source_sha") != sha:
     raise SystemExit("prior attempt source_sha differs")
@@ -682,7 +814,30 @@ if prev.get("t1_packet_sha256") and prev["t1_packet_sha256"] != phash:
 if prev.get("result") == "PASS" and prev.get("production_candidate_path"):
     # Fully complete attempt — still allow re-entry to re-verify and print path.
     pass
-print("resume_ok")
+# Backfill checkout binding on older receipts; refuse mismatched binding.
+changed = False
+if prev.get("checkout_head") is None:
+    prev["checkout_head"] = sha
+    changed = True
+elif prev.get("checkout_head") != sha:
+    raise SystemExit(
+        f"prior attempt checkout_head {prev.get('checkout_head')!r} != HEAD {sha!r}"
+    )
+if "scripts_dirty" not in prev:
+    prev["scripts_dirty"] = scripts_dirty == "true"
+    changed = True
+if "packaging_dirty" not in prev:
+    prev["packaging_dirty"] = packaging_dirty == "true"
+    changed = True
+if changed:
+    tmp = path + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as fh:
+        json.dump(prev, fh, sort_keys=True, indent=2)
+        fh.write("\n")
+    os.replace(tmp, path)
+    print("resume_ok_backfilled")
+else:
+    print("resume_ok")
 PY
   else
     python3 - "$ATTEMPT_RECEIPT" "$T1_ATTEMPT_ID" "$SHA" "$T1_SIGNED_RC_ID" \
@@ -724,6 +879,44 @@ PY
   echo "source_sha=$SHA images_tag=$IMAGES_TAG mode=prepare release_version=$IRIN_RELEASE_VERSION"
   echo "signed_rc=$SIGNED_RC_PATH"
   echo "t1_attempt=$T1_ATTEMPT_ID"
+
+  # ---- production-cycle claim before first irreversible effect (#0056) ----
+  # Peek production-build status: complete/recoverable skip re-reserve; fresh
+  # needs exclusive reservation (T3 if already consumed) before GHCR/notary.
+  PROD_ST_EARLY="$(effect_status "$ATTEMPT_RECEIPT" "production-build")"
+  PROD_PATH_EARLY=""
+  if [[ "$PROD_ST_EARLY" == "complete" || "$PROD_ST_EARLY" == "starting" ]]; then
+    PROD_PATH_EARLY="$(python3 -c 'import json,sys; e=(json.load(open(sys.argv[1])).get("effects") or {}).get("production-build") or {}; print(e.get("candidate_path") or "")' "$ATTEMPT_RECEIPT")"
+  fi
+  NEED_FRESH_PROD=1
+  if [[ "$PROD_ST_EARLY" == "complete" && -n "$PROD_PATH_EARLY" && -d "$PROD_PATH_EARLY" ]]; then
+    NEED_FRESH_PROD=0
+  elif [[ "$PROD_ST_EARLY" == "starting" && -n "$PROD_PATH_EARLY" && -d "$PROD_PATH_EARLY" ]]; then
+    NEED_FRESH_PROD=0
+  elif [[ "$PROD_ST_EARLY" == "starting" && -z "$PROD_PATH_EARLY" ]]; then
+    # Interrupted mid-notary without path: refuse before GHCR re-entry.
+    die "production-build was interrupted without a candidate path (Apple cycle may have been spent); authorize a new T1 attempt — refusing silent re-notary"
+  fi
+  if [[ "$NEED_FRESH_PROD" == "1" ]]; then
+    CYCLE_STATE="$(production_cycle_state "$SHA")"
+    T3_PATH_ABS=""
+    if [[ "$CYCLE_STATE" == "consumed" ]]; then
+      [[ -n "$T3_EXCEPTION" ]] \
+        || die "production notarization already consumed for source $SHA; authorize a T3 exception naming that SHA (--t3-exception PATH)"
+      validate_t3_exception "$T3_EXCEPTION" "$SHA" \
+        || die "T3 exception invalid for second production cycle on $SHA"
+      T3_PATH_ABS="$T3_EXCEPTION"
+      [[ "$T3_PATH_ABS" == /* ]] || T3_PATH_ABS="$(cd "$(dirname "$T3_PATH_ABS")" && pwd)/$(basename "$T3_PATH_ABS")"
+      note "T3 exception authorizes second production cycle for $SHA"
+    elif [[ -n "$T3_EXCEPTION" ]]; then
+      validate_t3_exception "$T3_EXCEPTION" "$SHA" || die "T3 exception invalid"
+      T3_PATH_ABS="$T3_EXCEPTION"
+      [[ "$T3_PATH_ABS" == /* ]] || T3_PATH_ABS="$(cd "$(dirname "$T3_PATH_ABS")" && pwd)/$(basename "$T3_PATH_ABS")"
+    fi
+    reserve_production_cycle "$SHA" "$T1_ATTEMPT_ID" "$T3_PATH_ABS" \
+      || die "failed to reserve production cycle for $SHA"
+    note "production-cycle reserved for attempt $T1_ATTEMPT_ID (before external effects)"
+  fi
 
   # ---- effect: ghcr-rc-push (once) ----------------------------------------
   GHCR_ST="$(effect_status "$ATTEMPT_RECEIPT" "ghcr-rc-push")"
@@ -796,6 +989,8 @@ PY
     && die "manifest contains placeholder/local refs"
 
   # ---- effect: production-build / apple notary (once) ---------------------
+  # Cycle already reserved before GHCR when NEED_FRESH_PROD=1. Complete path
+  # updates reserved → consumed after candidate_path is known.
   PROD_ST="$(effect_status "$ATTEMPT_RECEIPT" "production-build")"
   CANDIDATE_PATH=""
   SKIP_PROD=0
@@ -811,8 +1006,8 @@ print("ok")
 PY
       note "production-build already complete; reusing $CANDIDATE_PATH"
       SKIP_PROD=1
-      # Bind cycle ledger if an older attempt predated the ledger file.
-      if ! production_cycle_consumed "$SHA"; then
+      # Bind/upgrade cycle ledger if an older attempt predated status field.
+      if [[ "$(production_cycle_state "$SHA")" != "consumed" ]]; then
         record_production_cycle_consumed "$SHA" "$T1_ATTEMPT_ID" "$CANDIDATE_PATH"
       fi
     else
@@ -828,7 +1023,7 @@ PY
         "candidate_path": "'"$CANDIDATE_PATH"'",
       }))')"
       SKIP_PROD=1
-      if ! production_cycle_consumed "$SHA"; then
+      if [[ "$(production_cycle_state "$SHA")" != "consumed" ]]; then
         record_production_cycle_consumed "$SHA" "$T1_ATTEMPT_ID" "$CANDIDATE_PATH"
       fi
     else
@@ -837,21 +1032,8 @@ PY
   fi
 
   if [[ "$SKIP_PROD" != "1" ]]; then
-    # Notarization spends the one-production-cycle budget for this source SHA.
-    # A second cycle needs an explicit T3 exception naming the SHA (#0056).
-    if production_cycle_consumed "$SHA"; then
-      if [[ -n "$T3_EXCEPTION" ]]; then
-        validate_t3_exception "$T3_EXCEPTION" "$SHA" \
-          || die "T3 exception invalid for second production cycle on $SHA"
-        note "T3 exception authorizes second production cycle for $SHA"
-      else
-        die "production notarization already consumed for source $SHA; authorize a T3 exception naming that SHA (--t3-exception PATH)"
-      fi
-    elif [[ -n "$T3_EXCEPTION" ]]; then
-      # Allow providing T3 early; still validate shape if present.
-      validate_t3_exception "$T3_EXCEPTION" "$SHA" \
-        || die "T3 exception invalid"
-    fi
+    # Reservation was claimed before GHCR; mark attempt effect starting, then
+    # build. Consumption is recorded as soon as candidate_path is known.
     attempt_set_effect "$ATTEMPT_RECEIPT" "production-build" \
       '{"status":"starting"}'
     note "dmg: production build (sign + notarize + staple) into candidate store — one cycle"
