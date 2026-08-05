@@ -3,12 +3,12 @@
 # This is a live provider run and incurs provider charges;
 # the offline test `grok_chair_fixture_all_pass` validates the corpus forever after.
 #
-# Usage (from repo root): bash tests/fixtures/grok_chair/generate.sh
+# Usage (from repo root): bash council-rs/tests/fixtures/grok_chair/generate.sh
 # Requires XAI_API_KEY + NVIDIA_API_KEY (the canary cabinet's two seats).
 set -euo pipefail
 cd "$(git rev-parse --show-toplevel)"
-DIR=tests/fixtures/grok_chair
-CAB=cabinets/triage.canary-novertex.yaml
+DIR=council-rs/tests/fixtures/grok_chair
+CAB=council-rs/cabinets/triage.canary-novertex.yaml
 : "${XAI_API_KEY:?export XAI_API_KEY in the login-shell environment}"
 : "${NVIDIA_API_KEY:?export NVIDIA_API_KEY in the login-shell environment}"
 

@@ -7,9 +7,11 @@ use super::{watch_distinct_genesis, WatchDb};
 
 /// Length-prefixed preimage for a row in the watch audit chain (`watch_fires`).
 /// Used by both Phase 2 sentinel fires and Phase 3 directive lifecycle events.
-/// Must stay in sync with the reference encoder
-/// `tests/preimage_vectors.py:build_watch_preimage` (v3 base) /
-/// `build_watch_preimage_v4` (v4 envelope append).
+/// Reference encoder for offline corpus regen:
+/// `tests/preimage_vectors.py:build_watch_preimage` (v3) /
+/// `build_watch_preimage_v4` (v4). Integration tests call this function
+/// directly (see `tests/proptest_preimage.rs`) so the corpus cannot drift
+/// from the product hash-chain path.
 ///
 /// Length-prefixed preimage for a `watch_fires` row, version-tagged (W3 item 3).
 ///
@@ -25,7 +27,10 @@ use super::{watch_distinct_genesis, WatchDb};
 ///   The envelope is hashed exactly as stored (insert writes JCS-canonical;
 ///   verify never re-canonicalizes), so an UPDATE to `envelope_json` flips the
 ///   recomputed hash and `verify_chain` reports the break.
-pub(crate) fn compute_watch_fire_preimage(
+///
+/// Pub (not `pub(crate)`) so integration tests re-verify against production —
+/// same seam as `compute_arm_audit_preimage`.
+pub fn compute_watch_fire_preimage(
     tenant: &str,
     sentinel: &str,
     fired_at_ms: i64,

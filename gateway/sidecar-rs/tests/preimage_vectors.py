@@ -21,7 +21,10 @@ column is the SELECTOR for the field set; it is NEVER itself a hashed field
     v4 preimage over an empty envelope is still NOT equal to the v3 preimage:
     the version tag, not byte-equality, is the discriminator.
 
-Mirrors `src/watch/db.rs::compute_watch_fire_preimage`.
+Mirrors `src/watch/db/fires.rs::compute_watch_fire_preimage` (re-exported from
+`watch::db`). The Rust integration suite binds that production function
+directly (`tests/proptest_preimage.rs`); this script is the offline corpus
+regenerator and must stay byte-identical to it.
 """
 
 from __future__ import annotations
