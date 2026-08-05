@@ -35,34 +35,6 @@ pub fn default_secret_store() -> KeychainSecretStore {
     KeychainSecretStore
 }
 
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct GatewayChildEnv {
-    pub api_key: String,
-    pub gateway_url: String,
-}
-
-#[allow(dead_code)]
-pub fn gateway_child_env_if_ready(
-    store: &dyn SecretStore,
-) -> Result<Option<GatewayChildEnv>, String> {
-    // Fresh authority sample: gateway_pack_status_fresh loads the key once and
-    // runs /v1/models live (never the presentation cache). If the pack is
-    // authenticated-ready, load the key again for the env — this authority path
-    // is one-shot per spawn, not on the 5s background tick, so the extra get
-    // does not produce repeated prompts.
-    let st = gateway_pack_status_fresh(store);
-    if !st.enabled || st.state != GatewayPackState::AuthenticatedReady {
-        return Ok(None);
-    }
-    let key =
-        load_gw_api_key(store)?.ok_or_else(|| "GW_API_KEY missing from Keychain".to_string())?;
-    Ok(Some(GatewayChildEnv {
-        api_key: key,
-        gateway_url: DESKTOP_GATEWAY_URL.to_string(),
-    }))
-}
-
 /// Launch-time revalidation of a persisted governed route: Docker daemon up,
 /// the owned pack project running, `/health` OK, and the Keychain-held client
 /// key still passing `/v1/models`. Proves pack authentication only — at launch

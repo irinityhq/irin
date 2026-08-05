@@ -1,7 +1,7 @@
 use super::*;
 use crate::docker_cli::DESKTOP_COMPOSE_PROJECT;
 use crate::gateway_pack::health::compose_ls_reports_running;
-use crate::gateway_pack::launch::gateway_child_env_if_ready;
+use crate::gateway_pack::launch::status_with_council_route;
 use crate::gateway_pack::types::{GatewayPackState, GatewayPackStatus};
 use crate::keychain::{
     store_gw_api_key, MemorySecretStore, SecretStore, GW_API_KEY_ACCOUNT, KEYCHAIN_SERVICE,
@@ -512,7 +512,7 @@ fn owned_council_route_record_invalidates_status_cache() {
 }
 
 #[test]
-fn credential_authority_path_bypasses_warm_cache() {
+fn status_with_council_route_bypasses_warm_cache() {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     static CALLS: AtomicUsize = AtomicUsize::new(0);
@@ -536,14 +536,19 @@ fn credential_authority_path_bypasses_warm_cache() {
         assert_eq!(CALLS.load(Ordering::SeqCst), 1);
         // World dies while cache is warm.
         READY.store(false, Ordering::SeqCst);
-        // The credential-returning helper must take a fresh sample rather
-        // than returning a key based on the warm presentation cache.
-        let env = gateway_child_env_if_ready(&store).expect("authority sample");
-        assert!(env.is_none());
+        // Live authority owner must take a fresh sample rather than returning
+        // truth based on the warm presentation cache.
+        let fresh = status_with_council_route(&store, false, false);
+        // status_with_council_route re-applies refresh_predicates(false) for the
+        // post-lifecycle view, so hard_down may clear on the returned status;
+        // the invariant is still: bypass warm ready, force a second probe, and
+        // leave presentation cache on the new truth.
+        assert!(!fresh.governed_ready);
         assert_eq!(CALLS.load(Ordering::SeqCst), 2);
         // The authority sample also re-caches the new truth for presentation.
         let after = gateway_pack_status(&store);
         assert!(after.hard_down);
+        assert!(!after.governed_ready);
         assert_eq!(CALLS.load(Ordering::SeqCst), 2);
         let _ = store;
     });

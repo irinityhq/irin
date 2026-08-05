@@ -21,7 +21,6 @@ local patterns = {
     { name = "gcp_api_key",    pattern = "AIza[0-9A-Za-z%-_]+" },
     -- modern formats actually brokered (missed by original)
     { name = "xai_key",        pattern = "xai%-[A-Za-z0-9%-_]+" },
-    { name = "anthropic_key",  pattern = "sk%-ant%-[A-Za-z0-9%-_]+" },
     { name = "nvidia_key",     pattern = "nvapi%-[A-Za-z0-9%-_]+" },
     { name = "google_oauth",   pattern = "ya29%.[A-Za-z0-9%-_]+" },
     { name = "github_pat_v2",  pattern = "github_pat_[A-Za-z0-9%-_]+" }
@@ -42,16 +41,12 @@ function _M.scrub(text)
     for _, p in ipairs(patterns) do
         -- lua pattern matching doesn't return count of replacements easily
         -- so we do a loop to count them accurately
-        local count = 0
         local replacement = "[REDACTED:" .. p.name .. "]"
-
-        -- gmatch check first avoids string.gsub overhead if pattern not present
-        if current_text:match(p.pattern) then
-            current_text, count = current_text:gsub(p.pattern, replacement)
-            if count > 0 then
-                total_redactions = total_redactions + count
-                matched_patterns[p.name] = (matched_patterns[p.name] or 0) + count
-            end
+        local count
+        current_text, count = current_text:gsub(p.pattern, replacement)
+        if count > 0 then
+            total_redactions = total_redactions + count
+            matched_patterns[p.name] = (matched_patterns[p.name] or 0) + count
         end
     end
 
