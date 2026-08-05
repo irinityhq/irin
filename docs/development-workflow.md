@@ -114,6 +114,26 @@ repeats the complete code matrix after merge so individually green branches
 cannot produce an untested combined tree. Scheduled and manual proof continue
 to own SBOM generation.
 
+## Merge method
+
+`main` does **not** require linear history. Choose the merge button by how
+much of the branch graph is evidence:
+
+| Method | Use when |
+| --- | --- |
+| **Create a merge commit** (preferred for multi-commit work) | Characterization tests, named phase splits, stacked independently proven commits, or any PR where intermediate SHAs are part of the proof trail |
+| **Squash and merge** | Small single-purpose fixes (one or two tightly related commits) where the intermediate commits are not evidence |
+| **Rebase and merge** | Not enabled by default. It rewrites SHAs, so receipts and notes that cite pre-merge commit IDs no longer match `main` |
+
+Prefer merge commits for the characterization-heavy work that defines this
+project: intermediate commits on `main` are not noise; they record *how* the
+change was validated. Squash remains available for trivial shipping fixes.
+
+After a merge commit lands, `git log --first-parent origin/main` is the clean
+“what landed on main” view. Squash merges leave local branch tips that are not
+ancestors of `origin/main`; prefer `make worktree-remove` after merge, and see
+`scripts/worktree-gc.sh` when cleaning squash leftovers.
+
 ## Product regression boundary
 
 The War Room gate has three distinct proofs:
