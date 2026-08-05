@@ -40,8 +40,7 @@ pub use config::{
     WRITER_CLAIM_HEARTBEAT_MS_DEFAULT, WRITER_CLAIM_STALE_MS_DEFAULT,
 };
 
-pub(crate) use fires::compute_watch_fire_preimage;
-pub use fires::{CommittedFire, FireRow, VerifyBreak, VerifyResult};
+pub use fires::{compute_watch_fire_preimage, CommittedFire, FireRow, VerifyBreak, VerifyResult};
 
 pub(crate) use registry::probation_target_for_clear;
 pub use registry::{DurableClearOutcome, RegistryRow, TenantPolicy};

@@ -1,16 +1,18 @@
-//! Property test on the length-prefixed v3 preimage builder.
+//! Property + corpus tests on the production Watch fire preimage builder.
 //!
-//! Asserts no field-permutation collisions even with adversarial inputs
-//! containing `|` and `:` literals. Pure-function test — no dependency on
-//! the production database. This proves the preimage scheme is sound in
-//! isolation.
+//! Binds `gateway_sidecar::watch::db::compute_watch_fire_preimage` (fires.rs),
+//! not a local mirror. Asserts no field-permutation collisions under
+//! adversarial `|` / `:` inputs, and that the committed v3 corpus hashes
+//! match the product scheme. Pure function — no database.
 
+use gateway_sidecar::watch::db::compute_watch_fire_preimage;
 use proptest::prelude::*;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
+/// v3 Watch fire preimage via the production builder (`envelope_json = None`).
 fn preimage_v3(
     tenant: &str,
     sentinel: &str,
@@ -19,21 +21,8 @@ fn preimage_v3(
     reason: &str,
     prev_hash: &str,
 ) -> String {
-    let fired_at_str = fired_at.to_string();
-    format!(
-        "{}:{}|{}:{}|{}:{}|{}:{}|{}:{}|{}:{}",
-        tenant.len(),
-        tenant,
-        sentinel.len(),
-        sentinel,
-        fired_at_str.len(),
-        fired_at_str,
-        state_json.len(),
-        state_json,
-        reason.len(),
-        reason,
-        prev_hash.len(),
-        prev_hash
+    compute_watch_fire_preimage(
+        tenant, sentinel, fired_at, state_json, reason, prev_hash, None,
     )
 }
 
