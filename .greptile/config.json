@@ -4,7 +4,7 @@
   "commentTypes": ["logic", "syntax"],
   "triggerOnUpdates": false,
   "statusCheck": true,
-  "ignorePatterns": "target/\nnode_modules/\n.next/\nruns/\nsessions/\n*.jsonl\n_archive/\n*.lock",
+  "ignorePatterns": "target/\nnode_modules/\n.next/\nruns/\nsessions/\n*.jsonl\n_archive/",
   "summarySection": {
     "included": true
   },
