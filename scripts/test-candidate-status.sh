@@ -508,10 +508,26 @@ pass "symlink lexically under store but physically outside is refused"
 
 # --- [P1] overrides ignored without HERMETIC=1 / real-store shape ----------
 # Simulate a non-hermetic invocation: drop HERMETIC, keep green overrides.
-# With HERMETIC unset, reporter must not trust overrides (will query real git/gh
-# for synthetic SHA → not green → below Candidate verified).
+# With HERMETIC unset, reporter must not trust overrides. Stub gh + refuse
+# git fetch so this case stays zero-network on hosted detect-changes (facts
+# become unavailable rather than Candidate verified).
+STUB_BIN="$(mktemp -d "$TEST_HOME/stub-bin.XXXXXX")"
+REAL_GIT="$(command -v git)"
+printf '#!/bin/sh\nexit 1\n' >"$STUB_BIN/gh"
+cat >"$STUB_BIN/git" <<EOF
+#!/bin/sh
+for a in "\$@"; do
+  if [ "\$a" = "fetch" ]; then
+    echo "stub-git: fetch refused (hermetic candidate-status contract)" >&2
+    exit 1
+  fi
+done
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$STUB_BIN/gh" "$STUB_BIN/git"
 set +e
 out="$(
+  PATH="$STUB_BIN:$PATH" \
   IRIN_CANDIDATE_STATUS_HERMETIC='' \
   IRIN_CANDIDATE_STATUS_SOURCE_ON_MAIN=true \
   IRIN_CANDIDATE_STATUS_CI_REQUIRED=true \

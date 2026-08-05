@@ -381,11 +381,48 @@ else
   pass "intentional exact_candidate supersets modeled (${#intentional_superset_cand[@]} paths)"
 fi
 
-# Hosted invocation: detect-changes must call this script (not only path lists).
-if ! grep -Eq '^[[:space:]]+scripts/test-ci-control-plane\.sh[[:space:]]*$' "$CI_YML"; then
-  fail "ci.yml must run scripts/test-ci-control-plane.sh as a hosted step"
-else
-  pass "ci.yml hosts test-ci-control-plane.sh in detect-changes"
+# Hosted invocation: detect-changes job must call these scripts (not only
+# path lists, and not a bare match elsewhere in the workflow).
+# Extract the detect-changes job block so moving invocations to another job
+# fails this contract.
+DETECT_CHANGES_JOB="$(python3 - "$CI_YML" <<'PY'
+from pathlib import Path
+import re
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+# Top-level jobs are indented two spaces: "  name:"
+m = re.search(
+    r"(?m)^  detect-changes:\n((?:    .*\n|      .*\n|\n)*)",
+    text,
+)
+if not m:
+    sys.stderr.write("ci.yml missing detect-changes job\n")
+    sys.exit(1)
+sys.stdout.write(m.group(0))
+PY
+)" || {
+  fail "ci.yml missing detect-changes job block"
+  DETECT_CHANGES_JOB=""
+}
+if [[ -n "$DETECT_CHANGES_JOB" ]]; then
+  host_ok=true
+  if ! grep -Eq '^[[:space:]]+scripts/test-ci-control-plane\.sh[[:space:]]*$' <<<"$DETECT_CHANGES_JOB"; then
+    fail "detect-changes must run scripts/test-ci-control-plane.sh as a hosted step"
+    host_ok=false
+  fi
+  # Shipping-method hermetics must also be bare hosted steps (not path-filter-only).
+  # Regression guard for #0043 / #0018 shape: filter triggers without execution.
+  if ! grep -Eq '^[[:space:]]+scripts/test-candidate-status\.sh[[:space:]]*$' <<<"$DETECT_CHANGES_JOB"; then
+    fail "detect-changes must run scripts/test-candidate-status.sh as a hosted step"
+    host_ok=false
+  fi
+  if ! grep -Eq '^[[:space:]]+scripts/test-release-transaction-w3\.sh[[:space:]]*$' <<<"$DETECT_CHANGES_JOB"; then
+    fail "detect-changes must run scripts/test-release-transaction-w3.sh as a hosted step"
+    host_ok=false
+  fi
+  if $host_ok; then
+    pass "detect-changes hosts control-plane + candidate-status + W3 contracts"
+  fi
 fi
 
 # ---------------------------------------------------------------------------
