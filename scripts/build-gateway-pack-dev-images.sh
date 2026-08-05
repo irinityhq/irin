@@ -47,7 +47,9 @@ docker build \
 echo "=== prepare sidecar docker context ==="
 # Sidecar Dockerfile needs monorepo root + a real .git (not a worktree gitfile).
 CTX=""
+HEAD_INDEX=""
 cleanup_ctx() {
+  [[ -n "${HEAD_INDEX:-}" && -f "$HEAD_INDEX" ]] && rm -f "$HEAD_INDEX" || true
   if [[ -n "${CTX:-}" && -d "${CTX:-}" ]]; then
     rm -rf "$CTX"
   fi
@@ -56,13 +58,17 @@ trap cleanup_ctx EXIT
 
 if [[ -f "$ROOT/.git" ]]; then
   CTX="$(mktemp -d "${TMPDIR:-/tmp}/irin-gw-pack-ctx.XXXXXX")"
+  HEAD_INDEX="$(mktemp "${TMPDIR:-/tmp}/irin-head-idx.XXXXXX")"
   echo "worktree detected; materializing self-contained context at $CTX"
   COMMON="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)"
-  # Full HEAD tree via checkout-index — not `git archive`, which applies
-  # export-ignore and drops tracked paths (examples/, etc.). Those missing
-  # paths made `git status` non-empty after read-tree, so build.rs baked
-  # GW_BUILD_DIRTY=true on a clean monorepo (false rehearsal-only arm).
-  git -C "$ROOT" checkout-index --all --prefix="$CTX/"
+  # Full commit tree via checkout-index against a temporary HEAD index — not
+  # `git archive` (export-ignore drops tracked paths → false GW_BUILD_DIRTY)
+  # and not the worktree index (staged edits would double-apply when the dirty
+  # overlay runs `git diff HEAD` under IRIN_GATEWAY_PACK_REQUIRE_CLEAN=0).
+  GIT_INDEX_FILE="$HEAD_INDEX" git -C "$ROOT" read-tree HEAD
+  GIT_INDEX_FILE="$HEAD_INDEX" git -C "$ROOT" checkout-index --all --prefix="$CTX/"
+  rm -f "$HEAD_INDEX"
+  HEAD_INDEX=""
   mkdir -p "$CTX/.git/objects" "$CTX/.git/refs/heads" "$CTX/.git/info"
   rsync -a "$COMMON/objects/" "$CTX/.git/objects/"
   if [[ -f "$COMMON/packed-refs" ]]; then
@@ -86,6 +92,7 @@ EOF
   # fall back to HEAD. Overlay tracked changes as a binary-safe patch and
   # copy only Git-visible untracked source. The temporary repository then
   # truthfully reports dirty provenance to build.rs inside Docker.
+  # Base tree is HEAD-only so this overlay is the sole dirt application.
   if [[ "$DIRTY_COUNT" != "0" ]]; then
     if ! git -C "$ROOT" diff --quiet HEAD --; then
       git -C "$ROOT" diff --binary HEAD -- |

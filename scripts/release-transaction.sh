@@ -148,6 +148,20 @@ PY
 }
 
 # ---------------------------------------------------------------------------
+# Local tag peel (non-hermetic publish)
+# ---------------------------------------------------------------------------
+# Peel a local annotated/lightweight tag to a full commit SHA, or print empty
+# if the tag is absent. Do NOT use bare `git rev-parse TAG^{commit} || true`:
+# on failure rev-parse echoes the input (e.g. "v0.1.3^{commit}"), which a
+# first-publish path would treat as a real SHA and refuse.
+local_tag_peeled_or_empty() {
+  local tag="$1"
+  if git rev-parse -q --verify "${tag}^{commit}" >/dev/null 2>&1; then
+    git rev-parse "${tag}^{commit}"
+  fi
+}
+
+# ---------------------------------------------------------------------------
 # Shared preflight
 # ---------------------------------------------------------------------------
 preflight_machine() {
@@ -854,13 +868,7 @@ PY
     # Never inspect or mutate real tags under hermetic rehearsal.
     LOCAL_TAG_SHA=""
   else
-    # git rev-parse prints the input and fails when the tag is absent; do not
-    # treat that echo as a real peeled SHA (would block first publish of vX.Y.Z).
-    if git rev-parse -q --verify "${TAG}^{commit}" >/dev/null 2>&1; then
-      LOCAL_TAG_SHA="$(git rev-parse "${TAG}^{commit}")"
-    else
-      LOCAL_TAG_SHA=""
-    fi
+    LOCAL_TAG_SHA="$(local_tag_peeled_or_empty "$TAG")"
     if [[ -n "$LOCAL_TAG_SHA" && "$LOCAL_TAG_SHA" != "$SOURCE_SHA" ]]; then
       die "local tag $TAG points at $LOCAL_TAG_SHA, candidate wants $SOURCE_SHA"
     fi

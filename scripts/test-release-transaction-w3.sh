@@ -589,4 +589,35 @@ for cmd in release-transaction install-verify candidate-status record-acceptance
 done
 pass "Makefile help lists W3/W5 public commands"
 
+# --- local tag peel: absent tag must not echo TAG^{commit} -----------------
+# Hermetic publish always sets LOCAL_TAG_SHA=""; this is the non-hermetic first
+# publish regression for the peel helper used by do_publish.
+grep -q 'local_tag_peeled_or_empty' "$TX" \
+  || fail "release-transaction must define local_tag_peeled_or_empty for publish"
+grep -q 'rev-parse -q --verify' "$TX" \
+  || fail "local tag peel must use rev-parse -q --verify (not bare || true echo)"
+PEEL_REPO="$(mktemp -d "$TEST_HOME/peel-repo.XXXXXX")"
+git -C "$PEEL_REPO" init -q
+git -C "$PEEL_REPO" config user.email "w3@test.local"
+git -C "$PEEL_REPO" config user.name "w3"
+git -C "$PEEL_REPO" commit -q --allow-empty -m "peel-base"
+# Source only the helper function (script is not designed as a library).
+# shellcheck disable=SC1090
+eval "$(
+  sed -n '/^local_tag_peeled_or_empty()/,/^}/p' "$TX"
+)"
+(
+  cd "$PEEL_REPO"
+  # Buggy pattern still echoes the input on missing tags.
+  bad="$(git rev-parse 'v0.0.0-absent^{commit}' 2>/dev/null || true)"
+  [[ -n "$bad" ]] || fail "expected buggy rev-parse || true to leave a non-empty string"
+  got="$(local_tag_peeled_or_empty 'v0.0.0-absent' || true)"
+  [[ -z "$got" ]] || fail "absent local tag must peel empty (got $got)"
+  HEAD_SHA="$(git rev-parse HEAD)"
+  git tag -a 'v0.0.0-present' -m "t" HEAD
+  got2="$(local_tag_peeled_or_empty 'v0.0.0-present')"
+  [[ "$got2" == "$HEAD_SHA" ]] || fail "present tag peel mismatch: $got2 != $HEAD_SHA"
+)
+pass "local_tag_peeled_or_empty: absent empty, present peels SHA"
+
 printf '\nAll W3 release-transaction contracts passed.\n'
