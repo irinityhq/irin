@@ -5,6 +5,10 @@ on:
   # checks and aggregate context even for documentation-only pull requests.
   pull_request:
     branches: ["main", "master"]
+  # Merge queue: required check name stays `ci / CI required` (job id `ci`).
+  # Without this trigger the queue stalls waiting for the protected context.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -12,9 +16,11 @@ permissions:
 # Superseded PR SHAs cancel here only. The reusable ci.yml graph uses a
 # non-cancelling main queue (queue:max) and must never set cancel-in-progress
 # true. Cancelling this caller cancels its called reusable-workflow job.
+# merge_group has no pull_request.number — key on head SHA so queue runs do not
+# share a concurrency bucket with ordinary PR updates.
 concurrency:
-  group: irin-ci-pr-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'merge_group' && format('irin-ci-merge-group-{0}', github.event.merge_group.head_sha) || format('irin-ci-pr-{0}', github.event.pull_request.number) }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
   # Base-controlled graph: runner selection predicates live in reviewed main.
@@ -25,5 +31,7 @@ jobs:
   # Permanent candidate isolation is owned by that pin
   # (`candidate-isolation-proof` → `ci / CI required`). Temporary W4 bootstrap
   # jobs in this dispatcher have been retired.
+  # merge_group also enters through this pin so protected check names stay
+  # stable (`ci / CI required`).
   ci:
     uses: irinityhq/irin/.github/workflows/ci.yml@main

@@ -3,6 +3,9 @@ name: CodeQL Advanced
 on:
   pull_request:
     branches: ["main", "master"]
+  # Merge queue must report the protected `CodeQL required` context.
+  merge_group:
+    types: [checks_requested]
   push:
     branches: ["main"]
   workflow_dispatch:

@@ -3,13 +3,17 @@ name: Dependency Review
 on:
   pull_request:
     branches: ["main", "master"]
+  # Merge queue must report the protected `Dependency Review` context. The
+  # action requires explicit base-ref/head-ref when the event is not a PR.
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
-  cancel-in-progress: true
+  group: ${{ github.event_name == 'merge_group' && format('{0}-merge-group-{1}', github.workflow, github.event.merge_group.head_sha) || format('{0}-{1}', github.workflow, github.event.pull_request.number) }}
+  cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
   dependency-review:
@@ -21,6 +25,17 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Reject newly introduced vulnerable dependencies
+        if: github.event_name == 'pull_request'
         uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
         with:
           fail-on-severity: moderate
+
+      # Non-PR events require explicit base-ref/head-ref (action contract).
+      # Job name stays "Dependency Review" so the protected check name is stable.
+      - name: Reject newly introduced vulnerable dependencies (merge group)
+        if: github.event_name == 'merge_group'
+        uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          base-ref: ${{ github.event.merge_group.base_sha }}
+          head-ref: ${{ github.event.merge_group.head_sha }}
