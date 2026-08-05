@@ -30,17 +30,25 @@ TAG=""
 CANDIDATE_ARG=""
 T1_PACKET=""
 T2_PACKET=""
+T3_EXCEPTION=""
 
 usage() {
   cat <<'EOF'
 Usage:
-  release-transaction.sh --prepare-production --t1-packet PATH
+  release-transaction.sh --prepare-production --t1-packet PATH \
+      [--t3-exception PATH]
   release-transaction.sh --publish --tag vX.Y.Z \
       --candidate ABSOLUTE_STORE_PATH --t2-packet CANDIDATE/proofs/t2.json
 
   --prepare-production is T1-authorized RC preparation with irreversible
   external effects (rc-* GHCR push, Apple notary once per attempt). It is not
   a no-effect simulation. There is no --dry-run-rc alias.
+
+  One production notarization consumes the T1 production cycle for that source
+  SHA. A second prepare for the same SHA requires --t3-exception PATH (words
+  must name the SHA and mention apple). Prepare records checkout HEAD and
+  whether scripts/ or packaging/ is dirty; publish requires that same HEAD and
+  a clean scripts/+packaging/ tree.
 
 Required env (both modes):
   APPLE_SIGNING_IDENTITY   Developer ID Application identity
@@ -86,12 +94,115 @@ if [[ "${IRIN_RELEASE_TX_LIB:-}" != "1" ]]; then
       --candidate) CANDIDATE_ARG="${2:-}"; shift 2 ;;
       --t1-packet) T1_PACKET="${2:-}"; shift 2 ;;
       --t2-packet) T2_PACKET="${2:-}"; shift 2 ;;
+      --t3-exception) T3_EXCEPTION="${2:-}"; shift 2 ;;
       -h|--help) usage; exit 0 ;;
       *) die "unknown argument: $1 (try --help)" ;;
     esac
   done
   [[ -n "$MODE" ]] || { usage >&2; die "mode required"; }
 fi
+
+# ---------------------------------------------------------------------------
+# Checkout control-plane binding (HEAD + scripts/packaging dirty)
+# ---------------------------------------------------------------------------
+# Sets CHECKOUT_HEAD, SCRIPTS_DIRTY, PACKAGING_DIRTY (true/false strings).
+snapshot_checkout_control() {
+  CHECKOUT_HEAD="$(git rev-parse HEAD)"
+  SCRIPTS_DIRTY=false
+  PACKAGING_DIRTY=false
+  local line path
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    # porcelain: XY SPACE path  (or rename: XY SPACE old -> new)
+    path="${line:3}"
+    path="${path%% -> *}"
+    case "$path" in
+      scripts|scripts/*) SCRIPTS_DIRTY=true ;;
+      packaging|packaging/*) PACKAGING_DIRTY=true ;;
+    esac
+  done < <(git status --porcelain --untracked-files=normal -- scripts packaging 2>/dev/null || true)
+}
+
+# ---------------------------------------------------------------------------
+# Production-cycle ledger: notarization spends one cycle per source SHA
+# ---------------------------------------------------------------------------
+production_cycle_path() {
+  local sha="$1"
+  printf '%s/.attempts/production-cycle-%s.json\n' "$IRIN_CANDIDATE_ROOT" "$sha"
+}
+
+# Returns 0 if a notarization cycle is already consumed for this source SHA.
+production_cycle_consumed() {
+  local sha="$1" path
+  path="$(production_cycle_path "$sha")"
+  [[ -f "$path" ]] || return 1
+  python3 - "$path" "$sha" <<'PY'
+import json, sys
+path, sha = sys.argv[1:]
+d = json.load(open(path))
+if d.get("source_sha") != sha:
+    raise SystemExit(2)
+if d.get("notarization_consumed") is True:
+    raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+record_production_cycle_consumed() {
+  local sha="$1" attempt="$2" candidate="$3" path
+  path="$(production_cycle_path "$sha")"
+  mkdir -p "$(dirname "$path")"
+  python3 - "$path" "$sha" "$attempt" "$candidate" <<'PY'
+import json, os, sys
+from datetime import datetime, timezone
+out, sha, attempt, cand = sys.argv[1:]
+doc = {
+    "schema_version": 1,
+    "kind": "production-cycle",
+    "source_sha": sha,
+    "notarization_consumed": True,
+    "production_attempt_id": attempt,
+    "production_candidate_path": cand,
+    "consumed_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}
+tmp = out + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(doc, fh, sort_keys=True, indent=2)
+    fh.write("\n")
+os.replace(tmp, out)
+PY
+}
+
+# T3 exception: words must name the source SHA and mention apple (SHIP-SPINE).
+validate_t3_exception() {
+  local path="$1" want_sha="$2"
+  [[ -n "$path" ]] || die "--t3-exception PATH is required for a second production cycle"
+  [[ "$path" == /* ]] || path="$(cd "$(dirname "$path")" && pwd)/$(basename "$path")"
+  [[ -f "$path" ]] || die "T3 exception missing: $path"
+  python3 - "$path" "$want_sha" <<'PY'
+import json, re, sys
+path, want_sha = sys.argv[1:]
+d = json.load(open(path))
+if d.get("schema_version") != 1:
+    raise SystemExit("T3 schema_version must be 1")
+if d.get("packet_kind") != "t3":
+    raise SystemExit("T3 packet_kind must be 't3'")
+sha = d.get("source_sha")
+if not isinstance(sha, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", sha):
+    raise SystemExit("T3 source_sha must be 40-char full git SHA (hex)")
+if sha.lower() != want_sha.lower():
+    raise SystemExit(f"T3 source_sha {sha} does not match prepare source {want_sha}")
+words = str(d.get("words") or "")
+if not words.strip():
+    raise SystemExit("T3 words missing (must name the SHA and mention apple)")
+low = words.lower()
+if "apple" not in low:
+    raise SystemExit("T3 words must mention apple (Apple notary cycle override)")
+if want_sha.lower() not in low and sha.lower() not in low:
+    raise SystemExit("T3 words must name the source SHA")
+print("t3_ok")
+PY
+}
 
 # ---------------------------------------------------------------------------
 # Helpers: attempt-effect ledger (atomic complete records; skip on verified reuse)
@@ -512,6 +623,9 @@ do_prepare() {
   SHA="$(git rev-parse HEAD)"
   [[ "$SHA" == "$T1_SOURCE_SHA" ]] \
     || die "HEAD ($SHA) does not match T1 source_sha ($T1_SOURCE_SHA)"
+  snapshot_checkout_control
+  [[ "$CHECKOUT_HEAD" == "$SHA" ]] \
+    || die "checkout snapshot HEAD mismatch ($CHECKOUT_HEAD vs $SHA)"
 
   note "resolve signed-rc candidate from T1"
   SIGNED_RC_PATH="$(
@@ -572,15 +686,18 @@ print("resume_ok")
 PY
   else
     python3 - "$ATTEMPT_RECEIPT" "$T1_ATTEMPT_ID" "$SHA" "$T1_SIGNED_RC_ID" \
-      "$PACKET_HASH" "$T1_EXPIRY" <<'PY'
+      "$PACKET_HASH" "$T1_EXPIRY" "$SCRIPTS_DIRTY" "$PACKAGING_DIRTY" <<'PY'
 import json, sys
 from datetime import datetime, timezone
-out, attempt, sha, cid, phash, expiry = sys.argv[1:]
+out, attempt, sha, cid, phash, expiry, scripts_dirty, packaging_dirty = sys.argv[1:]
 doc = {
   "schema_version": 1,
   "kind": "prepare-production-attempt",
   "production_attempt_id": attempt,
   "source_sha": sha,
+  "checkout_head": sha,
+  "scripts_dirty": scripts_dirty == "true",
+  "packaging_dirty": packaging_dirty == "true",
   "signed_rc_candidate_id": cid,
   "t1_packet_sha256": phash,
   "expiry": expiry,
@@ -596,6 +713,7 @@ import os
 os.replace(tmp, out)
 PY
     note "wrote attempt receipt before external effects: $ATTEMPT_RECEIPT"
+    note "checkout binding: head=$SHA scripts_dirty=$SCRIPTS_DIRTY packaging_dirty=$PACKAGING_DIRTY"
   fi
 
   IMAGES_TAG="rc-$(printf '%s' "$SHA" | cut -c1-12)"
@@ -693,6 +811,10 @@ print("ok")
 PY
       note "production-build already complete; reusing $CANDIDATE_PATH"
       SKIP_PROD=1
+      # Bind cycle ledger if an older attempt predated the ledger file.
+      if ! production_cycle_consumed "$SHA"; then
+        record_production_cycle_consumed "$SHA" "$T1_ATTEMPT_ID" "$CANDIDATE_PATH"
+      fi
     else
       die "completed production-build path missing; authorize a new attempt"
     fi
@@ -706,12 +828,30 @@ PY
         "candidate_path": "'"$CANDIDATE_PATH"'",
       }))')"
       SKIP_PROD=1
+      if ! production_cycle_consumed "$SHA"; then
+        record_production_cycle_consumed "$SHA" "$T1_ATTEMPT_ID" "$CANDIDATE_PATH"
+      fi
     else
       die "production-build was interrupted without a candidate path (Apple cycle may have been spent); authorize a new T1 attempt — refusing silent re-notary"
     fi
   fi
 
   if [[ "$SKIP_PROD" != "1" ]]; then
+    # Notarization spends the one-production-cycle budget for this source SHA.
+    # A second cycle needs an explicit T3 exception naming the SHA (#0056).
+    if production_cycle_consumed "$SHA"; then
+      if [[ -n "$T3_EXCEPTION" ]]; then
+        validate_t3_exception "$T3_EXCEPTION" "$SHA" \
+          || die "T3 exception invalid for second production cycle on $SHA"
+        note "T3 exception authorizes second production cycle for $SHA"
+      else
+        die "production notarization already consumed for source $SHA; authorize a T3 exception naming that SHA (--t3-exception PATH)"
+      fi
+    elif [[ -n "$T3_EXCEPTION" ]]; then
+      # Allow providing T3 early; still validate shape if present.
+      validate_t3_exception "$T3_EXCEPTION" "$SHA" \
+        || die "T3 exception invalid"
+    fi
     attempt_set_effect "$ATTEMPT_RECEIPT" "production-build" \
       '{"status":"starting"}'
     note "dmg: production build (sign + notarize + staple) into candidate store — one cycle"
@@ -730,6 +870,8 @@ PY
       "status": "complete",
       "candidate_path": "'"$CANDIDATE_PATH"'",
     }))')"
+    record_production_cycle_consumed "$SHA" "$T1_ATTEMPT_ID" "$CANDIDATE_PATH"
+    note "recorded production-cycle consumption for $SHA"
   fi
 
   note "verify + smoke the production candidate"
@@ -805,6 +947,19 @@ PY
   [[ "$PACK_MODE" == "production" ]] || die "publish requires production pack_mode (got $PACK_MODE)"
   [[ "$STAPLED" == "true" ]] || die "publish requires stapled production candidate"
   [[ "v$SEMVER" == "$TAG" ]] || die "tag $TAG does not match candidate semver v$SEMVER"
+
+  # T1 recorded checkout HEAD + scripts/packaging dirtiness; publish requires
+  # the same HEAD and a clean scripts/+packaging/ tree (#0056). Hermetic
+  # publish rehearsal uses synthetic source SHAs and skips live tree binding.
+  if ! publish_hermetic_active; then
+    snapshot_checkout_control
+    [[ "$CHECKOUT_HEAD" == "$SOURCE_SHA" ]] \
+      || die "publish requires checkout HEAD=$SOURCE_SHA (got $CHECKOUT_HEAD)"
+    [[ "$SCRIPTS_DIRTY" == "false" && "$PACKAGING_DIRTY" == "false" ]] \
+      || die "publish requires clean scripts/ and packaging/ (scripts_dirty=$SCRIPTS_DIRTY packaging_dirty=$PACKAGING_DIRTY)"
+  else
+    note "hermetic: skip live checkout HEAD/dirty bind"
+  fi
 
   python3 - "$T2_PATH" "$CANDIDATE_ID" "$SOURCE_SHA" <<'PY' || die "T2 packet invalid for publication"
 import json, sys

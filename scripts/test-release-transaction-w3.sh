@@ -410,6 +410,78 @@ grep -q 'not eligible for a fresh push' "$TX" \
   || fail "fresh push must be gated on empty effect status"
 pass "attempt ledger refuses interrupted GHCR re-push and silent re-notary"
 
+# --- #0056 production-cycle + checkout binding -----------------------------
+grep -q 'production_cycle_consumed\|production-cycle-' "$TX" \
+  || fail "prepare must track production-cycle consumption per source SHA"
+grep -q 'notarization already consumed\|authorize a T3 exception' "$TX" \
+  || fail "second production cycle must refuse without T3"
+grep -q 'validate_t3_exception\|--t3-exception' "$TX" \
+  || fail "prepare must accept --t3-exception for a second cycle"
+grep -q 'snapshot_checkout_control' "$TX" \
+  || fail "must snapshot checkout HEAD + scripts/packaging dirtiness"
+grep -q 'checkout_head' "$TX" || fail "attempt receipt must record checkout_head"
+grep -q 'scripts_dirty' "$TX" || fail "attempt receipt must record scripts_dirty"
+grep -q 'packaging_dirty' "$TX" || fail "attempt receipt must record packaging_dirty"
+grep -q 'publish requires checkout HEAD\|publish requires clean scripts' "$TX" \
+  || fail "publish must require same HEAD and clean scripts/packaging"
+# Live helper: cycle ledger + T3 words gate (subshell — do not clobber IRIN_CANDIDATE_ROOT)
+(
+  set -euo pipefail
+  # shellcheck disable=SC1090
+  IRIN_RELEASE_TX_LIB=1 source "$TX"
+  export IRIN_CANDIDATE_ROOT="$TEST_HOME/cycle-root"
+  mkdir -p "$IRIN_CANDIDATE_ROOT/.attempts"
+  CYCLE_SHA="$(python3 -c 'print("c" * 40)')"
+  record_production_cycle_consumed "$CYCLE_SHA" "attempt-1" "$TEST_HOME/cand-a"
+  production_cycle_consumed "$CYCLE_SHA" || {
+    printf 'cycle must report consumed after record\n' >&2
+    exit 1
+  }
+  BAD_T3="$TEST_HOME/bad-t3.json"
+  printf '%s\n' "{\"schema_version\":1,\"packet_kind\":\"t3\",\"source_sha\":\"$CYCLE_SHA\",\"words\":\"\"}" >"$BAD_T3"
+  set +e
+  validate_t3_exception "$BAD_T3" "$CYCLE_SHA" >/dev/null 2>&1
+  t3_ec=$?
+  set -e
+  [[ $t3_ec -ne 0 ]] || {
+    printf 'empty T3 words must refuse\n' >&2
+    exit 1
+  }
+  GOOD_T3="$TEST_HOME/good-t3.json"
+  python3 - "$GOOD_T3" "$CYCLE_SHA" <<'PY'
+import json, sys
+path, sha = sys.argv[1:]
+json.dump({
+    "schema_version": 1,
+    "packet_kind": "t3",
+    "source_sha": sha,
+    "words": f"Authorize second apple notary cycle for source {sha}",
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
+  validate_t3_exception "$GOOD_T3" "$CYCLE_SHA" >/dev/null
+  WRONG_T3="$TEST_HOME/wrong-t3.json"
+  python3 - "$WRONG_T3" <<'PY'
+import json, sys
+json.dump({
+    "schema_version": 1,
+    "packet_kind": "t3",
+    "source_sha": "d" * 40,
+    "words": "Authorize second apple notary cycle for source " + ("d" * 40),
+}, open(sys.argv[1], "w"), indent=2)
+open(sys.argv[1], "a").write("\n")
+PY
+  set +e
+  validate_t3_exception "$WRONG_T3" "$CYCLE_SHA" >/dev/null 2>&1
+  t3_ec=$?
+  set -e
+  [[ $t3_ec -ne 0 ]] || {
+    printf 'T3 for wrong SHA must refuse\n' >&2
+    exit 1
+  }
+) || fail "production-cycle/T3 live helper failed"
+pass "production-cycle ledger + T3 exception + checkout binding (#0056)"
+
 # --- [P1] prepare requires Candidate verified + runtime preflight ----------
 grep -q 'Candidate verified' "$TX" || fail "prepare must require Candidate verified"
 grep -q 'preflight_runtime_bounds\|free :8765\|port :8765' "$TX" \
