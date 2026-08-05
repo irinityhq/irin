@@ -68,5 +68,3 @@ path = "src/main.rs"
 [lib]
 name = "council_rs"
 path = "src/lib.rs"
-# When building Python extension:
-# crate-type = ["cdylib"]
