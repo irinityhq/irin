@@ -17,6 +17,7 @@ use serde_json::Value;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::OnceLock;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -187,20 +188,113 @@ pub fn argv_contains_serve_reset(args: &[String]) -> bool {
         || (args.len() == 2 && args[0] == "serve" && args[1] == "reset")
 }
 
-/// Resolve the first existing allow-listed Tailscale CLI binary.
-pub fn resolve_tailscale_cli() -> Result<PathBuf, String> {
-    for candidate in TAILSCALE_CLI_ALLOWLIST {
-        let p = Path::new(candidate);
-        if p.is_file() {
-            return Ok(p.to_path_buf());
+/// Install-guidance error when no allow-listed CLI is present.
+fn tailscale_cli_not_found_error() -> String {
+    "Tailscale CLI not found. Install Tailscale, then retry. Expected \
+     /Applications/Tailscale.app/Contents/MacOS/Tailscale, \
+     /opt/homebrew/bin/tailscale, or /usr/local/bin/tailscale."
+        .to_string()
+}
+
+/// True when `path` is a regular file with at least one execute bit (Unix).
+///
+/// Non-Unix builds fall back to `is_file()` — this crate targets macOS product.
+fn path_is_executable_cli(path: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        match path.metadata() {
+            Ok(meta) if meta.is_file() => meta.permissions().mode() & 0o111 != 0,
+            _ => false,
         }
     }
-    Err(
-        "Tailscale CLI not found. Install Tailscale, then retry. Expected \
-         /Applications/Tailscale.app/Contents/MacOS/Tailscale, \
-         /opt/homebrew/bin/tailscale, or /usr/local/bin/tailscale."
-            .to_string(),
-    )
+    #[cfg(not(unix))]
+    {
+        path.is_file()
+    }
+}
+
+/// Probe whether a CLI answers `status --json` with parseable node status.
+///
+/// Used during selection so a present-but-broken App wrapper (non-JSON
+/// CLIError) does not win over a working Homebrew CLI (ProjectMem #0040).
+fn cli_answers_status_json(bin: &Path) -> bool {
+    let mut cmd = Command::new(bin);
+    cmd.args(status_json_args());
+    // Bound tightly: selection must not hang Settings open on a stuck wrapper.
+    match run_command_timeout(cmd, Duration::from_secs(2)) {
+        Ok(out) if out.status.success() => {
+            let raw = String::from_utf8_lossy(&out.stdout);
+            parse_status_json(raw.trim()).is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// Select a Tailscale CLI from an ordered candidate list.
+///
+/// **Policy (ProjectMem #0040 / Settings false-red):**
+/// 1. Skip candidates that fail `is_present` (missing or non-executable).
+/// 2. Prefer the first present candidate for which `answers_status_json` is
+///    true (can answer `status --json` with parseable node status).
+/// 3. If every present candidate fails the JSON probe, fall back to the first
+///    present path so downstream errors stay path-bound (not "CLI not found").
+/// 4. If none are present, return install-guidance error text.
+///
+/// Production wires default allow-list order, executable presence, and a live
+/// status-json probe via [`resolve_tailscale_cli`]. Unit tests inject paths and
+/// predicates without touching the host layout.
+pub fn resolve_tailscale_cli_from<'a, I, P, J>(
+    candidates: I,
+    is_present: P,
+    answers_status_json: J,
+) -> Result<PathBuf, String>
+where
+    I: IntoIterator<Item = &'a Path>,
+    P: Fn(&Path) -> bool,
+    J: Fn(&Path) -> bool,
+{
+    let mut first_present: Option<PathBuf> = None;
+    for candidate in candidates {
+        if !is_present(candidate) {
+            continue;
+        }
+        if first_present.is_none() {
+            first_present = Some(candidate.to_path_buf());
+        }
+        if answers_status_json(candidate) {
+            return Ok(candidate.to_path_buf());
+        }
+    }
+    if let Some(path) = first_present {
+        return Ok(path);
+    }
+    Err(tailscale_cli_not_found_error())
+}
+
+/// Resolve an allow-listed Tailscale CLI binary for product use.
+///
+/// Candidate order matches [`TAILSCALE_CLI_ALLOWLIST`] (App bundle first, then
+/// Homebrew, then `/usr/local`). Selection prefers the first executable entry
+/// that answers `status --json` as parseable JSON so a broken App CLI wrapper
+/// does not force Settings false-red while Homebrew works.
+///
+/// Successful resolutions are process-cached (`OnceLock`) so status polls do
+/// not re-probe every call. Misses are not cached (install mid-session can
+/// recover). Restart after installing a better CLI if a non-JSON fallback was
+/// cached earlier in the process.
+pub fn resolve_tailscale_cli() -> Result<PathBuf, String> {
+    static RESOLVED_OK: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(path) = RESOLVED_OK.get() {
+        return Ok(path.clone());
+    }
+    let resolved = resolve_tailscale_cli_from(
+        TAILSCALE_CLI_ALLOWLIST.iter().map(|s| Path::new(*s)),
+        path_is_executable_cli,
+        cli_answers_status_json,
+    )?;
+    let _ = RESOLVED_OK.set(resolved.clone());
+    Ok(resolved)
 }
 
 /// Reject any path that is not on the allow-list.
@@ -1012,5 +1106,137 @@ mod tests {
         // Allow-list entry itself is accepted even if missing on disk for pure check.
         let listed = PathBuf::from(TAILSCALE_CLI_ALLOWLIST[1]);
         assert!(validate_tailscale_cli_path(&listed).is_ok());
+    }
+
+    // --- CLI selection (ProjectMem #0040) ------------------------------------
+
+    #[test]
+    fn default_allowlist_order_is_app_then_homebrew_then_usr_local() {
+        assert_eq!(
+            TAILSCALE_CLI_ALLOWLIST,
+            &[
+                "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+                "/opt/homebrew/bin/tailscale",
+                "/usr/local/bin/tailscale",
+            ]
+        );
+    }
+
+    #[test]
+    fn resolve_first_present_json_capable_wins() {
+        let app = Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        let brew = Path::new("/opt/homebrew/bin/tailscale");
+        let candidates = [app, brew];
+        let present = |p: &Path| p == app || p == brew;
+        let answers = |p: &Path| p == app; // App answers JSON → wins despite later brew.
+        let got = resolve_tailscale_cli_from(candidates, present, answers).unwrap();
+        assert_eq!(got, app);
+    }
+
+    #[test]
+    fn resolve_skips_missing_and_non_executable() {
+        let missing = Path::new("/tmp/irin-missing-tailscale");
+        let non_exec = Path::new("/tmp/irin-non-exec-tailscale");
+        let good = Path::new("/opt/homebrew/bin/tailscale");
+        let candidates = [missing, non_exec, good];
+        // Only `good` is present; non_exec is on the list but fails is_present.
+        let present = |p: &Path| p == good;
+        let answers = |_: &Path| true;
+        let got = resolve_tailscale_cli_from(candidates, present, answers).unwrap();
+        assert_eq!(got, good);
+    }
+
+    /// #0040 regression: App CLI present but non-JSON (CLIError) while Homebrew
+    /// answers status JSON → select Homebrew, not the App wrapper.
+    #[test]
+    fn resolve_prefers_homebrew_when_app_cli_fails_json_probe() {
+        let app = Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        let brew = Path::new("/opt/homebrew/bin/tailscale");
+        let candidates = [app, brew];
+        let present = |p: &Path| p == app || p == brew;
+        // Fingerprint of the live false-red: App wrapper returns English
+        // CLIError (first_byte=0x54), not parseable status JSON.
+        let answers = |p: &Path| p == brew;
+        let got = resolve_tailscale_cli_from(candidates, present, answers).unwrap();
+        assert_eq!(got, brew);
+    }
+
+    #[test]
+    fn resolve_falls_back_to_first_present_when_all_fail_json_probe() {
+        let app = Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        let brew = Path::new("/opt/homebrew/bin/tailscale");
+        let candidates = [app, brew];
+        let present = |p: &Path| p == app || p == brew;
+        let answers = |_: &Path| false;
+        let got = resolve_tailscale_cli_from(candidates, present, answers).unwrap();
+        assert_eq!(got, app);
+    }
+
+    #[test]
+    fn resolve_errors_when_no_candidate_present() {
+        let app = Path::new("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        let brew = Path::new("/opt/homebrew/bin/tailscale");
+        let err = resolve_tailscale_cli_from([app, brew], |_| false, |_| true).unwrap_err();
+        assert!(err.contains("Tailscale CLI not found"));
+        assert!(err.contains("/opt/homebrew/bin/tailscale"));
+    }
+
+    #[test]
+    fn status_json_probe_accepts_running_script_rejects_gui_error_script() {
+        let dir = std::env::temp_dir().join(format!(
+            "irin-ts-cli-probe-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let good = dir.join("good-tailscale");
+        std::fs::write(
+            &good,
+            "#!/bin/sh\necho '{\"BackendState\":\"Running\",\"Self\":{}}'\n",
+        )
+        .unwrap();
+        let bad = dir.join("bad-tailscale");
+        // Live false-red body shape: English CLIError, first byte 'T' (0x54).
+        std::fs::write(
+            &bad,
+            "#!/bin/sh\necho 'The Tailscale GUI failed to start: (Tailscale.CLIError error 3.)'\nexit 0\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+
+        assert!(
+            cli_answers_status_json(&good),
+            "running JSON script should pass status probe"
+        );
+        assert!(
+            !cli_answers_status_json(&bad),
+            "GUI CLIError script must fail status probe"
+        );
+
+        // End-to-end selection with real present/probe predicates on temp scripts.
+        let non_exec = dir.join("non-exec-tailscale");
+        std::fs::write(&non_exec, "#!/bin/sh\necho hi\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&non_exec, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        let candidates = [non_exec.as_path(), bad.as_path(), good.as_path()];
+        let got =
+            resolve_tailscale_cli_from(candidates, path_is_executable_cli, cli_answers_status_json)
+                .unwrap();
+        assert_eq!(got, good);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
