@@ -46,19 +46,16 @@ jobs:
       - name: Build release binary
         run: cargo build -p council-rs --release --locked
 
-      - name: Run council E2E smoke tests
+      # Not provider-backed deliberation E2E (no keys / no spend in release CI).
+      # Assert schemas parse and the release binary this job built actually runs.
+      - name: Council schema + release binary smoke
         working-directory: council-rs
         run: |
           python3 tests/smoke.py --quick
-          # smoke.py --quick makes no API calls, so a provider-less runner
-          # produces no sessions; the strict validators only have meaning
-          # when deliberation output exists to validate.
-          if ls sessions/council_*.json >/dev/null 2>&1; then
-            python3 tests/validate_session.py --strict
-            python3 tests/validate_index.py --strict
-          else
-            echo "no sessions produced in this environment (--quick, no providers); strict validators skipped"
-          fi
+          BIN="../target/release/council"
+          test -x "$BIN"
+          "$BIN" --version
+          "$BIN" --list-cabinets
 
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7

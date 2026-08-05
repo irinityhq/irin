@@ -351,8 +351,10 @@ assert_tier "$DEST_EXEC" "Candidate verified"
 # Pure freeze a-w leaves executable bits (0755→0555) — still Verified.
 stored_mode="$(awk -F'\t' '$1=="Contents/MacOS/council"{print $3; exit}' "$DEST_EXEC/bundle-manifest.txt")"
 [[ "$stored_mode" == "0755" ]] || fail "expected stored council mode 0755, got $stored_mode"
-frozen_mode="$(stat -f '%Lp' "$DEST_EXEC/IRIN.app/Contents/MacOS/council" 2>/dev/null \
-  || stat -c '%a' "$DEST_EXEC/IRIN.app/Contents/MacOS/council")"
+# Portable mode bits: GNU stat -c first. On Linux, stat -f is --file-system
+# (succeeds with a multi-line dump), so BSD-first order falsely "succeeds".
+frozen_mode="$(stat -c '%a' "$DEST_EXEC/IRIN.app/Contents/MacOS/council" 2>/dev/null \
+  || stat -f '%Lp' "$DEST_EXEC/IRIN.app/Contents/MacOS/council")"
 [[ "$frozen_mode" == "555" || "$frozen_mode" == "0555" ]] \
   || fail "expected frozen council mode 0555, got $frozen_mode"
 assert_tier "$DEST_EXEC" "Candidate verified"

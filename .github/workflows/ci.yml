@@ -603,16 +603,16 @@ jobs:
       - name: Build council release binary for smoke
         run: cargo build -p council-rs --release --locked
 
-      - name: Run council E2E smoke tests
+      # Not provider-backed deliberation E2E (no keys / no spend in CI).
+      # Assert schemas parse and the release binary this job built actually runs.
+      - name: Council schema + release binary smoke
         working-directory: council-rs
         run: |
           python3 tests/smoke.py --quick
-          python3 tests/validate_session.py --strict
-          if [ -f sessions/index.jsonl ]; then
-            python3 tests/validate_index.py --strict
-          else
-            echo "index validate: no index.jsonl found; skipping strict validator in CI"
-          fi
+          BIN="../target/release/council"
+          test -x "$BIN"
+          "$BIN" --version
+          "$BIN" --list-cabinets
 
   warroom-web:
     name: War Room Web

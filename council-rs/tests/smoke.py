@@ -21,10 +21,30 @@ import tempfile
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).parent.parent
+ROOT = Path(__file__).parent.parent  # council-rs/
 SCHEMAS_DIR = ROOT / "schemas"
 SESSIONS_DIR = ROOT / "sessions"
 SCRIPTS_DIR = ROOT / "scripts"
+
+
+def resolve_council_binary() -> Path:
+    """Resolve the release council binary for full smoke.
+
+    Cargo workspace target is repo-root ``target/`` (or ``$CARGO_TARGET_DIR``),
+    not package-local ``council-rs/target/``. Prefer the first existing path.
+    """
+    candidates: list[Path] = []
+    cargo_target = os.environ.get("CARGO_TARGET_DIR")
+    if cargo_target:
+        candidates.append(Path(cargo_target) / "release" / "council")
+    # Workspace root is the parent of the council-rs package root.
+    candidates.append(ROOT.parent / "target" / "release" / "council")
+    # Package-local fallback for non-workspace / older layouts.
+    candidates.append(ROOT / "target" / "release" / "council")
+    for path in candidates:
+        if path.is_file():
+            return path
+    return candidates[0]
 
 
 class SmokeResult:
@@ -139,8 +159,8 @@ def test_deliberation(r: SmokeResult):
 
     print("  ⏳ Running --quick deliberation...")
     start = time.time()
-    binary = ROOT / "target" / "release" / "council"
-    if not binary.exists():
+    binary = resolve_council_binary()
+    if not binary.is_file():
         r.fail("deliberation", f"binary not found at {binary}")
         return
     with tempfile.TemporaryDirectory(prefix="council-smoke-") as tmp:
