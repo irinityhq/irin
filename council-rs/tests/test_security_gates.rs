@@ -65,9 +65,8 @@ fn test_p1_b2_bind_string_is_loopback() {
     // server/mod.rs has many 127.0.0.1 literals (CORS, docs) that would keep
     // a naive source scan green if the CLI default were changed.
     let main_path = manifest.join("src/main.rs");
-    let main = fs::read_to_string(&main_path).unwrap_or_else(|e| {
-        panic!("must read CLI bind source {}: {e}", main_path.display())
-    });
+    let main = fs::read_to_string(&main_path)
+        .unwrap_or_else(|e| panic!("must read CLI bind source {}: {e}", main_path.display()));
     assert!(
         main.contains("default_value = \"127.0.0.1\""),
         "src/main.rs --host must default to 127.0.0.1"
