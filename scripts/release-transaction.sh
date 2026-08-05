@@ -854,7 +854,13 @@ PY
     # Never inspect or mutate real tags under hermetic rehearsal.
     LOCAL_TAG_SHA=""
   else
-    LOCAL_TAG_SHA="$(git rev-parse "$TAG^{commit}" 2>/dev/null || true)"
+    # git rev-parse prints the input and fails when the tag is absent; do not
+    # treat that echo as a real peeled SHA (would block first publish of vX.Y.Z).
+    if git rev-parse -q --verify "${TAG}^{commit}" >/dev/null 2>&1; then
+      LOCAL_TAG_SHA="$(git rev-parse "${TAG}^{commit}")"
+    else
+      LOCAL_TAG_SHA=""
+    fi
     if [[ -n "$LOCAL_TAG_SHA" && "$LOCAL_TAG_SHA" != "$SOURCE_SHA" ]]; then
       die "local tag $TAG points at $LOCAL_TAG_SHA, candidate wants $SOURCE_SHA"
     fi
