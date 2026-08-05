@@ -53,20 +53,6 @@ pub(crate) fn citation_override_mode() -> CitationOverrideMode {
     }
 }
 
-/// Whether to apply the round-level "pure opinion" pre-filter skip.
-/// Deprecated for round-level use: opinion filtering is per-claim in the validator LLM.
-/// Kept for env compat; no longer consulted by `validate_round` (claim-validation path / council-rs product).
-#[allow(dead_code)]
-pub(crate) fn skip_opinion_round() -> bool {
-    match std::env::var("COUNCIL_SHELDON_SKIP_OPINION_ROUND") {
-        Ok(v) => {
-            let v = v.trim().to_ascii_lowercase();
-            v != "0" && v != "false"
-        }
-        Err(_) => true,
-    }
-}
-
 /// Session-scoped evidence cache for Sheldon validator (one per deliberation/phase).
 /// Deduplicates web (exa/tavily/news/scholar/firecrawl) and xmcp (live X only) fetches
 /// across rounds when the normalized query/topic is the same. Stores formatted section strings.
