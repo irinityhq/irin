@@ -77,6 +77,10 @@ for the complete contract.
    not. Judge size by blast radius, not file count. Review findings are
    repaired on the owning branch (target ≤ two automated review rounds).
    Unrelated cleanups and process-only changes wait while a product PR is open.
+   Maintainers: prefer **Create a merge commit** for multi-commit /
+   characterization PRs (preserves SHAs); squash is fine for small
+   single-purpose fixes. Full policy:
+   [`docs/development-workflow.md`](docs/development-workflow.md#merge-method).
 3. **Commit messages** follow `type(scope): summary` — e.g.
    `fix(warroom): …`, `docs(readme): …`, `feat(gateway): …`,
    `ci: …`, `chore: …`. Scope is optional; a clear imperative summary is not.
