@@ -293,7 +293,8 @@ where
 ///
 /// Unverified fallbacks are returned as-is without writing the cache so a
 /// later poll can recover after a transient probe failure (ProjectMem #0049).
-/// When the cache already holds a path, that path wins (verified stickiness).
+/// Verified paths use [`OnceLock::get_or_init`] so concurrent first-fill races
+/// all observe the same winning path (not "set failed → return my local pick").
 pub(crate) fn store_json_verified_cli(
     cache: &OnceLock<PathBuf>,
     selection: TailscaleCliSelection,
@@ -302,7 +303,7 @@ pub(crate) fn store_json_verified_cli(
         return cached.clone();
     }
     if selection.json_verified {
-        let _ = cache.set(selection.path.clone());
+        return cache.get_or_init(|| selection.path.clone()).clone();
     }
     selection.path
 }
@@ -651,14 +652,19 @@ pub fn handlers_look_foreign(
 /// Not used by unit tests.
 pub fn run_tailscale(args: &[String], timeout: Duration) -> Result<Output, String> {
     let bin = resolve_tailscale_cli()?;
-    validate_tailscale_cli_path(&bin)?;
+    run_tailscale_at(&bin, args, timeout)
+}
+
+/// Execute at a pre-resolved allow-listed path (one resolve per product call).
+fn run_tailscale_at(bin: &Path, args: &[String], timeout: Duration) -> Result<Output, String> {
+    validate_tailscale_cli_path(bin)?;
     if argv_contains_funnel(args) {
         return Err("refusing Tailscale argv that mentions funnel".to_string());
     }
     if argv_contains_serve_reset(args) {
         return Err("refusing global tailscale serve reset".to_string());
     }
-    let mut cmd = Command::new(&bin);
+    let mut cmd = Command::new(bin);
     cmd.args(args);
     run_command_timeout(cmd, timeout)
 }
@@ -726,9 +732,11 @@ fn run_command_timeout(mut cmd: Command, timeout: Duration) -> Result<Output, St
 ///
 /// Empty stdout is a truthful host-boundary error (never handed to serde as
 /// raw JSON). Logs selected CLI path, exit status, and stdout byte count.
+/// Resolves the CLI once so logging and execution share the same path (and
+/// uncached fallback does not double-probe within one call).
 pub fn run_tailscale_stdout(args: &[String], timeout: Duration) -> Result<String, String> {
-    let bin = resolve_tailscale_cli().unwrap_or_else(|_| PathBuf::from("tailscale"));
-    let out = run_tailscale(args, timeout)?;
+    let bin = resolve_tailscale_cli()?;
+    let out = run_tailscale_at(&bin, args, timeout)?;
     let exit = out.status.code().unwrap_or(-1);
     let stdout_len = out.stdout.len();
     eprintln!(
@@ -1246,6 +1254,45 @@ mod tests {
         let out3 = store_json_verified_cli(&cache, worse);
         assert_eq!(out3, brew);
         assert_eq!(cache.get().map(PathBuf::as_path), Some(brew));
+    }
+
+    /// Concurrent verified first-fill must not return the losing local pick.
+    #[test]
+    fn concurrent_verified_store_shares_once_lock_winner() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let cache = Arc::new(OnceLock::new());
+        let app = PathBuf::from("/Applications/Tailscale.app/Contents/MacOS/Tailscale");
+        let brew = PathBuf::from("/opt/homebrew/bin/tailscale");
+        let cache_a = Arc::clone(&cache);
+        let cache_b = Arc::clone(&cache);
+        let app_c = app.clone();
+        let brew_c = brew.clone();
+        let t1 = thread::spawn(move || {
+            store_json_verified_cli(
+                &cache_a,
+                TailscaleCliSelection {
+                    path: app_c,
+                    json_verified: true,
+                },
+            )
+        });
+        let t2 = thread::spawn(move || {
+            store_json_verified_cli(
+                &cache_b,
+                TailscaleCliSelection {
+                    path: brew_c,
+                    json_verified: true,
+                },
+            )
+        });
+        let r1 = t1.join().expect("thread1");
+        let r2 = t2.join().expect("thread2");
+        let winner = cache.get().expect("cache filled").clone();
+        assert!(winner == app || winner == brew);
+        assert_eq!(r1, winner);
+        assert_eq!(r2, winner);
     }
 
     #[test]
