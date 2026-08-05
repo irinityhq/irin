@@ -47,7 +47,9 @@ docker build \
 echo "=== prepare sidecar docker context ==="
 # Sidecar Dockerfile needs monorepo root + a real .git (not a worktree gitfile).
 CTX=""
+HEAD_INDEX=""
 cleanup_ctx() {
+  [[ -n "${HEAD_INDEX:-}" && -f "$HEAD_INDEX" ]] && rm -f "$HEAD_INDEX" || true
   if [[ -n "${CTX:-}" && -d "${CTX:-}" ]]; then
     rm -rf "$CTX"
   fi
@@ -56,9 +58,17 @@ trap cleanup_ctx EXIT
 
 if [[ -f "$ROOT/.git" ]]; then
   CTX="$(mktemp -d "${TMPDIR:-/tmp}/irin-gw-pack-ctx.XXXXXX")"
+  HEAD_INDEX="$(mktemp "${TMPDIR:-/tmp}/irin-head-idx.XXXXXX")"
   echo "worktree detected; materializing self-contained context at $CTX"
   COMMON="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)"
-  git -C "$ROOT" archive HEAD | tar -x -C "$CTX"
+  # Full commit tree via checkout-index against a temporary HEAD index — not
+  # `git archive` (export-ignore drops tracked paths → false GW_BUILD_DIRTY)
+  # and not the worktree index (staged edits would double-apply when the dirty
+  # overlay runs `git diff HEAD` under IRIN_GATEWAY_PACK_REQUIRE_CLEAN=0).
+  GIT_INDEX_FILE="$HEAD_INDEX" git -C "$ROOT" read-tree HEAD
+  GIT_INDEX_FILE="$HEAD_INDEX" git -C "$ROOT" checkout-index --all --prefix="$CTX/"
+  rm -f "$HEAD_INDEX"
+  HEAD_INDEX=""
   mkdir -p "$CTX/.git/objects" "$CTX/.git/refs/heads" "$CTX/.git/info"
   rsync -a "$COMMON/objects/" "$CTX/.git/objects/"
   if [[ -f "$COMMON/packed-refs" ]]; then
@@ -76,20 +86,13 @@ if [[ -f "$ROOT/.git" ]]; then
 	bare = false
 	logallrefupdates = true
 EOF
-  # Seed the index so status is clean against the archived tree.
   git -C "$CTX" read-tree HEAD
-  # Drop index entries for paths missing from this archive (e.g. export-ignore).
-  while IFS= read -r rel; do
-    [[ -n "$rel" ]] || continue
-    if [[ ! -e "$CTX/$rel" ]]; then
-      git -C "$CTX" update-index --force-remove -- "$rel" 2>/dev/null || true
-    fi
-  done < <(git -C "$CTX" ls-files)
 
   # Dirty local-dev builds must compile the actual candidate, not silently
-  # fall back to archived HEAD. Overlay tracked changes as a binary-safe patch
-  # and copy only Git-visible untracked source. The temporary repository then
+  # fall back to HEAD. Overlay tracked changes as a binary-safe patch and
+  # copy only Git-visible untracked source. The temporary repository then
   # truthfully reports dirty provenance to build.rs inside Docker.
+  # Base tree is HEAD-only so this overlay is the sole dirt application.
   if [[ "$DIRTY_COUNT" != "0" ]]; then
     if ! git -C "$ROOT" diff --quiet HEAD --; then
       git -C "$ROOT" diff --binary HEAD -- |
@@ -101,6 +104,11 @@ EOF
     done < <(git -C "$ROOT" ls-files --others --exclude-standard -z)
     [[ -n "$(git -C "$CTX" status --porcelain)" ]] ||
       die "dirty worktree overlay produced a clean sidecar context"
+  else
+    # Fail closed: a clean monorepo must materialize a clean sidecar context
+    # so GW_BUILD_DIRTY=false is honest (not false-dirty from export-ignore).
+    [[ -z "$(git -C "$CTX" status --porcelain 2>/dev/null || true)" ]] ||
+      die "clean monorepo materialized a dirty sidecar context (checkout-index/read-tree bug)"
   fi
 
   git -C "$CTX" rev-parse HEAD >/dev/null \

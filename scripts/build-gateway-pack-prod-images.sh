@@ -168,7 +168,9 @@ if [[ "$RECEIPT_ONLY" -eq 1 ]]; then
 else
 echo "=== prepare sidecar docker context (worktree-safe) ==="
 CTX=""
+HEAD_INDEX=""
 cleanup_ctx() {
+  [[ -n "${HEAD_INDEX:-}" && -f "$HEAD_INDEX" ]] && rm -f "$HEAD_INDEX" || true
   if [[ -n "${CTX:-}" && -d "$CTX" ]]; then
     rm -rf "$CTX"
   fi
@@ -176,8 +178,16 @@ cleanup_ctx() {
 trap cleanup_ctx EXIT
 if [[ -f "$ROOT/.git" ]]; then
   CTX="$(mktemp -d "${TMPDIR:-/tmp}/irin-gw-pack-ctx.XXXXXX")"
+  HEAD_INDEX="$(mktemp "${TMPDIR:-/tmp}/irin-head-idx.XXXXXX")"
   COMMON="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)"
-  git -C "$ROOT" archive HEAD | tar -x -C "$CTX"
+  # Full commit tree via temp HEAD index + checkout-index — not `git archive`
+  # (export-ignore → false dirty) and not the worktree index (staged edits under
+  # IRIN_GATEWAY_PACK_REQUIRE_CLEAN=0 must not land before the cleanliness check;
+  # production materializes exact $SHA / HEAD independently of the index).
+  GIT_INDEX_FILE="$HEAD_INDEX" git -C "$ROOT" read-tree HEAD
+  GIT_INDEX_FILE="$HEAD_INDEX" git -C "$ROOT" checkout-index --all --prefix="$CTX/"
+  rm -f "$HEAD_INDEX"
+  HEAD_INDEX=""
   mkdir -p "$CTX/.git/objects" "$CTX/.git/refs/heads" "$CTX/.git/info"
   rsync -a "$COMMON/objects/" "$CTX/.git/objects/"
   [[ -f "$COMMON/packed-refs" ]] && cp -f "$COMMON/packed-refs" "$CTX/.git/packed-refs"
@@ -186,10 +196,8 @@ if [[ -f "$ROOT/.git" ]]; then
   echo "$SHA" >"$CTX/.git/refs/heads/pack-build"
   printf '[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n' >"$CTX/.git/config"
   git -C "$CTX" read-tree HEAD
-  while IFS= read -r rel; do
-    [[ -n "$rel" ]] || continue
-    [[ -e "$CTX/$rel" ]] || git -C "$CTX" update-index --force-remove -- "$rel" 2>/dev/null || true
-  done < <(git -C "$CTX" ls-files)
+  [[ -z "$(git -C "$CTX" status --porcelain 2>/dev/null || true)" ]] ||
+    die "clean monorepo materialized a dirty sidecar context (checkout-index/read-tree bug)"
   SIDECAR_CONTEXT="$CTX"
 else
   SIDECAR_CONTEXT="$ROOT"
