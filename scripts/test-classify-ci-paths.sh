@@ -47,7 +47,8 @@ cases=(
   "control-plane contract scripts force full|$full_pr|scripts/test-ci-control-plane.sh scripts/run-actionlint.sh"
   "gateway Rust source|false true false false false false false false false false false|gateway/sidecar-rs/src/main.rs"
   "gateway manifest|false true false false false false true false false false false|gateway/sidecar-rs/Cargo.toml"
-  "gateway non-Rust runtime|false true false false false false false false false false false|gateway/docker-compose.yml gateway/lua/auth.lua"
+  "gateway compose/non-pack runtime stays gateway-only|false true false false false false false false false false false|gateway/docker-compose.yml gateway/Dockerfile.gateway"
+  "gateway OpenResty runtime selects pack+install|false true false false false true false false false true true|gateway/lua/auth.lua gateway/nginx.conf gateway/conf/models.json"
   "gateway docs stay light|$all_false|gateway/README.md gateway/docs/watch-api.md"
   "sentinel runtime|false false false true false false false false false false false|sentinel/tools/check_protocol_version_drift.py"
   "sentinel docs stay light|$all_false|sentinel/README.md sentinel/docs/protocol-implementation.md"
@@ -65,7 +66,7 @@ cases=(
   "shared deny policy|false false false false false false true true false false false|deny.toml"
   "shared protocol source fans out|false true true true false false false false false false false|sentinel/sovereign-protocol/src/lib.rs"
   "shared protocol manifest fans out|false true true true false false true false false false false|sentinel/sovereign-protocol/Cargo.toml"
-  "mixed paths union lanes|false true false false true true false false false true false|gateway/lua/auth.lua council-rs/warroom/web/package.json"
+  "mixed paths union lanes|false true false false true true false false false true true|gateway/lua/auth.lua council-rs/warroom/web/package.json"
   # W4 positive: packaging → exact_candidate
   "packaging env selects exact candidate|false false false false false true false false false true false|packaging/env.sh"
   "packaging build-dmg selects candidate+install|false false false false false true false false false true true|packaging/build-dmg.sh"
@@ -108,10 +109,21 @@ stdin_output="$(printf '%s\n' \
   | "$CLASSIFIER")"
 if [[ "$(sed -n 's/^gateway_rust=//p' <<<"$stdin_output")" != true ]] \
   || [[ "$(sed -n 's/^warroom_web=//p' <<<"$stdin_output")" != true ]] \
-  || [[ "$(sed -n 's/^exact_candidate=//p' <<<"$stdin_output")" != true ]]; then
+  || [[ "$(sed -n 's/^warroom_tauri=//p' <<<"$stdin_output")" != true ]] \
+  || [[ "$(sed -n 's/^exact_candidate=//p' <<<"$stdin_output")" != true ]] \
+  || [[ "$(sed -n 's/^exact_install=//p' <<<"$stdin_output")" != true ]]; then
   printf 'classifier self-test: stdin mode failed\n' >&2
   exit 1
 fi
+
+# OpenResty runtime alone must select pack lanes (regression for #0051).
+lua_only="$($CLASSIFIER gateway/lua/auth.lua)"
+for key in gateway_rust warroom_tauri exact_candidate exact_install; do
+  if [[ "$(sed -n "s/^${key}=//p" <<<"$lua_only")" != true ]]; then
+    printf 'classifier self-test: gateway/lua must set %s=true\n' "$key" >&2
+    exit 1
+  fi
+done
 
 # Explicit: docs-only must not set exact_candidate or exact_install.
 docs_out="$($CLASSIFIER README.md docs/architecture.md)"

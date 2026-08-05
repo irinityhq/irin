@@ -214,6 +214,16 @@ for path in "${paths[@]}"; do
       gateway_rust=true
       ;;
 
+    # OpenResty runtime staged into Gateway Pack (nginx/conf/lua). Selects
+    # gateway proofs + Tauri/pack lanes so staged-pack freshness and candidate
+    # isolation run; exact_install covers bundled resources in the app.
+    gateway/lua/*|gateway/nginx.conf|gateway/conf/*)
+      gateway_rust=true
+      warroom_tauri=true
+      exact_candidate=true
+      exact_install=true
+      ;;
+
     sentinel/*)
       sentinel_rust=true
       ;;
