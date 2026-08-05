@@ -44,14 +44,13 @@
       ]
     },
     {
-      "path": "docs/SHIP-SPINE.md",
-      "description": "Release transaction spine (T1/T2/T3), packaging, and publication boundaries — not source-proof substitutes.",
+      "path": "docs/release-runbook.md",
+      "description": "Tracked release runbook: T1 prepare, install proof, T2 acceptance, and publication boundaries — not source-proof substitutes. (Private untracked SHIP-SPINE is not available to SaaS review.)",
       "scope": [
         "scripts/release-transaction.sh",
         "scripts/*release*",
         "scripts/*ship*",
         "packaging/**",
-        "docs/SHIP-SPINE.md",
         "docs/release*",
         "docs/DMG*",
         ".github/workflows/*release*",

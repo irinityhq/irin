@@ -101,13 +101,13 @@
         ".github/**",
         "**/README*"
       ],
-      "rule": "Keep source, test, build, package, install, acceptance, and publication claims distinct. make check / ship-check prove source only — not installed-app, Touch ID arm, notarization, or publication. Flag language that collapses these tiers."
+      "rule": "Keep source, test, build, package, install, acceptance, and publication claims distinct (docs/release-runbook.md). make check / ship-check prove source only — not installed-app, Touch ID arm, notarization, or publication. Flag language that collapses these tiers."
     },
     {
       "id": "vocabulary-docs",
       "severity": "low",
       "scope": ["**/*.md", "docs/**"],
-      "rule": "Vocabulary for architecture prose only (not code): 'AI agent' should be 'Worker' (ephemeral) or 'Sentinel' (continuous); 'heartbeat'/'always-on' should be 'watch'/'sentinel-gated'. A sentinel described as firing on a clock regardless of state is a heartbeat — flag it."
+      "rule": "Vocabulary for architecture prose only. Prefer Worker (ephemeral) or Sentinel (continuous) over vague 'AI agent' for product roles. Flag a Sentinel described as firing on a wall-clock schedule regardless of observed state (generic always-on/heartbeat scheduling). Do NOT flag legitimate protocol or ops terms: outbox lease heartbeat routes/operations, writer-claim heartbeat TTLs, or CI always-on required checks (see docs/architecture.md, docs/surface-map.md, docs/security-claims-vs-reality.md)."
     }
   ]
 }
