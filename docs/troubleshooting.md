@@ -23,9 +23,10 @@ enable separately requires Docker Desktop to be running.
 On Ubuntu, install Rust, Node.js 20 or newer, Git, `make`, `curl`, and `lsof`,
 then use `make warroom`. Docker Engine plus the Compose and Buildx plugins are
 required for Gateway and `make verify`, but not for the browser-only Council
-launcher. Installed-app and Gateway Pack paths are macOS-first because
-they depend on Docker Desktop and macOS-only packaging, signing, and window
-proofs. This is an installer boundary, not a claim that Council or War Room
+launcher. The installed app is macOS-first because of macOS-only
+packaging, signing, and window proofs (the core DMG itself is Docker-free);
+the optional Gateway Pack additionally requires Docker Desktop. This is an
+installer boundary, not a claim that Council or War Room
 Web cannot run on Linux.
 
 ## Docker
@@ -49,9 +50,10 @@ cold.
 
 ## Ports
 
-IRIN publishes its product services on these loopback
-ports by default. Ubuntu `make warroom` starts only Council and War Room Web on
-the first two ports; Gateway is a separate component-level start there.
+IRIN publishes its product services on these ports by default; all but the
+optional CLI adapters are loopback-only. Ubuntu `make warroom` starts only
+Council and War Room Web on the first two ports; Gateway is a separate
+component-level start there.
 
 | Service | Port |
 | --- | --- |
