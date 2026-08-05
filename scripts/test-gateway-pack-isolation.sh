@@ -91,6 +91,16 @@ grep -q 'diff --binary HEAD' "$ROOT/scripts/build-gateway-pack-dev-images.sh" ||
   die "dirty worktree image build must overlay tracked changes"
 grep -q 'ls-files --others --exclude-standard' "$ROOT/scripts/build-gateway-pack-dev-images.sh" ||
   die "dirty worktree image build must overlay untracked source"
+# Worktree materialization must use full checkout-index (not git archive):
+# export-ignore drops tracked paths and falsely baked GW_BUILD_DIRTY=true.
+grep -q 'checkout-index --all' "$ROOT/scripts/build-gateway-pack-dev-images.sh" ||
+  die "worktree sidecar context must use checkout-index --all"
+grep -q 'checkout-index --all' "$ROOT/scripts/build-gateway-pack-prod-images.sh" ||
+  die "prod worktree sidecar context must use checkout-index --all"
+! grep -q 'git archive HEAD' "$ROOT/scripts/build-gateway-pack-dev-images.sh" ||
+  die "dev image build must not use git archive for worktree context"
+! grep -q 'git archive HEAD' "$ROOT/scripts/build-gateway-pack-prod-images.sh" ||
+  die "prod image build must not use git archive for worktree context"
 SIDECAR_DOCKERFILE="$ROOT/gateway/sidecar-rs/Dockerfile"
 grep -q 'find /build -mindepth 1 -maxdepth 1 ! -name target' "$SIDECAR_DOCKERFILE" ||
   die "cargo-chef dummy tree must be removed before the real source copy"

@@ -177,7 +177,9 @@ trap cleanup_ctx EXIT
 if [[ -f "$ROOT/.git" ]]; then
   CTX="$(mktemp -d "${TMPDIR:-/tmp}/irin-gw-pack-ctx.XXXXXX")"
   COMMON="$(git -C "$ROOT" rev-parse --path-format=absolute --git-common-dir)"
-  git -C "$ROOT" archive HEAD | tar -x -C "$CTX"
+  # Full HEAD tree via checkout-index — not `git archive` (export-ignore drops
+  # tracked paths → false GW_BUILD_DIRTY=true and permanent REHEARSAL arm).
+  git -C "$ROOT" checkout-index --all --prefix="$CTX/"
   mkdir -p "$CTX/.git/objects" "$CTX/.git/refs/heads" "$CTX/.git/info"
   rsync -a "$COMMON/objects/" "$CTX/.git/objects/"
   [[ -f "$COMMON/packed-refs" ]] && cp -f "$COMMON/packed-refs" "$CTX/.git/packed-refs"
@@ -186,10 +188,8 @@ if [[ -f "$ROOT/.git" ]]; then
   echo "$SHA" >"$CTX/.git/refs/heads/pack-build"
   printf '[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n' >"$CTX/.git/config"
   git -C "$CTX" read-tree HEAD
-  while IFS= read -r rel; do
-    [[ -n "$rel" ]] || continue
-    [[ -e "$CTX/$rel" ]] || git -C "$CTX" update-index --force-remove -- "$rel" 2>/dev/null || true
-  done < <(git -C "$CTX" ls-files)
+  [[ -z "$(git -C "$CTX" status --porcelain 2>/dev/null || true)" ]] ||
+    die "clean monorepo materialized a dirty sidecar context (checkout-index/read-tree bug)"
   SIDECAR_CONTEXT="$CTX"
 else
   SIDECAR_CONTEXT="$ROOT"
