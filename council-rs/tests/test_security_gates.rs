@@ -61,46 +61,80 @@ fn test_p1_b2_bind_string_is_loopback() {
     // on missing files made this gate a permanent green no-op.
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
 
-    // Bind logic lives in server/mod.rs since server.rs became a module tree.
+    // CLI default bind is the clap `default_value` on --host in main.rs.
+    // server/mod.rs has many 127.0.0.1 literals (CORS, docs) that would keep
+    // a naive source scan green if the CLI default were changed.
+    let main_path = manifest.join("src/main.rs");
+    let main = fs::read_to_string(&main_path).unwrap_or_else(|e| {
+        panic!("must read CLI bind source {}: {e}", main_path.display())
+    });
+    assert!(
+        main.contains("default_value = \"127.0.0.1\""),
+        "src/main.rs --host must default to 127.0.0.1"
+    );
+    assert!(
+        !main.contains("default_value = \"0.0.0.0\""),
+        "src/main.rs must not default --host to 0.0.0.0"
+    );
+
+    // Runtime non-loopback refusal still lives in server/mod.rs — pin the
+    // hard reject so the gate is not only the CLI default string.
     let server_path = manifest.join("src/server/mod.rs");
-    let content = fs::read_to_string(&server_path).unwrap_or_else(|e| {
+    let server = fs::read_to_string(&server_path).unwrap_or_else(|e| {
         panic!(
             "must read server bind source {}: {e}",
             server_path.display()
         )
     });
     assert!(
-        !content.contains("\"0.0.0.0\""),
+        !server.contains("\"0.0.0.0\""),
         "server/mod.rs contains 0.0.0.0 bind!"
     );
     assert!(
-        content.contains("127.0.0.1"),
-        "server/mod.rs must explicitly bind to 127.0.0.1"
+        server.contains("is_loopback_host"),
+        "server/mod.rs must keep is_loopback_host for non-loopback refusal"
     );
 
-    // Sidecar bind/serve lives in boot.rs (main.rs no longer owns the listener).
+    // Sidecar management plane is UDS-only: pin the concrete bind op, not a
+    // comment substring ("uds"/"UDS" appears in many log/doc lines).
     let sidecar_path = manifest.join("../gateway/sidecar-rs/src/boot.rs");
-    let content = fs::read_to_string(&sidecar_path).unwrap_or_else(|e| {
+    let sidecar = fs::read_to_string(&sidecar_path).unwrap_or_else(|e| {
         panic!(
             "must read sidecar bind source {}: {e}",
             sidecar_path.display()
         )
     });
     assert!(
-        !content.contains("\"0.0.0.0\""),
+        !sidecar.contains("\"0.0.0.0\""),
         "sidecar-rs contains 0.0.0.0 bind!"
     );
     assert!(
-        content.contains("127.0.0.1") || content.contains("uds") || content.contains("UDS"),
-        "sidecar-rs must bind to 127.0.0.1 or UDS"
+        sidecar.contains("UnixListener::bind"),
+        "sidecar-rs must bind management plane via UnixListener::bind"
     );
 }
 
-/// Lint short-form `ports:` entries for loopback-only host binds.
+/// Strip one layer of YAML single/double quotes from a scalar.
+fn strip_yaml_scalar_quotes(s: &str) -> &str {
+    let s = s.trim();
+    if s.len() >= 2
+        && ((s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')))
+    {
+        &s[1..s.len() - 1]
+    } else {
+        s
+    }
+}
+
+/// Lint every `ports:` sequence item for loopback-only host binds.
 ///
 /// Only lines under a YAML `ports:` key are checked. Volume mounts, env
 /// strings, and `extra_hosts` entries also match naive `- "...:..."` patterns
 /// and must not be treated as port mappings.
+///
+/// Fail-closed: every sequence item under `ports:` must be a short-form
+/// loopback mapping (`127.0.0.1:…`). Unquoted, single-quoted, and double-quoted
+/// forms are accepted. Long-form maps and any other syntax fail the gate.
 fn assert_compose_ports_loopback(content: &str, rel: &str) {
     let mut in_ports = false;
     let mut ports_indent: Option<usize> = None;
@@ -128,9 +162,6 @@ fn assert_compose_ports_loopback(content: &str, rel: &str) {
             // Left the ports block (next sibling or parent key).
             in_ports = false;
             ports_indent = None;
-            // Current line may open another block; re-check next iteration only.
-            // If this line itself is another ports: it will be handled next loop —
-            // fall through by re-evaluating as non-ports unless it is ports.
             if trimmed == "ports:" || trimmed.starts_with("ports:") {
                 in_ports = true;
                 ports_indent = Some(indent);
@@ -138,16 +169,37 @@ fn assert_compose_ports_loopback(content: &str, rel: &str) {
             continue;
         }
 
-        // Short-form publish: - "ip:host:container" or - "host:container"
-        if trimmed.starts_with("- \"") && trimmed.ends_with('"') {
-            assert!(
-                trimmed.starts_with("- \"127.0.0.1:"),
-                "docker-compose port mapping not bound to localhost in {}: {}",
-                rel,
-                line
+        // Fail-closed: only sequence items are supported under ports.
+        if !trimmed.starts_with('-') {
+            panic!(
+                "unsupported non-sequence ports entry in {rel} (long-form maps not allowed): {line}"
             );
-            mappings += 1;
         }
+        let rest = trimmed.trim_start_matches('-').trim();
+        let val = strip_yaml_scalar_quotes(rest);
+        // Long-form single-line or nested map start → fail closed.
+        if val.is_empty()
+            || val.starts_with("target:")
+            || val.starts_with("published:")
+            || val.starts_with("host_ip:")
+            || rest.starts_with('{')
+        {
+            panic!("unsupported ports mapping syntax in {rel}: {line}");
+        }
+        assert!(
+            val.starts_with("127.0.0.1:"),
+            "docker-compose port mapping not bound to localhost in {}: {}",
+            rel,
+            line
+        );
+        // Require host:container shape (at least one more colon after IP).
+        assert!(
+            val.matches(':').count() >= 2,
+            "docker-compose port mapping missing host/container ports in {}: {}",
+            rel,
+            line
+        );
+        mappings += 1;
     }
 
     assert!(
