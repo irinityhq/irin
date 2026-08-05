@@ -109,10 +109,11 @@ No current passing receipt means no source-proof claim for that PR tip.
 `make ship-check` never means Installed, Accepted, Published, or product-green;
 those tiers come only from `scripts/candidate-status.sh` on a durable candidate.
 If another pull request merges first, update from `origin/main`, rerun
-`make preflight`, then rerun the ship check. The integrated `main` workflow
-repeats the complete code matrix after merge so individually green branches
-cannot produce an untested combined tree. Scheduled and manual proof continue
-to own SBOM generation.
+`make preflight`, then rerun the ship check. On push to `main`, the
+integrated workflow runs only the matrix lanes selected by the exact
+`before...sha` change classification; the complete matrix runs on scheduled
+and manual dispatches, and as a fail-safe when the `before` SHA is
+unavailable. Scheduled and manual proof continue to own SBOM generation.
 
 ## Merge method
 

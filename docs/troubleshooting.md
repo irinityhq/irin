@@ -15,7 +15,7 @@ Docker images from source.
 
 On macOS, `make gateway-prepare-config` requires OpenSSL and prepares only the
 private Gateway environment and ledger key; it does not check Docker, Rust,
-Node.js, Git, `jq`, `lockf`, or `launchctl`, and it starts no services. It is
+Node.js, Git, or `jq`, and it starts no services. It is
 safe to rerun: valid operator-owned values and signing material are preserved
 while missing or placeholder IRIN-managed fields are filled. Gateway Pack
 enable separately requires Docker Desktop to be running.
@@ -24,8 +24,8 @@ On Ubuntu, install Rust, Node.js 20 or newer, Git, `make`, `curl`, and `lsof`,
 then use `make warroom`. Docker Engine plus the Compose and Buildx plugins are
 required for Gateway and `make verify`, but not for the browser-only Council
 launcher. Installed-app and Gateway Pack paths are macOS-first because
-they depend on `lockf`, `launchctl`, Docker Desktop, and macOS-only runtime
-recovery. This is an installer boundary, not a claim that Council or War Room
+they depend on Docker Desktop and macOS-only packaging, signing, and window
+proofs. This is an installer boundary, not a claim that Council or War Room
 Web cannot run on Linux.
 
 ## Docker
@@ -33,9 +33,6 @@ Web cannot run on Linux.
 Gateway Pack enable requires the Docker daemon to be running before it
 starts — `docker info` must succeed or setup exits with an explicit instruction
 to open Docker Desktop. Open it, wait until it reports ready, then rerun setup.
-After installation, the optional CLI proxy launcher can
-open Docker Desktop and wait for the daemon (180 seconds by default,
-configurable with `IRIN_DOCKER_WAIT_SECS`).
 
 Building the Gateway and sidecar images the first time is a real Docker
 build from this checkout, not a pull of a published image — expect it to use
@@ -52,7 +49,7 @@ cold.
 
 ## Ports
 
-The managed macOS runtime publishes its product services on these loopback
+IRIN publishes its product services on these loopback
 ports by default. Ubuntu `make warroom` starts only Council and War Room Web on
 the first two ports; Gateway is a separate component-level start there.
 
@@ -79,20 +76,6 @@ for each adapter, and each proxy refuses a non-loopback bind without its token.
 This means the listeners are reachable from host network interfaces but are not
 unauthenticated. Keep the host behind a trusted private network/firewall and do
 not forward ports `9090` or `9091`.
-
-## Managed macOS runtime refuses the checkout
-
-The managed runtime verifies source identity before it starts. A canonical
-runtime must use the `irinityhq/irin` origin, the `main` branch, and a clean
-tree; an isolated worktree must use the same origin and a non-`main` branch.
-This is why `runtime origin is not irinityhq/irin`, `canonical runtime must
-launch from main`, or `canonical runtime checkout is dirty` stops startup.
-
-Commit the change in an IRIN-origin worktree, then update the clean canonical
-checkout before restarting it. External fork contributors can build and run
-the verification/test targets, but the managed product runtime intentionally
-does not adopt a fork as its source. Do not change `origin` merely to bypass
-this check.
 
 ## Login-shell provider discovery
 
@@ -135,13 +118,6 @@ Funnel or any other public-internet exposure.
 
 Login recovery for a source-managed runtime is retired. The installed app
 owns its bundled Council; source development uses foreground `make warroom`.
-
-Packaged and source Council health endpoints report build identity; the
-identity embedded in the currently running Council and Gateway sidecar
-builds; a `RUNTIME_MISMATCH` line means the running services do not match
-the checkout on disk (dirty tree, unbuilt commit, or a source-receipt/
-build drift). Commit worktree changes and update the clean canonical checkout;
-then rebuild and relaunch from that committed source.
 
 ## Watch looks empty or quiet
 
@@ -197,9 +173,8 @@ ports, and ephemeral signing key) and never touches canonical state.
 
 ## Where to look next
 
-- Local runtime logs: `~/.local/state/irin/runtime/` — `council.log`,
-  `web.log`, `supervisor.log`, `claude-proxy.log`, `codex-proxy.log`,
-  `login-boot.log`.
+- Source development logs: foreground `make warroom` output in the
+  launching terminal.
 - Gateway/sidecar logs: from the repository root, use
   `docker compose --env-file /dev/null -p gateway -f gateway/docker-compose.yml -f gateway/docker-compose.canary.yml logs --tail=100 sidecar`
   (replace `sidecar` with `gateway` for the proxy container).
