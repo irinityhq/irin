@@ -858,10 +858,11 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Broader unwired-test reachability (#0018 / #0043 recurrence class)
+# Broader unwired-test reachability (#0018 / #0043 / #0059 class)
 # Every scripts/test-*.sh must be hosted-CI reachable (direct workflow step or
 # transitive real invocation from a reachable script) OR listed in the small
-# explicit allow-list below. Path-filter / case-arm mentions do not count.
+# explicit allow-list below. Mentions are not wiring: path filters, continued
+# command arguments, echo/printf text, and heredoc fixture bodies do not count.
 # Do not add a workflow to quiet this: allow-list intentional local-only tests,
 # or wire a real invocation into an existing entrypoint.
 # ---------------------------------------------------------------------------
@@ -871,7 +872,6 @@ import re
 import sys
 
 root = Path(sys.argv[1])
-# Repo-relative paths (scripts/test-*.sh) so they match workflow seeds.
 tests = sorted(
     f"scripts/{p.name}" for p in (root / "scripts").glob("test-*.sh")
 )
@@ -887,77 +887,147 @@ ALLOW_LIST = {
     "scripts/test-link-agent-context.sh": "private doctrine linker hermetic",
 }
 
+SHELLS = {"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh"}
+TEST_PATH_RE = re.compile(
+    r"""^["']?(?:\$\{?ROOT\}?/)?(scripts/test-[\w-]+\.sh)["']?$"""
+)
+BARE_TEST_RE = re.compile(r"""^["']?(scripts/test-[\w-]+\.sh)["']?$""")
+# Real heredoc openers only (<<EOF / <<'EOF' / <<"EOF" / <<-EOF).
+# Reject bash here-strings (<<<) and non-identifier delimiters ($...).
+HEREDOC_START_RE = re.compile(
+    r"""(?<!<)<<-?\s*(?:'([A-Za-z_][A-Za-z0-9_]*)'|"([A-Za-z_][A-Za-z0-9_]*)"|\\?([A-Za-z_][A-Za-z0-9_]*))(?!\S)"""
+)
+ENV_ASSIGN_RE = re.compile(
+    r"""^(?:export\s+)?[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S+)\s+"""
+)
+# Path-filter / case-arm style (not shell ||).
+PATH_FILTER_RE = re.compile(r"""scripts/[\w./-]+\.sh\s*\|""")
+PATH_FILTER_LEFT_RE = re.compile(r"""\|\s*scripts/[\w./-]+\.sh""")
+
+
+def strip_comment(line: str) -> str:
+    # Keep # inside quotes out of scope; control-plane sources are simple.
+    return line.split("#", 1)[0]
+
 
 def path_filterish(code: str) -> bool:
-    """True for path-filter / case-arm mentions, not shell ||/&& runs."""
     s = code.rstrip()
     if s.endswith("\\"):
         return True
-    if re.search(r"scripts/[\w./-]+\.sh\s*\|", s):
-        return True
-    if re.search(r"\|\s*scripts/[\w./-]+\.sh", s):
+    if PATH_FILTER_RE.search(s) or PATH_FILTER_LEFT_RE.search(s):
         return True
     return False
 
 
-def workflow_invokes(code: str):
-    code = code.strip()
-    if not code or path_filterish(code):
+def first_command_tokens(code: str):
+    """First pipeline/list command's argv after leading env assignments."""
+    s = code.strip()
+    if not s or path_filterish(s):
         return []
-    out = []
-    for m in re.finditer(
-        r"""(?:^|[\s;|&])bash\s+["']?scripts/(test-[\w-]+\.sh)["']?""",
-        code,
-    ):
-        out.append(f"scripts/{m.group(1)}")
-    m = re.fullmatch(r"scripts/(test-[\w-]+\.sh)(?:\s+.*)?", code)
+    # Only the first simple command in a list/pipeline (before | / || / && / ;).
+    # Do not split on | that is already path-filterish (handled above).
+    for sep in ("||", "&&", "|", ";"):
+        if sep in s:
+            s = s.split(sep, 1)[0].strip()
+    while True:
+        m = ENV_ASSIGN_RE.match(s)
+        if not m:
+            break
+        s = s[m.end() :]
+    if not s:
+        return []
+    # Tokenize lightly: whitespace, keep quoted strings as one token.
+    tokens = re.findall(r"""'[^']*'|"[^"]*"|\S+""", s)
+    return tokens
+
+
+def tokens_invoke_test(tokens) -> list:
+    """Command-position executions only (#0059: not echo/grep/args/text)."""
+    if not tokens:
+        return []
+    cmd = tokens[0]
+    cmd_unq = cmd.strip("'\"")
+    # bash scripts/test-foo.sh  /  bash "$ROOT/scripts/test-foo.sh"
+    if cmd_unq in SHELLS:
+        if len(tokens) < 2:
+            return []
+        m = TEST_PATH_RE.match(tokens[1])
+        if m:
+            return [m.group(1)]
+        return []
+    # Bare hosted step: scripts/test-foo.sh (no $ROOT expansion form).
+    m = BARE_TEST_RE.match(cmd)
     if m:
-        out.append(f"scripts/{m.group(1)}")
-    return out
+        return [m.group(1)]
+    return []
 
 
-def script_invokes(code: str):
-    """Real executions only — not path-list fixtures, classifier cases, or
-    bare path arguments to grep/other tools (e.g. isolation.sh grepping the
-    integration-smoke source for flag strings without running it)."""
-    code = code.strip()
-    if not code or path_filterish(code):
-        return []
-    out = []
-    # Require an explicit bash runner. A quoted "$ROOT/scripts/test-*.sh"
-    # alone is often a file operand (grep path list), not a command.
-    for m in re.finditer(
-        r"""bash\s+["']?(?:\$\{?ROOT\}?/)?scripts/(test-[\w-]+\.sh)["']?""",
-        code,
-    ):
-        out.append(f"scripts/{m.group(1)}")
-    return out
+def line_invokes(code: str) -> list:
+    return tokens_invoke_test(first_command_tokens(code))
 
 
-seeds = set()
-wf_dir = root / ".github" / "workflows"
-if not wf_dir.is_dir():
-    print("missing .github/workflows", file=sys.stderr)
-    sys.exit(2)
-for path in sorted(wf_dir.glob("*.yml")):
-    for line in path.read_text(encoding="utf-8").splitlines():
-        for target in workflow_invokes(line.split("#", 1)[0]):
-            seeds.add(target)
+def heredoc_delimiter(code: str):
+    m = HEREDOC_START_RE.search(code)
+    if not m:
+        return None
+    return m.group(1) or m.group(2) or m.group(3)
 
-reachable = set(seeds)
-queue = list(seeds)
-while queue:
-    cur = queue.pop()
-    cur_path = root / cur
-    if not cur_path.is_file():
-        continue
-    for line in cur_path.read_text(encoding="utf-8").splitlines():
-        for target in script_invokes(line.split("#", 1)[0]):
-            if target not in reachable and (root / target).is_file():
-                reachable.add(target)
-                queue.append(target)
+
+def scan_lines(lines):
+    """Yield invocation targets; skip heredoc bodies (fixture text)."""
+    heredoc_end = None
+    for raw in lines:
+        code = strip_comment(raw)
+        if heredoc_end is not None:
+            if code.strip() == heredoc_end:
+                heredoc_end = None
+            continue
+        delim = heredoc_delimiter(code)
+        if delim is not None:
+            # Content after <<EOF on the same line is not used here; body follows.
+            heredoc_end = delim
+            # Still allow the prefix command (e.g. cat <<EOF) to be parsed —
+            # it will not invoke a test script via first-token rules.
+            for t in line_invokes(code):
+                yield t
+            continue
+        for t in line_invokes(code):
+            yield t
+
+
+def scan_text(text: str):
+    return list(scan_lines(text.splitlines()))
+
+
+def compute_reachable():
+    seeds = set()
+    wf_dir = root / ".github" / "workflows"
+    if not wf_dir.is_dir():
+        raise SystemExit("missing .github/workflows")
+    for path in sorted(wf_dir.glob("*.yml")):
+        for t in scan_text(path.read_text(encoding="utf-8")):
+            seeds.add(t)
+    reachable = set(seeds)
+    queue = list(seeds)
+    while queue:
+        cur = queue.pop()
+        cur_path = root / cur
+        if not cur_path.is_file():
+            continue
+        for t in scan_text(cur_path.read_text(encoding="utf-8")):
+            if t not in reachable and (root / t).is_file():
+                reachable.add(t)
+                queue.append(t)
+    return seeds, reachable
+
 
 errors = []
+try:
+    seeds, reachable = compute_reachable()
+except SystemExit as exc:
+    print(str(exc), file=sys.stderr)
+    sys.exit(2)
+
 for name, reason in sorted(ALLOW_LIST.items()):
     if not (root / name).is_file():
         errors.append(f"allow-list entry missing on disk: {name} ({reason})")
@@ -966,97 +1036,11 @@ for name, reason in sorted(ALLOW_LIST.items()):
             f"allow-list stale (already CI-reachable): {name} ({reason})"
         )
 
-unwired = [
-    t for t in tests if t not in reachable and t not in ALLOW_LIST
-]
+unwired = [t for t in tests if t not in reachable and t not in ALLOW_LIST]
 for t in unwired:
     errors.append(
         f"unwired scripts/test-*.sh (not CI-reachable, not allow-listed): {t}"
     )
-
-if errors:
-    for e in errors:
-        print(e, file=sys.stderr)
-    sys.exit(1)
-
-print(
-    f"reachable={len(reachable)} allow-listed={len(ALLOW_LIST)} total={len(tests)}"
-)
-sys.exit(0)
-PY
-then
-  pass "every scripts/test-*.sh is CI-reachable or allow-listed (#0018/#0043 class)"
-else
-  fail "unwired scripts/test-*.sh: wire an existing CI entrypoint or add to allow-list"
-fi
-
-# Classification pins (teeth): path-filter-only scripts stay unwired; hosted
-# seeds and real transitive runs stay reachable. Prevents a no-op matcher.
-if python3 - "$ROOT" <<'PY'
-from pathlib import Path
-import re
-import sys
-
-root = Path(sys.argv[1])
-
-
-def path_filterish(code: str) -> bool:
-    s = code.rstrip()
-    if s.endswith("\\"):
-        return True
-    if re.search(r"scripts/[\w./-]+\.sh\s*\|", s):
-        return True
-    if re.search(r"\|\s*scripts/[\w./-]+\.sh", s):
-        return True
-    return False
-
-
-def workflow_invokes(code: str):
-    code = code.strip()
-    if not code or path_filterish(code):
-        return []
-    out = []
-    for m in re.finditer(
-        r"""(?:^|[\s;|&])bash\s+["']?scripts/(test-[\w-]+\.sh)["']?""",
-        code,
-    ):
-        out.append(f"scripts/{m.group(1)}")
-    m = re.fullmatch(r"scripts/(test-[\w-]+\.sh)(?:\s+.*)?", code)
-    if m:
-        out.append(f"scripts/{m.group(1)}")
-    return out
-
-
-def script_invokes(code: str):
-    code = code.strip()
-    if not code or path_filterish(code):
-        return []
-    out = []
-    for m in re.finditer(
-        r"""bash\s+["']?(?:\$\{?ROOT\}?/)?scripts/(test-[\w-]+\.sh)["']?""",
-        code,
-    ):
-        out.append(f"scripts/{m.group(1)}")
-    return out
-
-
-seeds = set()
-for path in sorted((root / ".github" / "workflows").glob("*.yml")):
-    for line in path.read_text(encoding="utf-8").splitlines():
-        for target in workflow_invokes(line.split("#", 1)[0]):
-            seeds.add(target)
-reachable = set(seeds)
-queue = list(seeds)
-while queue:
-    cur = queue.pop()
-    cur_path = root / cur
-    if not cur_path.is_file():
-        continue
-    for line in cur_path.read_text(encoding="utf-8").splitlines():
-        for target in script_invokes(line.split("#", 1)[0]):
-            if target not in reachable and (root / target).is_file():
-                reachable.add(target)
-                queue.append(target)
 
 must_reach = [
     "scripts/test-ci-control-plane.sh",
@@ -1066,40 +1050,111 @@ must_reach = [
 ]
 must_not = [
     "scripts/test-cargo-target-policy.sh",
-    "scripts/test-link-agent-context.sh",  # classifier fixture only
-    "scripts/test-gateway-pack-integration-smoke.sh",  # local only; isolation greps it
+    "scripts/test-link-agent-context.sh",
+    "scripts/test-gateway-pack-integration-smoke.sh",
     "scripts/test-__orphan_unwired_guard__.sh",
 ]
-errors = []
 for t in must_reach:
     if t not in reachable:
         errors.append(f"expected CI-reachable: {t}")
 for t in must_not:
     if t in reachable:
         errors.append(f"expected not CI-reachable: {t}")
-# Path-filter line must not seed (regression of #0043 mention-only class).
-if workflow_invokes("              scripts/test-cargo-target-policy.sh|\\"):
-    errors.append("path-filter line wrongly counted as invocation")
-if not workflow_invokes("          scripts/test-candidate-status.sh"):
-    errors.append("bare detect-changes step not counted as invocation")
-# Isolation-style grep operand must not create a transitive edge.
-grep_arg = '  "$ROOT/scripts/test-gateway-pack-integration-smoke.sh" || die'
-if script_invokes(grep_arg):
-    errors.append("grep file-operand path wrongly counted as invocation")
-if not script_invokes(
-    'bash "$ROOT/scripts/test-production-image-provenance.sh" ||'
-):
-    errors.append("bash-prefixed transitive run not counted as invocation")
+
+# --- Regression mutants (#0059 / Copilot isolation false edge) ---
+mutants = []
+
+def expect_empty(label, text):
+    got = scan_text(text)
+    if got:
+        mutants.append(f"{label}: expected no invokes, got {got}")
+
+
+def expect_has(label, text, want):
+    got = scan_text(text)
+    if want not in got:
+        mutants.append(f"{label}: expected {want} in {got}")
+
+
+# Real shapes must still count.
+expect_has(
+    "bare workflow step",
+    "          scripts/test-candidate-status.sh\n",
+    "scripts/test-candidate-status.sh",
+)
+expect_has(
+    "bash workflow step",
+    "          bash scripts/test-gateway-pack-assets.sh\n",
+    "scripts/test-gateway-pack-assets.sh",
+)
+expect_has(
+    "bash $ROOT transitive",
+    'bash "$ROOT/scripts/test-production-image-provenance.sh" ||\n',
+    "scripts/test-production-image-provenance.sh",
+)
+expect_has(
+    "env-prefixed bash",
+    'IRIN_X=1 bash "$ROOT/scripts/test-production-image-provenance.sh"\n',
+    "scripts/test-production-image-provenance.sh",
+)
+
+# Non-execution text must not count.
+expect_empty(
+    "echo bash mention",
+    "          echo bash scripts/test-__orphan_unwired_guard__.sh\n",
+)
+expect_empty(
+    "printf bash mention",
+    'printf "%s\\n" "bash scripts/test-__orphan_unwired_guard__.sh"\n',
+)
+expect_empty(
+    "path-filter case arm",
+    "              scripts/test-cargo-target-policy.sh|\\\n",
+)
+expect_empty(
+    "grep continued file operand",
+    'grep -qE "OWNED_DESKTOP_TEARDOWN" \\\n'
+    '  "$ROOT/packaging/smoke-gateway-pack.sh" \\\n'
+    '  "$ROOT/scripts/test-gateway-pack-integration-smoke.sh" || die\n',
+)
+expect_empty(
+    "bare $ROOT path as first token (operand class)",
+    '  "$ROOT/scripts/test-gateway-pack-integration-smoke.sh" || die\n',
+)
+expect_empty(
+    "heredoc fixture body",
+    "cat <<'EOF'\n"
+    "bash scripts/test-__orphan_unwired_guard__.sh\n"
+    "EOF\n",
+)
+expect_empty(
+    "heredoc unquoted body",
+    "cat <<EOF\n"
+    "bash scripts/test-__orphan_unwired_guard__.sh\n"
+    "EOF\n",
+)
+expect_empty(
+    "workflow run: echo bash ...",
+    "        run: echo bash scripts/test-__orphan_unwired_guard__.sh\n",
+)
+
+errors.extend(mutants)
+
 if errors:
     for e in errors:
         print(e, file=sys.stderr)
     sys.exit(1)
+
+print(
+    f"reachable={len(reachable)} allow-listed={len(ALLOW_LIST)} "
+    f"total={len(tests)} seeds={len(seeds)}"
+)
 sys.exit(0)
 PY
 then
-  pass "unwired-test reachability classification pins hold"
+  pass "every scripts/test-*.sh is CI-reachable or allow-listed (#0018/#0043/#0059)"
 else
-  fail "unwired-test reachability classification pins failed"
+  fail "unwired-test reachability guard failed (wire, allow-list, or mutant)"
 fi
 
 # ---------------------------------------------------------------------------
