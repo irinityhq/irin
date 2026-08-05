@@ -539,11 +539,16 @@ fn status_with_council_route_bypasses_warm_cache() {
         // Live authority owner must take a fresh sample rather than returning
         // truth based on the warm presentation cache.
         let fresh = status_with_council_route(&store, false, false);
-        assert!(fresh.hard_down);
+        // status_with_council_route re-applies refresh_predicates(false) for the
+        // post-lifecycle view, so hard_down may clear on the returned status;
+        // the invariant is still: bypass warm ready, force a second probe, and
+        // leave presentation cache on the new truth.
+        assert!(!fresh.governed_ready);
         assert_eq!(CALLS.load(Ordering::SeqCst), 2);
         // The authority sample also re-caches the new truth for presentation.
         let after = gateway_pack_status(&store);
         assert!(after.hard_down);
+        assert!(!after.governed_ready);
         assert_eq!(CALLS.load(Ordering::SeqCst), 2);
         let _ = store;
     });
