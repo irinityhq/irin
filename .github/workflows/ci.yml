@@ -575,6 +575,10 @@ jobs:
         working-directory: gateway
         run: make contract-check
 
+      - name: Gateway models catalog
+        working-directory: gateway
+        run: make models-validate
+
       - name: Gateway fmt (known pre-existing debt)
         continue-on-error: true
         run: cargo fmt -p gateway-sidecar -- --check

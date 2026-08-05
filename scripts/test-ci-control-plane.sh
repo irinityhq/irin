@@ -548,6 +548,7 @@ for needle in \
   'make -C gateway lint-lua' \
   'make -C gateway lua-unit' \
   'make -C gateway contract-check' \
+  'make -C gateway models-validate' \
   'scripts/test-gateway-pack-assets.sh' \
   'gateway_openresty_runtime' \
   'run_gateway_openresty_static_proofs'
@@ -558,7 +559,7 @@ do
 done
 pass "dev-check wires Gateway OpenResty static proofs"
 
-# Hosted gateway-rust: timer-closure + lua-unit + contract-check.
+# Hosted gateway-rust: timer-closure + lua-unit + contract-check + models-validate.
 GATEWAY_RUST_JOB="$(python3 - "$CI_YML" <<'PY'
 from pathlib import Path
 import re
@@ -591,8 +592,12 @@ if [[ -n "$GATEWAY_RUST_JOB" ]]; then
     fail "gateway-rust must run make contract-check"
     host_gw_ok=false
   fi
+  if ! grep -Eq 'make models-validate' <<<"$GATEWAY_RUST_JOB"; then
+    fail "gateway-rust must run make models-validate"
+    host_gw_ok=false
+  fi
   if $host_gw_ok; then
-    pass "gateway-rust hosts lint-lua + lua-unit + contract-check"
+    pass "gateway-rust hosts lint-lua + lua-unit + contract-check + models-validate"
   fi
 fi
 

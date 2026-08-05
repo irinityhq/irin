@@ -191,11 +191,12 @@ if printf '%s\n' "${paths[@]}" | grep -Eq '^gateway/(lua/|conf/|nginx\.conf)'; t
 fi
 
 run_gateway_openresty_static_proofs() {
-  # Structural + pure-Lua + contract + staged-pack freshness. metrics-contract
-  # needs a live stack and is hosted on gateway-smoke, not here.
+  # Structural + pure-Lua + contract + model catalog + staged-pack freshness.
+  # metrics-contract needs a live stack and is hosted on gateway-smoke, not here.
   run "Gateway Lua timer-closure lint" make -C gateway lint-lua
   run "Gateway Lua unit tests" make -C gateway lua-unit
   run "Gateway contract check" make -C gateway contract-check
+  run "Gateway models catalog" make -C gateway models-validate
   run "Gateway Pack static assets" bash scripts/test-gateway-pack-assets.sh
 }
 
