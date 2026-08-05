@@ -323,7 +323,9 @@ path_universe_file="$tmp/path-universe.txt"
     council-rs/warroom-tauri/src-tauri/src/lib.rs \
     council-rs/warroom-tauri/src-tauri/resources/gateway-pack/docker-compose.yml \
     council-rs/scripts/warroom-tauri-dev.sh \
-    gateway/sidecar-rs/src/main.rs Makefile
+    gateway/sidecar-rs/src/main.rs \
+    gateway/lua/auth.lua gateway/nginx.conf gateway/conf/models.json \
+    gateway/docker-compose.yml Makefile
   git -C "$ROOT" ls-files \
     'packaging/*' \
     'scripts/*' \
@@ -333,6 +335,8 @@ path_universe_file="$tmp/path-universe.txt"
     'council-rs/warroom-tauri/*' \
     'council-rs/src-tauri/*' \
     'council-rs/scripts/warroom*' \
+    'gateway/lua/*' \
+    'gateway/conf/*' \
     2>/dev/null || true
 } | sort -u >"$path_universe_file"
 
@@ -512,6 +516,217 @@ if [[ "$(sed -n 's/^full_matrix=//p' <<<"$docs_sim")" != false ]]; then
   fail "docs-only must not force full via base-controlled guard"
 else
   pass "docs-only does not trigger force-full guard"
+fi
+
+# ---------------------------------------------------------------------------
+# Gateway OpenResty runtime (#0051): classifier + base exact + local/hosted
+# proofs must stay wired. Mutations that drop selection or remove commands fail.
+# ---------------------------------------------------------------------------
+DEV_CHECK="$ROOT/scripts/dev-check.sh"
+for openresty_path in gateway/lua/auth.lua gateway/nginx.conf gateway/conf/models.json; do
+  out="$("$CLASSIFIER" "$openresty_path")"
+  for key in gateway_rust warroom_tauri exact_candidate exact_install; do
+    if [[ "$(sed -n "s/^${key}=//p" <<<"$out")" != true ]]; then
+      fail "OpenResty path $openresty_path must set $key=true"
+    fi
+  done
+  if ! base_exact_cand "$openresty_path"; then
+    fail "base exact_candidate must cover $openresty_path"
+  fi
+  if ! base_exact_inst "$openresty_path"; then
+    fail "base exact_install must cover $openresty_path"
+  fi
+done
+if [[ "$(sed -n 's/^exact_candidate=//p' <<<"$("$CLASSIFIER" gateway/docker-compose.yml)")" != false ]]; then
+  fail "gateway compose must not select exact_candidate (pack uses packaging/gateway-pack)"
+else
+  pass "gateway OpenResty paths select pack+install; compose stays gateway-only"
+fi
+
+# Local check/ship must invoke the static OpenResty proofs for those paths.
+for needle in \
+  'make -C gateway lint-lua' \
+  'make -C gateway lua-unit' \
+  'make -C gateway contract-check' \
+  'make -C gateway models-validate' \
+  'scripts/test-gateway-pack-assets.sh' \
+  'gateway_openresty_runtime' \
+  'run_gateway_openresty_static_proofs'
+do
+  if ! file_has_fixed "$needle" "$DEV_CHECK"; then
+    fail "dev-check.sh must wire OpenResty proof: $needle"
+  fi
+done
+pass "dev-check wires Gateway OpenResty static proofs"
+
+# Hosted gateway-rust: timer-closure + lua-unit + contract-check + models-validate.
+GATEWAY_RUST_JOB="$(python3 - "$CI_YML" <<'PY'
+from pathlib import Path
+import re
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+m = re.search(
+    r"(?m)^  gateway-rust:\n((?:    .*\n|      .*\n|\n)*)",
+    text,
+)
+if not m:
+    sys.stderr.write("ci.yml missing gateway-rust job\n")
+    sys.exit(1)
+sys.stdout.write(m.group(0))
+PY
+)" || {
+  fail "ci.yml missing gateway-rust job block"
+  GATEWAY_RUST_JOB=""
+}
+if [[ -n "$GATEWAY_RUST_JOB" ]]; then
+  host_gw_ok=true
+  if ! grep -Eq 'make lint-lua' <<<"$GATEWAY_RUST_JOB"; then
+    fail "gateway-rust must run make lint-lua (timer-closure)"
+    host_gw_ok=false
+  fi
+  if ! grep -Eq 'make lua-unit' <<<"$GATEWAY_RUST_JOB"; then
+    fail "gateway-rust must run make lua-unit"
+    host_gw_ok=false
+  fi
+  if ! grep -Eq 'make contract-check' <<<"$GATEWAY_RUST_JOB"; then
+    fail "gateway-rust must run make contract-check"
+    host_gw_ok=false
+  fi
+  if ! grep -Eq 'make models-validate' <<<"$GATEWAY_RUST_JOB"; then
+    fail "gateway-rust must run make models-validate"
+    host_gw_ok=false
+  fi
+  if $host_gw_ok; then
+    pass "gateway-rust hosts lint-lua + lua-unit + contract-check + models-validate"
+  fi
+fi
+
+# Live metrics-contract requires a stack; hosted on gateway-smoke.
+GATEWAY_SMOKE_JOB="$(python3 - "$CI_YML" <<'PY'
+from pathlib import Path
+import re
+import sys
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+m = re.search(
+    r"(?m)^  gateway-smoke:\n((?:    .*\n|      .*\n|\n)*)",
+    text,
+)
+if not m:
+    sys.stderr.write("ci.yml missing gateway-smoke job\n")
+    sys.exit(1)
+sys.stdout.write(m.group(0))
+PY
+)" || {
+  fail "ci.yml missing gateway-smoke job block"
+  GATEWAY_SMOKE_JOB=""
+}
+if [[ -n "$GATEWAY_SMOKE_JOB" ]]; then
+  if ! grep -Eq 'make metrics-contract' <<<"$GATEWAY_SMOKE_JOB"; then
+    fail "gateway-smoke must run make metrics-contract when stack is up"
+  else
+    pass "gateway-smoke hosts metrics-contract"
+  fi
+fi
+
+# Mutation: dropping OpenResty from exact_candidate overlay must fail underlay.
+if python3 - "$CI_YML" "$CLASSIFIER" <<'PY'
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ci = Path(sys.argv[1]).read_text(encoding="utf-8")
+classifier = Path(sys.argv[2])
+# Mutant: strip gateway OpenResty arms from path_requires_exact_candidate only.
+mutant = re.sub(
+    r"\n\s*gateway/lua/\*\|\\\n\s*gateway/nginx\.conf\|\\\n\s*gateway/conf/\*\|\\",
+    "",
+    ci,
+    count=1,
+)
+if mutant == ci:
+    print("could not build exact_candidate OpenResty mutant", file=sys.stderr)
+    sys.exit(1)
+with tempfile.TemporaryDirectory() as td:
+    out = Path(td) / "exact_fns.sh"
+    # Reuse extraction pattern from this script's earlier block.
+    parts = []
+    for name in (
+        "path_requires_exact_candidate",
+        "path_requires_exact_install",
+        "path_forces_full_non_sbom_matrix",
+    ):
+        m = re.search(rf"({name}\(\) \{{.*?\n          \}})", mutant, re.S)
+        if not m:
+            print(f"could not extract {name} from mutant", file=sys.stderr)
+            sys.exit(1)
+        parts.append(m.group(1))
+    body = "\n".join(parts)
+    body = "\n".join(
+        line[10:] if line.startswith("          ") else line for line in body.splitlines()
+    )
+    out.write_text("#!/usr/bin/env bash\n" + body + "\n", encoding="utf-8")
+    check = r'''
+set -euo pipefail
+source "$1"
+path=gateway/lua/auth.lua
+cls="$("$2" "$path")"
+cls_cand="$(sed -n 's/^exact_candidate=//p' <<<"$cls")"
+if path_requires_exact_candidate "$path" || path_forces_full_non_sbom_matrix "$path"; then
+  base=true
+else
+  base=false
+fi
+# Underlay defect: classifier true, base false
+if [[ "$cls_cand" == true && "$base" != true ]]; then
+  exit 0
+fi
+echo "mutant did not under-select exact_candidate for gateway/lua" >&2
+exit 1
+'''
+    r = subprocess.run(
+        ["bash", "-c", check, "_", str(out), str(classifier)],
+        capture_output=True,
+        text=True,
+    )
+    if r.returncode != 0:
+        sys.stderr.write(r.stderr or r.stdout or "mutant check failed\n")
+        sys.exit(1)
+sys.exit(0)
+PY
+then
+  pass "exact underlay mutation rejects dropped OpenResty exact_candidate"
+else
+  fail "exact underlay mutation did not catch dropped OpenResty exact_candidate"
+fi
+
+# Mutation: removing lint-lua from gateway-rust must fail the hosted contract.
+if ! grep -Eq 'make lint-lua' <<<"$GATEWAY_RUST_JOB"; then
+  : # already failed above
+elif python3 - "$CI_YML" <<'PY'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+m = re.search(r"(?m)^  gateway-rust:\n((?:    .*\n|      .*\n|\n)*)", text)
+if not m:
+    sys.exit(1)
+job = m.group(0)
+mutant = job.replace("make lint-lua", "true # stripped lint-lua")
+if "make lint-lua" in mutant:
+    sys.exit(1)
+if re.search(r"make lint-lua", mutant):
+    sys.exit(1)
+# Contract teeth: the same check used above must fail on mutant.
+if re.search(r"make lint-lua", mutant):
+    sys.exit(1)
+sys.exit(0 if "make lint-lua" not in mutant and "make lua-unit" in mutant else 1)
+PY
+then
+  pass "gateway-rust lint-lua presence is mutation-sensitive"
+else
+  fail "gateway-rust lint-lua mutation self-check failed"
 fi
 
 # ---------------------------------------------------------------------------

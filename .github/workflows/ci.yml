@@ -189,6 +189,9 @@ jobs:
               scripts/classify-ci-paths.sh|\
               scripts/test-classify-ci-paths.sh|\
               scripts/test-ci-control-plane.sh|\
+              gateway/lua/*|\
+              gateway/nginx.conf|\
+              gateway/conf/*|\
               .github/workflows/ci.yml|\
               .github/workflows/ci-pr.yml|\
               Makefile|\
@@ -210,6 +213,9 @@ jobs:
               scripts/test-gateway-pack-*.sh|\
               scripts/test-production-image-provenance.sh|\
               scripts/install-verify-candidate.sh|\
+              gateway/lua/*|\
+              gateway/nginx.conf|\
+              gateway/conf/*|\
               Makefile|\
               __manual_dispatch__|__scheduled_proof__|__integrated_main__|__unknown_base__|__unknown_event__)
                 return 0
@@ -556,10 +562,22 @@ jobs:
           command -v lua5.4
           dpkg-query -W -f='${db:Status-Status}\n' lua5.4 | grep -qx installed
 
+      - name: Gateway Lua timer-closure lint
+        working-directory: gateway
+        run: make lint-lua
+
       - name: Run gateway Lua unit tests
         working-directory: gateway
         run: |
           make lua-unit
+
+      - name: Gateway contract check
+        working-directory: gateway
+        run: make contract-check
+
+      - name: Gateway models catalog
+        working-directory: gateway
+        run: make models-validate
 
       - name: Gateway fmt (known pre-existing debt)
         continue-on-error: true
@@ -851,6 +869,12 @@ jobs:
           done
           [[ "${healthy:-false}" == true ]]
           PROVISION
+
+      - name: Gateway metrics contract
+        working-directory: gateway
+        env:
+          GW_URL: http://localhost:18080
+        run: make metrics-contract
 
       - name: Run Phase 3 smoke
         working-directory: gateway

@@ -184,9 +184,28 @@ run_rust_ship_proof() {
   done
 }
 
+# OpenResty runtime paths staged into Gateway Pack (see classify-ci-paths.sh).
+gateway_openresty_runtime=false
+if printf '%s\n' "${paths[@]}" | grep -Eq '^gateway/(lua/|conf/|nginx\.conf)'; then
+  gateway_openresty_runtime=true
+fi
+
+run_gateway_openresty_static_proofs() {
+  # Structural + pure-Lua + contract + model catalog + staged-pack freshness.
+  # metrics-contract needs a live stack and is hosted on gateway-smoke, not here.
+  run "Gateway Lua timer-closure lint" make -C gateway lint-lua
+  run "Gateway Lua unit tests" make -C gateway lua-unit
+  run "Gateway contract check" make -C gateway contract-check
+  run "Gateway models catalog" make -C gateway models-validate
+  run "Gateway Pack static assets" bash scripts/test-gateway-pack-assets.sh
+}
+
 if [[ "$mode" == "check" ]]; then
   if [[ "$(lane gateway_rust)" == true ]]; then
     run "Gateway focused tests" cargo test -p gateway-sidecar
+  fi
+  if [[ "$gateway_openresty_runtime" == true ]]; then
+    run_gateway_openresty_static_proofs
   fi
   if [[ "$(lane council_rust)" == true ]]; then
     run "Council focused tests" cargo test -p council-rs
@@ -247,6 +266,10 @@ run "GitHub Actions lint" bash scripts/run-actionlint.sh
 
 if [[ "$any_rust" == true ]]; then
   run_rust_ship_proof
+fi
+
+if [[ "$gateway_openresty_runtime" == true ]]; then
+  run_gateway_openresty_static_proofs
 fi
 
 deny_bin=""
