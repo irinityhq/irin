@@ -296,44 +296,38 @@ pub async fn run_worker_tick(
             continue;
         }
 
-        // Stub execution — operate on the verified canonical envelope.
-        let envelope_val = &verified_envelope;
+        let (problem_type, detail) = match verified_authority.as_str() {
+            "recommend" | "prepare" => (
+                "non-executing-authority",
+                format!(
+                    "authority {} does not permit Worker execution",
+                    verified_authority
+                ),
+            ),
+            "execute" => (
+                "worker-execution-unimplemented",
+                "no native Worker executor is installed".to_string(),
+            ),
+            _ => unreachable!("authority whitelist already enforced"),
+        };
+        let reason = serde_json::to_string(&sovereign_protocol::types::ProblemDetails::new(
+            problem_type,
+            &detail,
+        ))
+        .unwrap_or(detail);
 
-        let worker_result = serde_json::json!({
-            "status": "completed",
-            "extracted_data": null
-        });
-
-        let worker_metrics = serde_json::json!({
-            "execution_ms": 42,
-            "tokens_used": 0,
-            "cost": 0.0,
-            "job": envelope_val.get("job"),
-            "scope": envelope_val.get("scope")
-        });
-
-        tracing::info!(
+        // ponytail: no executor means no effect or ack; the first native executor
+        // must revalidate the live arm immediately before both.
+        tracing::warn!(
             tenant = %claim.tenant,
             id = %claim.id,
-            job = ?envelope_val.get("job"),
-            scope = ?envelope_val.get("scope"),
-            stop_condition = ?envelope_val.get("stop_condition"),
-            return_expectation = ?envelope_val.get("return_expectation"),
-            worker_result = ?worker_result,
-            worker_metrics = ?worker_metrics,
-            "worker execution stub (success path)"
+            authority = %verified_authority,
+            problem_type,
+            "worker refused directive without an executable effect path"
         );
-
-        // After all verification gates, emit VerifiedExact provenance (JCS on storage) so ack path returns it.
-        // claim_handle kept for the lease check; full guard written to worker_provenance col.
-        let verified_provenance = sovereign_protocol::types::WorkerProvenanceGuard {
-            status: sovereign_protocol::types::WorkerProvenanceStatus::VerifiedExact,
-            fabrication_guard: true,
-            opaque_handle: Some(claim_handle.to_string()),
-        };
-        db.worker_ack_outbox(&claim.tenant, &claim.id, claim_handle, verified_provenance)
+        db.nack_outbox(&claim.tenant, &claim.id, claim_handle, &reason)
             .await?;
-        report.executed_count += 1;
+        report.failed_count += 1;
     }
 
     Ok(report)

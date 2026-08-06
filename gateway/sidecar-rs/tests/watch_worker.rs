@@ -103,7 +103,7 @@ fn execute_canonical(in_response_to: &str, token: &str) -> String {
 }
 
 #[tokio::test]
-async fn test_worker_claim_and_execute() {
+async fn test_worker_execute_without_executor_is_nacked() {
     let (_tmp, db, db_path) = setup_db().await;
     let tenant = "tenant-a";
 
@@ -136,12 +136,12 @@ async fn test_worker_claim_and_execute() {
         .await
         .unwrap();
     assert_eq!(report.claimed_count, 1);
-    assert_eq!(report.executed_count, 1);
-    assert_eq!(report.failed_count, 0);
+    assert_eq!(report.executed_count, 0);
+    assert_eq!(report.failed_count, 1);
     assert!(!report.idle);
 
     let rec = db.get_outbox(tenant, "dir-1").await.unwrap().unwrap();
-    assert_eq!(rec.status, "acked");
+    assert_eq!(rec.status, "staged");
 }
 
 #[tokio::test]
@@ -209,7 +209,7 @@ async fn test_worker_blocks_missing_token_fail_closed() {
 }
 
 #[tokio::test]
-async fn test_worker_allows_recommend_without_token() {
+async fn test_worker_recommend_without_token_is_nacked() {
     let (_tmp, db, db_path) = setup_db().await;
     let tenant = "tenant-c";
 
@@ -234,11 +234,11 @@ async fn test_worker_allows_recommend_without_token() {
         .await
         .unwrap();
     assert_eq!(report.claimed_count, 1);
-    assert_eq!(report.executed_count, 1);
-    assert_eq!(report.failed_count, 0);
+    assert_eq!(report.executed_count, 0);
+    assert_eq!(report.failed_count, 1);
 
     let rec = db.get_outbox(tenant, "dir-3").await.unwrap().unwrap();
-    assert_eq!(rec.status, "acked");
+    assert_eq!(rec.status, "staged");
 }
 
 // ── Pre-seal W2 negative tests: provenance enforcement ───────────────────────
