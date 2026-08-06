@@ -315,6 +315,7 @@ fn build_ledger_delta(cfg: SentinelConfig, cooldown: Duration) -> Result<Arc<dyn
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct SequenceWatchCfg {
     watch_db_path: PathBuf,
     #[serde(default = "default_sequence_window_ms")]

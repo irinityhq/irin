@@ -449,7 +449,7 @@ async fn sequence_watch_fires_on_recent_act_velocity() {
             &format!("sequence-act-{i}"),
             "Act",
             now_ms - i * 1_000,
-            0.04,
+            0.25,
         );
     }
 
@@ -470,13 +470,65 @@ async fn sequence_watch_fires_on_recent_act_velocity() {
         "sequence query must use the tenant/status/time index: {query_plan}"
     );
 
-    let sentinel = SequenceWatchSentinel::new("sequence-watch", tenant, &watch_db, 60_000, 3, 0.10);
+    let sentinel = SequenceWatchSentinel::new("sequence-watch", tenant, &watch_db, 60_000, 3, 1.0);
     let state = sentinel.observe().await.unwrap();
 
     assert_eq!(state.payload["act_count"].as_i64(), Some(4));
-    assert!((state.payload["aggregate_cost_usd"].as_f64().unwrap() - 0.16).abs() < 1e-9);
+    assert!((state.payload["aggregate_cost_usd"].as_f64().unwrap() - 1.0).abs() < 1e-9);
     assert_eq!(state.payload["heuristics_fired"][0], "directive_velocity");
     assert!(sentinel.interesting(&state).is_some());
+}
+
+#[tokio::test]
+async fn sequence_watch_fires_for_zero_cost_at_zero_floor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watch_db = temp_watch_db_path(&tmp).await;
+    let tenant = "sequence-zero-cost";
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for i in (0..4).rev() {
+        insert_sequence_directive(
+            &watch_db,
+            tenant,
+            &format!("zero-cost-act-{i}"),
+            "Act",
+            now_ms - i * 1_000,
+            0.0,
+        );
+    }
+
+    let sentinel = SequenceWatchSentinel::new("sequence-watch", tenant, &watch_db, 60_000, 3, 0.0);
+    let state = sentinel.observe().await.unwrap();
+
+    assert!(sentinel.interesting(&state).is_some());
+}
+
+#[tokio::test]
+async fn sequence_watch_ignores_cost_below_floor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watch_db = temp_watch_db_path(&tmp).await;
+    let tenant = "sequence-below-cost";
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for i in (0..4).rev() {
+        insert_sequence_directive(
+            &watch_db,
+            tenant,
+            &format!("below-cost-act-{i}"),
+            "Act",
+            now_ms - i * 1_000,
+            0.25,
+        );
+    }
+
+    let sentinel = SequenceWatchSentinel::new("sequence-watch", tenant, &watch_db, 60_000, 3, 1.01);
+    let state = sentinel.observe().await.unwrap();
+
+    assert!(sentinel.interesting(&state).is_none());
 }
 
 #[tokio::test]

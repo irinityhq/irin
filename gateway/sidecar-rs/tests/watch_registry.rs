@@ -346,6 +346,36 @@ fn sequence_watch_loads_from_yaml() {
 }
 
 #[test]
+fn sequence_watch_rejects_unknown_config_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watch_db = tmp.path().join("watch.db");
+    rusqlite::Connection::open(&watch_db).unwrap();
+
+    let body = format!(
+        r#"
+- name: sequence-watch
+  tenant: sovereign
+  tier: polling
+  cooldown_ms: 45000
+  config:
+    watch_db_path: {}
+    max_act_per_window: 3
+"#,
+        watch_db.display()
+    );
+    let yaml_path = write_yaml(&tmp, &body);
+    let err = match SentinelRegistry::load_from_yaml(&yaml_path) {
+        Ok(_) => panic!("unknown sequence-watch config key was accepted"),
+        Err(err) => err,
+    };
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("unknown field `max_act_per_window`"),
+        "{message}"
+    );
+}
+
+#[test]
 fn t24_9_anomaly_watch_loads_from_yaml() {
     let tmp = tempfile::tempdir().unwrap();
     let watch_db = tmp.path().join("watch.db");

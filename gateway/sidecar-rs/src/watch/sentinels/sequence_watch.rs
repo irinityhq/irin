@@ -125,7 +125,7 @@ impl Sentinel for SequenceWatchSentinel {
         .map_err(|e| ObserveError::Fatal(format!("join: {e}")))?
         .map_err(ObserveError::TransientUpstream)?;
         let fired = act_count > self.max_acts_per_window
-            && aggregate_cost_usd > self.min_aggregate_cost_usd;
+            && aggregate_cost_usd >= self.min_aggregate_cost_usd;
 
         Ok(SentinelState {
             tenant: self.tenant.clone(),
