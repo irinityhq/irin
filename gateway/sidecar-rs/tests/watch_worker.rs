@@ -2,9 +2,13 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use gateway_sidecar::keymgmt::DirectiveVerifier;
+use gateway_sidecar::watch::api::ArmNotifier;
 use gateway_sidecar::watch::db::WatchDb;
 use gateway_sidecar::watch::outbox::AckOutcome;
-use gateway_sidecar::watch::worker::{run_worker_tick, WatchWorkerConfig};
+use gateway_sidecar::watch::quarantine::{QuarantineConfig, QuarantineState};
+use gateway_sidecar::watch::worker::{
+    run_worker_tick, run_worker_tick_with_quarantine, WatchWorkerConfig,
+};
 use rusqlite::{params, Connection};
 
 async fn setup_db() -> (tempfile::TempDir, WatchDb, std::path::PathBuf) {
@@ -97,7 +101,7 @@ fn recommend_canonical(in_response_to: &str) -> String {
 /// Canonical execute-authority envelope carrying the given capability token.
 fn execute_canonical(in_response_to: &str, token: &str) -> String {
     format!(
-        r#"{{"schema":"irin.directive.payload.v1","in_response_to":"{}","authority":"execute","verdict":"Act","job":"foo","capability_token":"{}"}}"#,
+        r#"{{"schema":"irin.directive.payload.v1","in_response_to":"{}","authority":"execute","verdict":"Act","job":"foo","scope":{{"tenant":"test","subject":"watch-producer","allowed_actions":["quarantine_producer"]}},"capability_token":"{}"}}"#,
         in_response_to, token
     )
 }
@@ -142,6 +146,67 @@ async fn test_worker_execute_without_executor_is_nacked() {
 
     let rec = db.get_outbox(tenant, "dir-1").await.unwrap().unwrap();
     assert_eq!(rec.status, "staged");
+}
+
+#[tokio::test]
+async fn test_worker_executes_quarantine_producer_and_acks() {
+    let (_tmp, db, db_path) = setup_db().await;
+    let tenant = "tenant-quarantine";
+
+    db.add_capability_token(
+        tenant.to_string(),
+        "tok-quarantine".to_string(),
+        "execute".to_string(),
+    )
+    .await
+    .unwrap();
+    insert_signed_outbox_row(
+        &db_path,
+        "dir-quarantine",
+        tenant,
+        "execute",
+        &execute_canonical("resp", "tok-quarantine"),
+    );
+
+    let quarantine =
+        QuarantineState::new_with_db(QuarantineConfig::default(), std::sync::Arc::new(db.clone()));
+    let notifier = ArmNotifier::default();
+    let (kill_tx, mut kill_rx) = tokio::sync::watch::channel(false);
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    *quarantine.producer_kill_state.lock() = Some((kill_tx, ack_rx));
+    let producer = tokio::spawn(async move {
+        kill_rx.changed().await.unwrap();
+        assert!(*kill_rx.borrow());
+        ack_tx.send(()).unwrap();
+    });
+
+    let config = WatchWorkerConfig {
+        enabled: true,
+        tick_interval_ms: 1000,
+        max_claims_per_tick: 10,
+        lease_duration_ms: 30_000,
+        tenant_scope: tenant.to_string(),
+    };
+    let verifier = test_verifier();
+    let report = run_worker_tick_with_quarantine(
+        &db,
+        &config,
+        Some(&verifier),
+        Some((&quarantine, &notifier)),
+    )
+    .await
+    .unwrap();
+    producer.await.unwrap();
+
+    assert_eq!(report.claimed_count, 1);
+    assert_eq!(report.executed_count, 1);
+    assert_eq!(report.failed_count, 0);
+    let rec = db
+        .get_outbox(tenant, "dir-quarantine")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.status, "acked");
 }
 
 #[tokio::test]

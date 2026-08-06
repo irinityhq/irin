@@ -423,7 +423,7 @@ pub async fn auto_disarm_producer(
     notifier: &ArmNotifier,
     principal_label: &str,
     reason: &str,
-) {
+) -> bool {
     // Council P1: check kill_state FIRST. If already disarmed, short-circuit
     // to avoid per-cadence audit-row spam and ntfy page-storm.
     let state = quarantine.producer_kill_state.lock().take();
@@ -433,7 +433,7 @@ pub async fn auto_disarm_producer(
             reason,
             "auto-disarm requested but producer already disarmed (no-op, no page)"
         );
-        return;
+        return false;
     };
 
     append_arm_audit_best_effort(quarantine, "disarm", principal_label, reason).await;
@@ -448,7 +448,7 @@ pub async fn auto_disarm_producer(
             principal = principal_label,
             "auto-disarm: kill channel dropped — CDC producer already gone"
         );
-        return;
+        return false;
     }
     match tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx).await {
         Ok(Ok(_)) => {
@@ -460,6 +460,7 @@ pub async fn auto_disarm_producer(
                 reason,
                 "H7a auto-disarm complete: CDC producer drained on safety alarm"
             );
+            true
         }
         Ok(Err(_)) => {
             let crash_ms = (kill_sent_at.elapsed().as_millis() as u64).max(1);
@@ -469,6 +470,7 @@ pub async fn auto_disarm_producer(
                 principal = principal_label,
                 "auto-disarm: producer dropped ack channel without completing drain"
             );
+            false
         }
         Err(_) => {
             quarantine.record_kill_switch_drain_timeout(5_000);
@@ -476,6 +478,7 @@ pub async fn auto_disarm_producer(
                 principal = principal_label,
                 "auto-disarm: producer drain timed out after 5 seconds (kill_switch_drain_timeout_total bumped; 5000ms floor recorded)"
             );
+            false
         }
     }
 }

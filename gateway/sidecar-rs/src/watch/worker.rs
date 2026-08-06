@@ -1,5 +1,7 @@
 use crate::keymgmt::DirectiveVerifier;
+use crate::watch::api::{auto_disarm_producer, ArmNotifier};
 use crate::watch::db::WatchDb;
+use crate::watch::quarantine::QuarantineState;
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -67,6 +69,15 @@ pub async fn run_worker_tick(
     db: &WatchDb,
     config: &WatchWorkerConfig,
     verifier: Option<&DirectiveVerifier>,
+) -> anyhow::Result<WorkerTickReport> {
+    run_worker_tick_with_quarantine(db, config, verifier, None).await
+}
+
+pub async fn run_worker_tick_with_quarantine(
+    db: &WatchDb,
+    config: &WatchWorkerConfig,
+    verifier: Option<&DirectiveVerifier>,
+    quarantine_executor: Option<(&QuarantineState, &ArmNotifier)>,
 ) -> anyhow::Result<WorkerTickReport> {
     let mut report = WorkerTickReport::default();
     let now_ms = std::time::SystemTime::now()
@@ -241,15 +252,15 @@ pub async fn run_worker_tick(
         let mut valid_authority = true;
         let mut error_reason = String::new();
 
+        let capability_token = verified_envelope
+            .get("capability_token")
+            .and_then(|v| v.as_str());
+
         if verified_authority == "prepare" || verified_authority == "execute" {
             // Extract the capability token from the VERIFIED canonical envelope
             // (the signed bytes), not the unsigned envelope_json — the token is
             // part of what Council signed.
-            let token_opt = verified_envelope
-                .get("capability_token")
-                .and_then(|v| v.as_str());
-
-            match token_opt {
+            match capability_token {
                 Some(token) => {
                     let is_valid = db
                         .is_capability_token_valid(&claim.tenant, token, &verified_authority)
@@ -296,6 +307,75 @@ pub async fn run_worker_tick(
             continue;
         }
 
+        let can_quarantine = verified_envelope
+            .pointer("/scope/subject")
+            .and_then(|v| v.as_str())
+            == Some("watch-producer")
+            && verified_envelope
+                .pointer("/scope/allowed_actions")
+                .and_then(|v| v.as_array())
+                .is_some_and(|actions| {
+                    actions
+                        .iter()
+                        .any(|action| action.as_str() == Some("quarantine_producer"))
+                });
+
+        if let (true, Some((quarantine, notifier))) = (
+            verified_authority == "execute" && can_quarantine,
+            quarantine_executor,
+        ) {
+            let token = capability_token.expect("execute token already validated");
+            if !db
+                .is_capability_token_valid(&claim.tenant, token, "execute")
+                .await?
+            {
+                let reason =
+                    serde_json::to_string(&sovereign_protocol::types::ProblemDetails::new(
+                        "invalid-capability-token",
+                        "capability_token expired or was revoked before effect",
+                    ))?;
+                db.nack_outbox(&claim.tenant, &claim.id, claim_handle, &reason)
+                    .await?;
+                report.failed_count += 1;
+                continue;
+            }
+
+            if auto_disarm_producer(
+                quarantine,
+                notifier,
+                "worker(quarantine_producer)",
+                &format!("directive_id={}", claim.id),
+            )
+            .await
+            {
+                let outcome = db
+                    .worker_ack_outbox(
+                        &claim.tenant,
+                        &claim.id,
+                        claim_handle,
+                        sovereign_protocol::types::WorkerProvenanceGuard {
+                            status:
+                                sovereign_protocol::types::WorkerProvenanceStatus::VerifiedExact,
+                            fabrication_guard: true,
+                            opaque_handle: Some(claim_handle.to_string()),
+                        },
+                    )
+                    .await?;
+                if matches!(outcome, crate::watch::outbox::AckOutcome::Acked { .. }) {
+                    report.executed_count += 1;
+                    continue;
+                }
+                tracing::error!(
+                    tenant = %claim.tenant,
+                    id = %claim.id,
+                    outcome = ?outcome,
+                    "quarantine_producer completed but outbox ack was refused"
+                );
+                report.failed_count += 1;
+                continue;
+            }
+        }
+
         let (problem_type, detail) = match verified_authority.as_str() {
             "recommend" | "prepare" => (
                 "non-executing-authority",
@@ -304,9 +384,17 @@ pub async fn run_worker_tick(
                     verified_authority
                 ),
             ),
+            "execute" if !can_quarantine => (
+                "unsupported-worker-action",
+                "execute directive does not allow quarantine_producer".to_string(),
+            ),
+            "execute" if quarantine_executor.is_none() => (
+                "worker-executor-unavailable",
+                "quarantine_producer executor is not wired".to_string(),
+            ),
             "execute" => (
-                "worker-execution-unimplemented",
-                "no native Worker executor is installed".to_string(),
+                "quarantine-producer-not-armed",
+                "producer was not live or did not acknowledge quarantine".to_string(),
             ),
             _ => unreachable!("authority whitelist already enforced"),
         };
@@ -316,14 +404,12 @@ pub async fn run_worker_tick(
         ))
         .unwrap_or(detail);
 
-        // ponytail: no executor means no effect or ack; the first native executor
-        // must revalidate the live arm immediately before both.
         tracing::warn!(
             tenant = %claim.tenant,
             id = %claim.id,
             authority = %verified_authority,
             problem_type,
-            "worker refused directive without an executable effect path"
+            "worker refused directive without a completed effect"
         );
         db.nack_outbox(&claim.tenant, &claim.id, claim_handle, &reason)
             .await?;
@@ -336,6 +422,8 @@ pub async fn run_worker_tick(
 pub fn spawn_live_worker_loop(
     db: WatchDb,
     config: WatchWorkerConfig,
+    quarantine: std::sync::Arc<QuarantineState>,
+    notifier: std::sync::Arc<ArmNotifier>,
 ) -> Option<(
     tokio::task::JoinHandle<()>,
     tokio::sync::oneshot::Sender<()>,
@@ -369,7 +457,14 @@ pub fn spawn_live_worker_loop(
                 break;
             }
 
-            match run_worker_tick(&db, &config, verifier.as_ref()).await {
+            match run_worker_tick_with_quarantine(
+                &db,
+                &config,
+                verifier.as_ref(),
+                Some((quarantine.as_ref(), notifier.as_ref())),
+            )
+            .await
+            {
                 Ok(report) => {
                     if report.idle {
                         tracing::debug!("live worker tick: idle");
