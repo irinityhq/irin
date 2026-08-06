@@ -270,6 +270,14 @@ pub fn bump_directive_clock_skew_rejected(n: u64) {
     DIRECTIVE_CLOCK_SKEW_REJECTED.fetch_add(n, std::sync::atomic::Ordering::Relaxed);
 }
 
+fn allowed_worker_policy_allows(
+    workers_json: &str,
+    actor: &str,
+) -> Result<bool, serde_json::Error> {
+    let allowed_workers = serde_json::from_str::<Vec<String>>(workers_json)?;
+    Ok(allowed_workers.is_empty() || allowed_workers.iter().any(|worker| worker == actor))
+}
+
 pub fn is_capability_token_valid(
     conn: &rusqlite::Connection,
     tenant: &str,
@@ -353,14 +361,15 @@ pub fn is_capability_token_valid(
                             Err(e) => return Err(e),
                         };
                         if let Some(workers_json) = workers_json {
-                            // A malformed allowed_workers JSON is not a DB error;
-                            // preserve the prior permissive fallthrough exactly.
-                            if let Ok(allowed_workers) =
-                                serde_json::from_str::<Vec<String>>(&workers_json)
-                            {
-                                if !allowed_workers.is_empty()
-                                    && !allowed_workers.contains(&cap_token.actor)
-                                {
+                            match allowed_worker_policy_allows(&workers_json, &cap_token.actor) {
+                                Ok(allowed) => worker_allowed = allowed,
+                                Err(e) => {
+                                    tracing::error!(
+                                        tenant = tenant,
+                                        actor = %cap_token.actor,
+                                        error = %e,
+                                        "capability-token allowed_workers policy is malformed — denying (fail closed)"
+                                    );
                                     worker_allowed = false;
                                 }
                             }
@@ -383,6 +392,10 @@ pub fn is_capability_token_valid(
                 }
             }
         }
+
+        // A token recognized as structured must never be reinterpreted as a
+        // legacy opaque token after any structured validation denial.
+        return false;
     }
 
     // Fallback to legacy string-match DB check.
@@ -459,6 +472,21 @@ pub fn is_capability_token_valid(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod capability_policy_tests {
+    use super::allowed_worker_policy_allows;
+
+    #[test]
+    fn malformed_allowed_workers_denies() {
+        assert!(allowed_worker_policy_allows("not-json", "worker-a").is_err());
+    }
+
+    #[test]
+    fn empty_allowed_workers_keeps_no_restriction_semantics() {
+        assert!(allowed_worker_policy_allows("[]", "worker-a").unwrap());
+    }
 }
 
 pub fn build_council_triage_user_prompt(
