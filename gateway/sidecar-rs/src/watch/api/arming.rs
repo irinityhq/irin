@@ -427,7 +427,7 @@ pub async fn auto_disarm_producer(
     // Council P1: check kill_state FIRST. If already disarmed, short-circuit
     // to avoid per-cadence audit-row spam and ntfy page-storm.
     let state = quarantine.producer_kill_state.lock().take();
-    let Some((tx, ack_rx)) = state else {
+    let Some((tx, mut ack_rx)) = state else {
         tracing::debug!(
             principal = principal_label,
             reason,
@@ -444,13 +444,12 @@ pub async fn auto_disarm_producer(
     clear_arm_pending_best_effort(quarantine, None).await;
     let kill_sent_at = std::time::Instant::now();
     if tx.send(true).is_err() {
-        tracing::error!(
+        tracing::warn!(
             principal = principal_label,
-            "auto-disarm: kill channel dropped — CDC producer already gone"
+            "auto-disarm: kill receiver already gone; checking retained drain completion"
         );
-        return false;
     }
-    match tokio::time::timeout(std::time::Duration::from_secs(5), ack_rx).await {
+    match tokio::time::timeout(std::time::Duration::from_secs(5), &mut ack_rx).await {
         Ok(Ok(_)) => {
             let drain_ms = (kill_sent_at.elapsed().as_millis() as u64).max(1);
             quarantine.record_kill_switch_latency_ms(drain_ms);
@@ -474,9 +473,13 @@ pub async fn auto_disarm_producer(
         }
         Err(_) => {
             quarantine.record_kill_switch_drain_timeout(5_000);
+            let mut state = quarantine.producer_kill_state.lock();
+            if state.is_none() {
+                *state = Some((tx, ack_rx));
+            }
             tracing::error!(
                 principal = principal_label,
-                "auto-disarm: producer drain timed out after 5 seconds (kill_switch_drain_timeout_total bumped; 5000ms floor recorded)"
+                "auto-disarm: producer drain timed out after 5 seconds; completion handle retained for retry"
             );
             false
         }

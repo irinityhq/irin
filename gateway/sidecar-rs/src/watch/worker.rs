@@ -4,6 +4,8 @@ use crate::watch::db::WatchDb;
 use crate::watch::quarantine::QuarantineState;
 use std::time::Duration;
 
+const MIN_QUARANTINE_LEASE_MS: i64 = 10_000;
+
 #[derive(Debug, Clone)]
 pub struct WatchWorkerConfig {
     pub enabled: bool,
@@ -90,7 +92,7 @@ pub async fn run_worker_tick_with_quarantine(
             &config.tenant_scope,
             config.max_claims_per_tick,
             now_ms,
-            config.lease_duration_ms,
+            config.lease_duration_ms.max(MIN_QUARANTINE_LEASE_MS),
         )
         .await?;
 
@@ -308,9 +310,17 @@ pub async fn run_worker_tick_with_quarantine(
         }
 
         let can_quarantine = verified_envelope
-            .pointer("/scope/subject")
+            .pointer("/scope/tenant")
             .and_then(|v| v.as_str())
-            == Some("watch-producer")
+            == Some(claim.tenant.as_str())
+            && verified_envelope
+                .get("in_response_to")
+                .and_then(|v| v.as_str())
+                == Some(claim.in_response_to.as_str())
+            && verified_envelope
+                .pointer("/scope/subject")
+                .and_then(|v| v.as_str())
+                == Some("watch-producer")
             && verified_envelope
                 .pointer("/scope/allowed_actions")
                 .and_then(|v| v.as_array())
