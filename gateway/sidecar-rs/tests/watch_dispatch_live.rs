@@ -2188,11 +2188,11 @@ async fn live_token_store_primary_path_db_seeding_and_validation() {
     let (_tmp, db_path) = fresh_migrated_db().await;
     let db = WatchDb::open(&db_path).await.unwrap();
 
-    // 1. Seed DB
+    // 1. Seed DB — prepare opaque tokens remain; execute is structured-only.
     db.add_capability_token(
         "tenant-x".to_string(),
-        "tok-1".to_string(),
-        "execute".to_string(),
+        "tok-prep-1".to_string(),
+        "prepare".to_string(),
     )
     .await
     .unwrap();
@@ -2221,38 +2221,43 @@ async fn live_token_store_primary_path_db_seeding_and_validation() {
 
     // 3. Prompt Builder Test
     let prompt = build_council_triage_user_prompt(&claim, &tokens);
-    assert!(prompt.contains("tok-1"));
+    assert!(prompt.contains("tok-prep-1"));
     assert!(prompt.contains("tok-2"));
 
     // 4. Validator Test
     let mut conn = Connection::open(&db_path).unwrap();
     let tx = conn.transaction().unwrap();
 
-    // Valid tokens
+    // Prepare opaque still works; execute opaque is refused.
     assert!(is_capability_token_valid(
-        &tx, "tenant-x", "tok-1", "execute"
+        &tx, "tenant-x", "tok-prep-1", "prepare", None
     ));
     assert!(is_capability_token_valid(
-        &tx, "tenant-x", "tok-2", "prepare"
+        &tx, "tenant-x", "tok-2", "prepare", None
+    ));
+    assert!(!is_capability_token_valid(
+        &tx, "tenant-x", "tok-prep-1", "execute", Some("dir-x")
     ));
 
     // Invalid tokens / mismatched tenant
     assert!(!is_capability_token_valid(
-        &tx, "tenant-y", "tok-1", "execute"
+        &tx, "tenant-y", "tok-prep-1", "prepare", None
     ));
     assert!(!is_capability_token_valid(
-        &tx, "tenant-x", "tok-3", "execute"
+        &tx, "tenant-x", "tok-3", "prepare", None
     ));
-    assert!(!is_capability_token_valid(
-        &tx, "tenant-x", "tok-1", "prepare"
-    )); // Wrong authority
 
-    // Env fallback (empty DB for tenant)
+    // Env fallback for execute is refused; prepare env still works for empty tenant.
     std::env::set_var("WATCH_ALLOWED_EXECUTE_TOKENS", "tok-env");
-    assert!(is_capability_token_valid(
-        &tx, "tenant-y", "tok-env", "execute"
+    assert!(!is_capability_token_valid(
+        &tx, "tenant-y", "tok-env", "execute", Some("dir-env")
     ));
     std::env::remove_var("WATCH_ALLOWED_EXECUTE_TOKENS");
+    std::env::set_var("WATCH_ALLOWED_PREPARE_TOKENS", "tok-env-prep");
+    assert!(is_capability_token_valid(
+        &tx, "tenant-y", "tok-env-prep", "prepare", None
+    ));
+    std::env::remove_var("WATCH_ALLOWED_PREPARE_TOKENS");
 }
 
 // ── Pre-seal W2 (opt-a, #3b): structured-token allowed_workers fail-closed ───
@@ -2271,19 +2276,37 @@ async fn live_token_store_primary_path_db_seeding_and_validation() {
 /// returned local key from a later fresh_signing_key_and_db call can differ from
 /// the global — always sign with directive_signing_key() so the token verifies.
 fn signed_structured_token(tenant: &str, actor: &str, action: &str) -> String {
+    signed_structured_token_for(tenant, actor, action, "tok-struct-1", "dir-struct-1")
+}
+
+fn signed_structured_token_for(
+    tenant: &str,
+    actor: &str,
+    action: &str,
+    token_id: &str,
+    directive_id: &str,
+) -> String {
     let key = gateway_sidecar::keymgmt::directive_signing_key();
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_millis() as u64;
+    // Execute-path exact shape when action is execute; prepare keeps looser fields.
+    let (subject, approval_required, max_cost_usd) = if action == "execute" {
+        ("watch-producer".to_string(), true, Some(0.0))
+    } else {
+        ("subject-1".to_string(), false, None)
+    };
     let token = sovereign_protocol::types::CapabilityToken {
         actor: actor.to_string(),
-        subject: "subject-1".to_string(),
+        subject,
         tenant: tenant.to_string(),
         allowed_actions: vec![action.to_string()],
-        approval_required: false,
+        approval_required,
         expires_at: now_ms + 60_000, // future, non-zero, well under the 24h cap
-        max_cost_usd: None,
+        max_cost_usd,
+        token_id: token_id.to_string(),
+        directive_id: directive_id.to_string(),
         signature: None,
     };
     let signed = key.sign_capability_token(token);
@@ -2305,7 +2328,13 @@ async fn w2_3b_structured_token_allowed_workers_db_error_fails_closed() {
     let bare = Connection::open_in_memory().unwrap();
 
     let before = gateway_sidecar::watch::dispatcher::cap_token_db_error_deny_total();
-    let allowed = is_capability_token_valid(&bare, "tenant-3b", &token_json, "execute");
+    let allowed = is_capability_token_valid(
+        &bare,
+        "tenant-3b",
+        &token_json,
+        "execute",
+        Some("dir-struct-1"),
+    );
 
     assert!(
         !allowed,
@@ -2327,7 +2356,8 @@ async fn w2_3b_structured_token_clean_empty_allowlist_still_allowed() {
 
     let conn = Connection::open(&db_path).unwrap();
 
-    let allowed = is_capability_token_valid(&conn, "tenant-3b-clean", &token_json, "prepare");
+    let allowed =
+        is_capability_token_valid(&conn, "tenant-3b-clean", &token_json, "prepare", None);
 
     assert!(
         allowed,
@@ -2360,8 +2390,233 @@ async fn w2_3b_malformed_policy_cannot_fall_back_to_legacy_token() {
     .unwrap();
 
     assert!(
-        !is_capability_token_valid(&conn, "tenant-3b-overlap", &token_json, "execute"),
+        !is_capability_token_valid(
+            &conn,
+            "tenant-3b-overlap",
+            &token_json,
+            "execute",
+            Some("dir-struct-1")
+        ),
         "malformed structured-token policy denial must not fall through to an exact legacy-token match"
+    );
+}
+
+#[tokio::test]
+async fn pr1_structured_execute_same_directive_retry_and_foreign_refuse() {
+    let (_tmp, db_path, _key, _ident) = fresh_signing_key_and_db().await;
+    let token_a = signed_structured_token_for(
+        "tenant-replay",
+        "operator",
+        "execute",
+        "tok-replay-1",
+        "dir-a",
+    );
+    // Second *valid* signature over the same (tenant, token_id) but a different
+    // directive_id. Field-level bind passes for dir-b; only the durable
+    // consumption table can refuse (first bind already claimed tok-replay-1 → dir-a).
+    let token_b_foreign = signed_structured_token_for(
+        "tenant-replay",
+        "operator",
+        "execute",
+        "tok-replay-1",
+        "dir-b",
+    );
+    let conn = Connection::open(&db_path).unwrap();
+
+    assert!(
+        is_capability_token_valid(
+            &conn,
+            "tenant-replay",
+            &token_a,
+            "execute",
+            Some("dir-a")
+        ),
+        "first bind for token_id must succeed"
+    );
+    assert!(
+        is_capability_token_valid(
+            &conn,
+            "tenant-replay",
+            &token_a,
+            "execute",
+            Some("dir-a")
+        ),
+        "same-directive retry must succeed"
+    );
+    // Wire mismatch alone is also refuse (defense in depth) — but the durable
+    // path is proven by token_b_foreign below, which has matching wire fields.
+    assert!(
+        !is_capability_token_valid(
+            &conn,
+            "tenant-replay",
+            &token_a,
+            "execute",
+            Some("dir-b")
+        ),
+        "same signed blob with foreign claimed directive must refuse"
+    );
+    assert!(
+        !is_capability_token_valid(
+            &conn,
+            "tenant-replay",
+            &token_b_foreign,
+            "execute",
+            Some("dir-b")
+        ),
+        "valid second signature for same token_id + different directive_id must refuse via durable consumption"
+    );
+
+    // Prove the row is still dir-a in the durable table (not process memory).
+    let bound: String = conn
+        .query_row(
+            "SELECT directive_id FROM capability_token_consumptions
+             WHERE tenant = ?1 AND token_id = ?2",
+            rusqlite::params!["tenant-replay", "tok-replay-1"],
+            |r| r.get(0),
+        )
+        .expect("consumption row must exist after first bind");
+    assert_eq!(bound, "dir-a");
+
+    // Durable across reconnect (simulated restart).
+    drop(conn);
+    let conn2 = Connection::open(&db_path).unwrap();
+    assert!(
+        is_capability_token_valid(
+            &conn2,
+            "tenant-replay",
+            &token_a,
+            "execute",
+            Some("dir-a")
+        ),
+        "same-directive retry must survive restart"
+    );
+    assert!(
+        !is_capability_token_valid(
+            &conn2,
+            "tenant-replay",
+            &token_b_foreign,
+            "execute",
+            Some("dir-b")
+        ),
+        "durable foreign refuse must survive restart"
+    );
+}
+
+/// Build a fully valid execute token shape, then override one field and re-sign.
+fn signed_execute_variant<F>(tenant: &str, token_id: &str, directive_id: &str, mut tweak: F) -> String
+where
+    F: FnMut(&mut sovereign_protocol::types::CapabilityToken),
+{
+    let key = gateway_sidecar::keymgmt::directive_signing_key();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let mut token = sovereign_protocol::types::CapabilityToken {
+        actor: "operator".to_string(),
+        subject: "watch-producer".to_string(),
+        tenant: tenant.to_string(),
+        allowed_actions: vec!["execute".to_string()],
+        approval_required: true,
+        expires_at: now_ms + 60_000,
+        max_cost_usd: Some(0.0),
+        token_id: token_id.to_string(),
+        directive_id: directive_id.to_string(),
+        signature: None,
+    };
+    tweak(&mut token);
+    serde_json::to_string(&key.sign_capability_token(token)).unwrap()
+}
+
+#[tokio::test]
+async fn pr1_structured_execute_rejects_false_approval() {
+    let (_tmp, db_path, _key, _ident) = fresh_signing_key_and_db().await;
+    let token_json = signed_execute_variant("tenant-cost", "tok-appr", "dir-appr", |t| {
+        t.approval_required = false;
+    });
+    let conn = Connection::open(&db_path).unwrap();
+    assert!(
+        !is_capability_token_valid(
+            &conn,
+            "tenant-cost",
+            &token_json,
+            "execute",
+            Some("dir-appr")
+        ),
+        "execute must refuse approval_required=false"
+    );
+}
+
+#[tokio::test]
+async fn pr1_structured_execute_rejects_cost_variants() {
+    let (_tmp, db_path, _key, _ident) = fresh_signing_key_and_db().await;
+    let conn = Connection::open(&db_path).unwrap();
+
+    // Isolated max_cost_usd cases (each signed with only that field wrong).
+    let none_json = signed_execute_variant("tenant-cost", "tok-none", "dir-none", |t| {
+        t.max_cost_usd = None;
+    });
+    assert!(
+        !is_capability_token_valid(
+            &conn,
+            "tenant-cost",
+            &none_json,
+            "execute",
+            Some("dir-none")
+        ),
+        "execute must refuse max_cost_usd=None"
+    );
+
+    let nonzero_json = signed_execute_variant("tenant-cost", "tok-nz", "dir-nz", |t| {
+        t.max_cost_usd = Some(1.0);
+    });
+    assert!(
+        !is_capability_token_valid(
+            &conn,
+            "tenant-cost",
+            &nonzero_json,
+            "execute",
+            Some("dir-nz")
+        ),
+        "execute must refuse max_cost_usd=1.0"
+    );
+
+    let negative_json = signed_execute_variant("tenant-cost", "tok-neg", "dir-neg", |t| {
+        t.max_cost_usd = Some(-0.01);
+    });
+    assert!(
+        !is_capability_token_valid(
+            &conn,
+            "tenant-cost",
+            &negative_json,
+            "execute",
+            Some("dir-neg")
+        ),
+        "execute must refuse max_cost_usd=-0.01"
+    );
+
+    // NaN is not RFC 8785-serializable: production `sign_capability_token`
+    // cannot emit it (JCS NonFinite). Authorize still guards with `is_finite`
+    // for defense-in-depth if a future encoder ever allowed it.
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let nan_unsigned = sovereign_protocol::types::CapabilityToken {
+        actor: "operator".to_string(),
+        subject: "watch-producer".to_string(),
+        tenant: "tenant-cost".to_string(),
+        allowed_actions: vec!["execute".to_string()],
+        approval_required: true,
+        expires_at: now_ms + 60_000,
+        max_cost_usd: Some(f64::NAN),
+        token_id: "tok-nan".to_string(),
+        directive_id: "dir-nan".to_string(),
+        signature: None,
+    };
+    assert!(
+        sovereign_protocol::jcs::to_jcs_bytes(&nan_unsigned).is_err(),
+        "NaN max_cost_usd must fail closed at the JCS wire boundary"
     );
 }
 

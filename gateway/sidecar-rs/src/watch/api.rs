@@ -54,7 +54,9 @@ pub use outbox_admin::{
 
 mod arming;
 mod writer_claim;
+mod capability_mint;
 
+pub use capability_mint::{mint_capability_token_json, MintCapabilityTokenRequest};
 pub use writer_claim::{writer_claim_heartbeat_loop, writer_claim_heartbeat_step};
 
 pub use arming::{

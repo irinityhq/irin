@@ -204,6 +204,16 @@ CREATE TABLE IF NOT EXISTS tenant_policy_tokens (
     PRIMARY KEY (tenant, token)
 );
 
+-- Durable structured-execute replay: first (tenant, token_id) bind wins;
+-- same directive_id may retry; a foreign directive_id is refused.
+CREATE TABLE IF NOT EXISTS capability_token_consumptions (
+    tenant         TEXT NOT NULL,
+    token_id       TEXT NOT NULL,
+    directive_id   TEXT NOT NULL,
+    consumed_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (tenant, token_id)
+);
+
 CREATE TRIGGER IF NOT EXISTS trg_do_immutable_signed_fields
 BEFORE UPDATE OF
     envelope_json_canonical, signature_b64, signing_kid,
@@ -557,6 +567,20 @@ impl WatchDb {
                 conn.execute(
                     "CREATE UNIQUE INDEX IF NOT EXISTS idx_pe_causal_dedup
                      ON pending_escalations(tenant, sentinel_name, causal_fire_id)",
+                    [],
+                )?;
+
+                // PR1 structured execute authority: durable (tenant, token_id) →
+                // directive_id consumptions. CREATE IF NOT EXISTS is idempotent
+                // for both fresh DBs (already in schema_v1) and upgraded DBs.
+                conn.execute(
+                    "CREATE TABLE IF NOT EXISTS capability_token_consumptions (
+                        tenant         TEXT NOT NULL,
+                        token_id       TEXT NOT NULL,
+                        directive_id   TEXT NOT NULL,
+                        consumed_at_ms INTEGER NOT NULL,
+                        PRIMARY KEY (tenant, token_id)
+                    )",
                     [],
                 )?;
 

@@ -179,6 +179,11 @@ pub fn build_council_triage_headers(tenant: &str, raw_escalation_id: &str) -> He
 /// the top of the prompt.
 static CAP_TOKEN_REJECTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// T21a remaining-lifetime ceiling for structured capability tokens (24h).
+/// Shared by authorize (`is_capability_token_valid`) and admin mint so the
+/// two sides cannot drift.
+pub const MAX_CAPABILITY_TOKEN_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+
 pub fn cap_token_rejected_total() -> u64 {
     CAP_TOKEN_REJECTED.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -278,11 +283,68 @@ fn allowed_worker_policy_allows(
     Ok(allowed_workers.is_empty() || allowed_workers.iter().any(|worker| worker == actor))
 }
 
+/// Atomically bind `(tenant, token_id)` to `directive_id` for durable replay.
+///
+/// First successful insert wins. Same-directive retries may proceed; a different
+/// directive id against a consumed `token_id` is refused. Survives restart via
+/// the Watch DB table `capability_token_consumptions`.
+fn bind_capability_token_consumption(
+    conn: &rusqlite::Connection,
+    tenant: &str,
+    token_id: &str,
+    directive_id: &str,
+) -> bool {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64;
+    // INSERT OR IGNORE is atomic with the subsequent read: first claim wins.
+    if let Err(e) = conn.execute(
+        "INSERT OR IGNORE INTO capability_token_consumptions
+            (tenant, token_id, directive_id, consumed_at_ms)
+         VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![tenant, token_id, directive_id, now_ms],
+    ) {
+        CAP_TOKEN_DB_ERROR_DENY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        tracing::error!(
+            tenant = tenant,
+            token_id = token_id,
+            error = %e,
+            "capability-token consumption insert errored — denying (fail closed)"
+        );
+        return false;
+    }
+    match conn.query_row(
+        "SELECT directive_id FROM capability_token_consumptions
+         WHERE tenant = ?1 AND token_id = ?2",
+        rusqlite::params![tenant, token_id],
+        |r| r.get::<_, String>(0),
+    ) {
+        Ok(bound) => bound == directive_id,
+        Err(e) => {
+            CAP_TOKEN_DB_ERROR_DENY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::error!(
+                tenant = tenant,
+                token_id = token_id,
+                error = %e,
+                "capability-token consumption read errored — denying (fail closed)"
+            );
+            false
+        }
+    }
+}
+
+/// Validate a capability token for `desired_authority`.
+///
+/// `claimed_directive_id` is required for **execute** (structured bind + durable
+/// same-directive-only replay). Prepare may pass `None` and still use opaque
+/// DB/env bootstrap tokens. Opaque tokens never authorize **execute**.
 pub fn is_capability_token_valid(
     conn: &rusqlite::Connection,
     tenant: &str,
     token: &str,
     desired_authority: &str,
+    claimed_directive_id: Option<&str>,
 ) -> bool {
     if token.is_empty() {
         return false;
@@ -291,114 +353,168 @@ pub fn is_capability_token_valid(
     // First, try verifying as a structured capability token
     if let Ok(cap_token) = serde_json::from_str::<sovereign_protocol::types::CapabilityToken>(token)
     {
+        // Wire-required identity fields: missing/empty fails closed (no kid/keyset).
+        if cap_token.token_id.is_empty() || cap_token.directive_id.is_empty() {
+            CAP_TOKEN_REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return false;
+        }
+
         // T4: removed `if true` deadcode wrapper; Ed25519 verify now always runs (no bypass).
         // Guard pre-init panic: if key not ready, fail closed (no elevated action).
         let signing_key = match std::panic::catch_unwind(crate::keymgmt::directive_signing_key) {
             Ok(k) => k,
             Err(_) => return false,
         };
-        if signing_key.verify_capability_token(&cap_token) {
-            // Check if it matches the requested tenant and action
-            if cap_token.tenant == tenant
-                && cap_token
-                    .allowed_actions
-                    .iter()
-                    .any(|a| a == desired_authority)
+        if !signing_key.verify_capability_token(&cap_token) {
+            // Structured parse succeeded: never fall through to opaque.
+            return false;
+        }
+
+        // Tenant + authority action match
+        if cap_token.tenant != tenant
+            || !cap_token
+                .allowed_actions
+                .iter()
+                .any(|a| a == desired_authority)
+        {
+            return false;
+        }
+
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        // T21a: reject immortal tokens (expires_at==0) and tokens with
+        // remaining lifetime > 24h. Shared with admin mint so both sides
+        // cannot drift.
+        if cap_token.expires_at == 0 {
+            CAP_TOKEN_REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                tenant = tenant,
+                actor = %cap_token.actor,
+                "T21a: rejected capability token with expires_at=0 (immortal)"
+            );
+            return false;
+        }
+        if cap_token.expires_at > now_ms + MAX_CAPABILITY_TOKEN_LIFETIME_MS {
+            CAP_TOKEN_REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::warn!(
+                tenant = tenant,
+                actor = %cap_token.actor,
+                expires_at = cap_token.expires_at,
+                max_allowed = now_ms + MAX_CAPABILITY_TOKEN_LIFETIME_MS,
+                "T21a: rejected capability token with remaining validity > 24h"
+            );
+            return false;
+        }
+        if cap_token.expires_at <= now_ms {
+            return false;
+        }
+
+        // Execute-path exact acceptance (PR1 structured execute authority).
+        if desired_authority == "execute" {
+            if cap_token.subject != "watch-producer" {
+                CAP_TOKEN_REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return false;
+            }
+            if !cap_token.approval_required {
+                CAP_TOKEN_REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return false;
+            }
+            // Some(0.0) only — reject None, NaN, negative, nonzero.
+            match cap_token.max_cost_usd {
+                Some(v) if v == 0.0 && v.is_finite() => {}
+                _ => {
+                    CAP_TOKEN_REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    return false;
+                }
+            }
+            let Some(claimed) = claimed_directive_id.filter(|id| !id.is_empty()) else {
+                CAP_TOKEN_REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return false;
+            };
+            if cap_token.directive_id != claimed {
+                CAP_TOKEN_REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                return false;
+            }
+        }
+
+        // Check TenantPolicy allowlist.
+        //
+        // Pre-seal W2 (opt-a, #3b): this allowlist query must FAIL
+        // CLOSED on a DB error, same as the legacy path below. A real
+        // prepare/query Err (DB locked, poisoned, table gone) previously
+        // skipped the whole check, left worker_allowed=true, and let an
+        // (even Ed25519-verified) actor through regardless of policy.
+        // We now distinguish a real DB error from "no policy row" /
+        // "empty allowlist": the no-row case (QueryReturnedNoRows) and a
+        // legitimately empty allowed_workers set keep their current
+        // meaning (no restriction configured -> allow); only a real DB
+        // ERROR flips to deny + bumps CAP_TOKEN_DB_ERROR_DENY.
+        let mut worker_allowed = true; // allow by default if no policy or no allowed_workers set
+        let policy_check: Result<(), rusqlite::Error> = (|| {
+            let mut stmt = conn.prepare(
+                "SELECT allowed_workers FROM tenant_policies WHERE tenant = ?1",
+            )?;
+            let workers_json: Option<String> = match stmt
+                .query_row(rusqlite::params![tenant], |r| r.get::<_, Option<String>>(0))
             {
-                let now_ms = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap_or_default()
-                    .as_millis() as u64;
-                // T21a: reject immortal tokens (expires_at==0) and tokens with
-                // lifetime > 24h. Closes the worst replay window without adding
-                // jti/wire-shape changes (that's T21b).
-                const MAX_TOKEN_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000; // 24h
-                if cap_token.expires_at == 0 {
-                    CAP_TOKEN_REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::warn!(
-                        tenant = tenant,
-                        actor = %cap_token.actor,
-                        "T21a: rejected capability token with expires_at=0 (immortal)"
-                    );
-                    return false;
-                }
-                if cap_token.expires_at > now_ms + MAX_TOKEN_LIFETIME_MS {
-                    CAP_TOKEN_REJECTED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    tracing::warn!(
-                        tenant = tenant,
-                        actor = %cap_token.actor,
-                        expires_at = cap_token.expires_at,
-                        max_allowed = now_ms + MAX_TOKEN_LIFETIME_MS,
-                        "T21a: rejected capability token with remaining validity > 24h"
-                    );
-                    return false;
-                }
-                if cap_token.expires_at > now_ms {
-                    // Check TenantPolicy allowlist.
-                    //
-                    // Pre-seal W2 (opt-a, #3b): this allowlist query must FAIL
-                    // CLOSED on a DB error, same as the legacy path below. A real
-                    // prepare/query Err (DB locked, poisoned, table gone) previously
-                    // skipped the whole check, left worker_allowed=true, and let an
-                    // (even Ed25519-verified) actor through regardless of policy.
-                    // We now distinguish a real DB error from "no policy row" /
-                    // "empty allowlist": the no-row case (QueryReturnedNoRows) and a
-                    // legitimately empty allowed_workers set keep their current
-                    // meaning (no restriction configured -> allow); only a real DB
-                    // ERROR flips to deny + bumps CAP_TOKEN_DB_ERROR_DENY.
-                    let mut worker_allowed = true; // allow by default if no policy or no allowed_workers set
-                    let policy_check: Result<(), rusqlite::Error> = (|| {
-                        let mut stmt = conn.prepare(
-                            "SELECT allowed_workers FROM tenant_policies WHERE tenant = ?1",
-                        )?;
-                        let workers_json: Option<String> = match stmt
-                            .query_row(rusqlite::params![tenant], |r| r.get::<_, Option<String>>(0))
-                        {
-                            Ok(v) => v,
-                            // No policy row for this tenant is NOT an error: no
-                            // restriction configured -> leave worker_allowed=true.
-                            Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()),
-                            Err(e) => return Err(e),
-                        };
-                        if let Some(workers_json) = workers_json {
-                            match allowed_worker_policy_allows(&workers_json, &cap_token.actor) {
-                                Ok(allowed) => worker_allowed = allowed,
-                                Err(e) => {
-                                    tracing::error!(
-                                        tenant = tenant,
-                                        actor = %cap_token.actor,
-                                        error = %e,
-                                        "capability-token allowed_workers policy is malformed — denying (fail closed)"
-                                    );
-                                    worker_allowed = false;
-                                }
-                            }
-                        }
-                        Ok(())
-                    })();
-                    if let Err(e) = policy_check {
-                        CAP_TOKEN_DB_ERROR_DENY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(v) => v,
+                // No policy row for this tenant is NOT an error: no
+                // restriction configured -> leave worker_allowed=true.
+                Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(()),
+                Err(e) => return Err(e),
+            };
+            if let Some(workers_json) = workers_json {
+                match allowed_worker_policy_allows(&workers_json, &cap_token.actor) {
+                    Ok(allowed) => worker_allowed = allowed,
+                    Err(e) => {
                         tracing::error!(
                             tenant = tenant,
                             actor = %cap_token.actor,
                             error = %e,
-                            "capability-token allowed_workers DB check errored — denying (fail closed); cap_token_db_error_deny_total bumped"
+                            "capability-token allowed_workers policy is malformed — denying (fail closed)"
                         );
                         worker_allowed = false;
                     }
-                    if worker_allowed {
-                        return true;
-                    }
                 }
             }
+            Ok(())
+        })();
+        if let Err(e) = policy_check {
+            CAP_TOKEN_DB_ERROR_DENY.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            tracing::error!(
+                tenant = tenant,
+                actor = %cap_token.actor,
+                error = %e,
+                "capability-token allowed_workers DB check errored — denying (fail closed); cap_token_db_error_deny_total bumped"
+            );
+            worker_allowed = false;
+        }
+        if !worker_allowed {
+            return false;
         }
 
-        // A token recognized as structured must never be reinterpreted as a
-        // legacy opaque token after any structured validation denial.
+        // Durable same-directive-only replay for execute (survives restart).
+        if desired_authority == "execute" {
+            let claimed = claimed_directive_id.expect("execute bind checked above");
+            return bind_capability_token_consumption(
+                conn,
+                tenant,
+                &cap_token.token_id,
+                claimed,
+            );
+        }
+
+        return true;
+    }
+
+    // Opaque path: never authorizes execute (structured-only).
+    if desired_authority == "execute" {
         return false;
     }
 
-    // Fallback to legacy string-match DB check.
+    // Fallback to legacy string-match DB check (prepare / non-execute only).
     //
     // Pre-seal W2 (opt-a): this DB check must FAIL CLOSED on a DB error. A real
     // prepare/query/iteration Err (DB locked, poisoned, schema gone) is NOT the
@@ -453,13 +569,11 @@ pub fn is_capability_token_valid(
         }
     }
 
-    // Fallback to env var for bootstrap
-    let env_key = match desired_authority {
-        "execute" => "WATCH_ALLOWED_EXECUTE_TOKENS",
-        "prepare" => "WATCH_ALLOWED_PREPARE_TOKENS",
-        _ => return false,
-    };
-    if let Ok(val) = std::env::var(env_key) {
+    // Fallback to env var for bootstrap — prepare only (execute refused above).
+    if desired_authority != "prepare" {
+        return false;
+    }
+    if let Ok(val) = std::env::var("WATCH_ALLOWED_PREPARE_TOKENS") {
         for t in val.split(',') {
             // T4: ct for env fallback (boot/loopback)
             use sha2::{Digest, Sha256};
@@ -2279,7 +2393,16 @@ fn parse_and_enrich_proposal(
                 .get("capability_token")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            if !is_capability_token_valid(&*conn, tenant, token, authority_str) {
+            // Planned outbox id is deterministic: same formula as insert path.
+            // Execute requires directive bind; prepare ignores claimed id.
+            let planned_directive_id =
+                format!("{}-rec-{}", safe_tenant_token(tenant), escalation_id);
+            let claimed = if authority_str == "execute" {
+                Some(planned_directive_id.as_str())
+            } else {
+                None
+            };
+            if !is_capability_token_valid(&*conn, tenant, token, authority_str, claimed) {
                 return dead_letter_staged_row(
                     conn,
                     escalation_id,
@@ -3488,7 +3611,7 @@ fn t4_preinit_guard_forces_false_on_key_panic_sim() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let conn = rusqlite::Connection::open_in_memory().unwrap();
-    let _ = is_capability_token_valid(&conn, "t", "tok", "a");
+    let _ = is_capability_token_valid(&conn, "t", "tok", "a", None);
 }
 
 // ── Pre-seal W2 (opt-a): legacy DB-check fail-closed-on-error ────────────────
@@ -3532,14 +3655,15 @@ fn w2_cap_token_db_error_fails_closed_and_bumps_counter() {
     // No `tenant_policy_tokens` table at all -> conn.prepare(...) returns Err
     // ("no such table"), which is the DB-error path. Must deny + bump counter,
     // even though a matching env token is set (error must NOT fall through).
+    // Uses prepare: execute refuses opaque tokens before the DB path.
     let conn = rusqlite::Connection::open_in_memory().unwrap();
 
-    std::env::set_var("WATCH_ALLOWED_EXECUTE_TOKENS", "env-token-xyz");
+    std::env::set_var("WATCH_ALLOWED_PREPARE_TOKENS", "env-token-xyz");
     let before = cap_token_db_error_deny_total();
 
-    let allowed = is_capability_token_valid(&conn, "tenant-a", "env-token-xyz", "execute");
+    let allowed = is_capability_token_valid(&conn, "tenant-a", "env-token-xyz", "prepare", None);
 
-    std::env::remove_var("WATCH_ALLOWED_EXECUTE_TOKENS");
+    std::env::remove_var("WATCH_ALLOWED_PREPARE_TOKENS");
 
     assert!(
         !allowed,
@@ -3567,7 +3691,7 @@ fn w2_clean_empty_db_with_valid_env_token_still_allowed() {
 
     std::env::set_var("WATCH_ALLOWED_PREPARE_TOKENS", "prep-tok-1, prep-tok-2");
 
-    let allowed = is_capability_token_valid(&conn, "tenant-b", "prep-tok-2", "prepare");
+    let allowed = is_capability_token_valid(&conn, "tenant-b", "prep-tok-2", "prepare", None);
 
     std::env::remove_var("WATCH_ALLOWED_PREPARE_TOKENS");
 
@@ -3592,9 +3716,42 @@ fn w2_clean_empty_db_with_no_tokens_denies() {
 
     std::env::remove_var("WATCH_ALLOWED_EXECUTE_TOKENS");
 
-    let allowed = is_capability_token_valid(&conn, "tenant-c", "no-such-token", "execute");
+    // Opaque execute is always refused (structured-only).
+    let allowed = is_capability_token_valid(
+        &conn,
+        "tenant-c",
+        "no-such-token",
+        "execute",
+        Some("dir-c"),
+    );
 
-    assert!(!allowed, "no DB tokens + no env tokens -> deny");
-    // No "counter unchanged" assert (process-global atomic races under parallel
-    // tests); the behavioral invariant under test is "deny".
+    assert!(!allowed, "opaque execute token must deny");
+}
+
+#[cfg(test)]
+#[test]
+fn pr1_opaque_execute_env_token_refused() {
+    let _guard = W2_CAP_TOKEN_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let conn = conn_with_empty_token_table();
+    // Also create consumption table so a mistaken structured path would work.
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS capability_token_consumptions (
+            tenant TEXT NOT NULL,
+            token_id TEXT NOT NULL,
+            directive_id TEXT NOT NULL,
+            consumed_at_ms INTEGER NOT NULL,
+            PRIMARY KEY (tenant, token_id)
+         );",
+    )
+    .unwrap();
+    std::env::set_var("WATCH_ALLOWED_EXECUTE_TOKENS", "env-exec-tok");
+    let allowed =
+        is_capability_token_valid(&conn, "tenant-x", "env-exec-tok", "execute", Some("dir-1"));
+    std::env::remove_var("WATCH_ALLOWED_EXECUTE_TOKENS");
+    assert!(
+        !allowed,
+        "WATCH_ALLOWED_EXECUTE_TOKENS must not authorize execute after PR1"
+    );
 }

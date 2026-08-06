@@ -213,6 +213,7 @@ fn t22j_directive_payload_serialization() {
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use ed25519_dalek::{Signer, SigningKey};
+use sovereign_protocol::jcs;
 use sovereign_protocol::types::CapabilityToken;
 
 #[test]
@@ -225,40 +226,40 @@ fn t22k_capability_token_golden() {
         approval_required: true,
         expires_at: 1680000000000,
         max_cost_usd: Some(10.0),
+        token_id: "tok-golden-1".to_string(),
+        directive_id: "dir-golden-1".to_string(),
         signature: None,
     };
 
-    // Serialize token with signature = None
-    let canonical = serde_json::to_vec(&token).unwrap();
-
-    // Exact byte string representation expected (field order is load-bearing)
-    let expected = r#"{"actor":"council","subject":"outbox","tenant":"sovereign","allowed_actions":["insert"],"approval_required":true,"expires_at":1680000000000,"max_cost_usd":10.0}"#;
+    // Production signs jcs::to_jcs_bytes (RFC 8785 key order), not serde field order.
+    let canonical = jcs::to_jcs_bytes(&token).unwrap();
+    // Lexicographic key order: actor, allowed_actions, approval_required,
+    // directive_id, expires_at, max_cost_usd, subject, tenant, token_id.
+    // RFC 8785 / ES6 number form: whole floats emit as integers (`10` not `10.0`).
+    let expected = r#"{"actor":"council","allowed_actions":["insert"],"approval_required":true,"directive_id":"dir-golden-1","expires_at":1680000000000,"max_cost_usd":10,"subject":"outbox","tenant":"sovereign","token_id":"tok-golden-1"}"#;
     assert_eq!(String::from_utf8(canonical.clone()).unwrap(), expected);
 
-    // Fixed deterministic keypair seed
+    // Fixed deterministic keypair seed — signature binds the JCS preimage.
     let seed = [42u8; 32];
     let signing_key = SigningKey::from_bytes(&seed);
-
-    // Sign canonical representation
     let sig = signing_key.sign(&canonical);
     let sig_b64 = BASE64.encode(sig.to_bytes());
 
-    // Expected signature from deterministic keypair
+    // Expected signature over the JCS preimage (recompute if fields change).
     let expected_sig =
-        "4Cordy4/pYv+CTfGYQOM1CZLDpXl+iJykjN6gCqJXGgpLrQThr7Lw+RYoMIy3u9bKBWsI1fkfwnu5Fa/teuVAQ==";
+        "CvCEVghNUxp5QBVbdVXAfMgLnk7R8Q3d/r97CEq120swSnqpNRH0SiZrD9Wm86+sPWQ4W58FQWQcrfFdhukJDg==";
     assert_eq!(sig_b64, expected_sig);
 
-    // Ensure it can be added to the token and serialized back
+    // Serde round-trip of the signed token (field order is declaration order).
     token.signature = Some(sig_b64);
     let token_json = serde_json::to_string(&token).unwrap();
     let expected_json = format!(
-        r#"{{"actor":"council","subject":"outbox","tenant":"sovereign","allowed_actions":["insert"],"approval_required":true,"expires_at":1680000000000,"max_cost_usd":10.0,"signature":"{}"}}"#,
+        r#"{{"actor":"council","subject":"outbox","tenant":"sovereign","allowed_actions":["insert"],"approval_required":true,"expires_at":1680000000000,"max_cost_usd":10.0,"token_id":"tok-golden-1","directive_id":"dir-golden-1","signature":"{}"}}"#,
         expected_sig
     );
     assert_eq!(token_json, expected_json);
 }
 
-use sovereign_protocol::jcs;
 use sovereign_protocol::types::{WorkerProvenanceGuard, WorkerProvenanceStatus};
 
 #[test]
