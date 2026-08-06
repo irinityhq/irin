@@ -243,9 +243,7 @@ mod tests {
         assert_eq!(payload["directive_id"], directive_id);
         let token_id = payload["token_id"].as_str().expect("token_id string");
         assert!(token_id.starts_with("tok-") && token_id.len() > 8);
-        let response_expires_at = payload["expires_at"]
-            .as_u64()
-            .expect("response expires_at");
+        let response_expires_at = payload["expires_at"].as_u64().expect("response expires_at");
 
         let cap = payload
             .get("capability_token")

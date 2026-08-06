@@ -2230,18 +2230,30 @@ async fn live_token_store_primary_path_db_seeding_and_validation() {
 
     // Prepare opaque still works; execute opaque is refused.
     assert!(is_capability_token_valid(
-        &tx, "tenant-x", "tok-prep-1", "prepare", None
+        &tx,
+        "tenant-x",
+        "tok-prep-1",
+        "prepare",
+        None
     ));
     assert!(is_capability_token_valid(
         &tx, "tenant-x", "tok-2", "prepare", None
     ));
     assert!(!is_capability_token_valid(
-        &tx, "tenant-x", "tok-prep-1", "execute", Some("dir-x")
+        &tx,
+        "tenant-x",
+        "tok-prep-1",
+        "execute",
+        Some("dir-x")
     ));
 
     // Invalid tokens / mismatched tenant
     assert!(!is_capability_token_valid(
-        &tx, "tenant-y", "tok-prep-1", "prepare", None
+        &tx,
+        "tenant-y",
+        "tok-prep-1",
+        "prepare",
+        None
     ));
     assert!(!is_capability_token_valid(
         &tx, "tenant-x", "tok-3", "prepare", None
@@ -2250,12 +2262,20 @@ async fn live_token_store_primary_path_db_seeding_and_validation() {
     // Env fallback for execute is refused; prepare env still works for empty tenant.
     std::env::set_var("WATCH_ALLOWED_EXECUTE_TOKENS", "tok-env");
     assert!(!is_capability_token_valid(
-        &tx, "tenant-y", "tok-env", "execute", Some("dir-env")
+        &tx,
+        "tenant-y",
+        "tok-env",
+        "execute",
+        Some("dir-env")
     ));
     std::env::remove_var("WATCH_ALLOWED_EXECUTE_TOKENS");
     std::env::set_var("WATCH_ALLOWED_PREPARE_TOKENS", "tok-env-prep");
     assert!(is_capability_token_valid(
-        &tx, "tenant-y", "tok-env-prep", "prepare", None
+        &tx,
+        "tenant-y",
+        "tok-env-prep",
+        "prepare",
+        None
     ));
     std::env::remove_var("WATCH_ALLOWED_PREPARE_TOKENS");
 }
@@ -2356,8 +2376,7 @@ async fn w2_3b_structured_token_clean_empty_allowlist_still_allowed() {
 
     let conn = Connection::open(&db_path).unwrap();
 
-    let allowed =
-        is_capability_token_valid(&conn, "tenant-3b-clean", &token_json, "prepare", None);
+    let allowed = is_capability_token_valid(&conn, "tenant-3b-clean", &token_json, "prepare", None);
 
     assert!(
         allowed,
@@ -2424,35 +2443,17 @@ async fn pr1_structured_execute_same_directive_retry_and_foreign_refuse() {
     let conn = Connection::open(&db_path).unwrap();
 
     assert!(
-        is_capability_token_valid(
-            &conn,
-            "tenant-replay",
-            &token_a,
-            "execute",
-            Some("dir-a")
-        ),
+        is_capability_token_valid(&conn, "tenant-replay", &token_a, "execute", Some("dir-a")),
         "first bind for token_id must succeed"
     );
     assert!(
-        is_capability_token_valid(
-            &conn,
-            "tenant-replay",
-            &token_a,
-            "execute",
-            Some("dir-a")
-        ),
+        is_capability_token_valid(&conn, "tenant-replay", &token_a, "execute", Some("dir-a")),
         "same-directive retry must succeed"
     );
     // Wire mismatch alone is also refuse (defense in depth) — but the durable
     // path is proven by token_b_foreign below, which has matching wire fields.
     assert!(
-        !is_capability_token_valid(
-            &conn,
-            "tenant-replay",
-            &token_a,
-            "execute",
-            Some("dir-b")
-        ),
+        !is_capability_token_valid(&conn, "tenant-replay", &token_a, "execute", Some("dir-b")),
         "same signed blob with foreign claimed directive must refuse"
     );
     assert!(
@@ -2481,13 +2482,7 @@ async fn pr1_structured_execute_same_directive_retry_and_foreign_refuse() {
     drop(conn);
     let conn2 = Connection::open(&db_path).unwrap();
     assert!(
-        is_capability_token_valid(
-            &conn2,
-            "tenant-replay",
-            &token_a,
-            "execute",
-            Some("dir-a")
-        ),
+        is_capability_token_valid(&conn2, "tenant-replay", &token_a, "execute", Some("dir-a")),
         "same-directive retry must survive restart"
     );
     assert!(
@@ -2503,7 +2498,12 @@ async fn pr1_structured_execute_same_directive_retry_and_foreign_refuse() {
 }
 
 /// Build a fully valid execute token shape, then override one field and re-sign.
-fn signed_execute_variant<F>(tenant: &str, token_id: &str, directive_id: &str, mut tweak: F) -> String
+fn signed_execute_variant<F>(
+    tenant: &str,
+    token_id: &str,
+    directive_id: &str,
+    mut tweak: F,
+) -> String
 where
     F: FnMut(&mut sovereign_protocol::types::CapabilityToken),
 {

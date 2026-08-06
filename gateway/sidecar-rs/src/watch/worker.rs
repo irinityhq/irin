@@ -341,12 +341,7 @@ pub async fn run_worker_tick_with_quarantine(
         ) {
             let token = capability_token.expect("execute token already validated");
             if !db
-                .is_capability_token_valid(
-                    &claim.tenant,
-                    token,
-                    "execute",
-                    Some(claim.id.as_str()),
-                )
+                .is_capability_token_valid(&claim.tenant, token, "execute", Some(claim.id.as_str()))
                 .await?
             {
                 let reason =

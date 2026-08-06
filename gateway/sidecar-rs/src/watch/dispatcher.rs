@@ -181,8 +181,8 @@ static CAP_TOKEN_REJECTED: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 
 /// T21a remaining-lifetime ceiling for structured capability tokens (24h).
 /// Shared by authorize (`is_capability_token_valid`) and admin mint so the
-/// two sides cannot drift.
-pub const MAX_CAPABILITY_TOKEN_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
+/// two sides cannot drift. Crate-private: not a public API contract.
+pub(crate) const MAX_CAPABILITY_TOKEN_LIFETIME_MS: u64 = 24 * 60 * 60 * 1000;
 
 pub fn cap_token_rejected_total() -> u64 {
     CAP_TOKEN_REJECTED.load(std::sync::atomic::Ordering::Relaxed)
@@ -453,9 +453,8 @@ pub fn is_capability_token_valid(
         // ERROR flips to deny + bumps CAP_TOKEN_DB_ERROR_DENY.
         let mut worker_allowed = true; // allow by default if no policy or no allowed_workers set
         let policy_check: Result<(), rusqlite::Error> = (|| {
-            let mut stmt = conn.prepare(
-                "SELECT allowed_workers FROM tenant_policies WHERE tenant = ?1",
-            )?;
+            let mut stmt =
+                conn.prepare("SELECT allowed_workers FROM tenant_policies WHERE tenant = ?1")?;
             let workers_json: Option<String> = match stmt
                 .query_row(rusqlite::params![tenant], |r| r.get::<_, Option<String>>(0))
             {
@@ -498,12 +497,7 @@ pub fn is_capability_token_valid(
         // Durable same-directive-only replay for execute (survives restart).
         if desired_authority == "execute" {
             let claimed = claimed_directive_id.expect("execute bind checked above");
-            return bind_capability_token_consumption(
-                conn,
-                tenant,
-                &cap_token.token_id,
-                claimed,
-            );
+            return bind_capability_token_consumption(conn, tenant, &cap_token.token_id, claimed);
         }
 
         return true;
@@ -3717,13 +3711,8 @@ fn w2_clean_empty_db_with_no_tokens_denies() {
     std::env::remove_var("WATCH_ALLOWED_EXECUTE_TOKENS");
 
     // Opaque execute is always refused (structured-only).
-    let allowed = is_capability_token_valid(
-        &conn,
-        "tenant-c",
-        "no-such-token",
-        "execute",
-        Some("dir-c"),
-    );
+    let allowed =
+        is_capability_token_valid(&conn, "tenant-c", "no-such-token", "execute", Some("dir-c"));
 
     assert!(!allowed, "opaque execute token must deny");
 }
