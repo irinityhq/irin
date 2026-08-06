@@ -30,6 +30,7 @@ use crate::watch::sentinels::file_inbox::FileInboxSentinel;
 use crate::watch::sentinels::ledger_delta::LedgerDeltaSentinel;
 use crate::watch::sentinels::precedent_integrity::PrecedentIntegritySentinel;
 use crate::watch::sentinels::queue_depth::QueueDepthSentinel;
+use crate::watch::sentinels::sequence_watch::SequenceWatchSentinel;
 use crate::watch::sentinels::silence::SilenceSentinel;
 use crate::watch::sentinels::watch_health::WatchHealthSentinel;
 use crate::watch::{Sentinel, Tier};
@@ -46,6 +47,7 @@ const KNOWN_SENTINELS: &[&str] = &[
     "gateway-active-watch",
     "watch-health-watch",
     "ledger-delta-watch",
+    "sequence-watch",
     "anomaly-watch",
     "completion-verify-watch",
     "precedent-integrity-watch",
@@ -112,6 +114,7 @@ fn build_one(cfg: SentinelConfig) -> Result<Arc<dyn Sentinel>> {
         "gateway-active-watch" => build_queue_depth(cfg, cooldown),
         "watch-health-watch" => build_watch_health(cfg, cooldown),
         "ledger-delta-watch" => build_ledger_delta(cfg, cooldown),
+        "sequence-watch" => build_sequence_watch(cfg, cooldown),
         "anomaly-watch" => build_anomaly(cfg, cooldown),
         "completion-verify-watch" => build_completion_verify(cfg, cooldown),
         "precedent-integrity-watch" => build_precedent_integrity(cfg, cooldown),
@@ -304,6 +307,66 @@ fn build_ledger_delta(cfg: SentinelConfig, cooldown: Duration) -> Result<Arc<dyn
         lc.min_baseline_usd,
         lc.min_absolute_delta_usd,
         lc.baseline_usd,
+    )
+    .with_cooldown(cooldown);
+    s.validate_path()
+        .with_context(|| format!("sentinel '{}': validate_path", cfg.name))?;
+    Ok(Arc::new(s))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SequenceWatchCfg {
+    watch_db_path: PathBuf,
+    #[serde(default = "default_sequence_window_ms")]
+    window_ms: i64,
+    #[serde(default = "default_sequence_max_acts")]
+    max_acts_per_window: i64,
+    #[serde(default = "default_sequence_min_cost")]
+    min_aggregate_cost_usd: f64,
+}
+
+fn default_sequence_window_ms() -> i64 {
+    900_000
+}
+fn default_sequence_max_acts() -> i64 {
+    5
+}
+fn default_sequence_min_cost() -> f64 {
+    0.10
+}
+
+fn build_sequence_watch(cfg: SentinelConfig, cooldown: Duration) -> Result<Arc<dyn Sentinel>> {
+    let sc: SequenceWatchCfg = serde_yaml::from_value(cfg.config)
+        .with_context(|| format!("sentinel '{}': parsing sequence-watch config", cfg.name))?;
+    if sc.window_ms <= 0 {
+        bail!(
+            "sentinel '{}': window_ms must be > 0 (got {})",
+            cfg.name,
+            sc.window_ms
+        );
+    }
+    if sc.max_acts_per_window <= 0 {
+        bail!(
+            "sentinel '{}': max_acts_per_window must be > 0 (got {})",
+            cfg.name,
+            sc.max_acts_per_window
+        );
+    }
+    if !sc.min_aggregate_cost_usd.is_finite() || sc.min_aggregate_cost_usd < 0.0 {
+        bail!(
+            "sentinel '{}': min_aggregate_cost_usd must be finite and >= 0 (got {})",
+            cfg.name,
+            sc.min_aggregate_cost_usd
+        );
+    }
+    let s = SequenceWatchSentinel::new(
+        &cfg.name,
+        &cfg.tenant,
+        &sc.watch_db_path,
+        sc.window_ms,
+        sc.max_acts_per_window,
+        sc.min_aggregate_cost_usd,
     )
     .with_cooldown(cooldown);
     s.validate_path()

@@ -4,6 +4,7 @@ use gateway_sidecar::watch::db::utc_day_bucket;
 use gateway_sidecar::watch::sentinels::file_inbox::FileInboxSentinel;
 use gateway_sidecar::watch::sentinels::ledger_delta::LedgerDeltaSentinel;
 use gateway_sidecar::watch::sentinels::queue_depth::QueueDepthSentinel;
+use gateway_sidecar::watch::sentinels::sequence_watch::SequenceWatchSentinel;
 use gateway_sidecar::watch::sentinels::silence::SilenceSentinel;
 use gateway_sidecar::watch::Sentinel;
 use std::time::Duration;
@@ -393,6 +394,188 @@ fn set_day_spend(watch_db: &std::path::Path, day_bucket: &str, settled_usd: f64)
         rusqlite::params![day_bucket, settled_usd],
     )
     .unwrap();
+}
+
+fn insert_sequence_directive(
+    watch_db: &std::path::Path,
+    tenant: &str,
+    id: &str,
+    verdict: &str,
+    created_at_ms: i64,
+    cost_usd: f64,
+) {
+    let conn = rusqlite::Connection::open(watch_db).unwrap();
+    let source_id = format!("source-{id}");
+    conn.execute(
+        "INSERT INTO pending_escalations
+            (id, tenant, sentinel_name, envelope_json, status, created_at_ms)
+         VALUES (?1, ?2, 'sequence-fixture', '{}', 'council_response_staged', ?3)",
+        rusqlite::params![source_id, tenant, created_at_ms],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO directive_outbox
+            (id, in_response_to, tenant, status, verdict, authority,
+             envelope_json, envelope_json_canonical, signature_b64, signing_kid,
+             council_cost_usd, created_at_ms, expires_at_ms)
+         VALUES (?1, ?2, ?3, 'staged', ?4, 'recommend', '{}', '{}',
+                 'fixture', 'fixture', ?5, ?6, ?7)",
+        rusqlite::params![
+            id,
+            source_id,
+            tenant,
+            verdict,
+            cost_usd,
+            created_at_ms,
+            created_at_ms + 3_600_000
+        ],
+    )
+    .unwrap();
+}
+
+#[tokio::test]
+async fn sequence_watch_fires_on_recent_act_velocity() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watch_db = temp_watch_db_path(&tmp).await;
+    let tenant = "sequence-tenant";
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for i in (0..4).rev() {
+        insert_sequence_directive(
+            &watch_db,
+            tenant,
+            &format!("sequence-act-{i}"),
+            "Act",
+            now_ms - i * 1_000,
+            0.25,
+        );
+    }
+
+    let conn = rusqlite::Connection::open(&watch_db).unwrap();
+    let query_plan: String = conn
+        .query_row(
+            "EXPLAIN QUERY PLAN
+             SELECT COUNT(*), COALESCE(SUM(council_cost_usd), 0.0)
+             FROM directive_outbox
+             WHERE tenant = ?1 AND status IN ('staged', 'acked')
+               AND created_at_ms >= ?2 AND created_at_ms <= ?3 AND verdict = 'Act'",
+            rusqlite::params![tenant, now_ms - 60_000, now_ms],
+            |row| row.get(3),
+        )
+        .unwrap();
+    assert!(
+        query_plan.contains("idx_do_tenant_status_created"),
+        "sequence query must use the tenant/status/time index: {query_plan}"
+    );
+
+    let sentinel = SequenceWatchSentinel::new("sequence-watch", tenant, &watch_db, 60_000, 3, 1.0);
+    let state = sentinel.observe().await.unwrap();
+
+    assert_eq!(state.payload["act_count"].as_i64(), Some(4));
+    assert!((state.payload["aggregate_cost_usd"].as_f64().unwrap() - 1.0).abs() < 1e-9);
+    assert_eq!(state.payload["heuristics_fired"][0], "directive_velocity");
+    assert!(sentinel.interesting(&state).is_some());
+}
+
+#[tokio::test]
+async fn sequence_watch_fires_for_zero_cost_at_zero_floor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watch_db = temp_watch_db_path(&tmp).await;
+    let tenant = "sequence-zero-cost";
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for i in (0..4).rev() {
+        insert_sequence_directive(
+            &watch_db,
+            tenant,
+            &format!("zero-cost-act-{i}"),
+            "Act",
+            now_ms - i * 1_000,
+            0.0,
+        );
+    }
+
+    let sentinel = SequenceWatchSentinel::new("sequence-watch", tenant, &watch_db, 60_000, 3, 0.0);
+    let state = sentinel.observe().await.unwrap();
+
+    assert!(sentinel.interesting(&state).is_some());
+}
+
+#[tokio::test]
+async fn sequence_watch_ignores_cost_below_floor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watch_db = temp_watch_db_path(&tmp).await;
+    let tenant = "sequence-below-cost";
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for i in (0..4).rev() {
+        insert_sequence_directive(
+            &watch_db,
+            tenant,
+            &format!("below-cost-act-{i}"),
+            "Act",
+            now_ms - i * 1_000,
+            0.25,
+        );
+    }
+
+    let sentinel = SequenceWatchSentinel::new("sequence-watch", tenant, &watch_db, 60_000, 3, 1.01);
+    let state = sentinel.observe().await.unwrap();
+
+    assert!(sentinel.interesting(&state).is_none());
+}
+
+#[tokio::test]
+async fn sequence_watch_ignores_old_dismissed_and_other_tenant_rows() {
+    let tmp = tempfile::tempdir().unwrap();
+    let watch_db = temp_watch_db_path(&tmp).await;
+    let tenant = "sequence-negative";
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    for i in (0..4).rev() {
+        insert_sequence_directive(
+            &watch_db,
+            tenant,
+            &format!("old-act-{i}"),
+            "Act",
+            now_ms - 120_000 - i * 1_000,
+            1.0,
+        );
+    }
+    for i in 0..6 {
+        insert_sequence_directive(
+            &watch_db,
+            tenant,
+            &format!("recent-dismiss-{i}"),
+            "Dismiss",
+            now_ms - 20_000 + i * 1_000,
+            1.0,
+        );
+    }
+    for i in 0..4 {
+        insert_sequence_directive(
+            &watch_db,
+            "other-tenant",
+            &format!("other-act-{i}"),
+            "Act",
+            now_ms - 10_000 + i * 1_000,
+            1.0,
+        );
+    }
+
+    let sentinel = SequenceWatchSentinel::new("sequence-watch", tenant, &watch_db, 60_000, 3, 0.10);
+    let state = sentinel.observe().await.unwrap();
+
+    assert_eq!(state.payload["act_count"].as_i64(), Some(0));
+    assert!(sentinel.interesting(&state).is_none());
 }
 
 /// T9: ledger-delta sentinel FIRES when spend rises above threshold_pct from baseline.
