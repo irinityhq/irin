@@ -392,6 +392,10 @@ pub fn is_capability_token_valid(
                 }
             }
         }
+
+        // A token recognized as structured must never be reinterpreted as a
+        // legacy opaque token after any structured validation denial.
+        return false;
     }
 
     // Fallback to legacy string-match DB check.

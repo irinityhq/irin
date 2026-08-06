@@ -2338,6 +2338,33 @@ async fn w2_3b_structured_token_clean_empty_allowlist_still_allowed() {
     // delta races. The behavioral invariant under test is "still allowed".
 }
 
+#[tokio::test]
+async fn w2_3b_malformed_policy_cannot_fall_back_to_legacy_token() {
+    let (_tmp, db_path, _key, _ident) = fresh_signing_key_and_db().await;
+    let db = WatchDb::open(&db_path).await.unwrap();
+    let token_json = signed_structured_token("tenant-3b-overlap", "worker-actor", "execute");
+
+    db.add_capability_token(
+        "tenant-3b-overlap".to_string(),
+        token_json.clone(),
+        "execute".to_string(),
+    )
+    .await
+    .unwrap();
+
+    let conn = Connection::open(&db_path).unwrap();
+    conn.execute(
+        "INSERT INTO tenant_policies (tenant, allowed_workers) VALUES (?1, ?2)",
+        rusqlite::params!["tenant-3b-overlap", "{"],
+    )
+    .unwrap();
+
+    assert!(
+        !is_capability_token_valid(&conn, "tenant-3b-overlap", &token_json, "execute"),
+        "malformed structured-token policy denial must not fall through to an exact legacy-token match"
+    );
+}
+
 // ==========================================================================
 // lease liveness — K8s-Lease-style renewal on the deliberation claim
 // (lease-renewal invariant: prove lease correctness via heartbeat renewal + p99 evidence;
