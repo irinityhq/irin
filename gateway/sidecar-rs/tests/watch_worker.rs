@@ -2,9 +2,13 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use gateway_sidecar::keymgmt::DirectiveVerifier;
+use gateway_sidecar::watch::api::ArmNotifier;
 use gateway_sidecar::watch::db::WatchDb;
 use gateway_sidecar::watch::outbox::AckOutcome;
-use gateway_sidecar::watch::worker::{run_worker_tick, WatchWorkerConfig};
+use gateway_sidecar::watch::quarantine::{QuarantineConfig, QuarantineState};
+use gateway_sidecar::watch::worker::{
+    run_worker_tick, run_worker_tick_with_quarantine, WatchWorkerConfig,
+};
 use rusqlite::{params, Connection};
 
 async fn setup_db() -> (tempfile::TempDir, WatchDb, std::path::PathBuf) {
@@ -96,9 +100,13 @@ fn recommend_canonical(in_response_to: &str) -> String {
 
 /// Canonical execute-authority envelope carrying the given capability token.
 fn execute_canonical(in_response_to: &str, token: &str) -> String {
+    execute_canonical_for("test", in_response_to, token)
+}
+
+fn execute_canonical_for(tenant: &str, in_response_to: &str, token: &str) -> String {
     format!(
-        r#"{{"schema":"irin.directive.payload.v1","in_response_to":"{}","authority":"execute","verdict":"Act","job":"foo","capability_token":"{}"}}"#,
-        in_response_to, token
+        r#"{{"schema":"irin.directive.payload.v1","in_response_to":"{}","authority":"execute","verdict":"Act","job":"foo","scope":{{"tenant":"{}","subject":"watch-producer","allowed_actions":["quarantine_producer"]}},"capability_token":"{}"}}"#,
+        in_response_to, tenant, token
     )
 }
 
@@ -142,6 +150,315 @@ async fn test_worker_execute_without_executor_is_nacked() {
 
     let rec = db.get_outbox(tenant, "dir-1").await.unwrap().unwrap();
     assert_eq!(rec.status, "staged");
+}
+
+#[tokio::test]
+async fn test_worker_executes_quarantine_producer_and_acks() {
+    let (_tmp, db, db_path) = setup_db().await;
+    let tenant = "tenant-quarantine";
+
+    db.add_capability_token(
+        tenant.to_string(),
+        "tok-quarantine".to_string(),
+        "execute".to_string(),
+    )
+    .await
+    .unwrap();
+    insert_signed_outbox_row(
+        &db_path,
+        "dir-quarantine",
+        tenant,
+        "execute",
+        &execute_canonical_for(tenant, "resp", "tok-quarantine"),
+    );
+
+    let quarantine =
+        QuarantineState::new_with_db(QuarantineConfig::default(), std::sync::Arc::new(db.clone()));
+    let notifier = ArmNotifier::default();
+    let (kill_tx, mut kill_rx) = tokio::sync::watch::channel(false);
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    *quarantine.producer_kill_state.lock() = Some((kill_tx, ack_rx));
+    let producer = tokio::spawn(async move {
+        kill_rx.changed().await.unwrap();
+        assert!(*kill_rx.borrow());
+        ack_tx.send(()).unwrap();
+    });
+
+    let config = WatchWorkerConfig {
+        enabled: true,
+        tick_interval_ms: 1000,
+        max_claims_per_tick: 10,
+        lease_duration_ms: 30_000,
+        tenant_scope: tenant.to_string(),
+    };
+    let verifier = test_verifier();
+    let report = run_worker_tick_with_quarantine(
+        &db,
+        &config,
+        Some(&verifier),
+        Some((&quarantine, &notifier)),
+    )
+    .await
+    .unwrap();
+    producer.await.unwrap();
+
+    assert_eq!(report.claimed_count, 1);
+    assert_eq!(report.executed_count, 1);
+    assert_eq!(report.failed_count, 0);
+    let rec = db
+        .get_outbox(tenant, "dir-quarantine")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(rec.status, "acked");
+}
+
+#[tokio::test]
+async fn test_worker_rejects_mismatched_signed_row_identity() {
+    for (id, signed_tenant, signed_response) in [
+        ("dir-wrong-tenant", "tenant-other", "resp"),
+        ("dir-wrong-response", "tenant-row", "resp-other"),
+    ] {
+        let (_tmp, db, db_path) = setup_db().await;
+        let tenant = "tenant-row";
+        db.add_capability_token(
+            tenant.to_string(),
+            "tok-row".to_string(),
+            "execute".to_string(),
+        )
+        .await
+        .unwrap();
+        insert_signed_outbox_row(
+            &db_path,
+            id,
+            tenant,
+            "execute",
+            &execute_canonical_for(signed_tenant, signed_response, "tok-row"),
+        );
+
+        let quarantine = QuarantineState::new_with_db(
+            QuarantineConfig::default(),
+            std::sync::Arc::new(db.clone()),
+        );
+        let notifier = ArmNotifier::default();
+        let (kill_tx, kill_rx) = tokio::sync::watch::channel(false);
+        let (_ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+        *quarantine.producer_kill_state.lock() = Some((kill_tx, ack_rx));
+        let config = WatchWorkerConfig {
+            enabled: true,
+            tick_interval_ms: 1000,
+            max_claims_per_tick: 10,
+            lease_duration_ms: 30_000,
+            tenant_scope: tenant.to_string(),
+        };
+
+        let report = run_worker_tick_with_quarantine(
+            &db,
+            &config,
+            Some(&test_verifier()),
+            Some((&quarantine, &notifier)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(report.executed_count, 0);
+        assert_eq!(report.failed_count, 1);
+        assert!(
+            !*kill_rx.borrow(),
+            "mismatched signed identity must not kill"
+        );
+        assert_eq!(
+            db.get_outbox(tenant, id).await.unwrap().unwrap().status,
+            "staged"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_worker_does_not_ack_dropped_drain_ack() {
+    let (_tmp, db, db_path) = setup_db().await;
+    let tenant = "tenant-no-drain-ack";
+    db.add_capability_token(
+        tenant.to_string(),
+        "tok-no-ack".to_string(),
+        "execute".to_string(),
+    )
+    .await
+    .unwrap();
+    insert_signed_outbox_row(
+        &db_path,
+        "dir-no-ack",
+        tenant,
+        "execute",
+        &execute_canonical_for(tenant, "resp", "tok-no-ack"),
+    );
+
+    let quarantine =
+        QuarantineState::new_with_db(QuarantineConfig::default(), std::sync::Arc::new(db.clone()));
+    let notifier = ArmNotifier::default();
+    let (kill_tx, kill_rx) = tokio::sync::watch::channel(false);
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    drop(ack_tx);
+    *quarantine.producer_kill_state.lock() = Some((kill_tx, ack_rx));
+    let config = WatchWorkerConfig {
+        enabled: true,
+        tick_interval_ms: 1000,
+        max_claims_per_tick: 10,
+        lease_duration_ms: 30_000,
+        tenant_scope: tenant.to_string(),
+    };
+
+    let report = run_worker_tick_with_quarantine(
+        &db,
+        &config,
+        Some(&test_verifier()),
+        Some((&quarantine, &notifier)),
+    )
+    .await
+    .unwrap();
+
+    assert!(*kill_rx.borrow(), "producer must receive the kill signal");
+    assert_eq!(report.executed_count, 0);
+    assert_eq!(report.failed_count, 1);
+    assert_eq!(
+        db.get_outbox(tenant, "dir-no-ack")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "staged"
+    );
+}
+
+#[tokio::test]
+async fn test_worker_claim_survives_bounded_drain() {
+    let (_tmp, db, db_path) = setup_db().await;
+    let tenant = "tenant-short-lease";
+    db.add_capability_token(
+        tenant.to_string(),
+        "tok-short-lease".to_string(),
+        "execute".to_string(),
+    )
+    .await
+    .unwrap();
+    insert_signed_outbox_row(
+        &db_path,
+        "dir-short-lease",
+        tenant,
+        "execute",
+        &execute_canonical_for(tenant, "resp", "tok-short-lease"),
+    );
+
+    let quarantine =
+        QuarantineState::new_with_db(QuarantineConfig::default(), std::sync::Arc::new(db.clone()));
+    let notifier = ArmNotifier::default();
+    let (kill_tx, mut kill_rx) = tokio::sync::watch::channel(false);
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    *quarantine.producer_kill_state.lock() = Some((kill_tx, ack_rx));
+    let config = WatchWorkerConfig {
+        enabled: true,
+        tick_interval_ms: 1000,
+        max_claims_per_tick: 10,
+        lease_duration_ms: 25,
+        tenant_scope: tenant.to_string(),
+    };
+
+    let verifier = test_verifier();
+    let worker = run_worker_tick_with_quarantine(
+        &db,
+        &config,
+        Some(&verifier),
+        Some((&quarantine, &notifier)),
+    );
+    let producer = async move {
+        kill_rx.changed().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        ack_tx.send(()).unwrap();
+    };
+    let contender = async {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        db.claim_outbox(tenant, 1, now_ms, 25).await.unwrap()
+    };
+    let (report, (), reclaimed) = tokio::join!(worker, producer, contender);
+
+    assert!(
+        reclaimed.is_empty(),
+        "bounded drain must retain the original claim"
+    );
+    assert_eq!(report.unwrap().executed_count, 1);
+}
+
+#[tokio::test]
+async fn test_worker_reconciles_late_drain_ack_on_retry() {
+    let (_tmp, db, db_path) = setup_db().await;
+    let tenant = "tenant-late-ack";
+    db.add_capability_token(
+        tenant.to_string(),
+        "tok-late".to_string(),
+        "execute".to_string(),
+    )
+    .await
+    .unwrap();
+    insert_signed_outbox_row(
+        &db_path,
+        "dir-late",
+        tenant,
+        "execute",
+        &execute_canonical_for(tenant, "resp", "tok-late"),
+    );
+
+    let quarantine =
+        QuarantineState::new_with_db(QuarantineConfig::default(), std::sync::Arc::new(db.clone()));
+    let notifier = ArmNotifier::default();
+    let (kill_tx, mut kill_rx) = tokio::sync::watch::channel(false);
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    *quarantine.producer_kill_state.lock() = Some((kill_tx, ack_rx));
+    let config = WatchWorkerConfig {
+        enabled: true,
+        tick_interval_ms: 1000,
+        max_claims_per_tick: 10,
+        lease_duration_ms: 30_000,
+        tenant_scope: tenant.to_string(),
+    };
+    let producer = tokio::spawn(async move {
+        kill_rx.changed().await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(5_100)).await;
+        ack_tx.send(()).unwrap();
+    });
+
+    let first = run_worker_tick_with_quarantine(
+        &db,
+        &config,
+        Some(&test_verifier()),
+        Some((&quarantine, &notifier)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(first.executed_count, 0);
+    assert_eq!(first.failed_count, 1);
+    producer.await.unwrap();
+
+    let retry = run_worker_tick_with_quarantine(
+        &db,
+        &config,
+        Some(&test_verifier()),
+        Some((&quarantine, &notifier)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(retry.executed_count, 1);
+    assert_eq!(
+        db.get_outbox(tenant, "dir-late")
+            .await
+            .unwrap()
+            .unwrap()
+            .status,
+        "acked"
+    );
 }
 
 #[tokio::test]

@@ -1090,7 +1090,12 @@ async fn start_listener_and_background(hydrated: BootHydrated) -> BootServing {
             "starting live worker loop"
         );
         let db_for_worker = (*watch_db).clone();
-        match spawn_live_worker_loop(db_for_worker, worker_config) {
+        match spawn_live_worker_loop(
+            db_for_worker,
+            worker_config,
+            watch_quarantine.clone(),
+            arm_notifier.clone(),
+        ) {
             Some((_handle, shutdown_tx)) => {
                 info!("live worker loop spawned successfully");
                 Some(shutdown_tx)
