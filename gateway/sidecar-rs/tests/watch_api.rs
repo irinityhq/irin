@@ -129,26 +129,29 @@ async fn ui_snapshot_fixture() -> (tempfile::TempDir, std::path::PathBuf, UiSnap
     )
 }
 
+/// Seed inputs for redacted-receipt tests (bundled to avoid clippy too_many_arguments).
+struct SeedExecuteReceipt<'a> {
+    db_path: &'a std::path::Path,
+    tenant: &'a str,
+    token_id: &'a str,
+    directive_id: &'a str,
+    in_response_to: &'a str,
+    status: &'a str,
+    last_error: Option<&'a str>,
+    consumed_at_ms: i64,
+}
+
 /// Seed durable consumption + outbox rows for redacted-receipt tests.
 /// Inserts only identity/outcome fields — secret material lives only in
 /// last_error detail (must not appear in the UI projection).
-fn seed_execute_receipt_fixture(
-    db_path: &std::path::Path,
-    tenant: &str,
-    token_id: &str,
-    directive_id: &str,
-    in_response_to: &str,
-    status: &str,
-    last_error: Option<&str>,
-    consumed_at_ms: i64,
-) {
+fn seed_execute_receipt_fixture(seed: SeedExecuteReceipt<'_>) {
     use rusqlite::{params, Connection};
-    let conn = Connection::open(db_path).unwrap();
+    let conn = Connection::open(seed.db_path).unwrap();
     conn.execute(
         "INSERT OR IGNORE INTO pending_escalations
             (id, tenant, sentinel_name, envelope_json, status, created_at_ms)
          VALUES (?1, ?2, 'test', '{}', 'council_response_staged', ?3)",
-        params![in_response_to, tenant, consumed_at_ms],
+        params![seed.in_response_to, seed.tenant, seed.consumed_at_ms],
     )
     .unwrap();
     conn.execute(
@@ -161,12 +164,12 @@ fn seed_execute_receipt_fixture(
                  'RAW_SIGNATURE_B64_MUST_NOT_LEAK', 'kid-test',
                  ?5, 9999999999999, ?6)",
         params![
-            directive_id,
-            in_response_to,
-            tenant,
-            status,
-            consumed_at_ms,
-            last_error
+            seed.directive_id,
+            seed.in_response_to,
+            seed.tenant,
+            seed.status,
+            seed.consumed_at_ms,
+            seed.last_error
         ],
     )
     .unwrap();
@@ -174,7 +177,12 @@ fn seed_execute_receipt_fixture(
         "INSERT INTO capability_token_consumptions
             (tenant, token_id, directive_id, consumed_at_ms)
          VALUES (?1, ?2, ?3, ?4)",
-        params![tenant, token_id, directive_id, consumed_at_ms],
+        params![
+            seed.tenant,
+            seed.token_id,
+            seed.directive_id,
+            seed.consumed_at_ms
+        ],
     )
     .unwrap();
 }
@@ -354,37 +362,37 @@ async fn gate4_ui_snapshot_projects_redacted_execute_receipts() {
     .to_string();
 
     // Foreign tenant must not appear in canary snapshot.
-    seed_execute_receipt_fixture(
-        &db_path,
-        "foreign",
-        "tok-foreign",
-        "dir-foreign",
-        "esc-foreign",
-        "acked",
-        None,
-        1_000,
-    );
+    seed_execute_receipt_fixture(SeedExecuteReceipt {
+        db_path: &db_path,
+        tenant: "foreign",
+        token_id: "tok-foreign",
+        directive_id: "dir-foreign",
+        in_response_to: "esc-foreign",
+        status: "acked",
+        last_error: None,
+        consumed_at_ms: 1_000,
+    });
     // Insert canary outbox rows in non-decreasing created_at order (trigger).
-    seed_execute_receipt_fixture(
-        &db_path,
-        "configured-canary",
-        "tok-refused",
-        "dir-refused",
-        "esc-refused",
-        "staged",
-        Some(&last_error),
-        2_000,
-    );
-    seed_execute_receipt_fixture(
-        &db_path,
-        "configured-canary",
-        "tok-completed",
-        "dir-completed",
-        "esc-completed",
-        "acked",
-        None,
-        3_000,
-    );
+    seed_execute_receipt_fixture(SeedExecuteReceipt {
+        db_path: &db_path,
+        tenant: "configured-canary",
+        token_id: "tok-refused",
+        directive_id: "dir-refused",
+        in_response_to: "esc-refused",
+        status: "staged",
+        last_error: Some(&last_error),
+        consumed_at_ms: 2_000,
+    });
+    seed_execute_receipt_fixture(SeedExecuteReceipt {
+        db_path: &db_path,
+        tenant: "configured-canary",
+        token_id: "tok-completed",
+        directive_id: "dir-completed",
+        in_response_to: "esc-completed",
+        status: "acked",
+        last_error: None,
+        consumed_at_ms: 3_000,
+    });
 
     let response = ui_snapshot_router(state)
         .oneshot(
@@ -461,16 +469,16 @@ async fn gate4_ui_snapshot_projects_redacted_execute_receipts() {
 #[tokio::test]
 async fn gate4_ui_snapshot_pending_receipt_has_null_result() {
     let (_tmp, db_path, state) = ui_snapshot_fixture().await;
-    seed_execute_receipt_fixture(
-        &db_path,
-        "configured-canary",
-        "tok-pending",
-        "dir-pending",
-        "esc-pending",
-        "staged",
-        None,
-        1_000,
-    );
+    seed_execute_receipt_fixture(SeedExecuteReceipt {
+        db_path: &db_path,
+        tenant: "configured-canary",
+        token_id: "tok-pending",
+        directive_id: "dir-pending",
+        in_response_to: "esc-pending",
+        status: "staged",
+        last_error: None,
+        consumed_at_ms: 1_000,
+    });
     let response = ui_snapshot_router(state)
         .oneshot(
             Request::builder()
@@ -486,7 +494,10 @@ async fn gate4_ui_snapshot_pending_receipt_has_null_result() {
     let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let receipt = &value["recent_execute_receipts"][0];
     assert_eq!(receipt["decision"], "pending");
-    assert!(receipt["result"].is_null(), "pending must not put lifecycle in result");
+    assert!(
+        receipt["result"].is_null(),
+        "pending must not put lifecycle in result"
+    );
     assert_eq!(receipt["action"], "quarantine_producer");
     assert!(receipt.get("in_response_to").is_some());
 }
@@ -496,16 +507,19 @@ async fn gate4_ui_snapshot_execute_receipt_tail_is_bounded() {
     let (_tmp, db_path, state) = ui_snapshot_fixture().await;
     // Insert more than the fixed UI tail (20).
     for i in 0..25 {
-        seed_execute_receipt_fixture(
-            &db_path,
-            "configured-canary",
-            &format!("tok-{i:02}"),
-            &format!("dir-{i:02}"),
-            &format!("esc-{i:02}"),
-            "acked",
-            None,
-            1_000 + i,
-        );
+        let token_id = format!("tok-{i:02}");
+        let directive_id = format!("dir-{i:02}");
+        let in_response_to = format!("esc-{i:02}");
+        seed_execute_receipt_fixture(SeedExecuteReceipt {
+            db_path: &db_path,
+            tenant: "configured-canary",
+            token_id: &token_id,
+            directive_id: &directive_id,
+            in_response_to: &in_response_to,
+            status: "acked",
+            last_error: None,
+            consumed_at_ms: 1_000 + i,
+        });
     }
     let response = ui_snapshot_router(state)
         .oneshot(

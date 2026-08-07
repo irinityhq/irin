@@ -213,6 +213,9 @@ CREATE TABLE IF NOT EXISTS capability_token_consumptions (
     consumed_at_ms INTEGER NOT NULL,
     PRIMARY KEY (tenant, token_id)
 );
+-- UI snapshot tail: newest-N by tenant without scanning full history.
+CREATE INDEX IF NOT EXISTS idx_ctc_tenant_consumed_at
+    ON capability_token_consumptions(tenant, consumed_at_ms DESC, token_id DESC);
 
 CREATE TRIGGER IF NOT EXISTS trg_do_immutable_signed_fields
 BEFORE UPDATE OF
@@ -581,6 +584,13 @@ impl WatchDb {
                         consumed_at_ms INTEGER NOT NULL,
                         PRIMARY KEY (tenant, token_id)
                     )",
+                    [],
+                )?;
+                // UI snapshot ORDER BY consumed_at_ms DESC LIMIT N — without this
+                // index every poll sorts the full durable tenant history.
+                conn.execute(
+                    "CREATE INDEX IF NOT EXISTS idx_ctc_tenant_consumed_at
+                     ON capability_token_consumptions(tenant, consumed_at_ms DESC, token_id DESC)",
                     [],
                 )?;
 
