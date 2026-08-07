@@ -113,6 +113,7 @@ async function installGovernanceShellFixtures(page: Page) {
           fires_last_24h: 0,
         },
         recent_fires: [],
+        recent_execute_receipts: [],
         budget: { spend_today_usd: 0, spend_cap_usd: 0 },
         degradation: {
           audit_infra_errors_total: 0,

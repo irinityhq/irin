@@ -6,6 +6,20 @@ use crate::watch::outbox::{AckOutcome, DirectiveOutboxRecord};
 
 use super::{pending_escalations_max_nonterminal, WatchDb};
 
+/// Durable join row for redacted execute receipts (UI snapshot only).
+///
+/// Carries consumption + optional outbox outcome fields. Callers must project
+/// a strict subset — never surface `last_error` detail text to a UI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecuteReceiptRow {
+    pub token_id: String,
+    pub directive_id: String,
+    pub consumed_at_ms: i64,
+    pub outbox_status: Option<String>,
+    pub last_error: Option<String>,
+    pub in_response_to: Option<String>,
+}
+
 fn outbox_record_from_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<DirectiveOutboxRecord> {
     // NOTE: SELECTs must include claim_handle (18) + worker_provenance (19).
     // Legacy rows fall back so tests + old DBs continue to surface the claim
@@ -838,6 +852,53 @@ impl WatchDb {
             })
             .await?;
         Ok(())
+    }
+
+    /// Bounded tenant-scoped execute receipt tail for the UI snapshot.
+    ///
+    /// Projects only non-secret identity + outcome fields from durable
+    /// `capability_token_consumptions` joined to `directive_outbox`. Never
+    /// reads envelopes, signatures, or raw capability token material.
+    pub async fn list_recent_execute_receipts(
+        &self,
+        tenant: &str,
+        limit: i64,
+    ) -> anyhow::Result<Vec<ExecuteReceiptRow>> {
+        let t = tenant.to_string();
+        let lim = limit.max(1);
+        let rows = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT c.token_id,
+                            c.directive_id,
+                            c.consumed_at_ms,
+                            d.status,
+                            d.last_error,
+                            d.in_response_to
+                     FROM capability_token_consumptions c
+                     LEFT JOIN directive_outbox d
+                       ON d.tenant = c.tenant AND d.id = c.directive_id
+                     WHERE c.tenant = ?1
+                     ORDER BY c.consumed_at_ms DESC, c.token_id DESC
+                     LIMIT ?2",
+                )?;
+                let rows: Vec<ExecuteReceiptRow> = stmt
+                    .query_map(rusqlite::params![t, lim], |r| {
+                        Ok(ExecuteReceiptRow {
+                            token_id: r.get(0)?,
+                            directive_id: r.get(1)?,
+                            consumed_at_ms: r.get(2)?,
+                            outbox_status: r.get(3)?,
+                            last_error: r.get(4)?,
+                            in_response_to: r.get(5)?,
+                        })
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<_, rusqlite::Error>(rows)
+            })
+            .await?;
+        Ok(rows)
     }
 
     /// Prunes terminal rows from `pending_escalations` and `directive_outbox`

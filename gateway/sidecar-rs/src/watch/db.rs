@@ -42,6 +42,8 @@ pub use config::{
 
 pub use fires::{compute_watch_fire_preimage, CommittedFire, FireRow, VerifyBreak, VerifyResult};
 
+pub use outbox_store::ExecuteReceiptRow;
+
 pub(crate) use registry::probation_target_for_clear;
 pub use registry::{DurableClearOutcome, RegistryRow, TenantPolicy};
 

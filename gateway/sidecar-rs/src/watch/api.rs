@@ -32,9 +32,9 @@ pub use status::{list_json, temperature_json, verify_chain_json, VERIFY_CHAIN_BU
 mod stats;
 
 pub use stats::{
-    audit_json, build_watch_stats, ui_snapshot_json, UiRecentFire, UiSentinelReadiness,
-    UiWatchBudget, UiWatchDegradation, UiWatchSnapshot, UiWatchTemperature, WatchStats,
-    AUDIT_LIMIT_CAP, AUDIT_LIMIT_DEFAULT,
+    audit_json, build_watch_stats, ui_snapshot_json, UiExecuteAction, UiExecuteDecision,
+    UiExecuteReceipt, UiRecentFire, UiSentinelReadiness, UiWatchBudget, UiWatchDegradation,
+    UiWatchSnapshot, UiWatchTemperature, WatchStats, AUDIT_LIMIT_CAP, AUDIT_LIMIT_DEFAULT,
 };
 
 mod force_wake;

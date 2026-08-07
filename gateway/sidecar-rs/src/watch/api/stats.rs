@@ -264,8 +264,50 @@ pub struct UiWatchSnapshot {
     pub sentinels: Vec<UiSentinelReadiness>,
     pub temperature: UiWatchTemperature,
     pub recent_fires: Vec<UiRecentFire>,
+    /// Bounded redacted execute receipts (token id + outcome only; no secrets).
+    pub recent_execute_receipts: Vec<UiExecuteReceipt>,
     pub budget: UiWatchBudget,
     pub degradation: UiWatchDegradation,
+}
+
+/// Finite lifecycle decision for a redacted execute receipt.
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum UiExecuteDecision {
+    Completed,
+    Refused,
+    Pending,
+    Expired,
+    Dismissed,
+    Bound,
+}
+
+/// v1 sole earned-execution action.
+#[derive(Debug, Clone, Copy, serde::Serialize, PartialEq, Eq)]
+pub enum UiExecuteAction {
+    #[serde(rename = "quarantine_producer")]
+    QuarantineProducer,
+}
+
+/// Redacted Earned Execution receipt for the UI snapshot.
+///
+/// Exact fields: token_id, decision, action, result, directive_id,
+/// in_response_to, at_ms. Never raw capability token, signature, envelope,
+/// or last_error detail text.
+///
+/// `result` is only `Some("acked")` or `Some(ProblemDetails title)`; null
+/// for lifecycle-only decisions (pending/expired/dismissed/bound).
+#[derive(Debug, Clone, serde::Serialize, PartialEq, Eq)]
+pub struct UiExecuteReceipt {
+    pub token_id: String,
+    pub decision: UiExecuteDecision,
+    pub action: UiExecuteAction,
+    /// Only `"acked"` or a ProblemDetails title; null otherwise.
+    pub result: Option<String>,
+    pub directive_id: String,
+    /// Escalation / fire correlation id when the outbox row is still present.
+    pub in_response_to: Option<String>,
+    pub at_ms: i64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -320,6 +362,52 @@ pub struct UiWatchDegradation {
 }
 
 const UI_RECENT_FIRE_LIMIT: i64 = 50;
+/// Fixed small tail of redacted execute receipts (not full history).
+const UI_RECENT_EXECUTE_RECEIPT_LIMIT: i64 = 20;
+
+/// Map durable consumption + optional outbox row into a strict UI receipt.
+///
+/// Lifecycle stays in `decision`. `result` is only `"acked"` or a
+/// ProblemDetails title — never outbox lifecycle strings. Free-form
+/// last_error detail is dropped.
+pub(crate) fn project_execute_receipt(
+    row: crate::watch::db::ExecuteReceiptRow,
+) -> UiExecuteReceipt {
+    let problem_title = row.last_error.as_deref().and_then(redacted_problem_title);
+    let status = row.outbox_status.as_deref();
+    let (decision, result) = match (status, problem_title) {
+        (Some("acked"), _) => (UiExecuteDecision::Completed, Some("acked".to_string())),
+        (Some("expired"), _) => (UiExecuteDecision::Expired, None),
+        (Some("dismissed"), _) => (UiExecuteDecision::Dismissed, None),
+        (Some("staged"), Some(title)) => (UiExecuteDecision::Refused, Some(title)),
+        (Some("staged"), None) => (UiExecuteDecision::Pending, None),
+        (Some(_), Some(title)) => (UiExecuteDecision::Refused, Some(title)),
+        (Some(_), None) => (UiExecuteDecision::Pending, None),
+        (None, Some(title)) => (UiExecuteDecision::Refused, Some(title)),
+        (None, None) => (UiExecuteDecision::Bound, None),
+    };
+    UiExecuteReceipt {
+        token_id: row.token_id,
+        decision,
+        action: UiExecuteAction::QuarantineProducer,
+        result,
+        directive_id: row.directive_id,
+        in_response_to: row.in_response_to,
+        at_ms: row.consumed_at_ms,
+    }
+}
+
+/// Extract ProblemDetails `title` only — never `detail` (may be sensitive).
+fn redacted_problem_title(last_error: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(last_error).ok()?;
+    let title = value.get("title")?.as_str()?.trim();
+    if title.is_empty() {
+        return None;
+    }
+    // Bound length so a hostile row cannot bloat the snapshot.
+    let capped: String = title.chars().take(96).collect();
+    Some(capped)
+}
 
 /// `GET /watch/ui-snapshot/{tenant}` — the only Watch read intended for a
 /// human UI. It is admin-authenticated, canary-guarded, read-only, and emits a
@@ -426,6 +514,21 @@ pub async fn ui_snapshot_json(
         }
     };
 
+    let recent_execute_receipts = match db
+        .list_recent_execute_receipts(&tenant, UI_RECENT_EXECUTE_RECEIPT_LIMIT)
+        .await
+    {
+        Ok(rows) => rows.into_iter().map(project_execute_receipt).collect(),
+        Err(error) => {
+            tracing::error!(%error, %tenant, "watch UI snapshot execute-receipt read failed");
+            return problem(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "snapshot-unavailable",
+                "watch snapshot is temporarily unavailable",
+            );
+        }
+    };
+
     let stats = build_watch_stats(&quarantine, Some(db.as_ref())).await;
     json_response(
         StatusCode::OK,
@@ -441,6 +544,7 @@ pub async fn ui_snapshot_json(
                 fires_last_24h,
             },
             recent_fires,
+            recent_execute_receipts,
             budget: UiWatchBudget {
                 spend_today_usd: stats.spend_today_usd,
                 spend_cap_usd: stats.spend_cap_usd,
@@ -464,4 +568,97 @@ pub async fn ui_snapshot_json(
             },
         },
     )
+}
+
+#[cfg(test)]
+mod project_execute_receipt_tests {
+    use super::*;
+    use crate::watch::db::ExecuteReceiptRow;
+
+    #[test]
+    fn completed_ack_projects_clean_receipt() {
+        let receipt = project_execute_receipt(ExecuteReceiptRow {
+            token_id: "tok-1".into(),
+            directive_id: "dir-1".into(),
+            consumed_at_ms: 42,
+            outbox_status: Some("acked".into()),
+            last_error: None,
+            in_response_to: Some("esc-1".into()),
+        });
+        assert_eq!(receipt.decision, UiExecuteDecision::Completed);
+        assert_eq!(receipt.result.as_deref(), Some("acked"));
+        assert_eq!(receipt.action, UiExecuteAction::QuarantineProducer);
+        assert_eq!(receipt.token_id, "tok-1");
+        assert_eq!(receipt.directive_id, "dir-1");
+        assert_eq!(receipt.in_response_to.as_deref(), Some("esc-1"));
+    }
+
+    #[test]
+    fn refused_projects_problem_title_never_detail() {
+        let last_error = serde_json::json!({
+            "title": "invalid-capability-token",
+            "detail": "raw capability_token SECRET_TOKEN signature_b64=abc must not leak",
+        })
+        .to_string();
+        let receipt = project_execute_receipt(ExecuteReceiptRow {
+            token_id: "tok-2".into(),
+            directive_id: "dir-2".into(),
+            consumed_at_ms: 99,
+            outbox_status: Some("staged".into()),
+            last_error: Some(last_error),
+            in_response_to: Some("esc-2".into()),
+        });
+        assert_eq!(receipt.decision, UiExecuteDecision::Refused);
+        assert_eq!(receipt.result.as_deref(), Some("invalid-capability-token"));
+        let dumped = serde_json::to_string(&receipt).unwrap();
+        assert!(!dumped.contains("SECRET_TOKEN"));
+        assert!(!dumped.contains("signature_b64"));
+        assert!(!dumped.contains("capability_token"));
+    }
+
+    #[test]
+    fn freeform_last_error_is_dropped_and_lifecycle_stays_out_of_result() {
+        let receipt = project_execute_receipt(ExecuteReceiptRow {
+            token_id: "tok-3".into(),
+            directive_id: "dir-3".into(),
+            consumed_at_ms: 1,
+            outbox_status: Some("staged".into()),
+            last_error: Some("not-json SECRET_BLOB".into()),
+            in_response_to: None,
+        });
+        assert_eq!(receipt.decision, UiExecuteDecision::Pending);
+        assert_eq!(receipt.result, None);
+        let dumped = serde_json::to_string(&receipt).unwrap();
+        assert!(!dumped.contains("SECRET_BLOB"));
+        assert!(!dumped.contains("\"staged\""));
+    }
+
+    #[test]
+    fn lifecycle_decisions_do_not_duplicate_into_result() {
+        for (status, decision) in [
+            ("expired", UiExecuteDecision::Expired),
+            ("dismissed", UiExecuteDecision::Dismissed),
+        ] {
+            let receipt = project_execute_receipt(ExecuteReceiptRow {
+                token_id: "tok-life".into(),
+                directive_id: "dir-life".into(),
+                consumed_at_ms: 7,
+                outbox_status: Some(status.into()),
+                last_error: None,
+                in_response_to: Some("esc-life".into()),
+            });
+            assert_eq!(receipt.decision, decision);
+            assert_eq!(receipt.result, None, "lifecycle must not appear in result");
+        }
+        let bound = project_execute_receipt(ExecuteReceiptRow {
+            token_id: "tok-bound".into(),
+            directive_id: "dir-bound".into(),
+            consumed_at_ms: 8,
+            outbox_status: None,
+            last_error: None,
+            in_response_to: None,
+        });
+        assert_eq!(bound.decision, UiExecuteDecision::Bound);
+        assert_eq!(bound.result, None);
+    }
 }
