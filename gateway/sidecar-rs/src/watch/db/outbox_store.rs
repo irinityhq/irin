@@ -802,15 +802,21 @@ impl WatchDb {
         tenant: &str,
         token: &str,
         authority: &str,
+        claimed_directive_id: Option<&str>,
     ) -> anyhow::Result<bool> {
         let t = tenant.to_string();
         let tok = token.to_string();
         let auth = authority.to_string();
+        let claimed = claimed_directive_id.map(|s| s.to_string());
         let valid = self
             .conn
             .call(move |conn| {
                 Ok::<_, rusqlite::Error>(crate::watch::dispatcher::is_capability_token_valid(
-                    conn, &t, &tok, &auth,
+                    conn,
+                    &t,
+                    &tok,
+                    &auth,
+                    claimed.as_deref(),
                 ))
             })
             .await?;

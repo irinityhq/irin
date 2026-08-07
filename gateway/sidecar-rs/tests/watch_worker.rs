@@ -1,7 +1,7 @@
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
-use gateway_sidecar::keymgmt::DirectiveVerifier;
+use gateway_sidecar::keymgmt::{DirectiveSigningKey, DirectiveVerifier};
 use gateway_sidecar::watch::api::ArmNotifier;
 use gateway_sidecar::watch::db::WatchDb;
 use gateway_sidecar::watch::outbox::AckOutcome;
@@ -16,7 +16,35 @@ async fn setup_db() -> (tempfile::TempDir, WatchDb, std::path::PathBuf) {
     let db_path = tmp.path().join("watch.db");
     let db = WatchDb::open(&db_path).await.unwrap();
     db.run_migrations().await.unwrap();
+    // Publish the process-global directive signing key so structured execute
+    // tokens verify (OnceLock: first init wins across this test binary).
+    let identity = tmp.path().join("directive_identity.json");
+    let _ = DirectiveSigningKey::load_or_initialize(&identity, &db)
+        .await
+        .unwrap();
     (tmp, db, db_path)
+}
+
+/// Mint a v1 structured execute capability token bound to `directive_id`.
+fn signed_execute_token(tenant: &str, directive_id: &str, token_id: &str) -> String {
+    let key = gateway_sidecar::keymgmt::directive_signing_key();
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let token = sovereign_protocol::types::CapabilityToken {
+        actor: "operator".to_string(),
+        subject: "watch-producer".to_string(),
+        tenant: tenant.to_string(),
+        allowed_actions: vec!["execute".to_string()],
+        approval_required: true,
+        expires_at: now_ms + 60_000,
+        max_cost_usd: Some(0.0),
+        token_id: token_id.to_string(),
+        directive_id: directive_id.to_string(),
+        signature: None,
+    };
+    serde_json::to_string(&key.sign_capability_token(token)).unwrap()
 }
 
 /// Pre-seal W2: a deterministic test Council signing key. Every happy-path
@@ -98,37 +126,37 @@ fn recommend_canonical(in_response_to: &str) -> String {
     )
 }
 
-/// Canonical execute-authority envelope carrying the given capability token.
-fn execute_canonical(in_response_to: &str, token: &str) -> String {
-    execute_canonical_for("test", in_response_to, token)
-}
-
+/// Canonical execute-authority envelope carrying the given capability token
+/// (token is a JSON string of CapabilityToken — embedded as a JSON string value).
 fn execute_canonical_for(tenant: &str, in_response_to: &str, token: &str) -> String {
-    format!(
-        r#"{{"schema":"irin.directive.payload.v1","in_response_to":"{}","authority":"execute","verdict":"Act","job":"foo","scope":{{"tenant":"{}","subject":"watch-producer","allowed_actions":["quarantine_producer"]}},"capability_token":"{}"}}"#,
-        in_response_to, tenant, token
-    )
+    serde_json::json!({
+        "schema": "irin.directive.payload.v1",
+        "in_response_to": in_response_to,
+        "authority": "execute",
+        "verdict": "Act",
+        "job": "foo",
+        "scope": {
+            "tenant": tenant,
+            "subject": "watch-producer",
+            "allowed_actions": ["quarantine_producer"]
+        },
+        "capability_token": token
+    })
+    .to_string()
 }
 
 #[tokio::test]
 async fn test_worker_execute_without_executor_is_nacked() {
     let (_tmp, db, db_path) = setup_db().await;
     let tenant = "tenant-a";
-
-    db.add_capability_token(
-        tenant.to_string(),
-        "tok-123".to_string(),
-        "execute".to_string(),
-    )
-    .await
-    .unwrap();
+    let token = signed_execute_token(tenant, "dir-1", "tok-123");
 
     insert_signed_outbox_row(
         &db_path,
         "dir-1",
         tenant,
         "execute",
-        &execute_canonical("resp", "tok-123"),
+        &execute_canonical_for(tenant, "resp", &token),
     );
 
     let config = WatchWorkerConfig {
@@ -156,20 +184,13 @@ async fn test_worker_execute_without_executor_is_nacked() {
 async fn test_worker_executes_quarantine_producer_and_acks() {
     let (_tmp, db, db_path) = setup_db().await;
     let tenant = "tenant-quarantine";
-
-    db.add_capability_token(
-        tenant.to_string(),
-        "tok-quarantine".to_string(),
-        "execute".to_string(),
-    )
-    .await
-    .unwrap();
+    let token = signed_execute_token(tenant, "dir-quarantine", "tok-quarantine");
     insert_signed_outbox_row(
         &db_path,
         "dir-quarantine",
         tenant,
         "execute",
-        &execute_canonical_for(tenant, "resp", "tok-quarantine"),
+        &execute_canonical_for(tenant, "resp", &token),
     );
 
     let quarantine =
@@ -221,19 +242,15 @@ async fn test_worker_rejects_mismatched_signed_row_identity() {
     ] {
         let (_tmp, db, db_path) = setup_db().await;
         let tenant = "tenant-row";
-        db.add_capability_token(
-            tenant.to_string(),
-            "tok-row".to_string(),
-            "execute".to_string(),
-        )
-        .await
-        .unwrap();
+        // Token binds to claim id + claim tenant; envelope deliberately
+        // mismatches scope identity so can_quarantine fails after auth.
+        let token = signed_execute_token(tenant, id, "tok-row");
         insert_signed_outbox_row(
             &db_path,
             id,
             tenant,
             "execute",
-            &execute_canonical_for(signed_tenant, signed_response, "tok-row"),
+            &execute_canonical_for(signed_tenant, signed_response, &token),
         );
 
         let quarantine = QuarantineState::new_with_db(
@@ -278,19 +295,13 @@ async fn test_worker_rejects_mismatched_signed_row_identity() {
 async fn test_worker_does_not_ack_dropped_drain_ack() {
     let (_tmp, db, db_path) = setup_db().await;
     let tenant = "tenant-no-drain-ack";
-    db.add_capability_token(
-        tenant.to_string(),
-        "tok-no-ack".to_string(),
-        "execute".to_string(),
-    )
-    .await
-    .unwrap();
+    let token = signed_execute_token(tenant, "dir-no-ack", "tok-no-ack");
     insert_signed_outbox_row(
         &db_path,
         "dir-no-ack",
         tenant,
         "execute",
-        &execute_canonical_for(tenant, "resp", "tok-no-ack"),
+        &execute_canonical_for(tenant, "resp", &token),
     );
 
     let quarantine =
@@ -334,19 +345,13 @@ async fn test_worker_does_not_ack_dropped_drain_ack() {
 async fn test_worker_claim_survives_bounded_drain() {
     let (_tmp, db, db_path) = setup_db().await;
     let tenant = "tenant-short-lease";
-    db.add_capability_token(
-        tenant.to_string(),
-        "tok-short-lease".to_string(),
-        "execute".to_string(),
-    )
-    .await
-    .unwrap();
+    let token = signed_execute_token(tenant, "dir-short-lease", "tok-short-lease");
     insert_signed_outbox_row(
         &db_path,
         "dir-short-lease",
         tenant,
         "execute",
-        &execute_canonical_for(tenant, "resp", "tok-short-lease"),
+        &execute_canonical_for(tenant, "resp", &token),
     );
 
     let quarantine =
@@ -396,19 +401,13 @@ async fn test_worker_claim_survives_bounded_drain() {
 async fn test_worker_reconciles_late_drain_ack_on_retry() {
     let (_tmp, db, db_path) = setup_db().await;
     let tenant = "tenant-late-ack";
-    db.add_capability_token(
-        tenant.to_string(),
-        "tok-late".to_string(),
-        "execute".to_string(),
-    )
-    .await
-    .unwrap();
+    let token = signed_execute_token(tenant, "dir-late", "tok-late");
     insert_signed_outbox_row(
         &db_path,
         "dir-late",
         tenant,
         "execute",
-        &execute_canonical_for(tenant, "resp", "tok-late"),
+        &execute_canonical_for(tenant, "resp", &token),
     );
 
     let quarantine =
@@ -466,13 +465,13 @@ async fn test_worker_blocks_invalid_token() {
     let (_tmp, db, db_path) = setup_db().await;
     let tenant = "tenant-b";
 
-    // No tokens inserted — captoken is unknown -> fail closed.
+    // Opaque execute token (and any non-structured shape) is refused.
     insert_signed_outbox_row(
         &db_path,
         "dir-2",
         tenant,
         "execute",
-        &execute_canonical("resp", "bad-tok"),
+        &execute_canonical_for(tenant, "resp", "bad-tok"),
     );
 
     let config = WatchWorkerConfig {
@@ -623,7 +622,7 @@ async fn test_worker_rejects_forged_signature_wrong_key() {
 
     let attacker = SigningKey::from_bytes(&[99u8; 32]);
     let pinned_kid = test_verifier().pinned_kid().to_string();
-    let canonical = execute_canonical("resp", "tok-anything");
+    let canonical = execute_canonical_for(tenant, "resp", "tok-anything");
     let forged_sig = BASE64.encode(attacker.sign(canonical.as_bytes()).to_bytes());
 
     insert_outbox_row_raw(
@@ -896,20 +895,14 @@ fn insert_expired_outbox_row(
 async fn test_worker_ttl_fence_expired_directive_not_dispatched() {
     let (_tmp, db, db_path) = setup_db().await;
     let tenant = "tenant-ttl";
-
-    db.add_capability_token(
-        tenant.to_string(),
-        "tok-ttl".to_string(),
-        "execute".to_string(),
-    )
-    .await
-    .unwrap();
+    // Token content is irrelevant: TTL sweep expires the row before claim.
+    let token = signed_execute_token(tenant, "dir-expired", "tok-ttl");
     insert_expired_outbox_row(
         &db_path,
         "dir-expired",
         tenant,
         "execute",
-        &execute_canonical("resp", "tok-ttl"),
+        &execute_canonical_for(tenant, "resp", &token),
     );
 
     let config = WatchWorkerConfig {
@@ -958,20 +951,13 @@ async fn test_worker_ttl_fence_expired_directive_not_dispatched() {
 async fn test_nack_on_ttl_expired_row_is_not_actionable() {
     let (_tmp, db, db_path) = setup_db().await;
     let tenant = "tenant-ttl-nack";
-
-    db.add_capability_token(
-        tenant.to_string(),
-        "tok-n".to_string(),
-        "execute".to_string(),
-    )
-    .await
-    .unwrap();
+    let token = signed_execute_token(tenant, "dir-exp-nack", "tok-n");
     insert_expired_outbox_row(
         &db_path,
         "dir-exp-nack",
         tenant,
         "execute",
-        &execute_canonical("resp", "tok-n"),
+        &execute_canonical_for(tenant, "resp", &token),
     );
 
     let config = WatchWorkerConfig {
@@ -1005,20 +991,13 @@ async fn test_nack_on_ttl_expired_row_is_not_actionable() {
 async fn test_ack_on_ttl_expired_row_is_not_actionable() {
     let (_tmp, db, db_path) = setup_db().await;
     let tenant = "tenant-ttl-ack";
-
-    db.add_capability_token(
-        tenant.to_string(),
-        "tok-a".to_string(),
-        "execute".to_string(),
-    )
-    .await
-    .unwrap();
+    let token = signed_execute_token(tenant, "dir-exp-ack", "tok-a");
     insert_expired_outbox_row(
         &db_path,
         "dir-exp-ack",
         tenant,
         "execute",
-        &execute_canonical("resp", "tok-a"),
+        &execute_canonical_for(tenant, "resp", &token),
     );
 
     let config = WatchWorkerConfig {

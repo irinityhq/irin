@@ -328,6 +328,12 @@ pub struct CapabilityToken {
     pub approval_required: bool,
     pub expires_at: u64,
     pub max_cost_usd: Option<f64>,
+    /// Stable token identity used as the durable replay key with `tenant`.
+    /// Required and non-empty on the wire; missing/empty fails closed at verify.
+    pub token_id: String,
+    /// Exact directive outbox id this token may authorize. Required and
+    /// non-empty; must equal the claimed directive id on execute.
+    pub directive_id: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signature: Option<String>,
 }

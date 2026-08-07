@@ -347,6 +347,27 @@ pub(super) async fn watch_nack_outbox(
     .await
 }
 
+/// PR1 — `POST /watch/capability-token/mint`. Admin-bearer mint of a v1
+/// structured execute capability token (token_id + directive bind).
+pub(super) async fn watch_mint_capability_token(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
+    axum::Json(body): axum::Json<watch::api::MintCapabilityTokenRequest>,
+) -> impl IntoResponse {
+    let bearer = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_string());
+    watch::api::mint_capability_token_json(
+        state.watch_admin_token.clone(),
+        bearer,
+        body,
+        &state.watch_canary_tenant,
+    )
+    .await
+}
+
 /// T33.P1-D — `GET /watch/stats`. Watch-plane counter snapshot scraped by
 /// the Lua-side prometheus poller, mirroring the council_stats precedent
 /// (council.rs:347 / main.rs:1558 — `/council/stats` JSON → Lua emits

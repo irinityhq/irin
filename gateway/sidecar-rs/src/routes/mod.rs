@@ -174,6 +174,11 @@ pub(crate) fn build_router(parts: BuildRouterParts) -> Router {
             "/watch/tenant-policy/{tenant}",
             post(watch::watch_set_tenant_policy),
         )
+        // PR1 — admin mint of structured execute capability tokens.
+        .route(
+            "/watch/capability-token/mint",
+            post(watch::watch_mint_capability_token),
+        )
         // P1 — Directive outbox surface (read/list, verification pubkey, ack).
         .route("/watch/outbox/pubkey", get(watch::watch_outbox_pubkey))
         .route("/watch/outbox/{tenant}", get(watch::watch_list_outbox))
