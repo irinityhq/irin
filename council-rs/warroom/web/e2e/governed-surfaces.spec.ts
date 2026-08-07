@@ -51,6 +51,7 @@ test.describe("governed War Room surfaces (zero-provider fixtures)", () => {
           fires_last_24h: 0,
         },
         recent_fires: [],
+        recent_execute_receipts: [],
         budget: { spend_today_usd: 0, spend_cap_usd: 5 },
         degradation,
       }),
@@ -62,6 +63,10 @@ test.describe("governed War Room surfaces (zero-provider fixtures)", () => {
     await expect(page.getByText("Action production DISARMED", { exact: true })).toBeVisible();
     await expect(page.getByText("public-readiness", { exact: true })).toBeVisible();
     await expect(page.getByText("No degradation counters raised", { exact: true })).toBeVisible();
+    await expect(page.getByTestId("execute-receipts")).toBeVisible();
+    await expect(
+      page.getByText("No earned-execution receipts for this canary.", { exact: true }),
+    ).toBeVisible();
   });
 
   test("Watch failure is an honest unavailable state", async ({ page }) => {

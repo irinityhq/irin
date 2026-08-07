@@ -87,9 +87,10 @@ fn ui_snapshot_router(state: UiSnapshotState) -> Router {
         .with_state(state)
 }
 
-async fn ui_snapshot_fixture() -> (tempfile::TempDir, UiSnapshotState) {
+async fn ui_snapshot_fixture() -> (tempfile::TempDir, std::path::PathBuf, UiSnapshotState) {
     let tmp = tempfile::TempDir::new().unwrap();
-    let db = Arc::new(WatchDb::open(&tmp.path().join("watch.db")).await.unwrap());
+    let db_path = tmp.path().join("watch.db");
+    let db = Arc::new(WatchDb::open(&db_path).await.unwrap());
     db.run_migrations().await.unwrap();
     db.upsert_sentinel_registration(
         "configured-canary",
@@ -118,6 +119,7 @@ async fn ui_snapshot_fixture() -> (tempfile::TempDir, UiSnapshotState) {
     ));
     (
         tmp,
+        db_path,
         UiSnapshotState {
             db,
             quarantine,
@@ -127,9 +129,67 @@ async fn ui_snapshot_fixture() -> (tempfile::TempDir, UiSnapshotState) {
     )
 }
 
+/// Seed inputs for redacted-receipt tests (bundled to avoid clippy too_many_arguments).
+struct SeedExecuteReceipt<'a> {
+    db_path: &'a std::path::Path,
+    tenant: &'a str,
+    token_id: &'a str,
+    directive_id: &'a str,
+    in_response_to: &'a str,
+    status: &'a str,
+    last_error: Option<&'a str>,
+    consumed_at_ms: i64,
+}
+
+/// Seed durable consumption + outbox rows for redacted-receipt tests.
+/// Inserts only identity/outcome fields — secret material lives only in
+/// last_error detail (must not appear in the UI projection).
+fn seed_execute_receipt_fixture(seed: SeedExecuteReceipt<'_>) {
+    use rusqlite::{params, Connection};
+    let conn = Connection::open(seed.db_path).unwrap();
+    conn.execute(
+        "INSERT OR IGNORE INTO pending_escalations
+            (id, tenant, sentinel_name, envelope_json, status, created_at_ms)
+         VALUES (?1, ?2, 'test', '{}', 'council_response_staged', ?3)",
+        params![seed.in_response_to, seed.tenant, seed.consumed_at_ms],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO directive_outbox
+            (id, in_response_to, tenant, status, verdict, authority,
+             envelope_json, envelope_json_canonical, signature_b64, signing_kid,
+             created_at_ms, expires_at_ms, last_error)
+         VALUES (?1, ?2, ?3, ?4, 'Act', 'execute',
+                 'RAW_ENVELOPE_MUST_NOT_LEAK', 'RAW_CANONICAL_MUST_NOT_LEAK',
+                 'RAW_SIGNATURE_B64_MUST_NOT_LEAK', 'kid-test',
+                 ?5, 9999999999999, ?6)",
+        params![
+            seed.directive_id,
+            seed.in_response_to,
+            seed.tenant,
+            seed.status,
+            seed.consumed_at_ms,
+            seed.last_error
+        ],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO capability_token_consumptions
+            (tenant, token_id, directive_id, consumed_at_ms)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![
+            seed.tenant,
+            seed.token_id,
+            seed.directive_id,
+            seed.consumed_at_ms
+        ],
+    )
+    .unwrap();
+}
+
 #[tokio::test]
 async fn gate4_ui_snapshot_rejects_missing_or_wrong_admin_auth() {
-    let (_tmp, state) = ui_snapshot_fixture().await;
+    let (_tmp, _path, state) = ui_snapshot_fixture().await;
     for auth in [None, Some("Bearer wrong-token")] {
         let mut request = Request::builder().uri("/watch/ui-snapshot/configured-canary");
         if let Some(value) = auth {
@@ -145,7 +205,7 @@ async fn gate4_ui_snapshot_rejects_missing_or_wrong_admin_auth() {
 
 #[tokio::test]
 async fn gate4_ui_snapshot_rejects_non_canary_tenant() {
-    let (_tmp, state) = ui_snapshot_fixture().await;
+    let (_tmp, _path, state) = ui_snapshot_fixture().await;
     let response = ui_snapshot_router(state)
         .oneshot(
             Request::builder()
@@ -174,6 +234,9 @@ fn sorted_keys(value: &serde_json::Value) -> Vec<String> {
 }
 
 fn assert_no_denied_keys(value: &serde_json::Value) {
+    // Substring denylist for secret-bearing names. Explicit allow-list for
+    // redacted execute-receipt fields that intentionally use `token_id`.
+    const ALLOWED_EXACT: &[&str] = &["token_id"];
     const DENIED: &[&str] = &[
         "config",
         "state_json",
@@ -190,11 +253,16 @@ fn assert_no_denied_keys(value: &serde_json::Value) {
         "envelope",
         "mutation",
         "claim_handle",
+        "signature",
     ];
     match value {
         serde_json::Value::Object(map) => {
             for (key, child) in map {
                 let lowered = key.to_ascii_lowercase();
+                if ALLOWED_EXACT.contains(&lowered.as_str()) {
+                    assert_no_denied_keys(child);
+                    continue;
+                }
                 assert!(
                     !DENIED.iter().any(|denied| lowered.contains(denied)),
                     "denied key leaked into UI snapshot: {key}"
@@ -213,7 +281,7 @@ fn assert_no_denied_keys(value: &serde_json::Value) {
 
 #[tokio::test]
 async fn gate4_ui_snapshot_has_exact_whitelist_and_no_raw_values() {
-    let (_tmp, state) = ui_snapshot_fixture().await;
+    let (_tmp, _path, state) = ui_snapshot_fixture().await;
     let response = ui_snapshot_router(state)
         .oneshot(
             Request::builder()
@@ -235,6 +303,7 @@ async fn gate4_ui_snapshot_has_exact_whitelist_and_no_raw_values() {
             "budget",
             "canary_tenant",
             "degradation",
+            "recent_execute_receipts",
             "recent_fires",
             "sentinels",
             "temperature",
@@ -242,6 +311,7 @@ async fn gate4_ui_snapshot_has_exact_whitelist_and_no_raw_values() {
         ]
     );
     assert_eq!(value["action_production_armed"], false);
+    assert_eq!(value["recent_execute_receipts"], serde_json::json!([]));
     assert_eq!(
         sorted_keys(&value["sentinels"][0]),
         vec![
@@ -278,6 +348,196 @@ async fn gate4_ui_snapshot_has_exact_whitelist_and_no_raw_values() {
     ] {
         assert!(!body.contains(secret), "raw value leaked: {secret}");
     }
+}
+
+#[tokio::test]
+async fn gate4_ui_snapshot_projects_redacted_execute_receipts() {
+    let (_tmp, db_path, state) = ui_snapshot_fixture().await;
+    let secret_detail =
+        "capability_token SECRET_TOKEN_MATERIAL signature_b64=RAW_SIGNATURE_B64_MUST_NOT_LEAK";
+    let last_error = serde_json::json!({
+        "title": "invalid-capability-token",
+        "detail": secret_detail,
+    })
+    .to_string();
+
+    // Foreign tenant must not appear in canary snapshot.
+    seed_execute_receipt_fixture(SeedExecuteReceipt {
+        db_path: &db_path,
+        tenant: "foreign",
+        token_id: "tok-foreign",
+        directive_id: "dir-foreign",
+        in_response_to: "esc-foreign",
+        status: "acked",
+        last_error: None,
+        consumed_at_ms: 1_000,
+    });
+    // Insert canary outbox rows in non-decreasing created_at order (trigger).
+    seed_execute_receipt_fixture(SeedExecuteReceipt {
+        db_path: &db_path,
+        tenant: "configured-canary",
+        token_id: "tok-refused",
+        directive_id: "dir-refused",
+        in_response_to: "esc-refused",
+        status: "staged",
+        last_error: Some(&last_error),
+        consumed_at_ms: 2_000,
+    });
+    seed_execute_receipt_fixture(SeedExecuteReceipt {
+        db_path: &db_path,
+        tenant: "configured-canary",
+        token_id: "tok-completed",
+        directive_id: "dir-completed",
+        in_response_to: "esc-completed",
+        status: "acked",
+        last_error: None,
+        consumed_at_ms: 3_000,
+    });
+
+    let response = ui_snapshot_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/watch/ui-snapshot/configured-canary")
+                .header("Authorization", "Bearer snapshot-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+
+    let receipts = value["recent_execute_receipts"]
+        .as_array()
+        .expect("recent_execute_receipts array");
+    assert_eq!(receipts.len(), 2, "tenant-scoped; foreign excluded");
+    // Newest first by consumed_at_ms.
+    assert_eq!(receipts[0]["token_id"], "tok-completed");
+    assert_eq!(receipts[0]["decision"], "completed");
+    assert_eq!(receipts[0]["result"], "acked");
+    assert_eq!(receipts[0]["action"], "quarantine_producer");
+    assert_eq!(receipts[0]["directive_id"], "dir-completed");
+    assert_eq!(receipts[0]["in_response_to"], "esc-completed");
+    assert_eq!(receipts[0]["at_ms"], 3_000);
+
+    assert_eq!(receipts[1]["token_id"], "tok-refused");
+    assert_eq!(receipts[1]["decision"], "refused");
+    assert_eq!(receipts[1]["result"], "invalid-capability-token");
+    assert_eq!(
+        sorted_keys(&receipts[0]),
+        vec![
+            "action",
+            "at_ms",
+            "decision",
+            "directive_id",
+            "in_response_to",
+            "result",
+            "token_id",
+        ]
+    );
+    assert_no_denied_keys(&value);
+
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    for secret in [
+        "SECRET_TOKEN_MATERIAL",
+        "RAW_SIGNATURE_B64_MUST_NOT_LEAK",
+        "RAW_ENVELOPE_MUST_NOT_LEAK",
+        "RAW_CANONICAL_MUST_NOT_LEAK",
+        "tok-foreign",
+        secret_detail,
+    ] {
+        assert!(!body.contains(secret), "secret/raw value leaked: {secret}");
+    }
+    // Lifecycle strings belong in decision only — not duplicated into result.
+    for receipt in receipts {
+        let result = &receipt["result"];
+        if !result.is_null() {
+            let s = result.as_str().expect("result string when present");
+            assert!(
+                s == "acked" || s == "invalid-capability-token",
+                "result must be acked or ProblemDetails title, got {s}"
+            );
+            assert!(
+                !matches!(s, "staged" | "expired" | "dismissed" | "bound" | "pending"),
+                "lifecycle must not appear in result: {s}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn gate4_ui_snapshot_pending_receipt_has_null_result() {
+    let (_tmp, db_path, state) = ui_snapshot_fixture().await;
+    seed_execute_receipt_fixture(SeedExecuteReceipt {
+        db_path: &db_path,
+        tenant: "configured-canary",
+        token_id: "tok-pending",
+        directive_id: "dir-pending",
+        in_response_to: "esc-pending",
+        status: "staged",
+        last_error: None,
+        consumed_at_ms: 1_000,
+    });
+    let response = ui_snapshot_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/watch/ui-snapshot/configured-canary")
+                .header("Authorization", "Bearer snapshot-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let receipt = &value["recent_execute_receipts"][0];
+    assert_eq!(receipt["decision"], "pending");
+    assert!(
+        receipt["result"].is_null(),
+        "pending must not put lifecycle in result"
+    );
+    assert_eq!(receipt["action"], "quarantine_producer");
+    assert!(receipt.get("in_response_to").is_some());
+}
+
+#[tokio::test]
+async fn gate4_ui_snapshot_execute_receipt_tail_is_bounded() {
+    let (_tmp, db_path, state) = ui_snapshot_fixture().await;
+    // Insert more than the fixed UI tail (20).
+    for i in 0..25 {
+        let token_id = format!("tok-{i:02}");
+        let directive_id = format!("dir-{i:02}");
+        let in_response_to = format!("esc-{i:02}");
+        seed_execute_receipt_fixture(SeedExecuteReceipt {
+            db_path: &db_path,
+            tenant: "configured-canary",
+            token_id: &token_id,
+            directive_id: &directive_id,
+            in_response_to: &in_response_to,
+            status: "acked",
+            last_error: None,
+            consumed_at_ms: 1_000 + i,
+        });
+    }
+    let response = ui_snapshot_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/watch/ui-snapshot/configured-canary")
+                .header("Authorization", "Bearer snapshot-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let receipts = value["recent_execute_receipts"].as_array().unwrap();
+    assert_eq!(receipts.len(), 20, "fixed small tail, not full history");
+    assert_eq!(receipts[0]["token_id"], "tok-24");
+    assert_eq!(receipts[19]["token_id"], "tok-05");
 }
 
 fn now_ms() -> i64 {

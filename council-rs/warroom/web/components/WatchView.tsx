@@ -8,6 +8,7 @@ import {
   fetchWatchSnapshot,
   type CooldownState,
   type WatchDegradation,
+  type WatchExecuteReceipt,
   type WatchFire,
   type WatchRegistryRow,
   type WatchSnapshot,
@@ -68,7 +69,8 @@ export default function WatchView(
             Watch Plane
           </h2>
           <p className="text-sm text-fg-muted mt-1">
-            Read-only sentinel readiness, recent fires, budget, and degradation counters.
+            Read-only sentinel readiness, recent fires, redacted execute receipts, budget, and
+            degradation counters.
           </p>
         </div>
         {snapshot && (
@@ -99,6 +101,7 @@ export default function WatchView(
           </div>
           <RegistryTable rows={snapshot.sentinels} nowMs={nowMs} />
           <FireLogTable fires={snapshot.recent_fires} />
+          <ExecuteReceiptTable receipts={snapshot.recent_execute_receipts} />
           <DegradationPanel degradation={snapshot.degradation} />
         </>
       ) : null}
@@ -176,6 +179,10 @@ function ActivityCard({ snapshot }: { snapshot: WatchSnapshot }) {
         </div>
         <div>{snapshot.sentinels.length} registered sentinel{snapshot.sentinels.length === 1 ? "" : "s"}</div>
         <div>{snapshot.recent_fires.length} recent fire identifier{snapshot.recent_fires.length === 1 ? "" : "s"}</div>
+        <div>
+          {snapshot.recent_execute_receipts.length} redacted execute receipt
+          {snapshot.recent_execute_receipts.length === 1 ? "" : "s"}
+        </div>
         <div className={degraded > 0 ? "text-amber" : "text-success"}>
           {degraded > 0 ? `${degraded} non-zero degradation counters` : "No degradation counters raised"}
         </div>
@@ -250,6 +257,65 @@ function FireLogTable({ fires }: { fires: WatchFire[] }) {
                   <td className="px-3 py-2 text-fg-dim">{fire.id}</td>
                   <td className="px-3 py-2 text-fg-bright">{fire.sentinel}</td>
                   <td className="px-3 py-2 text-fg-muted">{new Date(fire.fired_at).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ExecuteReceiptTable({ receipts }: { receipts: WatchExecuteReceipt[] }) {
+  return (
+    <section className="space-y-2" data-testid="execute-receipts">
+      <header className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest text-fg-dim">
+        <ShieldCheck className="w-3.5 h-3.5" /> Redacted execute receipts
+      </header>
+      {receipts.length === 0 ? (
+        <div className="panel p-8 text-center text-sm text-fg-muted">
+          No earned-execution receipts for this canary.
+        </div>
+      ) : (
+        <div className="border border-border rounded overflow-hidden bg-bg-elevated">
+          <table className="w-full text-left text-xs font-mono">
+            <thead className="bg-bg-deep text-fg-dim uppercase tracking-wider text-[10px]">
+              <tr>
+                <th className="px-3 py-2">Token id</th>
+                <th className="px-3 py-2">Decision</th>
+                <th className="px-3 py-2">Action</th>
+                <th className="px-3 py-2">Result</th>
+                <th className="px-3 py-2">Directive</th>
+                <th className="px-3 py-2">Correlation</th>
+                <th className="px-3 py-2">At</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-border">
+              {receipts.map((receipt) => (
+                <tr key={`${receipt.token_id}:${receipt.directive_id}`}>
+                  <td className="px-3 py-2 text-fg-bright">{receipt.token_id}</td>
+                  <td className="px-3 py-2">
+                    <span
+                      className={cn(
+                        "chip",
+                        receipt.decision === "completed"
+                          ? "chip-success"
+                          : receipt.decision === "refused"
+                            ? "chip-danger"
+                            : "chip-muted",
+                      )}
+                    >
+                      {receipt.decision}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 text-fg">{receipt.action}</td>
+                  <td className="px-3 py-2 text-fg-muted">{receipt.result ?? "—"}</td>
+                  <td className="px-3 py-2 text-fg-dim">{receipt.directive_id}</td>
+                  <td className="px-3 py-2 text-fg-dim">{receipt.in_response_to ?? "—"}</td>
+                  <td className="px-3 py-2 text-fg-muted whitespace-nowrap">
+                    {new Date(receipt.at_ms).toLocaleString()}
+                  </td>
                 </tr>
               ))}
             </tbody>

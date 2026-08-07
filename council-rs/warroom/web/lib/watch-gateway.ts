@@ -24,6 +24,44 @@ export type WatchFire = {
   fired_at: number;
 };
 
+/** Finite decision set projected by Gateway ui-snapshot. */
+export const WATCH_EXECUTE_DECISIONS = [
+  "completed",
+  "refused",
+  "pending",
+  "expired",
+  "dismissed",
+  "bound",
+] as const;
+export type WatchExecuteDecision = (typeof WATCH_EXECUTE_DECISIONS)[number];
+
+/** v1 sole earned-execution action. */
+export const WATCH_EXECUTE_ACTIONS = ["quarantine_producer"] as const;
+export type WatchExecuteAction = (typeof WATCH_EXECUTE_ACTIONS)[number];
+
+/** Exact receipt field set — unknown keys (e.g. raw_token) are rejected. */
+const EXECUTE_RECEIPT_KEYS = [
+  "token_id",
+  "decision",
+  "action",
+  "result",
+  "directive_id",
+  "in_response_to",
+  "at_ms",
+] as const;
+
+/** Redacted Earned Execution receipt — no raw token/signature material. */
+export type WatchExecuteReceipt = {
+  token_id: string;
+  decision: WatchExecuteDecision;
+  action: WatchExecuteAction;
+  /** Only `"acked"` or a ProblemDetails title; null for lifecycle-only decisions. */
+  result: string | null;
+  directive_id: string;
+  in_response_to: string | null;
+  at_ms: number;
+};
+
 export type WatchBudget = {
   spend_today_usd: number;
   spend_cap_usd: number;
@@ -54,6 +92,7 @@ export type WatchSnapshot = {
   sentinels: WatchRegistryRow[];
   temperature: WatchTemperature;
   recent_fires: WatchFire[];
+  recent_execute_receipts: WatchExecuteReceipt[];
   budget: WatchBudget;
   degradation: WatchDegradation;
 };
@@ -73,13 +112,90 @@ export function parseWatchSnapshot(value: unknown): WatchSnapshot {
   if (typeof obj.action_production_armed !== "boolean") {
     throw new Error("Watch snapshot missing action-production state");
   }
-  if (!Array.isArray(obj.sentinels) || !Array.isArray(obj.recent_fires)) {
+  if (
+    !Array.isArray(obj.sentinels) ||
+    !Array.isArray(obj.recent_fires) ||
+    !Array.isArray(obj.recent_execute_receipts)
+  ) {
     throw new Error("Watch snapshot missing safe collection fields");
   }
   if (!obj.temperature || !obj.budget || !obj.degradation) {
     throw new Error("Watch snapshot missing readiness fields");
   }
+  for (const receipt of obj.recent_execute_receipts) {
+    assertRedactedExecuteReceipt(receipt);
+  }
   return value as WatchSnapshot;
+}
+
+function isWatchExecuteDecision(value: unknown): value is WatchExecuteDecision {
+  return (
+    typeof value === "string" &&
+    (WATCH_EXECUTE_DECISIONS as readonly string[]).includes(value)
+  );
+}
+
+function isWatchExecuteAction(value: unknown): value is WatchExecuteAction {
+  return (
+    typeof value === "string" &&
+    (WATCH_EXECUTE_ACTIONS as readonly string[]).includes(value)
+  );
+}
+
+/**
+ * Fail closed: exact seven-field whitelist, finite decision/action sets,
+ * result only null | "acked" | non-empty ProblemDetails title.
+ */
+function assertRedactedExecuteReceipt(value: unknown): asserts value is WatchExecuteReceipt {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("invalid execute receipt");
+  }
+  const row = value as Record<string, unknown>;
+  const keys = Object.keys(row);
+  if (keys.length !== EXECUTE_RECEIPT_KEYS.length) {
+    throw new Error("execute receipt field set invalid");
+  }
+  for (const key of EXECUTE_RECEIPT_KEYS) {
+    if (!(key in row)) {
+      throw new Error(`execute receipt missing ${key}`);
+    }
+  }
+  for (const key of keys) {
+    if (!(EXECUTE_RECEIPT_KEYS as readonly string[]).includes(key)) {
+      throw new Error(`execute receipt unknown field: ${key}`);
+    }
+  }
+  if (typeof row.token_id !== "string" || !row.token_id) {
+    throw new Error("execute receipt token_id invalid");
+  }
+  if (!isWatchExecuteDecision(row.decision)) {
+    throw new Error("execute receipt decision invalid");
+  }
+  if (!isWatchExecuteAction(row.action)) {
+    throw new Error("execute receipt action invalid");
+  }
+  if (row.result != null) {
+    if (typeof row.result !== "string" || !row.result.trim()) {
+      throw new Error("execute receipt result invalid");
+    }
+    if (row.decision === "completed" && row.result !== "acked") {
+      throw new Error("execute receipt completed result must be acked");
+    }
+    if (row.decision !== "completed" && row.decision !== "refused") {
+      throw new Error("execute receipt result only allowed for completed/refused");
+    }
+  } else if (row.decision === "completed" || row.decision === "refused") {
+    throw new Error("execute receipt result required for completed/refused");
+  }
+  if (typeof row.directive_id !== "string" || !row.directive_id) {
+    throw new Error("execute receipt directive_id invalid");
+  }
+  if (row.in_response_to != null && typeof row.in_response_to !== "string") {
+    throw new Error("execute receipt in_response_to invalid");
+  }
+  if (typeof row.at_ms !== "number" || !Number.isFinite(row.at_ms)) {
+    throw new Error("execute receipt at_ms invalid");
+  }
 }
 
 /** Derive operator-facing cooldown state from safe readiness fields. */
