@@ -95,6 +95,10 @@ services:
       - WATCH_DISPATCHER_STRICT_BOOT=false
       - WATCH_CANARY_TENANT=${WATCH_CANARY_TENANT:-canary}
       - WATCH_DISPATCHER_GATEWAY_KEY=
+      # Sentinel profile path inside the container. Native host pins
+      # IRIN_WATCH_PROFILE_PATH only when an app-support profile file exists;
+      # empty expansion is treated as unset by the sidecar (0 sentinels, healthy).
+      - SENTINELS_CONFIG_PATH=${IRIN_WATCH_PROFILE_PATH:-}
       - GATEWAY_BASE_URL=${GATEWAY_BASE_URL:-http://gateway:8080}
       - DAILY_SPEND_CAP_USD=${DAILY_SPEND_CAP_USD:-25}
       - WATCH_MAX_FANOUT_COST_USD=${WATCH_MAX_FANOUT_COST_USD:-2.50}
@@ -124,6 +128,10 @@ services:
       # sidecar never mutates enrollment, and no private key material exists in
       # this file: the Secure Enclave private key never leaves the host enclave.
       - "${IRIN_DESKTOP_ARM_KEYS}:/run/secrets/arm_attest_keys.json:ro"
+      # Operator watch state lives under app-support (never the staged pack tree):
+      # profile mount is read-only; inbox is the only writable operator mount.
+      - "${IRIN_DESKTOP_SENTINELS_DIR}:/var/lib/gateway/sentinels:ro"
+      - "${IRIN_DESKTOP_WATCH_INBOX_DIR}:/var/lib/gateway/inbox"
     depends_on:
       gateway:
         condition: service_started

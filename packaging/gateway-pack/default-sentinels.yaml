@@ -1,0 +1,16 @@
+# Bundled default watch profile for the packaged app (tracked pack asset).
+# Shape matches the proven canary fixture (file-inbox, tenant canary).
+# Tenant MUST remain `canary` (== PACK_WATCH_CANARY_TENANT) or ui-snapshot
+# shows nothing for this profile.
+#
+# Installed by the desktop toggle into app-support operator state (not this
+# pack tree). Sidecar path inside the container:
+#   SENTINELS_CONFIG_PATH=/var/lib/gateway/sentinels/sentinels.yaml
+- name: file-inbox-watch
+  tenant: canary
+  tier: polling
+  cooldown_ms: 30000
+  config:
+    path: /var/lib/gateway/inbox
+    patterns: ["*.txt"]
+    debounce_ms: 500
