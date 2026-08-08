@@ -199,6 +199,51 @@ pub struct WatchStats {
     /// Emitted as `gw_watch_arm_rejected_unauth_total`.
     #[serde(default)]
     pub arm_rejected_unauth_total: u64,
+    /// Worker pre-act Ed25519 verification refusals. Emitted as
+    /// `gw_watch_directive_verify_failed_total`.
+    #[serde(default)]
+    pub directive_verify_failed_total: u64,
+    /// Capability-token checks denied because the backing DB query errored
+    /// (fail-closed). Emitted as `gw_watch_cap_token_db_error_deny_total`.
+    #[serde(default)]
+    pub cap_token_db_error_deny_total: u64,
+    /// 1 when a live producer kill-switch channel is held; 0 otherwise.
+    /// Emitted as `gw_watch_action_production_armed`.
+    #[serde(default)]
+    pub action_production_armed: bool,
+    /// Per-tenant temperature gauges (canary / registered tenants).
+    /// Emitted as labeled `gw_watch_temperature`.
+    #[serde(default)]
+    pub temperatures: Vec<WatchTemperatureStat>,
+    /// Per-sentinel fires (from `watch_fires`) + runner ticks (choke point).
+    /// Emitted as labeled `gw_watch_sentinel_*` families.
+    #[serde(default)]
+    pub sentinels: Vec<WatchSentinelStat>,
+}
+
+/// Per-tenant temperature slice for `/watch/stats` → Prometheus.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq)]
+pub struct WatchTemperatureStat {
+    pub tenant: String,
+    pub value: f64,
+    pub level: String,
+    pub fires_last_hour: u64,
+    pub fires_last_24h: u64,
+}
+
+/// Per-sentinel runtime stats: durable fire count + in-process runner ticks.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+pub struct WatchSentinelStat {
+    pub tenant: String,
+    pub sentinel: String,
+    /// Lifetime fire count from `watch_fires`.
+    pub fires_total: u64,
+    pub ticks_fired: u64,
+    pub ticks_uninteresting: u64,
+    pub ticks_failure: u64,
+    pub ticks_gated: u64,
+    /// Wall-clock ms of last runner tick (0 = never).
+    pub last_tick_ms: u64,
 }
 
 /// Single assembly point for the `/watch/stats` JSON snapshot.
@@ -206,6 +251,9 @@ pub struct WatchStats {
 /// surface cannot drift between them. `db: None` (in-memory test path) reads
 /// the spend gauge as 0.0; a db read failure also degrades to 0.0 with a
 /// warn — the stats endpoint must never 500 over a gauge.
+///
+/// **UiWatchSnapshot contract:** this struct may grow fields for metrics; the
+/// UI snapshot projection is assembled separately and must stay byte-stable.
 pub async fn build_watch_stats(quarantine: &QuarantineState, db: Option<&WatchDb>) -> WatchStats {
     let snapshot = quarantine.pending_snapshot();
     let spend_today_usd = match db {
@@ -222,6 +270,88 @@ pub async fn build_watch_stats(quarantine: &QuarantineState, db: Option<&WatchDb
         },
         None => 0.0,
     };
+
+    let mut fire_counts: std::collections::HashMap<(String, String), u64> =
+        std::collections::HashMap::new();
+    let mut temperatures: Vec<WatchTemperatureStat> = Vec::new();
+    if let Some(db) = db {
+        if let Ok(rows) = db.count_fires_by_sentinel().await {
+            for (tenant, sentinel, n) in rows {
+                fire_counts.insert((tenant, sentinel), n);
+            }
+        }
+        if let Ok(tenants) = db.list_sentinel_tenants().await {
+            let now_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as i64;
+            let one_hour_ago = now_ms - 3_600_000;
+            let one_day_ago = now_ms - 86_400_000;
+            for tenant in tenants {
+                let fires_1h = db
+                    .count_fires_since(&tenant, one_hour_ago)
+                    .await
+                    .unwrap_or(0) as u64;
+                let fires_24h = db
+                    .count_fires_since(&tenant, one_day_ago)
+                    .await
+                    .unwrap_or(0) as u64;
+                let raw = 0.7 * (fires_1h as f64 / 5.0) + 0.3 * (fires_24h as f64 / 24.0);
+                let value = raw.clamp(0.0, 1.0);
+                let level = if value < 0.15 {
+                    "cold"
+                } else if value < 0.6 {
+                    "warm"
+                } else {
+                    "hot"
+                }
+                .to_string();
+                temperatures.push(WatchTemperatureStat {
+                    tenant,
+                    value,
+                    level,
+                    fires_last_hour: fires_1h,
+                    fires_last_24h: fires_24h,
+                });
+            }
+        }
+    }
+
+    // Merge tick cells with fire counts; include fire-only sentinels too.
+    let mut sentinels: Vec<WatchSentinelStat> = Vec::new();
+    let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+    for tick in quarantine.sentinel_tick_snapshot() {
+        let key = (tick.tenant.clone(), tick.sentinel.clone());
+        let fires_total = fire_counts.get(&key).copied().unwrap_or(0);
+        seen.insert(key);
+        sentinels.push(WatchSentinelStat {
+            tenant: tick.tenant,
+            sentinel: tick.sentinel,
+            fires_total,
+            ticks_fired: tick.ticks_fired,
+            ticks_uninteresting: tick.ticks_uninteresting,
+            ticks_failure: tick.ticks_failure,
+            ticks_gated: tick.ticks_gated,
+            last_tick_ms: tick.last_tick_ms,
+        });
+    }
+    for ((tenant, sentinel), fires_total) in fire_counts {
+        if seen.contains(&(tenant.clone(), sentinel.clone())) {
+            continue;
+        }
+        sentinels.push(WatchSentinelStat {
+            tenant,
+            sentinel,
+            fires_total,
+            ticks_fired: 0,
+            ticks_uninteresting: 0,
+            ticks_failure: 0,
+            ticks_gated: 0,
+            last_tick_ms: 0,
+        });
+    }
+    sentinels.sort_by(|a, b| (&a.tenant, &a.sentinel).cmp(&(&b.tenant, &b.sentinel)));
+
     WatchStats {
         audit_infra_errors_total: quarantine.audit_infra_errors_total(),
         persist_failures_total: quarantine.persist_failures_total(),
@@ -246,6 +376,11 @@ pub async fn build_watch_stats(quarantine: &QuarantineState, db: Option<&WatchDb
         spend_gauge_read_failures_total: quarantine.spend_gauge_read_failures_total(),
         kill_switch_drain_timeout_total: quarantine.kill_switch_drain_timeout_total(),
         arm_rejected_unauth_total: quarantine.arm_rejected_unauth_total(),
+        directive_verify_failed_total: crate::watch::dispatcher::directive_verify_failed_total(),
+        cap_token_db_error_deny_total: crate::watch::dispatcher::cap_token_db_error_deny_total(),
+        action_production_armed: quarantine.action_production_armed(),
+        temperatures,
+        sentinels,
     }
 }
 

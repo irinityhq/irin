@@ -437,6 +437,49 @@ impl WatchDb {
         Ok(n)
     }
 
+    /// Per-sentinel lifetime fire counts from `watch_fires` for `/watch/stats`.
+    /// Bounded by registered sentinel count (pack default: few tenants × ≤10).
+    pub async fn count_fires_by_sentinel(&self) -> anyhow::Result<Vec<(String, String, u64)>> {
+        let rows = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT tenant, sentinel, COUNT(*) as n
+                     FROM watch_fires
+                     GROUP BY tenant, sentinel
+                     ORDER BY tenant ASC, sentinel ASC",
+                )?;
+                let rows: Vec<(String, String, u64)> = stmt
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)? as u64,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<Vec<(String, String, u64)>, rusqlite::Error>(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    /// Distinct tenants that have registered sentinels (for temperature gauges).
+    pub async fn list_sentinel_tenants(&self) -> anyhow::Result<Vec<String>> {
+        let rows = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT DISTINCT tenant FROM watch_sentinels ORDER BY tenant ASC")?;
+                let rows: Vec<String> = stmt
+                    .query_map([], |r| r.get(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<Vec<String>, rusqlite::Error>(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
     /// T29 — descending fire log for `/watch/audit/{tenant}` cursor pagination.
     /// Cursor: `before_id = None` → newest first; otherwise rows with id < before_id.
     pub async fn list_fires_descending(

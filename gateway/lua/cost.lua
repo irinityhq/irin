@@ -1212,12 +1212,55 @@ function _M.poll_watch_stats()
     metrics:set("watch_kill_switch_latency_ms",          stats.kill_switch_latency_ms          or 0)
     metrics:set("watch_kill_switch_latency_max_ms",      stats.kill_switch_latency_max_ms      or 0)
     metrics:set("watch_recon_divergence_total",          stats.recon_divergence_total          or 0)
+    metrics:set("watch_recon_cap_breach_total",          stats.recon_cap_breach_total          or 0)
     metrics:set("watch_settle_ceiling_overshoot_total",  stats.settle_ceiling_overshoot_total  or 0)
     metrics:set("watch_spend_gauge_read_failures_total", stats.spend_gauge_read_failures_total or 0)
     metrics:set("watch_kill_switch_drain_timeout_total", stats.kill_switch_drain_timeout_total or 0)
     -- Unauthenticated 401 arm rejections are
     -- counted here instead of appended to the unprunable arm_audit chain.
     metrics:set("watch_arm_rejected_unauth_total",       stats.arm_rejected_unauth_total       or 0)
+    metrics:set("watch_cap_token_rejected_total",        stats.cap_token_rejected_total        or 0)
+    metrics:set("watch_directive_verify_failed_total",   stats.directive_verify_failed_total   or 0)
+    metrics:set("watch_cap_token_db_error_deny_total",   stats.cap_token_db_error_deny_total   or 0)
+    -- 0/1 gauge: live producer kill channel held.
+    local armed = 0
+    if stats.action_production_armed == true or stats.action_production_armed == 1 then
+        armed = 1
+    end
+    metrics:set("watch_action_production_armed", armed)
+
+    -- Per-tenant temperature (labeled). Clear prior series by overwriting
+    -- known keys; bounded by registered-tenant count.
+    if type(stats.temperatures) == "table" then
+        for _, t in ipairs(stats.temperatures) do
+            if type(t) == "table" and type(t.tenant) == "string" and t.tenant ~= "" then
+                metrics:set("watch_temperature:" .. t.tenant, tonumber(t.value) or 0)
+            end
+        end
+    end
+
+    -- Per-sentinel fires + ticks (4 outcomes) + last-tick. Keys use colon
+    -- separators; labels are tenant/sentinel names from the registry.
+    if type(stats.sentinels) == "table" then
+        for _, s in ipairs(stats.sentinels) do
+            if type(s) == "table"
+                and type(s.tenant) == "string" and s.tenant ~= ""
+                and type(s.sentinel) == "string" and s.sentinel ~= ""
+            then
+                local base = s.tenant .. ":" .. s.sentinel
+                metrics:set("watch_sentinel_fires:" .. base, tonumber(s.fires_total) or 0)
+                metrics:set("watch_sentinel_last_tick_ms:" .. base, tonumber(s.last_tick_ms) or 0)
+                metrics:set("watch_sentinel_ticks:" .. base .. ":fired",
+                    tonumber(s.ticks_fired) or 0)
+                metrics:set("watch_sentinel_ticks:" .. base .. ":uninteresting",
+                    tonumber(s.ticks_uninteresting) or 0)
+                metrics:set("watch_sentinel_ticks:" .. base .. ":failure",
+                    tonumber(s.ticks_failure) or 0)
+                metrics:set("watch_sentinel_ticks:" .. base .. ":gated",
+                    tonumber(s.ticks_gated) or 0)
+            end
+        end
+    end
 end
 
 -- Schedule both pollers from init_worker. Only worker 0 polls — otherwise N
@@ -1272,6 +1315,12 @@ function _M.prometheus()
         "watch_pending_pending_records",
         "watch_pending_retry_failures_total",
         "watch_pending_oldest_age_ms",
+        "watch_recon_cap_breach_total",
+        "watch_cap_token_rejected_total",
+        "watch_directive_verify_failed_total",
+        "watch_cap_token_db_error_deny_total",
+        "watch_arm_rejected_unauth_total",
+        "watch_action_production_armed",
         "council_stored_bytes"
     }) do
         if not metrics:get(k) then
@@ -1359,6 +1408,24 @@ function _M.prometheus()
         "# TYPE gw_watch_kill_switch_drain_timeout_total counter",
         "# HELP gw_watch_arm_rejected_unauth_total Unauthenticated (401) arm stage/confirm rejections — counted instead of written to the unprunable arm_audit chain (DoS guard)",
         "# TYPE gw_watch_arm_rejected_unauth_total counter",
+        "# HELP gw_watch_recon_cap_breach_total Reconciliation ticks where reserved spend exceeded the day cap",
+        "# TYPE gw_watch_recon_cap_breach_total counter",
+        "# HELP gw_watch_cap_token_rejected_total Capability tokens rejected (immortal or lifetime over 24h)",
+        "# TYPE gw_watch_cap_token_rejected_total counter",
+        "# HELP gw_watch_directive_verify_failed_total Directive envelopes refused on Ed25519 verification at the worker pre-act gate",
+        "# TYPE gw_watch_directive_verify_failed_total counter",
+        "# HELP gw_watch_cap_token_db_error_deny_total Capability-token checks denied because the backing DB query errored (fail-closed)",
+        "# TYPE gw_watch_cap_token_db_error_deny_total counter",
+        "# HELP gw_watch_action_production_armed 1 when a live producer kill-switch channel is held; 0 otherwise",
+        "# TYPE gw_watch_action_production_armed gauge",
+        "# HELP gw_watch_temperature Per-tenant watch heat score (0-1)",
+        "# TYPE gw_watch_temperature gauge",
+        "# HELP gw_watch_sentinel_fires_total Lifetime watch_fires count per sentinel",
+        "# TYPE gw_watch_sentinel_fires_total counter",
+        "# HELP gw_watch_sentinel_ticks_total Runner ticks per sentinel by outcome (fired|uninteresting|failure|gated)",
+        "# TYPE gw_watch_sentinel_ticks_total counter",
+        "# HELP gw_watch_sentinel_last_tick_ms Wall-clock ms of the last runner tick per sentinel (0=never)",
+        "# TYPE gw_watch_sentinel_last_tick_ms gauge",
     }
 
     local metric_lines = {}
@@ -1433,36 +1500,72 @@ function _M.prometheus()
                 metric_lines[#metric_lines + 1] = string.format('gw_watch_spend_gauge_read_failures_total %s', tostring(val))
             elseif key == "watch_kill_switch_drain_timeout_total" then
                 metric_lines[#metric_lines + 1] = string.format('gw_watch_kill_switch_drain_timeout_total %s', tostring(val))
+            elseif key == "watch_recon_cap_breach_total" then
+                metric_lines[#metric_lines + 1] = string.format('gw_watch_recon_cap_breach_total %s', tostring(val))
+            elseif key == "watch_cap_token_rejected_total" then
+                metric_lines[#metric_lines + 1] = string.format('gw_watch_cap_token_rejected_total %s', tostring(val))
+            elseif key == "watch_directive_verify_failed_total" then
+                metric_lines[#metric_lines + 1] = string.format('gw_watch_directive_verify_failed_total %s', tostring(val))
+            elseif key == "watch_cap_token_db_error_deny_total" then
+                metric_lines[#metric_lines + 1] = string.format('gw_watch_cap_token_db_error_deny_total %s', tostring(val))
+            elseif key == "watch_arm_rejected_unauth_total" then
+                metric_lines[#metric_lines + 1] = string.format('gw_watch_arm_rejected_unauth_total %s', tostring(val))
+            elseif key == "watch_action_production_armed" then
+                metric_lines[#metric_lines + 1] = string.format('gw_watch_action_production_armed %s', tostring(val))
             else
-                -- Histogram keys: latency_bucket:provider:model:le
-                local htype, provider, model, le = key:match("^(latency_bucket):([^:]+):([^:]+):(.+)$")
-                if htype then
+                -- Labeled watch temperature: watch_temperature:tenant
+                local temp_tenant = key:match("^watch_temperature:(.+)$")
+                local sf_tenant, sf_name = key:match("^watch_sentinel_fires:([^:]+):(.+)$")
+                local sl_tenant, sl_name = key:match("^watch_sentinel_last_tick_ms:([^:]+):(.+)$")
+                local st_tenant, st_name, st_out =
+                    key:match("^watch_sentinel_ticks:([^:]+):([^:]+):([^:]+)$")
+                if temp_tenant then
                     metric_lines[#metric_lines + 1] = string.format(
-                        'gw_request_duration_ms_bucket{provider="%s",model="%s",le="%s"} %s',
-                        provider, model, le, tostring(val))
+                        'gw_watch_temperature{tenant="%s"} %s', temp_tenant, tostring(val))
+                elseif sf_tenant and sf_name then
+                    metric_lines[#metric_lines + 1] = string.format(
+                        'gw_watch_sentinel_fires_total{tenant="%s",sentinel="%s"} %s',
+                        sf_tenant, sf_name, tostring(val))
+                elseif sl_tenant and sl_name then
+                    metric_lines[#metric_lines + 1] = string.format(
+                        'gw_watch_sentinel_last_tick_ms{tenant="%s",sentinel="%s"} %s',
+                        sl_tenant, sl_name, tostring(val))
+                elseif st_tenant and st_name and st_out then
+                    metric_lines[#metric_lines + 1] = string.format(
+                        'gw_watch_sentinel_ticks_total{tenant="%s",sentinel="%s",outcome="%s"} %s',
+                        st_tenant, st_name, st_out, tostring(val))
                 else
-                    local stype, slabel = key:match("^(latency_sum):(.+)$")
-                    if stype then
-                        local sp, sm = slabel:match("^([^:]+):(.+)$")
-                        if sp and sm then
-                            metric_lines[#metric_lines + 1] = string.format(
-                                'gw_request_duration_ms_sum{provider="%s",model="%s"} %s',
-                                sp, sm, tostring(val))
-                        end
+                    -- Histogram keys: latency_bucket:provider:model:le
+                    local htype, provider, model, le = key:match("^(latency_bucket):([^:]+):([^:]+):(.+)$")
+                    if htype then
+                        metric_lines[#metric_lines + 1] = string.format(
+                            'gw_request_duration_ms_bucket{provider="%s",model="%s",le="%s"} %s',
+                            provider, model, le, tostring(val))
                     else
-                        local ctype, clabel = key:match("^(latency_count):(.+)$")
-                        if ctype then
-                            local cp, cm = clabel:match("^([^:]+):(.+)$")
-                            if cp and cm then
+                        local stype, slabel = key:match("^(latency_sum):(.+)$")
+                        if stype then
+                            local sp, sm = slabel:match("^([^:]+):(.+)$")
+                            if sp and sm then
                                 metric_lines[#metric_lines + 1] = string.format(
-                                    'gw_request_duration_ms_count{provider="%s",model="%s"} %s',
-                                    cp, cm, tostring(val))
+                                    'gw_request_duration_ms_sum{provider="%s",model="%s"} %s',
+                                    sp, sm, tostring(val))
                             end
                         else
-                            -- Simple labeled counters
-                            local metric_name, label = key:match("^([^:]+):(.+)$")
-                            if metric_name and label and renderers[metric_name] then
-                                metric_lines[#metric_lines + 1] = renderers[metric_name](label, tostring(val))
+                            local ctype, clabel = key:match("^(latency_count):(.+)$")
+                            if ctype then
+                                local cp, cm = clabel:match("^([^:]+):(.+)$")
+                                if cp and cm then
+                                    metric_lines[#metric_lines + 1] = string.format(
+                                        'gw_request_duration_ms_count{provider="%s",model="%s"} %s',
+                                        cp, cm, tostring(val))
+                                end
+                            else
+                                -- Simple labeled counters
+                                local metric_name, label = key:match("^([^:]+):(.+)$")
+                                if metric_name and label and renderers[metric_name] then
+                                    metric_lines[#metric_lines + 1] =
+                                        renderers[metric_name](label, tostring(val))
+                                end
                             end
                         end
                     end

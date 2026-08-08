@@ -34,7 +34,8 @@ mod stats;
 pub use stats::{
     audit_json, build_watch_stats, ui_snapshot_json, UiExecuteAction, UiExecuteDecision,
     UiExecuteReceipt, UiRecentFire, UiSentinelReadiness, UiWatchBudget, UiWatchDegradation,
-    UiWatchSnapshot, UiWatchTemperature, WatchStats, AUDIT_LIMIT_CAP, AUDIT_LIMIT_DEFAULT,
+    UiWatchSnapshot, UiWatchTemperature, WatchSentinelStat, WatchStats, WatchTemperatureStat,
+    AUDIT_LIMIT_CAP, AUDIT_LIMIT_DEFAULT,
 };
 
 mod force_wake;

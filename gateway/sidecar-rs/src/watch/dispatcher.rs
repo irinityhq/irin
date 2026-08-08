@@ -194,9 +194,8 @@ pub fn cap_token_rejected_total() -> u64 {
 /// make security-critical refusals visible, not buried in logs. Mirrors the
 /// CAP_TOKEN_REJECTED pattern (private static + pub accessor).
 ///
-/// NOTE: WatchStats/Prometheus export (the `gw_watch_*_total` scrape field +
-/// build_watch_stats assembly, both in api.rs) is wired post-W1+W2 merge to keep
-/// W2 disjoint from W1's api.rs — see task #20. The pub accessor is ready now.
+/// Exported on `/watch/stats` as `directive_verify_failed_total` →
+/// `gw_watch_directive_verify_failed_total`.
 static DIRECTIVE_VERIFY_FAILED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn directive_verify_failed_total() -> u64 {
@@ -215,9 +214,8 @@ pub fn bump_directive_verify_failed() {
 /// visible rather than silent. Mirrors the CAP_TOKEN_REJECTED pattern. Also
 /// bumped by the structured-token allowed_workers DB-error path (#3b).
 ///
-/// NOTE: WatchStats/Prometheus export (the `gw_watch_*_total` scrape field +
-/// build_watch_stats assembly, both in api.rs) is wired post-W1+W2 merge to keep
-/// W2 disjoint from W1's api.rs — see task #20. The pub accessor is ready now.
+/// Exported on `/watch/stats` as `cap_token_db_error_deny_total` →
+/// `gw_watch_cap_token_db_error_deny_total`.
 static CAP_TOKEN_DB_ERROR_DENY: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 pub fn cap_token_db_error_deny_total() -> u64 {

@@ -31,7 +31,7 @@ admin authentication. The arm ceremony uses principals from
 | `GET /watch/list/{tenant}` | Registered Sentinels: tier, cooldown, enabled, hard-killed state, last fire, and recent fire count. |
 | `GET /watch/temperature/{tenant}` | Heat score from fire rates; levels are cold, warm, and hot. |
 | `GET /watch/audit/{tenant}` | Descending fire log, capped at 500 rows, including hash-chain fields. |
-| `GET /watch/stats` | Watch counters and gauges including spend, arm rejections, leases, duplicates, and kill-switch latency. |
+| `GET /watch/stats` | Watch counters and gauges including spend, arm rejections, leases, duplicates, kill-switch latency, per-sentinel fires/ticks, temperature, and `action_production_armed`. Mirrored to Prometheus on gateway `GET /metrics` as `gw_watch_*` (including labeled `gw_watch_sentinel_*` and `gw_watch_temperature`). |
 | `GET /watch/ui-snapshot/{tenant}` | Admin- and canary-guarded sanitized UI projection, including `action_production_armed`. |
 | `POST /watch/force-wake/{sentinel}` | Admin-only manual fire; authentication is checked before existence, and quarantined or hard-killed Sentinels return 409. |
 | `DELETE /watch/quarantine/{sentinel}` | Admin clear of quarantine or hard kill, with optional probation reset. |

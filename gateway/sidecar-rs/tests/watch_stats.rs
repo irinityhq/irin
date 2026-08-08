@@ -300,6 +300,13 @@ async fn p0d_watch_stats_exposes_four_new_metrics() {
         "directive_ttl_expired_total",
         "directive_max_delivery_exceeded_total",
         "directive_clock_skew_rejected_total",
+        "directive_verify_failed_total",
+        "cap_token_db_error_deny_total",
+        "cap_token_rejected_total",
+        "action_production_armed",
+        "temperatures",
+        "sentinels",
+        "arm_rejected_unauth_total",
     ] {
         assert!(
             v.get(field).is_some(),
@@ -731,4 +738,37 @@ async fn p0d_recon_yesterday_lookback_alarms_on_closed_bucket() {
         "alarm row must carry the looked-back bucket, not today"
     );
     assert_eq!(q.recon_divergence_total(), 1);
+}
+
+/// Per-sentinel tick choke point + wiring into /watch/stats.sentinels.
+#[tokio::test]
+async fn sentinel_ticks_surface_on_watch_stats() {
+    use gateway_sidecar::watch::quarantine::RunnerTickOutcome;
+
+    let q = Arc::new(QuarantineState::test_default());
+    q.note_runner_tick("canary", "silence-watch", RunnerTickOutcome::Uninteresting);
+    q.note_runner_tick("canary", "silence-watch", RunnerTickOutcome::Uninteresting);
+    q.note_runner_tick("canary", "silence-watch", RunnerTickOutcome::Fired);
+    q.note_runner_tick("canary", "file-inbox-watch", RunnerTickOutcome::Gated);
+
+    let stats = build_watch_stats(&q, None).await;
+    assert!(!stats.action_production_armed);
+    assert!(stats.temperatures.is_empty(), "no db → no temperatures");
+    assert_eq!(stats.sentinels.len(), 2);
+
+    let silence = stats
+        .sentinels
+        .iter()
+        .find(|s| s.sentinel == "silence-watch")
+        .expect("silence-watch row");
+    assert_eq!(silence.tenant, "canary");
+    assert_eq!(silence.ticks_uninteresting, 2);
+    assert_eq!(silence.ticks_fired, 1);
+    assert_eq!(silence.fires_total, 0);
+    assert!(silence.last_tick_ms > 0);
+
+    let v = serde_json::to_value(&stats).expect("serialize");
+    assert_eq!(v["directive_verify_failed_total"], 0);
+    assert_eq!(v["cap_token_db_error_deny_total"], 0);
+    assert_eq!(v["action_production_armed"], false);
 }
