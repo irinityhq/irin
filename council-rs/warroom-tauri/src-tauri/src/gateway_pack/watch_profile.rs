@@ -1,16 +1,16 @@
 //! Pack-native watch profile toggle: install/remove bundled template + bounded
 //! sidecar recreate under the lifecycle lock.
 
+use super::cli_adapters::{ensure_cli_adapters_with_tokens, ensure_proxy_tokens};
 use super::enable::{compose_up, lifecycle_stage, wait_control_plane, LIFECYCLE_LOCK};
-use super::env::{build_full_compose_env, write_public_compose_env};
+use super::env::{build_full_compose_env, write_public_compose_env, PACK_WATCH_CANARY_TENANT};
 use super::install::{
     compose_file, installed_pack_root, load_validated_manifest, verify_images_present,
 };
 use super::keys::{ensure_arm_keys_file, ensure_ledger_key};
-use super::paths::{
-    bundled_pack_root, ensure_watch_dirs, watch_inbox_dir, watch_profile_path, PACK_DIR_NAME,
-};
+use super::paths::{bundled_pack_root, ensure_watch_dirs, watch_inbox_dir, watch_profile_path};
 use super::status::{bump_pack_lifecycle_generation, invalidate_status_cache};
+use crate::docker_cli::{probe_docker_daemon, DockerDaemonState};
 use crate::keychain::SecretStore;
 use crate::private_config::load_or_create_private_config;
 use std::fs;
@@ -80,8 +80,11 @@ pub(crate) fn install_default_profile_file() -> Result<(), String> {
     let body = fs::read(&src).map_err(|e| format!("read default watch profile: {e}"))?;
     // Fail closed: refuse a template that is not the canary tenant shape.
     let text = String::from_utf8_lossy(&body);
-    if !text.contains("tenant: canary") {
-        return Err("default watch profile template must use tenant canary".into());
+    let tenant_line = format!("tenant: {PACK_WATCH_CANARY_TENANT}");
+    if !text.contains(&tenant_line) {
+        return Err(format!(
+            "default watch profile template must use tenant {PACK_WATCH_CANARY_TENANT}"
+        ));
     }
     if !text.contains("file-inbox-watch") {
         return Err("default watch profile template must declare file-inbox-watch".into());
@@ -108,18 +111,30 @@ pub(crate) fn remove_profile_file() -> Result<(), String> {
 
 /// Bounded pack recreate so the sidecar reloads SENTINELS_CONFIG_PATH pins.
 fn reconcile_pack_for_profile(store: &dyn SecretStore) -> Result<(), String> {
+    match probe_docker_daemon() {
+        DockerDaemonState::Ready => {}
+        DockerDaemonState::CliMissing => {
+            return Err("Docker CLI missing; cannot resume Gateway Pack".to_string());
+        }
+        DockerDaemonState::DaemonDown => {
+            return Err("Docker daemon not ready; cannot resume Gateway Pack".to_string());
+        }
+    }
     let pack_root = installed_pack_root()
         .ok_or_else(|| "Gateway Pack is not installed; enable Gateway first".to_string())?;
     // Integrity: pack must still look installed.
     if !pack_root.join("docker-compose.yml").is_file() {
         return Err("Gateway Pack install is incomplete".into());
     }
-    let _ = pack_root.join(PACK_DIR_NAME); // silence unused if any
     let validated = load_validated_manifest(&pack_root)?;
     verify_images_present(&validated)?;
     ensure_watch_dirs()?;
     let _ = ensure_arm_keys_file()?;
     let ledger = ensure_ledger_key()?;
+    // Same as enable/resume: ensure adapters with live tokens before env so
+    // dead adapters do not inject empty proxy URL/token from cache alone.
+    let proxy_tokens = ensure_proxy_tokens(store)?;
+    let _ = ensure_cli_adapters_with_tokens(&proxy_tokens.0, &proxy_tokens.1);
     let existing_key_id = load_or_create_private_config()?.gateway_key_id;
     let env_path = write_public_compose_env(
         &pack_root,
@@ -135,7 +150,7 @@ fn reconcile_pack_for_profile(store: &dyn SecretStore) -> Result<(), String> {
         &ledger,
         &validated,
         existing_key_id.as_deref(),
-        None,
+        Some(proxy_tokens),
     )?;
     let compose = compose_file(&pack_root);
     compose_up(&compose, &env_path, &spawn_env)?;
@@ -216,7 +231,7 @@ mod tests {
         install_default_profile_file().expect("install template");
         assert!(watch_sentinels_enabled());
         let body = fs::read_to_string(watch_profile_path()).unwrap();
-        assert!(body.contains("tenant: canary"));
+        assert!(body.contains(&format!("tenant: {PACK_WATCH_CANARY_TENANT}")));
         assert!(body.contains("file-inbox-watch"));
         // Template source must not live under the pack tree identity — dest is app-support.
         assert!(watch_profile_path()
@@ -230,7 +245,7 @@ mod tests {
     fn default_template_is_canary_tenant() {
         let path = default_template_path().expect("template reachable from repo");
         let body = fs::read_to_string(path).unwrap();
-        assert!(body.contains("tenant: canary"));
+        assert!(body.contains(&format!("tenant: {PACK_WATCH_CANARY_TENANT}")));
         assert!(body.contains("file-inbox-watch"));
         assert!(body.contains("/var/lib/gateway/inbox"));
     }

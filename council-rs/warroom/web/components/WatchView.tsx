@@ -180,9 +180,15 @@ export default function WatchView(
                 Quiet
               </span>
               <p className="mt-1">
-                No sentinel profile installed. Watch is healthy with 0 sentinels — flip{" "}
-                <strong className="text-fg">Watch sentinels</strong> on to load the bundled
-                file-inbox profile (tenant canary).
+                {desktop ? (
+                  <>
+                    No sentinel profile installed. Watch is healthy with 0 sentinels — flip{" "}
+                    <strong className="text-fg">Watch sentinels</strong> on to load the bundled
+                    file-inbox profile (tenant canary).
+                  </>
+                ) : (
+                  <>No sentinel profile installed.</>
+                )}
               </p>
             </div>
           )}

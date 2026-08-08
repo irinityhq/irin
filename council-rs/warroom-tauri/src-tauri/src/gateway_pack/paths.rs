@@ -71,17 +71,17 @@ pub fn watch_inbox_dir() -> PathBuf {
 pub fn ensure_watch_dirs() -> Result<(), String> {
     ensure_gateway_dir()?;
     for dir in [sentinels_dir(), watch_inbox_dir()] {
-        fs::create_dir_all(&dir).map_err(|e| format!("create watch dir {}: {e}", dir.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
-        }
         if dir.is_file() {
             return Err(format!(
                 "watch bind source must be a directory, found file: {}",
                 dir.display()
             ));
+        }
+        fs::create_dir_all(&dir).map_err(|e| format!("create watch dir {}: {e}", dir.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&dir, fs::Permissions::from_mode(0o700));
         }
     }
     Ok(())
