@@ -56,12 +56,13 @@ time. See the detailed [Watch HTTP API](../gateway/docs/watch-api.md).
 | `POST .../arm` | Legacy endpoint; returns 410 Gone. Use stage and confirm. |
 | `POST .../arm/stage` | An arm principal stages a JCS challenge with a default 120-second TTL. |
 | `GET .../arm/pending` | Returns the stored challenge bytes for crash recovery; the challenge is not re-derived. |
-| `POST .../arm/confirm` | Completes single-operator dual custody: the arm principal authorizes the request and a local Secure Enclave or FIDO2 key attests it. The signed material binds the spend cap and window. |
+| `POST .../arm/confirm` | Completes single-operator principal token + local hardware attestation: one arm principal authorizes the request and a local Secure Enclave (se-p256) or FIDO2 key attests it. For se-p256 the envelope carries no UP assertion (the product SE path is biometry-gated); for fido2-es256 verification requires `authenticatorData` with the user-presence flag set. Confirm verifies the ES256 signature over the **stored** stage challenge bytes (never re-derived). The signed material binds the spend cap and window. |
 | Rehearsal or dirty build | Never starts the real producer. |
 | `POST .../disarm` | Kill switch accepted from the admin token or any arm principal; drains the writer. |
 | Writer claim | Enforces a single writer, with 30-second heartbeat and 90-second stale self-disarm defaults. |
 | Boot triple-gate | Starts the producer only when all three boot variables are present; does not create the signed `active_arm` required for spend. |
-| Spend ceiling | Hard maximum is $50/day; the environment may only lower it. The canonical runtime sets $25/day and a $2.50 fanout reserve. |
+| Startup cabinet probe | Before live dispatcher claim or boot hydration trusts Council output, the sidecar runs a council-triage startup probe: one authenticated Gateway `/v1/chat/completions` call that incurs real provider inference cost. Failure degrades or aborts activation per boot policy. There is no separate probe metering counter. |
+| Spend ceiling | Code day-cap ceiling is $50/day; `DAILY_SPEND_CAP_USD` may only lower it. Per-directive reservation code default is $5 (`WATCH_MAX_FANOUT_COST_USD`). The canonical pack compose sets $25/day and a $2.50 fanout reserve. These are ex-ante reservations with flagged overshoot on settle, not a post-hoc un-spend of accepted work. |
 | Signed spend window | Locked by the hardware ceremony and not extendable by an environment change after confirmation. |
 
 Host helpers include `gateway/bin/arm`, `disarm`, `arm-enroll`,

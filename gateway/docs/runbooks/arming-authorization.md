@@ -26,12 +26,12 @@ Host CLIs call these sidecar routes over the management UDS:
 | --- | --- | --- |
 | Legacy arm | `POST /watch/admin/producer/arm` | **410 Gone** — do not use |
 | Stage | `POST /watch/admin/producer/arm/stage` | Principal stages challenge v3 (JCS); default TTL **120s** (`ARM_STAGE_TTL_MS`) |
-| Pending | `GET /watch/admin/producer/arm/pending` | Crash-resume; returns **stored** challenge bytes |
-| Confirm | `POST /watch/admin/producer/arm/confirm` | SE-P256 or FIDO2-ES256 local attest; content-bound cap/window |
+| Pending | `GET /watch/admin/producer/arm/pending` | Crash-resume; returns **stored** challenge bytes (never re-derived) |
+| Confirm | `POST /watch/admin/producer/arm/confirm` | Single-operator principal token + local hardware attestation: SE-P256 or FIDO2-ES256 signs the **stored** challenge bytes; content-bound cap/window. se-p256: no UP assertion in the envelope, product SE path biometry-gated (`gateway/bin/arm-attest.swift`); fido2-es256: `authenticatorData` required and rejected without the UP flag |
 | Status | `GET /watch/admin/producer/arm/status` | Principal-authenticated projection: armed/staged flags, lease deadline, registry-loaded, keyset digest. **No** challenge, signature, or principal |
 | Disarm | `POST /watch/admin/producer/disarm` | Admin token **or** any arm principal |
 
-Confirm runs in one DB transaction (pending, signature, counter, content-binding). Failures are fail-closed.
+Confirm runs in one DB transaction (pending, signature, counter, content-binding) and verifies the ES256 signature over the stored stage challenge bytes. Failures are fail-closed. This is not dual custody or four-eyes by two human tokens.
 
 ## Desktop Touch ID bridge (installed IRIN.app)
 
@@ -66,13 +66,19 @@ control — no terminal command. What changes:
 
 ## Spend ceilings (enforced)
 
-| Limit | Default | Env |
+| Limit | Value | Env / notes |
 | --- | --- | --- |
-| Daily Watch spend ceiling | **$50 USD / UTC day** | `DAILY_SPEND_CAP_USD` may only **lower**; raise/garbage refuses boot |
-| Fanout reserve unit | **$5** | `WATCH_MAX_FANOUT_COST_USD` |
+| Day-cap code ceiling | **$50 USD / UTC day** | Hard-coded ceiling; `DAILY_SPEND_CAP_USD` may only **lower**; raise/garbage refuses boot |
+| Canonical pack day cap | **$25 / UTC day** | Compose default `DAILY_SPEND_CAP_USD=25` |
+| Per-directive reservation (code default) | **$5** | `WATCH_MAX_FANOUT_COST_USD` default |
+| Canonical pack fanout reserve | **$2.50** | Compose default `WATCH_MAX_FANOUT_COST_USD=2.50` |
 | Signed spend window | boot-locked (default 24h) | `GW_ARM_WINDOW_MS`; signed into challenge; not env-extendable after tap when signed-window enforcement is on |
 
-Reserve re-verifies the arm signature and content binding before spend.
+These are **ex-ante reservations**, not a post-hoc hard clamp: claim reserves the
+ceiling up front; settle records realized cost and **flags overshoot** when
+realized exceeds the reservation. Already accepted provider work cannot be
+un-spent by the cap. Reserve re-verifies the arm signature over the stored
+challenge bytes and the content binding before spend.
 
 ## Boot env triple-gate (automation path)
 
@@ -83,6 +89,19 @@ Producer may start at boot only if **all** of:
 3. `WATCH_DISPATCHER_GATEWAY_KEY` is set
 
 Any other `EXECUTION_MODE` keeps the gate closed. This path acquires the writer claim, appends a boot arm audit entry, and runs the sweep loops — but it never writes a signed `active_arm`. Spend reserves fail closed without one, so boot-env arming cannot authorize spend on its own; only a completed hardware ceremony can.
+
+## Startup cabinet probe (inference cost)
+
+Before live dispatcher claim or boot hydration trusts Council output, the
+sidecar runs the council-triage **startup probe**: an authenticated Gateway
+`/v1/chat/completions` call against the local `council-triage` cabinet,
+retried up to `WATCH_DISPATCHER_PROBE_MAX_ATTEMPTS` (default **30**) at
+`WATCH_DISPATCHER_PROBE_RETRY_MS` intervals (default 1s). Each attempt that
+reaches a provider is real inference and **incurs cost** under the same
+metering path as other governed completions — worst case, one boot can meter
+up to the full attempt budget, and there is no separate probe metering
+counter. A failing probe degrades or aborts dispatcher activation per boot
+policy; it does not create `active_arm` or authorize spend by itself.
 
 ## Writer claim
 
@@ -170,8 +189,11 @@ and spend metrics before creating a test fire.
 
 ## Max-loss bound
 
-Hard ceilings (see above): **$50/day** Watch spend and **$5** default fanout
-reserve unit, plus any in-flight Council work already accepted.
+Ceilings (see above): **$50/day** code day-cap (canonical pack **$25/day**),
+per-directive reservation code default **$5** (canonical pack **$2.50**), plus
+any in-flight Council work already accepted. Treat these as ex-ante
+reservation bounds with flagged overshoot, not as a guarantee that realized
+cost never exceeds the reserve.
 
 Operational upper bound:
 
