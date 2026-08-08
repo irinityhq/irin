@@ -2,12 +2,17 @@
 // gateway-ledger — Standalone ledger verification CLI.
 //
 // Subcommands:
-//   verify <db-path> [--key <signing-key-path>]
-//       Verifies hash chain integrity and Ed25519 signatures.
+//   verify <db-path> --key <path> [--old-key <path>]
+//       Verifies hash chain integrity and Ed25519 signatures against the
+//       configured trust set (active + optional rotated old key, expanded by
+//       verified key_introduce events).
 //
-//   fsck <db-path> [--key <signing-key-path>]
+//   fsck <db-path> --key <path> [--old-key <path>]
 //       Full semantic check: chain + signatures + schema monotonicity +
 //       signing_key_pubkey presence + key lifecycle event scanning.
+//
+//   Both commands refuse to run without --key unless --hash-only is set
+//   (hash/link diagnostics only; signatures are NOT verified).
 //
 // Exits 0 on valid, 1 on tampered/unhealthy, 2 on usage/IO errors.
 //
@@ -26,8 +31,12 @@ const EVENT_KEY_REVOKE: &str = "key_revoke";
 
 fn usage() -> ExitCode {
     eprintln!("Usage:");
-    eprintln!("  gateway-ledger verify <db-path> [--key <signing-key-path>]");
-    eprintln!("  gateway-ledger fsck <db-path> [--key <signing-key-path>]");
+    eprintln!(
+        "  gateway-ledger verify <db-path> --key <signing-key-path> [--old-key <path>] [--hash-only]"
+    );
+    eprintln!(
+        "  gateway-ledger fsck <db-path> --key <signing-key-path> [--old-key <path>] [--hash-only]"
+    );
     eprintln!("  gateway-ledger generate-key <output-path>");
     eprintln!();
     eprintln!("Commands:");
@@ -36,8 +45,12 @@ fn usage() -> ExitCode {
     eprintln!("  generate-key   Generate a 32-byte Ed25519 signing key seed file");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  --key <path>   Path to the 32-byte Ed25519 signing key (raw bytes).");
-    eprintln!("                 If omitted, only hash chain integrity is verified.");
+    eprintln!("  --key <path>       Active 32-byte Ed25519 signing key seed (required unless");
+    eprintln!("                     --hash-only). Authoritative row-signing trust root.");
+    eprintln!("  --old-key <path>   Previous configured key during rotation (optional).");
+    eprintln!("                     Mirrors the sidecar old_verifying_key trust root.");
+    eprintln!("  --hash-only        Hash/link check only; signatures are NOT verified.");
+    eprintln!("                     Exit 0 means the chain is self-consistent, not signed.");
     ExitCode::from(2)
 }
 
@@ -46,6 +59,8 @@ fn usage() -> ExitCode {
 /// chains that predate the air-gapped-root model. When present, ceremony
 /// (key_introduce / key_revoke) envelopes must be signed by this key, which
 /// turns fsck into a real PKI trust check.
+///
+/// ROOT is ceremony-envelope authority only — never a ledger row-signing root.
 fn load_root_pubkey_from_env() -> Option<VerifyingKey> {
     let hex_str = std::env::var("ROOT_PUBKEY_HEX").ok()?;
     let hex_str = hex_str.trim();
@@ -99,6 +114,30 @@ fn load_verifying_key(path: &str) -> Result<VerifyingKey, String> {
     };
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     Ok(signing_key.verifying_key())
+}
+
+/// Configured row-signing trust roots (mirrors sidecar active + old_verifying_key).
+#[derive(Clone, Default)]
+struct TrustKeys {
+    active: Option<VerifyingKey>,
+    old: Option<VerifyingKey>,
+}
+
+impl TrustKeys {
+    fn has_row_key(&self) -> bool {
+        self.active.is_some()
+    }
+
+    fn configured_pubkey_hexes(&self) -> HashSet<String> {
+        let mut set = HashSet::new();
+        if let Some(ref vk) = self.active {
+            set.insert(hex::encode(vk.as_bytes()));
+        }
+        if let Some(ref vk) = self.old {
+            set.insert(hex::encode(vk.as_bytes()));
+        }
+        set
+    }
 }
 
 struct EventRow {
@@ -205,21 +244,20 @@ fn compute_hash(event: &EventRow) -> String {
     hex::encode(hasher.finalize())
 }
 
+/// Verify hash chain; when `hash_only` is false, also verify signatures against
+/// the configured trust set (active + old + introduced). Row-stored
+/// `signing_key_pubkey` is a selector within that set, never an implicit root.
 fn verify_chain(
     events: &[EventRow],
-    verifying_key: &Option<VerifyingKey>,
+    trust: &TrustKeys,
+    hash_only: bool,
 ) -> Result<(u64, u64), (i64, String)> {
     let mut expected_prev = GENESIS_HASH.to_string();
     let mut verified: u64 = 0;
     let mut sig_verified: u64 = 0;
 
-    // --key is authoritative: only that key (plus keys introduced under it)
-    // may verify signatures. Row-stored signing_key_pubkey is a selector in
-    // the trust set, never an implicit root.
-    let mut trusted_pubkeys: HashSet<String> = HashSet::new();
-    if let Some(ref vk) = verifying_key {
-        trusted_pubkeys.insert(hex::encode(vk.as_bytes()));
-    }
+    let mut trusted_pubkeys = trust.configured_pubkey_hexes();
+    let verify_sigs = !hash_only && trust.has_row_key();
 
     for event in events {
         if event.prev_hash != expected_prev {
@@ -243,15 +281,15 @@ fn verify_chain(
             ));
         }
 
-        let hash_bytes = hex::decode(&event.hash).unwrap();
-        let sig_bytes = hex::decode(&event.signature)
-            .map_err(|_| (event.id, "invalid signature hex".to_string()))?;
-        let sig_array: [u8; 64] = sig_bytes
-            .try_into()
-            .map_err(|_| (event.id, "signature wrong length".to_string()))?;
-        let sig = Signature::from_bytes(&sig_array);
+        if verify_sigs {
+            let hash_bytes = hex::decode(&event.hash).unwrap();
+            let sig_bytes = hex::decode(&event.signature)
+                .map_err(|_| (event.id, "invalid signature hex".to_string()))?;
+            let sig_array: [u8; 64] = sig_bytes
+                .try_into()
+                .map_err(|_| (event.id, "signature wrong length".to_string()))?;
+            let sig = Signature::from_bytes(&sig_array);
 
-        if verifying_key.is_some() {
             if let Some(ref pubkey_hex) = event.signing_key_pubkey {
                 if !trusted_pubkeys.contains(pubkey_hex) {
                     return Err((
@@ -276,21 +314,30 @@ fn verify_chain(
                     ));
                 }
                 sig_verified += 1;
-            } else if let Some(ref vk) = verifying_key {
-                // Legacy row without stored pubkey — trial against --key only.
-                if vk.verify_strict(&hash_bytes, &sig).is_err() {
+            } else {
+                // Legacy row without stored pubkey — trial active then old.
+                let ok = trust
+                    .active
+                    .as_ref()
+                    .map(|vk| vk.verify_strict(&hash_bytes, &sig).is_ok())
+                    .unwrap_or(false)
+                    || trust
+                        .old
+                        .as_ref()
+                        .map(|vk| vk.verify_strict(&hash_bytes, &sig).is_ok())
+                        .unwrap_or(false);
+                if !ok {
                     return Err((event.id, "signature failed".to_string()));
                 }
                 sig_verified += 1;
             }
-        }
-        // Without --key: hash chain only (never trust row-stored pubkey).
 
-        // Expand trust after a verified key_introduce when --key is set.
-        if verifying_key.is_some() && event.target == EVENT_KEY_INTRODUCE {
-            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload) {
-                if let Some(new_pk) = payload.get("new_pubkey_hex").and_then(|v| v.as_str()) {
-                    trusted_pubkeys.insert(new_pk.to_string());
+            // Expand trust after a verified key_introduce.
+            if event.target == EVENT_KEY_INTRODUCE {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload) {
+                    if let Some(new_pk) = payload.get("new_pubkey_hex").and_then(|v| v.as_str()) {
+                        trusted_pubkeys.insert(new_pk.to_string());
+                    }
                 }
             }
         }
@@ -302,11 +349,30 @@ fn verify_chain(
     Ok((verified, sig_verified))
 }
 
+/// Fail closed when no row-signing key is configured and --hash-only was not
+/// requested. Empty ledgers still need the gate when the operator expects a
+/// signed verify (non-empty forges are the kill path; empty is harmless).
+fn refuse_missing_key(trust: &TrustKeys, hash_only: bool) -> Option<ExitCode> {
+    if hash_only || trust.has_row_key() {
+        return None;
+    }
+    eprintln!(
+        "❌ No ledger trust key supplied. Pass --key <path> (and optional --old-key), \
+         or --hash-only for unsigned hash-chain diagnostics only."
+    );
+    Some(ExitCode::FAILURE)
+}
+
 fn cmd_verify(
     conn: &rusqlite::Connection,
-    verifying_key: &Option<VerifyingKey>,
+    trust: &TrustKeys,
     root_pubkey: &Option<VerifyingKey>,
+    hash_only: bool,
 ) -> ExitCode {
+    if let Some(code) = refuse_missing_key(trust, hash_only) {
+        return code;
+    }
+
     let events = match read_events(conn) {
         Ok(e) => e,
         Err(e) => {
@@ -317,25 +383,38 @@ fn cmd_verify(
 
     if events.is_empty() {
         println!("✅ Ledger is empty (0 events) — nothing to verify.");
+        if hash_only {
+            println!("ℹ️  --hash-only: signatures were NOT verified.");
+        }
         return ExitCode::SUCCESS;
     }
 
-    println!("Verifying {} events...", events.len());
+    if hash_only {
+        println!(
+            "Verifying {} events (hash-only; signatures NOT verified)...",
+            events.len()
+        );
+    } else {
+        println!("Verifying {} events...", events.len());
+    }
 
     let mut healthy = true;
-    match verify_chain(&events, verifying_key) {
+    match verify_chain(&events, trust, hash_only) {
         Ok((verified, sig_verified)) => {
             println!(
                 "✅ Hash chain verified: {} events, all links valid.",
                 verified
             );
-            if sig_verified > 0 {
+            if hash_only {
+                println!(
+                    "ℹ️  --hash-only: signatures were NOT verified ({} events unchecked).",
+                    verified
+                );
+            } else if sig_verified > 0 {
                 println!(
                     "✅ Signatures verified: {}/{} events.",
                     sig_verified, verified
                 );
-            } else if verifying_key.is_none() {
-                println!("ℹ️  Signature verification skipped (no --key provided).");
             }
         }
         Err((id, msg)) => {
@@ -345,66 +424,69 @@ fn cmd_verify(
     }
 
     // Root pubkey ceremony cross-check (when ROOT_PUBKEY_HEX is configured).
-    // Verifies each key_introduce / key_revoke envelope was signed by root.
-    if let Some(root_vk) = root_pubkey {
-        let root_hex = hex::encode(root_vk.as_bytes());
-        let mut violations = 0usize;
-        let mut ceremonies = 0usize;
-        for event in &events {
-            if event.target != EVENT_KEY_INTRODUCE && event.target != EVENT_KEY_REVOKE {
-                continue;
-            }
-            ceremonies += 1;
-            let parsed: serde_json::Value = match serde_json::from_str(&event.payload) {
-                Ok(v) => v,
-                Err(_) => {
-                    violations += 1;
+    // Ceremony envelopes only — not a row-signing trust root.
+    if !hash_only {
+        if let Some(root_vk) = root_pubkey {
+            let root_hex = hex::encode(root_vk.as_bytes());
+            let mut violations = 0usize;
+            let mut ceremonies = 0usize;
+            for event in &events {
+                if event.target != EVENT_KEY_INTRODUCE && event.target != EVENT_KEY_REVOKE {
                     continue;
                 }
-            };
-            let signer_field = if event.target == EVENT_KEY_INTRODUCE {
-                "introduced_by_pubkey_hex"
-            } else {
-                "revoked_by_pubkey_hex"
-            };
-            let env_sig = parsed
-                .get("envelope_signature_hex")
-                .and_then(|v| v.as_str());
-            let signer_hex = parsed.get(signer_field).and_then(|v| v.as_str());
-            match (env_sig, signer_hex) {
-                (Some(sig), Some(s)) => {
-                    if s != root_hex {
-                        eprintln!(
-                            "❌ Event #{} ({}): signer != ROOT_PUBKEY_HEX",
-                            event.id, event.target
-                        );
+                ceremonies += 1;
+                let parsed: serde_json::Value = match serde_json::from_str(&event.payload) {
+                    Ok(v) => v,
+                    Err(_) => {
                         violations += 1;
-                    } else if !verify_ceremony_envelope(&event.target, &event.payload, sig, s) {
+                        continue;
+                    }
+                };
+                let signer_field = if event.target == EVENT_KEY_INTRODUCE {
+                    "introduced_by_pubkey_hex"
+                } else {
+                    "revoked_by_pubkey_hex"
+                };
+                let env_sig = parsed
+                    .get("envelope_signature_hex")
+                    .and_then(|v| v.as_str());
+                let signer_hex = parsed.get(signer_field).and_then(|v| v.as_str());
+                match (env_sig, signer_hex) {
+                    (Some(sig), Some(s)) => {
+                        if s != root_hex {
+                            eprintln!(
+                                "❌ Event #{} ({}): signer != ROOT_PUBKEY_HEX",
+                                event.id, event.target
+                            );
+                            violations += 1;
+                        } else if !verify_ceremony_envelope(&event.target, &event.payload, sig, s)
+                        {
+                            eprintln!(
+                                "❌ Event #{} ({}): root envelope signature invalid",
+                                event.id, event.target
+                            );
+                            violations += 1;
+                        }
+                    }
+                    _ => {
                         eprintln!(
-                            "❌ Event #{} ({}): root envelope signature invalid",
+                            "❌ Event #{} ({}): missing envelope_signature_hex or signer field",
                             event.id, event.target
                         );
                         violations += 1;
                     }
                 }
-                _ => {
-                    eprintln!(
-                        "❌ Event #{} ({}): missing envelope_signature_hex or signer field",
-                        event.id, event.target
-                    );
-                    violations += 1;
-                }
             }
-        }
-        if ceremonies == 0 {
-            // no ceremonies recorded yet — nothing to check
-        } else if violations == 0 {
-            println!(
-                "✅ Root ceremony verification: {}/{} events signed by ROOT_PUBKEY_HEX.",
-                ceremonies, ceremonies
-            );
-        } else {
-            healthy = false;
+            if ceremonies == 0 {
+                // no ceremonies recorded yet — nothing to check
+            } else if violations == 0 {
+                println!(
+                    "✅ Root ceremony verification: {}/{} events signed by ROOT_PUBKEY_HEX.",
+                    ceremonies, ceremonies
+                );
+            } else {
+                healthy = false;
+            }
         }
     }
 
@@ -415,95 +497,21 @@ fn cmd_verify(
     }
 }
 
-fn cmd_fsck(
-    conn: &rusqlite::Connection,
-    verifying_key: &Option<VerifyingKey>,
-    root_pubkey: &Option<VerifyingKey>,
-) -> ExitCode {
-    let events = match read_events(conn) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("{}", e);
-            return ExitCode::from(2);
-        }
-    };
+/// Ordered introduce-before-use / revoke scan used by fsck (and tests).
+/// Row trust roots = configured_signers only (never ROOT_PUBKEY_HEX).
+struct KeyTrustScan {
+    signers_seen: HashSet<String>,
+    introduces: Vec<(i64, String)>,
+    revokes: Vec<(i64, String)>,
+    introduced_keys: HashSet<String>,
+    revoked_keys: HashSet<String>,
+    duplicate_introduces: Vec<String>,
+    revoked_key_uses: Vec<i64>,
+    unintroduced_signer_events: Vec<(i64, String)>,
+    envelope_failures: Vec<(i64, String)>,
+}
 
-    if events.is_empty() {
-        println!("✅ Ledger is empty (0 events) — nothing to check.");
-        println!("✅ fsck complete — chain is HEALTHY");
-        return ExitCode::SUCCESS;
-    }
-
-    println!("Running full ledger fsck ({} events)...\n", events.len());
-    let mut healthy = true;
-
-    // --- 1. Hash chain + signatures ---
-    match verify_chain(&events, verifying_key) {
-        Ok((verified, sig_verified)) => {
-            println!("✅ Hash chain valid ({} events)", verified);
-            if sig_verified > 0 {
-                println!("✅ Signatures valid ({}/{})", sig_verified, verified);
-            } else if verifying_key.is_none() {
-                println!("ℹ️  Signature verification skipped (no --key provided)");
-            }
-        }
-        Err((id, msg)) => {
-            eprintln!("❌ Hash/signature failure at event #{}: {}", id, msg);
-            healthy = false;
-        }
-    }
-
-    // --- 2. Schema version monotonicity ---
-    let mut max_sv: u32 = 0;
-    let mut sv_violations: Vec<(i64, u32, u32)> = Vec::new();
-    for event in &events {
-        if event.schema_version < max_sv {
-            sv_violations.push((event.id, event.schema_version, max_sv));
-        }
-        max_sv = max_sv.max(event.schema_version);
-    }
-    if sv_violations.is_empty() {
-        println!("✅ Schema versions monotonic (max=v{})", max_sv);
-    } else {
-        eprintln!("❌ Schema version regression:");
-        for (id, got, expected_min) in &sv_violations {
-            eprintln!("   event #{}: v{} < v{}", id, got, expected_min);
-        }
-        healthy = false;
-    }
-
-    // --- 3. signing_key_pubkey presence on v3+ ---
-    let missing_pubkey: Vec<i64> = events
-        .iter()
-        .filter(|e| e.schema_version >= 3 && e.signing_key_pubkey.is_none())
-        .map(|e| e.id)
-        .collect();
-    if missing_pubkey.is_empty() {
-        println!("✅ All v3+ events carry signing_key_pubkey");
-    } else {
-        let preview: Vec<String> = missing_pubkey
-            .iter()
-            .take(5)
-            .map(|id| format!("#{}", id))
-            .collect();
-        println!(
-            "⚠️  {} v3+ event(s) missing signing_key_pubkey: {}{}",
-            missing_pubkey.len(),
-            preview.join(", "),
-            if missing_pubkey.len() > 5 { "..." } else { "" }
-        );
-    }
-
-    // --- 4. Key trust chain ---
-    // Configured --key (and optional ROOT_PUBKEY_HEX) seed the known set;
-    // key_introduce expands it. Unknown signers hard-fail — never "implicit root".
-    let mut configured_signers: HashSet<String> = HashSet::new();
-    if let Some(ref vk) = verifying_key {
-        configured_signers.insert(hex::encode(vk.as_bytes()));
-    }
-    if let Some(ref root_vk) = root_pubkey {
-        configured_signers.insert(hex::encode(root_vk.as_bytes()));
-    }
+fn scan_key_trust(events: &[EventRow], configured_signers: &HashSet<String>) -> KeyTrustScan {
     let mut known_keys: HashSet<String> = configured_signers.clone();
     let mut signers_seen: HashSet<String> = HashSet::new();
     let mut introduces: Vec<(i64, String)> = Vec::new();
@@ -515,7 +523,7 @@ fn cmd_fsck(
     let mut unintroduced_signer_events: Vec<(i64, String)> = Vec::new();
     let mut envelope_failures: Vec<(i64, String)> = Vec::new();
 
-    for event in &events {
+    for event in events {
         if let Some(ref pk) = event.signing_key_pubkey {
             signers_seen.insert(pk.clone());
             if !known_keys.contains(pk) {
@@ -544,10 +552,6 @@ fn cmd_fsck(
                         .get("introduced_by_pubkey_hex")
                         .and_then(|v| v.as_str()),
                 ) {
-                    // Cross-check: envelope's claimed signer must match the
-                    // chain row's signing_key_pubkey (which is cryptographically
-                    // bound by the chain signature from 4a). Without this, an
-                    // attacker can forge a payload claiming any signer.
                     if event.signing_key_pubkey.as_deref() != Some(signer_hex) {
                         envelope_failures.push((
                             event.id,
@@ -598,15 +602,129 @@ fn cmd_fsck(
         }
     }
 
+    KeyTrustScan {
+        signers_seen,
+        introduces,
+        revokes,
+        introduced_keys,
+        revoked_keys,
+        duplicate_introduces,
+        revoked_key_uses,
+        unintroduced_signer_events,
+        envelope_failures,
+    }
+}
+
+fn cmd_fsck(
+    conn: &rusqlite::Connection,
+    trust: &TrustKeys,
+    root_pubkey: &Option<VerifyingKey>,
+    hash_only: bool,
+) -> ExitCode {
+    if let Some(code) = refuse_missing_key(trust, hash_only) {
+        return code;
+    }
+
+    let events = match read_events(conn) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("{}", e);
+            return ExitCode::from(2);
+        }
+    };
+
+    if events.is_empty() {
+        println!("✅ Ledger is empty (0 events) — nothing to check.");
+        if hash_only {
+            println!("ℹ️  --hash-only: signatures were NOT verified.");
+        }
+        println!("✅ fsck complete — chain is HEALTHY");
+        return ExitCode::SUCCESS;
+    }
+
+    if hash_only {
+        println!(
+            "Running ledger fsck ({} events, hash-only; signatures NOT verified)...\n",
+            events.len()
+        );
+    } else {
+        println!("Running full ledger fsck ({} events)...\n", events.len());
+    }
+    let mut healthy = true;
+
+    // --- 1. Hash chain + signatures ---
+    match verify_chain(&events, trust, hash_only) {
+        Ok((verified, sig_verified)) => {
+            println!("✅ Hash chain valid ({} events)", verified);
+            if hash_only {
+                println!(
+                    "ℹ️  --hash-only: signatures were NOT verified ({} events unchecked)",
+                    verified
+                );
+            } else if sig_verified > 0 {
+                println!("✅ Signatures valid ({}/{})", sig_verified, verified);
+            }
+        }
+        Err((id, msg)) => {
+            eprintln!("❌ Hash/signature failure at event #{}: {}", id, msg);
+            healthy = false;
+        }
+    }
+
+    // --- 2. Schema version monotonicity ---
+    let mut max_sv: u32 = 0;
+    let mut sv_violations: Vec<(i64, u32, u32)> = Vec::new();
+    for event in &events {
+        if event.schema_version < max_sv {
+            sv_violations.push((event.id, event.schema_version, max_sv));
+        }
+        max_sv = max_sv.max(event.schema_version);
+    }
+    if sv_violations.is_empty() {
+        println!("✅ Schema versions monotonic (max=v{})", max_sv);
+    } else {
+        eprintln!("❌ Schema version regression:");
+        for (id, got, expected_min) in &sv_violations {
+            eprintln!("   event #{}: v{} < v{}", id, got, expected_min);
+        }
+        healthy = false;
+    }
+
+    // --- 3. signing_key_pubkey presence on v3+ ---
+    let missing_pubkey: Vec<i64> = events
+        .iter()
+        .filter(|e| e.schema_version >= 3 && e.signing_key_pubkey.is_none())
+        .map(|e| e.id)
+        .collect();
+    if missing_pubkey.is_empty() {
+        println!("✅ All v3+ events carry signing_key_pubkey");
+    } else {
+        let preview: Vec<String> = missing_pubkey
+            .iter()
+            .take(5)
+            .map(|id| format!("#{}", id))
+            .collect();
+        println!(
+            "⚠️  {} v3+ event(s) missing signing_key_pubkey: {}{}",
+            missing_pubkey.len(),
+            preview.join(", "),
+            if missing_pubkey.len() > 5 { "..." } else { "" }
+        );
+    }
+
+    // --- 4. Key trust chain (row signers = --key + --old-key only; not ROOT) ---
+    let configured_signers = trust.configured_pubkey_hexes();
+    let scan = scan_key_trust(&events, &configured_signers);
+
     println!("✅ Key trust chain:");
-    for pk in &signers_seen {
+    for pk in &scan.signers_seen {
         let short = &pk[..pk.len().min(12)];
-        let status = if revoked_keys.contains(pk) {
+        let status = if scan.revoked_keys.contains(pk) {
             "REVOKED"
         } else {
             "active"
         };
-        let intro = introduces.iter().find(|(_, p)| p == pk);
+        let intro = scan.introduces.iter().find(|(_, p)| p == pk);
         let intro_str = if configured_signers.contains(pk) {
             "configured root".to_string()
         } else if let Some((eid, _)) = intro {
@@ -618,21 +736,22 @@ fn cmd_fsck(
     }
     println!(
         "   Key lifecycle: {} introduce(s), {} revoke(s)",
-        introduces.len(),
-        revokes.len()
+        scan.introduces.len(),
+        scan.revokes.len()
     );
 
     // Introduce-before-use: signers_seen ⊆ introduced ∪ configured.
-    // Requires a trust root (--key and/or ROOT_PUBKEY_HEX); without one we
-    // cannot pin signers and only report (hash chain already checked above).
-    if configured_signers.is_empty() {
-        if !signers_seen.is_empty() {
-            println!("ℹ️  Signer trust check skipped (no --key / ROOT_PUBKEY_HEX)");
-        }
-    } else if unintroduced_signer_events.is_empty() {
+    // Skip policy walk under --hash-only (no cryptographic pin).
+    if hash_only {
+        println!("ℹ️  --hash-only: signer trust policy skipped (signatures NOT verified)");
+    } else if configured_signers.is_empty() {
+        // Should be unreachable after refuse_missing_key unless empty key set.
+        eprintln!("❌ No configured row-signing keys for trust policy");
+        healthy = false;
+    } else if scan.unintroduced_signer_events.is_empty() {
         println!("✅ All signers configured or introduced before use");
     } else {
-        for (id, pk) in &unintroduced_signer_events {
+        for (id, pk) in &scan.unintroduced_signer_events {
             let short = &pk[..pk.len().min(12)];
             eprintln!(
                 "❌ Event #{}: signing_key_pubkey {}... not in trusted set",
@@ -643,46 +762,42 @@ fn cmd_fsck(
     }
 
     // --- 5. Revoked key usage ---
-    if revoked_key_uses.is_empty() {
+    if scan.revoked_key_uses.is_empty() {
         println!("✅ No revoked-key usage detected");
     } else {
         eprintln!(
             "❌ {} event(s) signed by revoked keys: {:?}",
-            revoked_key_uses.len(),
-            revoked_key_uses
+            scan.revoked_key_uses.len(),
+            scan.revoked_key_uses
         );
         healthy = false;
     }
 
     // --- 6. Duplicate introduces ---
-    if !duplicate_introduces.is_empty() {
+    if !scan.duplicate_introduces.is_empty() {
         eprintln!(
             "❌ Duplicate introduce events for: {:?}",
-            duplicate_introduces
+            scan.duplicate_introduces
         );
         healthy = false;
     }
 
     // --- 7. Envelope signature validity ---
-    if envelope_failures.is_empty() {
-        if !introduces.is_empty() || !revokes.is_empty() {
+    if scan.envelope_failures.is_empty() {
+        if !scan.introduces.is_empty() || !scan.revokes.is_empty() {
             println!("✅ Ceremony envelope signatures valid");
         }
     } else {
-        for (id, msg) in &envelope_failures {
+        for (id, msg) in &scan.envelope_failures {
             eprintln!("❌ Event #{}: {}", id, msg);
         }
         healthy = false;
     }
 
-    // --- 8. Root pubkey cross-check (when ROOT_PUBKEY_HEX is configured) ---
-    //
-    // Each ceremony event (key_introduce / key_revoke) carries an envelope
-    // signature from the *signer* whose pubkey is recorded inline (via
-    // `introduced_by_pubkey_hex` / `revoked_by_pubkey_hex`). When operators
-    // graduate to PKI, those ceremonies must be signed by the air-gapped root.
-    // The check below enforces that policy whenever ROOT_PUBKEY_HEX is set.
-    if let Some(root_vk) = root_pubkey {
+    // --- 8. Root pubkey cross-check (ceremony envelopes only) ---
+    if hash_only {
+        // skip root ceremony under hash-only
+    } else if let Some(root_vk) = root_pubkey {
         let root_hex = hex::encode(root_vk.as_bytes());
         let mut root_violations: Vec<(i64, String, String)> = Vec::new();
         for event in &events {
@@ -718,14 +833,18 @@ fn cmd_fsck(
             }
             healthy = false;
         }
-    } else if !introduces.is_empty() || !revokes.is_empty() {
+    } else if !scan.introduces.is_empty() || !scan.revokes.is_empty() {
         println!("ℹ️  Root cross-check skipped (ROOT_PUBKEY_HEX not set)");
     }
 
     // --- Final verdict ---
     println!();
     if healthy {
-        println!("✅ fsck complete — chain is HEALTHY");
+        if hash_only {
+            println!("✅ fsck complete — hash chain self-consistent (signatures NOT verified)");
+        } else {
+            println!("✅ fsck complete — chain is HEALTHY");
+        }
         ExitCode::SUCCESS
     } else {
         eprintln!("❌ fsck complete — chain is UNHEALTHY");
@@ -865,18 +984,31 @@ fn main() -> ExitCode {
     let db_path = &args[2];
 
     let mut key_path: Option<&str> = None;
+    let mut old_key_path: Option<&str> = None;
+    let mut hash_only = false;
     let mut i = 3;
     while i < args.len() {
         if args[i] == "--key" && i + 1 < args.len() {
             key_path = Some(&args[i + 1]);
             i += 2;
+        } else if args[i] == "--old-key" && i + 1 < args.len() {
+            old_key_path = Some(&args[i + 1]);
+            i += 2;
+        } else if args[i] == "--hash-only" {
+            hash_only = true;
+            i += 1;
         } else {
             eprintln!("Unknown argument: {}", args[i]);
             return ExitCode::from(2);
         }
     }
 
-    let verifying_key: Option<VerifyingKey> = match key_path {
+    if old_key_path.is_some() && key_path.is_none() {
+        eprintln!("Error: --old-key requires --key");
+        return ExitCode::from(2);
+    }
+
+    let active = match key_path {
         Some(kp) => match load_verifying_key(kp) {
             Ok(vk) => Some(vk),
             Err(e) => {
@@ -886,6 +1018,17 @@ fn main() -> ExitCode {
         },
         None => None,
     };
+    let old = match old_key_path {
+        Some(kp) => match load_verifying_key(kp) {
+            Ok(vk) => Some(vk),
+            Err(e) => {
+                eprintln!("{}", e);
+                return ExitCode::from(2);
+            }
+        },
+        None => None,
+    };
+    let trust = TrustKeys { active, old };
 
     let conn = match rusqlite::Connection::open_with_flags(
         db_path,
@@ -901,11 +1044,322 @@ fn main() -> ExitCode {
     let root_pubkey = load_root_pubkey_from_env();
 
     match command.as_str() {
-        "verify" => cmd_verify(&conn, &verifying_key, &root_pubkey),
-        "fsck" => cmd_fsck(&conn, &verifying_key, &root_pubkey),
+        "verify" => cmd_verify(&conn, &trust, &root_pubkey, hash_only),
+        "fsck" => cmd_fsck(&conn, &trust, &root_pubkey, hash_only),
         _ => {
             eprintln!("Unknown command: {}", command);
             usage()
         }
+    }
+}
+
+// ==========================================================================
+// CLI verifier regression tests (findings 1–4)
+// ==========================================================================
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ed25519_dalek::{Signer, SigningKey};
+    use rand_core::OsRng;
+
+    fn keypair() -> (SigningKey, String) {
+        let sk = SigningKey::generate(&mut OsRng);
+        let pk = hex::encode(sk.verifying_key().as_bytes());
+        (sk, pk)
+    }
+
+    fn sign_row(sk: &SigningKey, mut row: EventRow) -> EventRow {
+        row.hash = compute_hash(&row);
+        let hash_bytes = hex::decode(&row.hash).unwrap();
+        row.signature = hex::encode(sk.sign(&hash_bytes).to_bytes());
+        row
+    }
+
+    fn base_row(id: i64, prev: &str, target: &str, payload: &str, pk: Option<&str>) -> EventRow {
+        EventRow {
+            id,
+            timestamp: 1_700_000_000_000 + id as u64,
+            source: "test".into(),
+            target: target.into(),
+            payload: payload.into(),
+            metadata: "{}".into(),
+            caller_key: None,
+            signing_key_pubkey: pk.map(|s| s.to_string()),
+            schema_version: 3,
+            prev_hash: prev.to_string(),
+            hash: String::new(),
+            signature: String::new(),
+        }
+    }
+
+    fn chain_two(sk_a: &SigningKey, pk_a: &str, sk_b: &SigningKey, pk_b: &str) -> Vec<EventRow> {
+        let r1 = sign_row(
+            sk_a,
+            base_row(1, GENESIS_HASH, "t", r#"{"action":"a"}"#, Some(pk_a)),
+        );
+        let r2 = sign_row(
+            sk_b,
+            base_row(2, &r1.hash, "t", r#"{"action":"b"}"#, Some(pk_b)),
+        );
+        vec![r1, r2]
+    }
+
+    #[test]
+    fn refuse_missing_key_hard_fails_without_hash_only() {
+        let empty = TrustKeys::default();
+        assert!(refuse_missing_key(&empty, false).is_some());
+        assert!(refuse_missing_key(&empty, true).is_none());
+
+        let (sk, _) = keypair();
+        let with_key = TrustKeys {
+            active: Some(sk.verifying_key()),
+            old: None,
+        };
+        assert!(refuse_missing_key(&with_key, false).is_none());
+    }
+
+    #[test]
+    fn verify_rejects_attacker_key_and_pubkey() {
+        let (legit, pk_legit) = keypair();
+        let (attacker, pk_att) = keypair();
+        let mut row = sign_row(
+            &legit,
+            base_row(1, GENESIS_HASH, "t", r#"{"action":"ok"}"#, Some(&pk_legit)),
+        );
+        // Forge: rewrite payload, re-sign with attacker, store attacker pubkey.
+        row.payload = r#"{"action":"stolen"}"#.into();
+        row = sign_row(&attacker, row);
+        row.signing_key_pubkey = Some(pk_att);
+
+        let trust = TrustKeys {
+            active: Some(legit.verifying_key()),
+            old: None,
+        };
+        let err = verify_chain(&[row], &trust, false).unwrap_err();
+        assert!(
+            err.1.contains("not in trusted set") || err.1.contains("signature failed"),
+            "unexpected err: {}",
+            err.1
+        );
+    }
+
+    #[test]
+    fn verify_legacy_null_pubkey_under_configured_keys() {
+        let (sk, _) = keypair();
+        let row = sign_row(
+            &sk,
+            base_row(1, GENESIS_HASH, "t", r#"{"action":"legacy"}"#, None),
+        );
+        let trust = TrustKeys {
+            active: Some(sk.verifying_key()),
+            old: None,
+        };
+        let (n, sigs) = verify_chain(&[row], &trust, false).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(sigs, 1);
+    }
+
+    #[test]
+    fn verify_legacy_null_pubkey_accepts_old_key() {
+        let (old_sk, _) = keypair();
+        let (active_sk, _) = keypair();
+        let row = sign_row(
+            &old_sk,
+            base_row(1, GENESIS_HASH, "t", r#"{"action":"legacy-old"}"#, None),
+        );
+        let trust = TrustKeys {
+            active: Some(active_sk.verifying_key()),
+            old: Some(old_sk.verifying_key()),
+        };
+        assert!(verify_chain(&[row], &trust, false).is_ok());
+    }
+
+    #[test]
+    fn verify_rotated_ledger_requires_active_and_old() {
+        let (sk_a, pk_a) = keypair();
+        let (sk_b, pk_b) = keypair();
+        let events = chain_two(&sk_a, &pk_a, &sk_b, &pk_b);
+
+        // Active B only — early A rows fail (kill-criterion scenario).
+        let only_b = TrustKeys {
+            active: Some(sk_b.verifying_key()),
+            old: None,
+        };
+        assert!(verify_chain(&events, &only_b, false).is_err());
+
+        // Active A only — later B rows fail.
+        let only_a = TrustKeys {
+            active: Some(sk_a.verifying_key()),
+            old: None,
+        };
+        assert!(verify_chain(&events, &only_a, false).is_err());
+
+        // Active B + old A — full rotated history verifies.
+        let both = TrustKeys {
+            active: Some(sk_b.verifying_key()),
+            old: Some(sk_a.verifying_key()),
+        };
+        let (n, sigs) = verify_chain(&events, &both, false).unwrap();
+        assert_eq!(n, 2);
+        assert_eq!(sigs, 2);
+    }
+
+    #[test]
+    fn verify_introduced_key_after_introduce() {
+        let (sk_a, pk_a) = keypair();
+        let (sk_c, pk_c) = keypair();
+
+        let r1 = sign_row(
+            &sk_a,
+            base_row(1, GENESIS_HASH, "t", r#"{"action":"a"}"#, Some(&pk_a)),
+        );
+        let intro_payload = format!(
+            r#"{{"new_pubkey_hex":"{}","purpose":"ledger_signing"}}"#,
+            pk_c
+        );
+        let r2 = sign_row(
+            &sk_a,
+            base_row(2, &r1.hash, EVENT_KEY_INTRODUCE, &intro_payload, Some(&pk_a)),
+        );
+        let r3 = sign_row(
+            &sk_c,
+            base_row(3, &r2.hash, "t", r#"{"action":"c"}"#, Some(&pk_c)),
+        );
+
+        let trust = TrustKeys {
+            active: Some(sk_a.verifying_key()),
+            old: None,
+        };
+        let (n, sigs) = verify_chain(&[r1, r2, r3], &trust, false).unwrap();
+        assert_eq!(n, 3);
+        assert_eq!(sigs, 3);
+    }
+
+    #[test]
+    fn verify_use_before_introduce_fails() {
+        let (sk_a, _pk_a) = keypair();
+        let (sk_c, pk_c) = keypair();
+        let row = sign_row(
+            &sk_c,
+            base_row(1, GENESIS_HASH, "t", r#"{"action":"early"}"#, Some(&pk_c)),
+        );
+        let trust = TrustKeys {
+            active: Some(sk_a.verifying_key()),
+            old: None,
+        };
+        let err = verify_chain(&[row], &trust, false).unwrap_err();
+        assert!(err.1.contains("not in trusted set"), "{}", err.1);
+    }
+
+    #[test]
+    fn hash_only_accepts_unsigned_consistent_chain() {
+        let (sk, pk) = keypair();
+        let mut row = sign_row(
+            &sk,
+            base_row(1, GENESIS_HASH, "t", r#"{"action":"x"}"#, Some(&pk)),
+        );
+        // Break the signature but keep a consistent hash chain.
+        row.signature = "00".repeat(64);
+
+        let empty = TrustKeys::default();
+        let (n, sigs) = verify_chain(&[row], &empty, true).unwrap();
+        assert_eq!(n, 1);
+        assert_eq!(sigs, 0, "hash-only must not count signature verifications");
+    }
+
+    #[test]
+    fn hash_only_still_rejects_broken_hash_chain() {
+        let row = EventRow {
+            id: 1,
+            timestamp: 1,
+            source: "t".into(),
+            target: "t".into(),
+            payload: "{}".into(),
+            metadata: "{}".into(),
+            caller_key: None,
+            signing_key_pubkey: None,
+            schema_version: 3,
+            prev_hash: GENESIS_HASH.into(),
+            hash: "deadbeef".into(),
+            signature: "00".repeat(64),
+        };
+        let empty = TrustKeys::default();
+        let err = verify_chain(&[row], &empty, true).unwrap_err();
+        assert!(err.1.contains("hash mismatch"), "{}", err.1);
+    }
+
+    #[test]
+    fn scan_flags_unintroduced_signer() {
+        let configured = HashSet::from(["aa".repeat(32)]);
+        let attacker = "bb".repeat(32);
+        let events = vec![base_row(
+            1,
+            GENESIS_HASH,
+            "t",
+            "{}",
+            Some(&attacker),
+        )];
+        // Don't need real sigs for scan_key_trust.
+        let scan = scan_key_trust(&events, &configured);
+        assert_eq!(scan.unintroduced_signer_events.len(), 1);
+        assert!(!scan.signers_seen.is_subset(
+            &configured
+                .union(&scan.introduced_keys)
+                .cloned()
+                .collect()
+        ));
+    }
+
+    #[test]
+    fn scan_root_pubkey_not_a_configured_row_signer() {
+        // ROOT hex must not seed row trust; only --key / --old-key do.
+        let root_hex = "cc".repeat(32);
+        let attacker = root_hex.clone();
+        let configured = HashSet::new(); // no --key
+        let events = vec![base_row(1, GENESIS_HASH, "t", "{}", Some(&attacker))];
+        let scan = scan_key_trust(&events, &configured);
+        assert_eq!(scan.unintroduced_signer_events.len(), 1);
+        assert!(!configured.contains(&root_hex));
+    }
+
+    #[test]
+    fn scan_revoked_key_use_fails() {
+        let (sk_a, pk_a) = keypair();
+        let (sk_b, pk_b) = keypair();
+
+        let r1 = base_row(1, GENESIS_HASH, "t", r#"{"a":1}"#, Some(&pk_a));
+        let revoke_payload = format!(r#"{{"revoked_pubkey_hex":"{}"}}"#, pk_b);
+        let r2 = base_row(
+            2,
+            "prev-placeholder",
+            EVENT_KEY_REVOKE,
+            &revoke_payload,
+            Some(&pk_a),
+        );
+        let r3 = base_row(3, "prev-placeholder", "t", r#"{"a":3}"#, Some(&pk_b));
+
+        let configured = HashSet::from([pk_a.clone(), pk_b.clone()]);
+        let scan = scan_key_trust(&[r1, r2, r3], &configured);
+        assert!(
+            scan.revoked_key_uses.contains(&3),
+            "event #3 signed by revoked key must be flagged: {:?}",
+            scan.revoked_key_uses
+        );
+        let _ = (sk_a, sk_b); // keys used only for pubkey material
+    }
+
+    #[test]
+    fn configured_signers_include_old_not_root() {
+        let (a, _) = keypair();
+        let (b, _) = keypair();
+        let trust = TrustKeys {
+            active: Some(a.verifying_key()),
+            old: Some(b.verifying_key()),
+        };
+        let set = trust.configured_pubkey_hexes();
+        assert_eq!(set.len(), 2);
+        assert!(set.contains(&hex::encode(a.verifying_key().as_bytes())));
+        assert!(set.contains(&hex::encode(b.verifying_key().as_bytes())));
     }
 }
