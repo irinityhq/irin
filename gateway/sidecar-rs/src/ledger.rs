@@ -482,6 +482,15 @@ impl AuditLedger {
 
             let mut expected_prev_hash = GENESIS_HASH.to_string();
 
+            // Configured keys form the root of the verify trust set. Keys
+            // introduced via verified key_introduce events expand it.
+            // Ceremony is not required for the configured key itself.
+            let mut trusted_pubkeys: HashSet<String> = HashSet::new();
+            trusted_pubkeys.insert(hex::encode(verifying_key.as_bytes()));
+            if let Some(old_key) = &old_verifying_key {
+                trusted_pubkeys.insert(hex::encode(old_key.as_bytes()));
+            }
+
             for event_result in event_iter {
                 let event = event_result?;
 
@@ -556,11 +565,20 @@ impl AuditLedger {
 
                 let signature = Signature::from_bytes(&sig_array);
 
-                // If the event carries signing_key_pubkey, use it to select the
-                // verifying key directly. Otherwise fall back to trial against
-                // the active and old keys (legacy rows without the field).
+                // Trust pin: only configured keys and keys introduced earlier
+                // in this chain may verify signatures. The row's
+                // signing_key_pubkey is a selector within that set — never an
+                // implicit root. Unknown pubkeys hard-fail (closes forge via
+                // attacker key + matching stored pubkey).
                 let sig_valid = if let Some(ref pubkey_hex) = event.signing_key_pubkey {
-                    if let Ok(pk_bytes) = hex::decode(pubkey_hex) {
+                    if !trusted_pubkeys.contains(pubkey_hex) {
+                        error!(
+                            id = event.id,
+                            pubkey = %pubkey_hex,
+                            "ledger verification failed: signing_key_pubkey not in trusted set"
+                        );
+                        false
+                    } else if let Ok(pk_bytes) = hex::decode(pubkey_hex) {
                         if let Ok(pk_arr) = <[u8; 32]>::try_from(pk_bytes.as_slice()) {
                             if let Ok(event_vk) = VerifyingKey::from_bytes(&pk_arr) {
                                 event_vk.verify_strict(&hash_bytes, &signature).is_ok()
@@ -574,7 +592,8 @@ impl AuditLedger {
                         false
                     }
                 } else {
-                    // Legacy event without signing_key_pubkey — trial verify
+                    // Legacy event without signing_key_pubkey — trial against
+                    // configured keys only (not any key claimed by a row).
                     if verifying_key.verify_strict(&hash_bytes, &signature).is_ok() {
                         true
                     } else if let Some(old_key) = &old_verifying_key {
@@ -587,6 +606,19 @@ impl AuditLedger {
                 if !sig_valid {
                     error!(id = event.id, "ledger verification failed: invalid cryptographic signature");
                     return Ok(false);
+                }
+
+                // Expand trust after a verified key_introduce event.
+                if event.target == EVENT_KEY_INTRODUCE {
+                    if let Ok(payload) =
+                        serde_json::from_str::<serde_json::Value>(&event.payload)
+                    {
+                        if let Some(new_pk) =
+                            payload.get("new_pubkey_hex").and_then(|v| v.as_str())
+                        {
+                            trusted_pubkeys.insert(new_pk.to_string());
+                        }
+                    }
                 }
 
                 expected_prev_hash = event.hash;
@@ -608,6 +640,13 @@ impl AuditLedger {
     #[allow(dead_code)]
     pub async fn fsck(&self) -> Result<FsckReport, String> {
         let chain_valid = self.verify_chain().await?;
+
+        // Configured keys are the trust roots — no ceremony required to use them.
+        let mut configured_signers: HashSet<String> = HashSet::new();
+        configured_signers.insert(hex::encode(self.verifying_key.as_bytes()));
+        if let Some(old_key) = &self.old_verifying_key {
+            configured_signers.insert(hex::encode(old_key.as_bytes()));
+        }
 
         let conn_lock = self.conn.lock().await;
         let report = conn_lock
@@ -649,7 +688,14 @@ impl AuditLedger {
                 let mut revoked_keys: HashSet<String> = HashSet::new();
                 let mut duplicate_introduces: Vec<String> = Vec::new();
                 let mut revoked_key_uses: Vec<i64> = Vec::new();
+                let mut unintroduced_signer_events: Vec<i64> = Vec::new();
                 let mut warnings: Vec<String> = Vec::new();
+
+                // Order-aware introduce-before-use: configured roots seed the
+                // known set; key_introduce events expand it after the row is
+                // accounted for (the introduce row itself is signed by the
+                // introducer, not the new key).
+                let mut known_keys: HashSet<String> = configured_signers.clone();
 
                 for event_result in event_iter {
                     let event = event_result?;
@@ -666,9 +712,13 @@ impl AuditLedger {
                         pubkey_missing_on_v3plus.push(eid);
                     }
 
-                    // Track signers
+                    // Track signers; require introduce-before-use (or configured).
                     if let Some(ref pk) = event.signing_key_pubkey {
                         signers_seen.insert(pk.clone());
+
+                        if !known_keys.contains(pk) {
+                            unintroduced_signer_events.push(eid);
+                        }
 
                         // No-use-after-revoke: if this key has been revoked, flag it
                         if revoked_keys.contains(pk) {
@@ -688,6 +738,7 @@ impl AuditLedger {
                                     duplicate_introduces.push(new_pk.to_string());
                                 }
                                 introduced_keys.insert(new_pk.to_string());
+                                known_keys.insert(new_pk.to_string());
                                 introduces.push((eid, new_pk.to_string()));
                             }
                         }
@@ -723,6 +774,8 @@ impl AuditLedger {
                     revokes,
                     signers_seen,
                     introduced_keys,
+                    configured_signers,
+                    unintroduced_signer_events,
                     revoked_keys,
                     revoked_key_uses,
                     duplicate_introduces,
@@ -746,7 +799,13 @@ pub struct FsckReport {
     pub introduces: Vec<(i64, String)>,
     pub revokes: Vec<(i64, String)>,
     pub signers_seen: HashSet<String>,
+    /// Pubkeys from key_introduce ceremony events (excludes configured roots).
     pub introduced_keys: HashSet<String>,
+    /// Configured verifying keys (active + optional rotation old key).
+    pub configured_signers: HashSet<String>,
+    /// Event ids whose signing_key_pubkey was neither configured nor previously
+    /// introduced (introduce-before-use violation).
+    pub unintroduced_signer_events: Vec<i64>,
     pub revoked_keys: HashSet<String>,
     pub revoked_key_uses: Vec<i64>,
     pub duplicate_introduces: Vec<String>,
@@ -754,12 +813,19 @@ pub struct FsckReport {
 }
 
 impl FsckReport {
+    /// Healthy when the chain verifies and policy holds: schema monotonic,
+    /// no use-after-revoke, no duplicate introduces, and every observed signer
+    /// is either configured or introduced (`signers_seen ⊆ introduced ∪ configured`).
     #[allow(dead_code)]
     pub fn is_healthy(&self) -> bool {
         self.chain_valid
             && self.schema_monotonic
             && self.revoked_key_uses.is_empty()
             && self.duplicate_introduces.is_empty()
+            && self.unintroduced_signer_events.is_empty()
+            && self.signers_seen.iter().all(|s| {
+                self.introduced_keys.contains(s) || self.configured_signers.contains(s)
+            })
     }
 }
 
@@ -1215,6 +1281,198 @@ mod tests {
         assert_eq!(report.introduces.len(), 1);
         assert_eq!(report.introduces[0].1, hex::encode(new_bytes));
         assert_eq!(report.introduced_keys.len(), 1);
+        // Configured signer is trusted without ceremony; introduce expands set.
+        assert!(report.unintroduced_signer_events.is_empty());
+        assert!(!report.configured_signers.is_empty());
+        cleanup(&path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Trust-pin proofs: (a) attacker re-sign fails, (b) legacy null-pubkey,
+    // (c) fsck introduce-before-use / signers ⊆ introduced ∪ configured.
+    // -----------------------------------------------------------------------
+
+    /// (a) Tampered payload re-signed with attacker key + matching stored
+    /// pubkey must fail verification (trust pin closes the forge path).
+    #[tokio::test]
+    async fn test_verify_rejects_attacker_key_and_pubkey() {
+        let (ledger, path) = test_ledger("attacker_forge").await;
+        let good = ledger.record_event(test_input("legit")).await.unwrap();
+
+        let attacker = SigningKey::generate(&mut OsRng);
+        let attacker_pubkey = hex::encode(attacker.verifying_key().as_bytes());
+
+        // Forge: keep chain link, change payload, recompute hash under v3,
+        // re-sign with attacker key, store attacker pubkey on the row.
+        let forged_payload =
+            serde_json::to_string(&serde_json::json!({"action": "stolen"})).unwrap();
+        let data_to_hash = build_hash_preimage_v3(
+            good.timestamp,
+            &good.source,
+            &good.target,
+            &forged_payload,
+            &good.metadata,
+            good.schema_version,
+            good.caller_key.as_deref().unwrap_or(""),
+            &good.prev_hash,
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(data_to_hash.as_bytes());
+        let hash_bytes = hasher.finalize();
+        let hash_hex = hex::encode(hash_bytes);
+        let sig_hex = hex::encode(attacker.sign(&hash_bytes).to_bytes());
+
+        let conn = ledger.conn.lock().await;
+        conn.call(move |c| {
+            c.execute(
+                "UPDATE audit_events SET payload = ?1, hash = ?2, signature = ?3, \
+                 signing_key_pubkey = ?4 WHERE id = 1",
+                rusqlite::params![forged_payload, hash_hex, sig_hex, attacker_pubkey],
+            )?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .await
+        .unwrap();
+        drop(conn);
+
+        assert!(
+            !ledger.verify_chain().await.unwrap(),
+            "attacker-signed row with attacker pubkey must hard-fail trust pin"
+        );
+        cleanup(&path);
+    }
+
+    /// (b) Legacy row without stored pubkey still verifies under the
+    /// configured key (no ceremony required).
+    #[tokio::test]
+    async fn test_verify_legacy_null_pubkey_under_configured_key() {
+        let (ledger, path) = test_ledger("legacy_null_pubkey").await;
+        ledger.record_event(test_input("legacy")).await.unwrap();
+
+        let conn = ledger.conn.lock().await;
+        conn.call(|c| {
+            c.execute(
+                "UPDATE audit_events SET signing_key_pubkey = NULL WHERE id = 1",
+                [],
+            )?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .await
+        .unwrap();
+        drop(conn);
+
+        assert!(
+            ledger.verify_chain().await.unwrap(),
+            "legacy null-pubkey rows must still verify under the configured key"
+        );
+        cleanup(&path);
+    }
+
+    /// (c) Fsck asserts every observed signer is configured or introduced
+    /// (signers_seen ⊆ introduced_keys ∪ configured_signers); unknown signer
+    /// is not "implicit root".
+    #[tokio::test]
+    async fn test_fsck_unintroduced_signer_unhealthy() {
+        // Pure policy unit: report fields drive is_healthy without a DB forge.
+        let configured = "aa".repeat(32);
+        let attacker = "bb".repeat(32);
+        let introduced = "cc".repeat(32);
+
+        let healthy = FsckReport {
+            chain_valid: true,
+            schema_monotonic: true,
+            total_events: 2,
+            pubkey_missing_on_v3plus: vec![],
+            introduces: vec![(2, introduced.clone())],
+            revokes: vec![],
+            signers_seen: HashSet::from([configured.clone(), introduced.clone()]),
+            introduced_keys: HashSet::from([introduced.clone()]),
+            configured_signers: HashSet::from([configured.clone()]),
+            unintroduced_signer_events: vec![],
+            revoked_keys: HashSet::new(),
+            revoked_key_uses: vec![],
+            duplicate_introduces: vec![],
+            warnings: vec![],
+        };
+        assert!(healthy.is_healthy());
+        assert!(healthy
+            .signers_seen
+            .iter()
+            .all(|s| healthy.introduced_keys.contains(s)
+                || healthy.configured_signers.contains(s)));
+
+        let unintroduced = FsckReport {
+            chain_valid: true,
+            schema_monotonic: true,
+            total_events: 1,
+            pubkey_missing_on_v3plus: vec![],
+            introduces: vec![],
+            revokes: vec![],
+            signers_seen: HashSet::from([attacker.clone()]),
+            introduced_keys: HashSet::new(),
+            configured_signers: HashSet::from([configured]),
+            unintroduced_signer_events: vec![1],
+            revoked_keys: HashSet::new(),
+            revoked_key_uses: vec![],
+            duplicate_introduces: vec![],
+            warnings: vec![],
+        };
+        assert!(
+            !unintroduced.is_healthy(),
+            "unknown signing_key_pubkey must make fsck unhealthy"
+        );
+        assert!(!unintroduced.signers_seen.is_subset(
+            &unintroduced
+                .introduced_keys
+                .union(&unintroduced.configured_signers)
+                .cloned()
+                .collect()
+        ));
+    }
+
+    /// Integration: attacker forge also fails fsck (chain_valid + unintroduced).
+    #[tokio::test]
+    async fn test_fsck_rejects_attacker_forge_path() {
+        let (ledger, path) = test_ledger("fsck_attacker_forge").await;
+        let good = ledger.record_event(test_input("legit")).await.unwrap();
+
+        let attacker = SigningKey::generate(&mut OsRng);
+        let attacker_pubkey = hex::encode(attacker.verifying_key().as_bytes());
+        let forged_payload =
+            serde_json::to_string(&serde_json::json!({"action": "stolen"})).unwrap();
+        let data_to_hash = build_hash_preimage_v3(
+            good.timestamp,
+            &good.source,
+            &good.target,
+            &forged_payload,
+            &good.metadata,
+            good.schema_version,
+            good.caller_key.as_deref().unwrap_or(""),
+            &good.prev_hash,
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(data_to_hash.as_bytes());
+        let hash_bytes = hasher.finalize();
+        let hash_hex = hex::encode(hash_bytes);
+        let sig_hex = hex::encode(attacker.sign(&hash_bytes).to_bytes());
+
+        let conn = ledger.conn.lock().await;
+        conn.call(move |c| {
+            c.execute(
+                "UPDATE audit_events SET payload = ?1, hash = ?2, signature = ?3, \
+                 signing_key_pubkey = ?4 WHERE id = 1",
+                rusqlite::params![forged_payload, hash_hex, sig_hex, attacker_pubkey],
+            )?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .await
+        .unwrap();
+        drop(conn);
+
+        let report = ledger.fsck().await.unwrap();
+        assert!(!report.chain_valid);
+        assert!(!report.unintroduced_signer_events.is_empty());
+        assert!(!report.is_healthy());
         cleanup(&path);
     }
 }

@@ -213,6 +213,14 @@ fn verify_chain(
     let mut verified: u64 = 0;
     let mut sig_verified: u64 = 0;
 
+    // --key is authoritative: only that key (plus keys introduced under it)
+    // may verify signatures. Row-stored signing_key_pubkey is a selector in
+    // the trust set, never an implicit root.
+    let mut trusted_pubkeys: HashSet<String> = HashSet::new();
+    if let Some(ref vk) = verifying_key {
+        trusted_pubkeys.insert(hex::encode(vk.as_bytes()));
+    }
+
     for event in events {
         if event.prev_hash != expected_prev {
             return Err((
@@ -243,26 +251,48 @@ fn verify_chain(
             .map_err(|_| (event.id, "signature wrong length".to_string()))?;
         let sig = Signature::from_bytes(&sig_array);
 
-        if let Some(ref pubkey_hex) = event.signing_key_pubkey {
-            let pk_bytes = hex::decode(pubkey_hex)
-                .map_err(|_| (event.id, "invalid signing_key_pubkey hex".to_string()))?;
-            let pk_arr: [u8; 32] = pk_bytes
-                .try_into()
-                .map_err(|_| (event.id, "signing_key_pubkey wrong length".to_string()))?;
-            let event_vk = VerifyingKey::from_bytes(&pk_arr)
-                .map_err(|_| (event.id, "invalid public key".to_string()))?;
-            if event_vk.verify_strict(&hash_bytes, &sig).is_err() {
-                return Err((
-                    event.id,
-                    format!("signature failed (signing_key_pubkey={})", pubkey_hex),
-                ));
+        if verifying_key.is_some() {
+            if let Some(ref pubkey_hex) = event.signing_key_pubkey {
+                if !trusted_pubkeys.contains(pubkey_hex) {
+                    return Err((
+                        event.id,
+                        format!(
+                            "signing_key_pubkey not in trusted set (pubkey={})",
+                            pubkey_hex
+                        ),
+                    ));
+                }
+                let pk_bytes = hex::decode(pubkey_hex)
+                    .map_err(|_| (event.id, "invalid signing_key_pubkey hex".to_string()))?;
+                let pk_arr: [u8; 32] = pk_bytes
+                    .try_into()
+                    .map_err(|_| (event.id, "signing_key_pubkey wrong length".to_string()))?;
+                let event_vk = VerifyingKey::from_bytes(&pk_arr)
+                    .map_err(|_| (event.id, "invalid public key".to_string()))?;
+                if event_vk.verify_strict(&hash_bytes, &sig).is_err() {
+                    return Err((
+                        event.id,
+                        format!("signature failed (signing_key_pubkey={})", pubkey_hex),
+                    ));
+                }
+                sig_verified += 1;
+            } else if let Some(ref vk) = verifying_key {
+                // Legacy row without stored pubkey — trial against --key only.
+                if vk.verify_strict(&hash_bytes, &sig).is_err() {
+                    return Err((event.id, "signature failed".to_string()));
+                }
+                sig_verified += 1;
             }
-            sig_verified += 1;
-        } else if let Some(ref vk) = verifying_key {
-            if vk.verify_strict(&hash_bytes, &sig).is_err() {
-                return Err((event.id, "signature failed".to_string()));
+        }
+        // Without --key: hash chain only (never trust row-stored pubkey).
+
+        // Expand trust after a verified key_introduce when --key is set.
+        if verifying_key.is_some() && event.target == EVENT_KEY_INTRODUCE {
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&event.payload) {
+                if let Some(new_pk) = payload.get("new_pubkey_hex").and_then(|v| v.as_str()) {
+                    trusted_pubkeys.insert(new_pk.to_string());
+                }
             }
-            sig_verified += 1;
         }
 
         expected_prev = event.hash.clone();
@@ -465,6 +495,16 @@ fn cmd_fsck(
     }
 
     // --- 4. Key trust chain ---
+    // Configured --key (and optional ROOT_PUBKEY_HEX) seed the known set;
+    // key_introduce expands it. Unknown signers hard-fail — never "implicit root".
+    let mut configured_signers: HashSet<String> = HashSet::new();
+    if let Some(ref vk) = verifying_key {
+        configured_signers.insert(hex::encode(vk.as_bytes()));
+    }
+    if let Some(ref root_vk) = root_pubkey {
+        configured_signers.insert(hex::encode(root_vk.as_bytes()));
+    }
+    let mut known_keys: HashSet<String> = configured_signers.clone();
     let mut signers_seen: HashSet<String> = HashSet::new();
     let mut introduces: Vec<(i64, String)> = Vec::new();
     let mut revokes: Vec<(i64, String)> = Vec::new();
@@ -472,11 +512,15 @@ fn cmd_fsck(
     let mut revoked_keys: HashSet<String> = HashSet::new();
     let mut duplicate_introduces: Vec<String> = Vec::new();
     let mut revoked_key_uses: Vec<i64> = Vec::new();
+    let mut unintroduced_signer_events: Vec<(i64, String)> = Vec::new();
     let mut envelope_failures: Vec<(i64, String)> = Vec::new();
 
     for event in &events {
         if let Some(ref pk) = event.signing_key_pubkey {
             signers_seen.insert(pk.clone());
+            if !known_keys.contains(pk) {
+                unintroduced_signer_events.push((event.id, pk.clone()));
+            }
             if revoked_keys.contains(pk) {
                 revoked_key_uses.push(event.id);
             }
@@ -489,6 +533,7 @@ fn cmd_fsck(
                         duplicate_introduces.push(new_pk.to_string());
                     }
                     introduced_keys.insert(new_pk.to_string());
+                    known_keys.insert(new_pk.to_string());
                     introduces.push((event.id, new_pk.to_string()));
                 }
                 if let (Some(env_sig), Some(signer_hex)) = (
@@ -562,9 +607,12 @@ fn cmd_fsck(
             "active"
         };
         let intro = introduces.iter().find(|(_, p)| p == pk);
-        let intro_str = match intro {
-            Some((eid, _)) => format!("introduced at event #{}", eid),
-            None => "implicit root".to_string(),
+        let intro_str = if configured_signers.contains(pk) {
+            "configured root".to_string()
+        } else if let Some((eid, _)) = intro {
+            format!("introduced at event #{}", eid)
+        } else {
+            "UNKNOWN (not configured, not introduced)".to_string()
         };
         println!("   - {}... ({}, {})", short, status, intro_str);
     }
@@ -573,6 +621,26 @@ fn cmd_fsck(
         introduces.len(),
         revokes.len()
     );
+
+    // Introduce-before-use: signers_seen ⊆ introduced ∪ configured.
+    // Requires a trust root (--key and/or ROOT_PUBKEY_HEX); without one we
+    // cannot pin signers and only report (hash chain already checked above).
+    if configured_signers.is_empty() {
+        if !signers_seen.is_empty() {
+            println!("ℹ️  Signer trust check skipped (no --key / ROOT_PUBKEY_HEX)");
+        }
+    } else if unintroduced_signer_events.is_empty() {
+        println!("✅ All signers configured or introduced before use");
+    } else {
+        for (id, pk) in &unintroduced_signer_events {
+            let short = &pk[..pk.len().min(12)];
+            eprintln!(
+                "❌ Event #{}: signing_key_pubkey {}... not in trusted set",
+                id, short
+            );
+        }
+        healthy = false;
+    }
 
     // --- 5. Revoked key usage ---
     if revoked_key_uses.is_empty() {
