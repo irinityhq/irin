@@ -23,8 +23,25 @@ pub(super) fn is_ws_subprotocol_path(norm_path: &str) -> bool {
     p == "/ws/deliberate" || p == "/ws/librarian" || p.starts_with("/ws/librarian/")
 }
 
-/// Validate WebSocket upgrade when bearer auth is required (browser cannot send Authorization).
+/// Origin gate for WebSocket upgrades — mirrors the full CORS allow predicate
+/// (loopback *plus* configured origins such as `tauri://localhost`), not
+/// loopback-only. Absent `Origin` is a non-browser local client and is allowed.
+pub(super) fn check_ws_origin(headers: &HeaderMap) -> Result<(), StatusCode> {
+    match headers.get(axum::http::header::ORIGIN) {
+        None => Ok(()),
+        Some(origin) if super::origin_is_allowed(origin) => Ok(()),
+        Some(_) => Err(StatusCode::FORBIDDEN),
+    }
+}
+
+/// Validate WebSocket upgrade: Origin gate always, then subprotocol token when
+/// bearer auth is configured (browsers cannot send `Authorization` on WS).
 pub(super) fn validate_ws_upgrade(headers: &HeaderMap) -> Result<(), StatusCode> {
+    // Cross-origin pages must not open the local council socket even in the
+    // token-less default posture. Absent Origin stays allowed for CLI/local
+    // clients; present Origin must match CORS allow (loopback + tauri list).
+    check_ws_origin(headers)?;
+
     let auth_config = super::AUTH_CONFIG
         .get()
         .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -60,36 +77,63 @@ pub(super) fn validate_ws_upgrade(headers: &HeaderMap) -> Result<(), StatusCode>
     }
 }
 
+/// Acquire one slot on the shared deliberate concurrency cap (audit #6).
+/// Non-blocking: a full pool fails fast with 429 instead of queueing.
+pub(super) fn acquire_deliberate_permit(
+    state: &AppState,
+) -> Result<tokio::sync::OwnedSemaphorePermit, StatusCode> {
+    match state.deliberate_semaphore.clone().try_acquire_owned() {
+        Ok(p) => Ok(p),
+        Err(_) => {
+            eprintln!(
+                "⚠️  deliberate_at_capacity: 429 (audit #6 concurrency cap reached; ws/deliberate)"
+            );
+            Err(StatusCode::TOO_MANY_REQUESTS)
+        }
+    }
+}
+
 /// WS /ws/deliberate — streaming deliberation.
 pub(super) async fn ws_deliberate(
     State(state): State<AppState>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    if validate_ws_upgrade(&headers).is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(status) = validate_ws_upgrade(&headers) {
+        return status.into_response();
     }
+    // Share the HTTP deliberate concurrency cap (audit #6).
+    let permit = match acquire_deliberate_permit(&state) {
+        Ok(p) => p,
+        Err(status) => return status.into_response(),
+    };
     // Browsers require the server to echo a negotiated subprotocol in the 101 response.
     // War Room sends `["council", "token.<secret>"]` (see warroom/web/lib/ws.ts); axum splits
     // comma-separated `Sec-WebSocket-Protocol` values and `protocols(["council"])` selects it.
     ws.protocols(["council"])
-        .on_upgrade(move |socket| super::ws_deliberate::handle_ws(socket, state))
+        .on_upgrade(move |socket| async move {
+            // Hold the permit for the connection lifetime so concurrent WS
+            // deliberations share the same cap as POST /api/deliberate.
+            let _permit = permit;
+            super::ws_deliberate::handle_ws(socket, state).await
+        })
 }
 
 /// WS /ws/librarian/{chat_id} — streaming librarian ask (R20).
 ///
-/// Same upgrade/auth posture as `/ws/deliberate`: subprotocol `token.<secret>`
-/// validated by `validate_ws_upgrade`, bearer skipped in `auth_middleware` via
-/// `is_ws_subprotocol_path`, and the negotiated `council` subprotocol echoed on
-/// the 101 so browser WebSocket open succeeds.
+/// Same upgrade/auth posture as `/ws/deliberate`: Origin gate + subprotocol
+/// `token.<secret>` via `validate_ws_upgrade`, bearer skipped in
+/// `auth_middleware` via `is_ws_subprotocol_path`, and the negotiated `council`
+/// subprotocol echoed on the 101 so browser WebSocket open succeeds.
+/// Does **not** consume `deliberate_semaphore` (librarian has its own cap).
 pub(super) async fn ws_librarian(
     State(state): State<AppState>,
     Path(chat_id): Path<String>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    if validate_ws_upgrade(&headers).is_err() {
-        return StatusCode::UNAUTHORIZED.into_response();
+    if let Err(status) = validate_ws_upgrade(&headers) {
+        return status.into_response();
     }
     ws.protocols(["council"])
         .on_upgrade(move |socket| handle_ws_librarian(socket, state, chat_id))
@@ -269,11 +313,13 @@ pub(crate) fn ws_path_skips_bearer_auth(norm_path: &str) -> bool {
 
 #[cfg(test)]
 mod ws_upgrade_auth_tests {
-    use super::super::{AUTH_CONFIG, AuthConfig, router};
+    use super::super::{AUTH_CONFIG, AuthConfig, origin_is_allowed, router};
     use super::*;
     use crate::config::Config;
+    use crate::librarian;
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
     use std::sync::Arc;
+    use tokio::sync::Semaphore;
 
     fn install_auth(token: &str) {
         let _ = AUTH_CONFIG.get_or_init(|| AuthConfig {
@@ -296,6 +342,14 @@ mod ws_upgrade_auth_tests {
             tera: tera::Tera::default(),
             base_dir: std::env::temp_dir(),
         })
+    }
+
+    fn test_app_state(sem_permits: usize) -> AppState {
+        AppState {
+            config: empty_config(),
+            librarian: librarian::routes::LibrarianState::from_env(),
+            deliberate_semaphore: Arc::new(Semaphore::new(sem_permits)),
+        }
     }
 
     #[test]
@@ -324,6 +378,113 @@ mod ws_upgrade_auth_tests {
             HeaderValue::from_static("council, token.wrong"),
         );
         assert_eq!(validate_ws_upgrade(&headers), Err(StatusCode::UNAUTHORIZED));
+    }
+
+    /// (a) Cross-origin browser Origin is refused even when the subprotocol
+    /// token would otherwise satisfy auth. Origin is checked first, so this
+    /// also covers the token-less default posture (same early gate).
+    #[test]
+    fn validate_ws_upgrade_rejects_evil_origin() {
+        install_auth("ws-test-secret");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            HeaderValue::from_static("https://evil.example"),
+        );
+        assert_eq!(
+            check_ws_origin(&headers),
+            Err(StatusCode::FORBIDDEN),
+            "evil Origin must be refused"
+        );
+        // Correct token still cannot override Origin.
+        headers.insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_static("council, token.ws-test-secret"),
+        );
+        assert_eq!(
+            validate_ws_upgrade(&headers),
+            Err(StatusCode::FORBIDDEN),
+            "token does not override Origin gate"
+        );
+        // Without Origin header present, the same token is accepted (token-less
+        // non-browser clients use absent Origin; browsers always send one).
+        let mut no_origin = HeaderMap::new();
+        no_origin.insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_static("council, token.ws-test-secret"),
+        );
+        assert_eq!(validate_ws_upgrade(&no_origin), Ok(()));
+    }
+
+    /// (b) Loopback Origin, absent Origin, and configured tauri://localhost stay allowed.
+    #[test]
+    fn validate_ws_upgrade_allows_loopback_absent_and_tauri_origins() {
+        install_auth("ws-test-secret");
+
+        // Absent Origin = non-browser local client.
+        assert_eq!(check_ws_origin(&HeaderMap::new()), Ok(()));
+
+        for origin in [
+            "http://127.0.0.1:3010",
+            "http://localhost:3000",
+            "https://localhost:3010",
+            "tauri://localhost",
+        ] {
+            assert!(
+                origin_is_allowed(&HeaderValue::from_static(origin)),
+                "expected allowed: {origin}"
+            );
+            let mut h = HeaderMap::new();
+            h.insert(axum::http::header::ORIGIN, HeaderValue::from_static(origin));
+            assert_eq!(
+                check_ws_origin(&h),
+                Ok(()),
+                "Origin gate must allow {origin}"
+            );
+        }
+
+        // token.<secret> subprotocol path keeps working with tauri Origin.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            HeaderValue::from_static("tauri://localhost"),
+        );
+        headers.insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_static("council, token.ws-test-secret"),
+        );
+        assert_eq!(validate_ws_upgrade(&headers), Ok(()));
+
+        // Loopback Origin + correct token also allowed.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::ORIGIN,
+            HeaderValue::from_static("http://127.0.0.1:3010"),
+        );
+        headers.insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_static("council, token.ws-test-secret"),
+        );
+        assert_eq!(validate_ws_upgrade(&headers), Ok(()));
+    }
+
+    /// (c) N concurrent WS deliberation permits fill the shared cap; N+1
+    /// is shed with 429 (same helper `ws_deliberate` calls before upgrade).
+    #[test]
+    fn ws_deliberate_sheds_when_concurrency_cap_saturated() {
+        let state = test_app_state(2);
+        let p1 = acquire_deliberate_permit(&state).expect("first slot");
+        let p2 = acquire_deliberate_permit(&state).expect("second slot");
+        assert_eq!(
+            acquire_deliberate_permit(&state).err(),
+            Some(StatusCode::TOO_MANY_REQUESTS),
+            "N+1 concurrent WS deliberation must be shed by the shared cap"
+        );
+        drop(p1);
+        // Freeing one slot re-opens capacity.
+        let p3 = acquire_deliberate_permit(&state).expect("slot after release");
+        drop(p2);
+        drop(p3);
     }
 
     /// A bearer-protected mutating route must 401 when no Authorization header

@@ -281,9 +281,9 @@ pub struct AppState {
     ///
     /// NOT-DONE (revisit triggers): the cap is GLOBAL, not per-caller — fine for
     /// the single-tenant canary; the moment a second auth subject exists it must
-    /// become per-subject. `/ws/deliberate` is intentionally UNCAPPED (single-
-    /// sovereign warroom UI, not gateway-reachable) — the moment WS is gateway-
-    /// reachable or multi-subject, it inherits this cap.
+    /// become per-subject. Shared by `POST /api/deliberate` and
+    /// `GET /ws/deliberate` so burst cost-exhaustion cannot bypass the HTTP cap
+    /// via the WebSocket path.
     pub deliberate_semaphore: Arc<Semaphore>,
 }
 
@@ -336,7 +336,7 @@ pub fn router_with_web_dist(config: Arc<Config>, web_dist: Option<WebDist>) -> R
 
     let configured_origins = configured_cors_origins();
     let allowed_origins = AllowOrigin::predicate(move |origin, _| {
-        origin_is_loopback(origin) || configured_origins.iter().any(|allowed| allowed == origin)
+        origin_is_allowed_with(origin, &configured_origins)
     });
 
     let cors = CorsLayer::new()
@@ -397,10 +397,8 @@ pub fn router_with_web_dist(config: Arc<Config>, web_dist: Option<WebDist>) -> R
             get(meta_review::meta_review_latest),
         )
         .route("/api/deliberate", post(deliberate::deliberate_handler))
-        // TODO(multi-tenant): /ws/deliberate is intentionally NOT behind
-        // deliberate_semaphore (audit #6) — single-sovereign warroom UI, not
-        // gateway-reachable. The moment it becomes gateway-reachable or serves a
-        // second auth subject, it must inherit the same concurrency cap.
+        // /ws/deliberate shares deliberate_semaphore with POST /api/deliberate
+        // (audit #6 concurrency cap); permit is acquired in the upgrade handler.
         .route("/ws/deliberate", get(ws::ws_deliberate))
         .route("/ws/librarian/{chat_id}", get(ws::ws_librarian))
         // Keep unknown reserved-prefix paths behind the same auth middleware
@@ -444,12 +442,26 @@ fn default_cors_origins() -> Vec<HeaderValue> {
     ]
 }
 
+/// Full CORS / WS Origin allow predicate: loopback *or* configured allow-list
+/// (defaults include `tauri://localhost`). Shared by the CORS layer and
+/// `validate_ws_upgrade` so the WebSocket gate cannot drift from HTTP CORS.
+pub(super) fn origin_is_allowed(origin: &HeaderValue) -> bool {
+    origin_is_allowed_with(origin, &configured_cors_origins())
+}
+
+fn origin_is_allowed_with(origin: &HeaderValue, configured: &[HeaderValue]) -> bool {
+    origin_is_loopback(origin) || configured.iter().any(|allowed| allowed == origin)
+}
+
 /// Any loopback origin (any port on localhost / 127.0.0.1/8 / [::1]) is
 /// always allowed. A page sending a loopback Origin is served from this
 /// machine, which is already the trust boundary for a token-less loopback
 /// bind; a hostile external page carries its own non-loopback Origin and is
 /// rejected. Non-loopback origins (e.g. a tailnet address serving the UI to
 /// a phone) must be listed in COUNCIL_CORS_ORIGINS.
+///
+/// NOTE: `tauri://localhost` is **not** loopback under this helper (http/https
+/// only). It is allowed via [`origin_is_allowed`] / the configured list.
 fn origin_is_loopback(origin: &HeaderValue) -> bool {
     let Ok(s) = origin.to_str() else {
         return false;
