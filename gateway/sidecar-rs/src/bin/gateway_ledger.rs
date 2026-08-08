@@ -49,8 +49,11 @@ fn usage() -> ExitCode {
     eprintln!("                     --hash-only). Authoritative row-signing trust root.");
     eprintln!("  --old-key <path>   Previous configured key during rotation (optional).");
     eprintln!("                     Mirrors the sidecar old_verifying_key trust root.");
-    eprintln!("  --hash-only        Hash/link check only; signatures are NOT verified.");
-    eprintln!("                     Exit 0 means the chain is self-consistent, not signed.");
+    eprintln!("  --hash-only        Skip row-signature/trust proof; hash links still checked.");
+    eprintln!("                     Fsck keeps unsigned semantic checks (revoked-key use,");
+    eprintln!(
+        "                     duplicate introduces, ceremony envelopes). Not a signed proof."
+    );
     ExitCode::from(2)
 }
 
@@ -459,8 +462,7 @@ fn cmd_verify(
                                 event.id, event.target
                             );
                             violations += 1;
-                        } else if !verify_ceremony_envelope(&event.target, &event.payload, sig, s)
-                        {
+                        } else if !verify_ceremony_envelope(&event.target, &event.payload, sig, s) {
                             eprintln!(
                                 "❌ Event #{} ({}): root envelope signature invalid",
                                 event.id, event.target
@@ -503,6 +505,9 @@ struct KeyTrustScan {
     signers_seen: HashSet<String>,
     introduces: Vec<(i64, String)>,
     revokes: Vec<(i64, String)>,
+    // Read only by unit tests proving the subset relation; runtime consumers
+    // use `unintroduced_signer_events`.
+    #[cfg_attr(not(test), allow(dead_code))]
     introduced_keys: HashSet<String>,
     revoked_keys: HashSet<String>,
     duplicate_introduces: Vec<String>,
@@ -1220,7 +1225,13 @@ mod tests {
         );
         let r2 = sign_row(
             &sk_a,
-            base_row(2, &r1.hash, EVENT_KEY_INTRODUCE, &intro_payload, Some(&pk_a)),
+            base_row(
+                2,
+                &r1.hash,
+                EVENT_KEY_INTRODUCE,
+                &intro_payload,
+                Some(&pk_a),
+            ),
         );
         let r3 = sign_row(
             &sk_c,
@@ -1293,22 +1304,13 @@ mod tests {
     fn scan_flags_unintroduced_signer() {
         let configured = HashSet::from(["aa".repeat(32)]);
         let attacker = "bb".repeat(32);
-        let events = vec![base_row(
-            1,
-            GENESIS_HASH,
-            "t",
-            "{}",
-            Some(&attacker),
-        )];
+        let events = vec![base_row(1, GENESIS_HASH, "t", "{}", Some(&attacker))];
         // Don't need real sigs for scan_key_trust.
         let scan = scan_key_trust(&events, &configured);
         assert_eq!(scan.unintroduced_signer_events.len(), 1);
-        assert!(!scan.signers_seen.is_subset(
-            &configured
-                .union(&scan.introduced_keys)
-                .cloned()
-                .collect()
-        ));
+        assert!(!scan
+            .signers_seen
+            .is_subset(&configured.union(&scan.introduced_keys).cloned().collect()));
     }
 
     #[test]

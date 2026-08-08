@@ -826,9 +826,10 @@ impl FsckReport {
             && self.revoked_key_uses.is_empty()
             && self.duplicate_introduces.is_empty()
             && self.unintroduced_signer_events.is_empty()
-            && self.signers_seen.iter().all(|s| {
-                self.introduced_keys.contains(s) || self.configured_signers.contains(s)
-            })
+            && self
+                .signers_seen
+                .iter()
+                .all(|s| self.introduced_keys.contains(s) || self.configured_signers.contains(s))
     }
 }
 
@@ -1398,11 +1399,13 @@ mod tests {
             warnings: vec![],
         };
         assert!(healthy.is_healthy());
-        assert!(healthy
-            .signers_seen
-            .iter()
-            .all(|s| healthy.introduced_keys.contains(s)
-                || healthy.configured_signers.contains(s)));
+        assert!(
+            healthy
+                .signers_seen
+                .iter()
+                .all(|s| healthy.introduced_keys.contains(s)
+                    || healthy.configured_signers.contains(s))
+        );
 
         let unintroduced = FsckReport {
             chain_valid: true,
@@ -1570,7 +1573,15 @@ mod tests {
         let derived = SigningKey::from_bytes(&seed_a).verifying_key();
         // When raw parse fails, the pre-fix path dropped old trust entirely.
         // The product path must still have a real old verifying key.
-        if raw_vk.is_err() {
+        if let Ok(accidental_vk) = raw_vk {
+            // Extremely rare: seed happened to be a valid point — still must
+            // use the SigningKey-derived pubkey, not the seed-as-point.
+            assert_ne!(
+                hex::encode(accidental_vk.as_bytes()),
+                hex::encode(derived.as_bytes()),
+                "if seed is accidentally a valid point, product still uses SigningKey derivation"
+            );
+        } else {
             // Common case: seed is not a curve point — product path still works.
             let path = temp_db_path("old_key_not_vk");
             let _ = std::fs::remove_file(&path);
@@ -1590,14 +1601,6 @@ mod tests {
             );
             assert!(ledger.verify_chain().await.unwrap());
             cleanup(&path);
-        } else {
-            // Extremely rare: seed happened to be a valid point — still must
-            // use the SigningKey-derived pubkey, not the seed-as-point.
-            assert_ne!(
-                hex::encode(raw_vk.unwrap().as_bytes()),
-                hex::encode(derived.as_bytes()),
-                "if seed is accidentally a valid point, product still uses SigningKey derivation"
-            );
         }
     }
 }

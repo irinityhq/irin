@@ -116,8 +116,10 @@ gateway-ledger fsck /path/to/ledger.db \
 ```
 
 `--key` is required for a signed result. Without it the CLI fails closed.
-`--hash-only` is diagnostics only (hash links; signatures are **not**
-verified) and must not be treated as cryptographic proof.
+`--hash-only` skips row-signature/trust proof (signatures are **not**
+verified) while keeping hash-link checks and, on `fsck`, unsigned semantic
+checks (revoked-key use, duplicate introduces, ceremony envelopes). It is
+not cryptographic proof of signing.
 
 The signing key is exactly 32 bytes. Never replace it in place while the
 sidecar is running. A signing-key rotation must keep the prior key available

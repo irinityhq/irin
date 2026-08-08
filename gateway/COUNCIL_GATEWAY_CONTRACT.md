@@ -429,10 +429,11 @@ semantic check (same trust set as `verify`):
 
 **`gateway-ledger generate-key <output-path>`** — generates a 32-byte Ed25519 seed file (chmod 600).
 
-**`--hash-only`** — optional flag for both `verify` and `fsck`. Checks hash
-links only; **signatures are NOT verified**. Exit 0 means the chain is
-self-consistent, not that it is signed. Use only for unsigned diagnostics;
-normal operator runs must pass `--key`.
+**`--hash-only`** — optional flag for both `verify` and `fsck`. Skips
+row-signature and trust-set proof (signatures are **not** verified). Hash
+links still run. On `fsck`, unsigned semantic checks stay active (revoked-key
+use, duplicate introduces, ceremony-envelope validity). Exit 0 is not a signed
+proof. Normal operator runs must pass `--key`.
 
 Without `--key` and without `--hash-only`, `verify`/`fsck` **fail closed**
 (exit 1).

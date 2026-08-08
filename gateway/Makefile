@@ -334,7 +334,12 @@ ledger-fsck:
 	KEY_FLAG=""; \
 	OLD_KEY_FLAG=""; \
 	if [ -f "$(LEDGER_KEY_PATH)" ]; then KEY_FLAG="--key $(LEDGER_KEY_PATH)"; fi; \
-	if [ -n "$${LEDGER_OLD_SIGNING_KEY_PATH:-}" ] && [ -f "$${LEDGER_OLD_SIGNING_KEY_PATH}" ]; then \
+	if [ -n "$${LEDGER_OLD_SIGNING_KEY_PATH:-}" ]; then \
+		if [ ! -f "$${LEDGER_OLD_SIGNING_KEY_PATH}" ]; then \
+			echo "FATAL: LEDGER_OLD_SIGNING_KEY_PATH is set but not a readable regular file: $${LEDGER_OLD_SIGNING_KEY_PATH}"; \
+			echo "       Fix the path or unset LEDGER_OLD_SIGNING_KEY_PATH (do not silently drop --old-key)."; \
+			exit 1; \
+		fi; \
 		OLD_KEY_FLAG="--old-key $${LEDGER_OLD_SIGNING_KEY_PATH}"; \
 	fi; \
 	if [ -z "$$KEY_FLAG" ]; then \
