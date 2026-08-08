@@ -20,6 +20,7 @@ mod launch;
 mod paths;
 mod status;
 mod types;
+mod watch_profile;
 
 // --- Public surface (unchanged from monolithic mod.rs) ---
 
@@ -50,6 +51,10 @@ pub use install::{install_pack_files, installed_pack_root};
 pub use enable::{
     disable_gateway_pack, enable_gateway_pack, lifecycle_stage, stop_gateway_pack,
     uninstall_gateway_pack,
+};
+
+pub use watch_profile::{
+    set_watch_sentinels_enabled, watch_inbox_path_string, watch_sentinels_enabled,
 };
 
 #[cfg(test)]

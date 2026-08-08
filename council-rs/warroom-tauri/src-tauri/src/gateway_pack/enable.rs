@@ -33,9 +33,8 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// Global lifecycle lock — enable/disable/stop/uninstall must not interleave.
-/// Global lifecycle lock — enable/disable/stop/uninstall must not interleave.
-static LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
+/// Global lifecycle lock — enable/disable/stop/uninstall/watch-profile must not interleave.
+pub(crate) static LIFECYCLE_LOCK: Mutex<()> = Mutex::new(());
 
 pub(crate) const COMPOSE_UP_ARGS: &[&str] =
     &["up", "-d", "--remove-orphans", "--force-recreate", "--wait"];
