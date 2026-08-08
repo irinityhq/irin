@@ -13,7 +13,7 @@ use super::install::{
     verify_images_present, verify_pack_asset_integrity,
 };
 use super::keys::{ensure_arm_keys_file, ensure_ledger_key, random_hex};
-use super::paths::{gateway_data_dir, public_env_path, PACK_DIR_NAME};
+use super::paths::{ensure_watch_dirs, gateway_data_dir, public_env_path, PACK_DIR_NAME};
 use super::status::{
     bump_pack_lifecycle_generation, gateway_pack_status_fresh, gateway_pack_status_fresh_with_key,
     invalidate_auth_observation, invalidate_status_cache,
@@ -141,6 +141,12 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         lifecycle_stage("arm_keys", "error");
     })?;
     lifecycle_stage("arm_keys", "ok");
+    // Watch bind sources (profile dir + inbox) must exist as directories before
+    // compose up — same class as arm_keys file. Profile file optional.
+    ensure_watch_dirs().inspect_err(|_| {
+        lifecycle_stage("watch_dirs", "error");
+    })?;
+    lifecycle_stage("watch_dirs", "ok");
 
     // Host CLI adapters before compose env: mint Keychain tokens once and start
     // app-owned Claude/Codex listeners when CLIs are present+authenticated.

@@ -3,13 +3,14 @@ use crate::docker_cli::ComposeEnv;
 use crate::gateway_pack::keys::{serialize_public_env, validate_env_value};
 use crate::gateway_pack::manifest::{ImageRef, ManifestMode, ValidatedManifest};
 use crate::gateway_pack::paths::{
-    arm_keys_path, gateway_data_dir, public_env_path, ARM_KEYS_CONTAINER_PATH,
+    arm_keys_path, ensure_watch_dirs, gateway_data_dir, public_env_path, sentinels_dir,
+    watch_inbox_dir, watch_profile_path, ARM_KEYS_CONTAINER_PATH, WATCH_PROFILE_CONTAINER_PATH,
 };
 use crate::keychain::{MemorySecretStore, SecretStore, ARM_PRINCIPAL_NAME};
 use crate::private_config::test_env_lock;
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 #[test]
@@ -446,6 +447,70 @@ fn teardown_env_drops_arm_principals_but_keeps_path_pins() {
         Some(ARM_KEYS_CONTAINER_PATH)
     );
     assert!(env.contains_key("IRIN_DESKTOP_ARM_KEYS"));
+    assert!(env.contains_key("IRIN_DESKTOP_SENTINELS_DIR"));
+    assert!(env.contains_key("IRIN_DESKTOP_WATCH_INBOX_DIR"));
+    assert!(env.contains_key("IRIN_WATCH_PROFILE_PATH"));
+}
+
+/// Watch profile/inbox pins always present; IRIN_WATCH_PROFILE_PATH is empty
+/// when no profile file is installed and the container path when it is.
+#[test]
+fn watch_profile_pins_empty_without_file_and_set_when_present() {
+    let _g = test_env_lock();
+    ensure_watch_dirs().unwrap();
+    let profile = watch_profile_path();
+    let _ = fs::remove_file(&profile);
+
+    let pins_off = build_pack_pin_env(
+        Path::new("/app/pack"),
+        Path::new("/app/ledger"),
+        &test_image_ref("ghcr.io/irin/gateway", "e"),
+        &test_image_ref("ghcr.io/irin/sidecar", "f"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        pins_off.get("IRIN_DESKTOP_SENTINELS_DIR").map(String::as_str),
+        Some(sentinels_dir().display().to_string().as_str())
+    );
+    assert_eq!(
+        pins_off
+            .get("IRIN_DESKTOP_WATCH_INBOX_DIR")
+            .map(String::as_str),
+        Some(watch_inbox_dir().display().to_string().as_str())
+    );
+    assert_eq!(
+        pins_off.get("IRIN_WATCH_PROFILE_PATH").map(String::as_str),
+        Some("")
+    );
+
+    fs::write(&profile, "placeholder\n").unwrap();
+    let pins_on = build_pack_pin_env(
+        Path::new("/app/pack"),
+        Path::new("/app/ledger"),
+        &test_image_ref("ghcr.io/irin/gateway", "e"),
+        &test_image_ref("ghcr.io/irin/sidecar", "f"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        pins_on.get("IRIN_WATCH_PROFILE_PATH").map(String::as_str),
+        Some(WATCH_PROFILE_CONTAINER_PATH)
+    );
+    let _ = fs::remove_file(&profile);
+}
+
+#[test]
+fn ensure_watch_dirs_creates_sentinels_and_inbox() {
+    let _g = test_env_lock();
+    // Remove dirs if present so we prove create path.
+    let s = sentinels_dir();
+    let i = watch_inbox_dir();
+    let _ = fs::remove_dir_all(&s);
+    let _ = fs::remove_dir_all(&i);
+    ensure_watch_dirs().unwrap();
+    assert!(s.is_dir());
+    assert!(i.is_dir());
 }
 
 #[test]

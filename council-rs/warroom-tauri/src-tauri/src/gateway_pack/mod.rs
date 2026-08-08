@@ -35,8 +35,9 @@ pub use status::{
 };
 
 pub use paths::{
-    arm_keys_path, bundled_pack_root, gateway_data_dir, installed_marker_path, is_pack_installed,
-    ledger_key_path, public_env_path, runtime_env_path, ARM_KEYS_CONTAINER_PATH,
+    arm_keys_path, bundled_pack_root, ensure_watch_dirs, gateway_data_dir, installed_marker_path,
+    is_pack_installed, ledger_key_path, public_env_path, runtime_env_path, sentinels_dir,
+    watch_inbox_dir, watch_profile_path, ARM_KEYS_CONTAINER_PATH, WATCH_PROFILE_CONTAINER_PATH,
 };
 
 pub use keys::{ensure_arm_keys_file, serialize_public_env, validate_env_value};

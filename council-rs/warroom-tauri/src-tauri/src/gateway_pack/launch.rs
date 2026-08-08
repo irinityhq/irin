@@ -19,6 +19,7 @@ use super::install::{
     compose_file, installed_pack_root, load_validated_manifest, verify_images_present,
 };
 use super::keys::{ensure_arm_keys_file, ensure_ledger_key};
+use super::paths::ensure_watch_dirs;
 use super::status::gateway_pack_status_fresh;
 use super::types::{GatewayPackState, GatewayPackStatus};
 use crate::docker_cli::{probe_docker_daemon, DockerDaemonState, DESKTOP_GATEWAY_URL};
@@ -249,6 +250,7 @@ fn resume_installed_pack_locked(
     verify_images_present(&validated)?;
     let ledger = ensure_ledger_key()?;
     let _ = ensure_arm_keys_file();
+    let _ = ensure_watch_dirs();
     // Single-pass Keychain for Claude/Codex: load tokens once, start adapters
     // with those values, inject the same values into compose env (no second get).
     let proxy_tokens = match launch_secrets {
