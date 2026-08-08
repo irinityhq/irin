@@ -155,6 +155,8 @@ for tool in docker openssl python3 jq; do
     command -v "$tool" >/dev/null 2>&1 || die "'$tool' is required but not found on PATH."
 done
 PATH="$DOCKER_PATH" docker compose version >/dev/null 2>&1 || die "'docker compose' (v2+) is required."
+python3 -c "import cryptography" >/dev/null 2>&1 \
+    || die "python 'cryptography' is required for independent Ed25519 outbox verification (pip3 install cryptography)."
 
 # Clean any PRIOR demo run FIRST — a previous failed run leaves its stack up
 # for inspection. Demo project ONLY; this is
@@ -171,7 +173,7 @@ sys.exit(1)                   # free
 PY
 )
 if port_is_taken "$DEMO_GW_PORT"; then die "gateway demo port $DEMO_GW_PORT is in use (not by a prior demo). Set DEMO_GW_PORT to a free port."; fi
-ok "docker/openssl/python3/jq present; prior verify stack (if any) cleaned; port $DEMO_GW_PORT free"
+ok "docker/openssl/python3(+cryptography)/jq present; prior verify stack (if any) cleaned; port $DEMO_GW_PORT free"
 
 # --- generate dev secrets + ephemeral keys (never touch .env / ~/.irin) --
 step "Generating dev-safe secrets + ephemeral keys under .demo-state/"
@@ -466,9 +468,10 @@ SIG_B64_ROW=$(dc exec -T "$SIDE" sqlite3 "$DB" "SELECT signature_b64 FROM direct
 
 # Independent Ed25519 verification through the gateway's public outbox surface
 # (admin-gated read + published pubkey), same proof the smoke asserts.
-VERIFY_MSG="(gateway outbox surface verification skipped — python cryptography not importable)"
-if python3 -c "import cryptography" >/dev/null 2>&1; then
-    if python3 - "$GW_URL" "$DEMO_TENANT" "$DIRECTIVE_ID" "$SIG_B64_ROW" "$BOOTSTRAP_TOKEN" <<'PY'
+# Fail closed: any verification failure (including an import failure inside
+# the interpreter) exits non-zero; 'cryptography' presence is proven in
+# preflight. Success banner below is only reached when this prints "verified".
+if ! python3 - "$GW_URL" "$DEMO_TENANT" "$DIRECTIVE_ID" "$SIG_B64_ROW" "$BOOTSTRAP_TOKEN" <<'PY'
 import base64, json, sys, urllib.request
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 base, tenant, did, expect_sig, auth = sys.argv[1:6]
@@ -488,9 +491,10 @@ Ed25519PublicKey.from_public_bytes(base64.b64decode(pk["pubkey_b64"])).verify(
     base64.b64decode(sig["value"]), row["envelope_json_canonical"].encode())
 print("verified")
 PY
-    then VERIFY_MSG="Ed25519 signature VERIFIED against the gateway's published outbox pubkey"
-    else VERIFY_MSG="(gateway outbox verification returned non-zero — inspect: make verify logs)"; fi
+then
+    die "gateway outbox verification returned non-zero — inspect: make verify logs"
 fi
+VERIFY_MSG="Ed25519 signature VERIFIED against the gateway's published outbox pubkey"
 
 ELAPSED=$(( $(date +%s) - CLOCK_START ))
 
