@@ -336,23 +336,46 @@ async fn hydrate_runtime_state(authority: BootAuthority) -> anyhow::Result<BootH
     let _rehydrated = watch_quarantine.rehydrate_arm_pending().await;
 
     // Load sentinels.yaml:
-    //   - SENTINELS_CONFIG_PATH explicitly set → file must exist and parse;
-    //     any failure is fatal (tracing::error! + exit(1)).
-    //   - Unset → fall back to /etc/gateway/sentinels.yaml; if absent, boot
-    //     with an empty Vec (the runtime is still up, ready for hot-reload).
-    let sentinels_yaml_explicit = std::env::var("SENTINELS_CONFIG_PATH").ok();
-    let sentinels_yaml_path = sentinels_yaml_explicit
-        .clone()
-        .unwrap_or_else(|| "/etc/gateway/sentinels.yaml".to_string());
-    let loaded_sentinels: Vec<watch::registry::LoadedSentinel> = {
-        let path = std::path::PathBuf::from(&sentinels_yaml_path);
-        if path.exists() {
-            match watch::registry::SentinelRegistry::load_from_yaml(&path) {
+    //   - SENTINELS_CONFIG_PATH explicitly set (non-empty) → file must exist
+    //     and parse; any failure is fatal (tracing::error! + exit(1)).
+    //   - Unset OR empty string → fall back to /etc/gateway/sentinels.yaml;
+    //     if absent, boot with an empty Vec (runtime healthy, 0 sentinels).
+    // Empty-string-as-unset is load-bearing for pack compose:
+    // SENTINELS_CONFIG_PATH=${IRIN_WATCH_PROFILE_PATH:-} expands to "" when
+    // no profile is installed; treating that as explicit would brick boot.
+    let policy = sentinels_config_policy(std::env::var("SENTINELS_CONFIG_PATH").ok().as_deref());
+    let disposition = sentinels_boot_disposition(
+        &policy,
+        std::path::Path::new(match &policy {
+            SentinelsConfigPolicy::Require { path }
+            | SentinelsConfigPolicy::OptionalDefault { path } => path.as_str(),
+        })
+        .exists(),
+    );
+    let loaded_sentinels: Vec<watch::registry::LoadedSentinel> = match disposition {
+        SentinelsBootDisposition::FatalMissing { path } => {
+            tracing::error!(
+                "SENTINELS_CONFIG_PATH={} but the file does not exist. \
+                 Set the variable to an existing yaml or unset it for default lookup.",
+                path
+            );
+            std::process::exit(1);
+        }
+        SentinelsBootDisposition::EmptyWarn { path } => {
+            tracing::warn!(
+                "no sentinels.yaml at {} — WatchRunner starting with 0 sentinels",
+                path
+            );
+            Vec::new()
+        }
+        SentinelsBootDisposition::Load { path } => {
+            let p = std::path::Path::new(&path);
+            match watch::registry::SentinelRegistry::load_from_yaml(p) {
                 Ok(v) => {
                     info!(
                         "sentinels.yaml: loaded {} sentinel(s) from {}",
                         v.len(),
-                        path.display()
+                        p.display()
                     );
                     v
                 }
@@ -360,25 +383,12 @@ async fn hydrate_runtime_state(authority: BootAuthority) -> anyhow::Result<BootH
                     tracing::error!(
                         "sentinels.yaml at {} failed to load: {:#}. \
                          Cold-boot Phase 2 cannot start with an invalid sentinel config.",
-                        path.display(),
+                        p.display(),
                         e
                     );
                     std::process::exit(1);
                 }
             }
-        } else if sentinels_yaml_explicit.is_some() {
-            tracing::error!(
-                "SENTINELS_CONFIG_PATH={} but the file does not exist. \
-                 Set the variable to an existing yaml or unset it for default lookup.",
-                path.display()
-            );
-            std::process::exit(1);
-        } else {
-            tracing::warn!(
-                "no sentinels.yaml at {} — WatchRunner starting with 0 sentinels",
-                path.display()
-            );
-            Vec::new()
         }
     };
 
@@ -1200,4 +1210,148 @@ pub(crate) async fn load_config_build_state_and_serve(
     let hydrated = hydrate_runtime_state(authority).await?;
     let serving = start_listener_and_background(hydrated).await;
     await_shutdown(serving, otel_provider).await
+}
+
+/// Sentinel config path policy from `SENTINELS_CONFIG_PATH`.
+///
+/// Empty string is treated as **unset** so pack compose can pin
+/// `SENTINELS_CONFIG_PATH=${IRIN_WATCH_PROFILE_PATH:-}` without fatally
+/// requiring a profile on every no-profile boot.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SentinelsConfigPolicy {
+    /// Non-empty explicit path: missing or invalid → fatal exit.
+    Require { path: String },
+    /// Unset/empty: default path; missing file → 0 sentinels (healthy).
+    OptionalDefault { path: String },
+}
+
+const DEFAULT_SENTINELS_YAML: &str = "/etc/gateway/sentinels.yaml";
+
+/// Resolve env value → load policy. Pure: no I/O, no process exit.
+pub(crate) fn sentinels_config_policy(env: Option<&str>) -> SentinelsConfigPolicy {
+    match env.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(path) => SentinelsConfigPolicy::Require {
+            path: path.to_string(),
+        },
+        None => SentinelsConfigPolicy::OptionalDefault {
+            path: DEFAULT_SENTINELS_YAML.to_string(),
+        },
+    }
+}
+
+/// Boot disposition after policy + filesystem existence (still pure of load).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SentinelsBootDisposition {
+    /// Path exists: load YAML; parse failure is always fatal.
+    Load { path: String },
+    /// Explicit path missing: fatal (never silent 0 sentinels).
+    FatalMissing { path: String },
+    /// Default path missing: warn and start with 0 sentinels.
+    EmptyWarn { path: String },
+}
+
+pub(crate) fn sentinels_boot_disposition(
+    policy: &SentinelsConfigPolicy,
+    path_exists: bool,
+) -> SentinelsBootDisposition {
+    match (policy, path_exists) {
+        (SentinelsConfigPolicy::Require { path }, true)
+        | (SentinelsConfigPolicy::OptionalDefault { path }, true) => {
+            SentinelsBootDisposition::Load {
+                path: path.clone(),
+            }
+        }
+        (SentinelsConfigPolicy::Require { path }, false) => {
+            SentinelsBootDisposition::FatalMissing {
+                path: path.clone(),
+            }
+        }
+        (SentinelsConfigPolicy::OptionalDefault { path }, false) => {
+            SentinelsBootDisposition::EmptyWarn {
+                path: path.clone(),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod sentinels_config_policy_tests {
+    use super::*;
+    use std::io::Write;
+
+    #[test]
+    fn empty_env_string_is_unset_default_lookup() {
+        assert_eq!(
+            sentinels_config_policy(Some("")),
+            SentinelsConfigPolicy::OptionalDefault {
+                path: DEFAULT_SENTINELS_YAML.into()
+            }
+        );
+        assert_eq!(
+            sentinels_config_policy(Some("   ")),
+            SentinelsConfigPolicy::OptionalDefault {
+                path: DEFAULT_SENTINELS_YAML.into()
+            }
+        );
+        assert_eq!(
+            sentinels_boot_disposition(&sentinels_config_policy(Some("")), false),
+            SentinelsBootDisposition::EmptyWarn {
+                path: DEFAULT_SENTINELS_YAML.into()
+            }
+        );
+    }
+
+    #[test]
+    fn unset_env_is_default_lookup() {
+        assert_eq!(
+            sentinels_config_policy(None),
+            SentinelsConfigPolicy::OptionalDefault {
+                path: DEFAULT_SENTINELS_YAML.into()
+            }
+        );
+    }
+
+    #[test]
+    fn explicit_missing_is_fatal_disposition() {
+        let policy = sentinels_config_policy(Some("/no/such/sentinels.yaml"));
+        assert_eq!(
+            policy,
+            SentinelsConfigPolicy::Require {
+                path: "/no/such/sentinels.yaml".into()
+            }
+        );
+        assert_eq!(
+            sentinels_boot_disposition(&policy, false),
+            SentinelsBootDisposition::FatalMissing {
+                path: "/no/such/sentinels.yaml".into()
+            }
+        );
+    }
+
+    #[test]
+    fn valid_explicit_path_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let inbox = dir.path().join("inbox");
+        std::fs::create_dir_all(&inbox).unwrap();
+        let path = dir.path().join("sentinels.yaml");
+        let mut f = std::fs::File::create(&path).unwrap();
+        writeln!(
+            f,
+            "- name: file-inbox-watch\n  tenant: canary\n  tier: polling\n  cooldown_ms: 30000\n  config:\n    path: {}\n    patterns: [\"*.txt\"]\n    debounce_ms: 500\n",
+            inbox.display()
+        )
+        .unwrap();
+        let policy = sentinels_config_policy(Some(path.to_str().unwrap()));
+        assert!(matches!(policy, SentinelsConfigPolicy::Require { .. }));
+        assert_eq!(
+            sentinels_boot_disposition(&policy, path.exists()),
+            SentinelsBootDisposition::Load {
+                path: path.to_string_lossy().into_owned()
+            }
+        );
+        let loaded = watch::registry::SentinelRegistry::load_from_yaml(&path).unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].sentinel.name(), "file-inbox-watch");
+        assert_eq!(loaded[0].sentinel.tenant(), "canary");
+    }
 }
