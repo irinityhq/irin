@@ -74,6 +74,28 @@ Additional stock types are implemented under
 the dispatcher smoke live under `test/fixtures/`. Enabling a Sentinel does not
 enable `WATCH_PRODUCER_ENABLED` and does not arm an action path.
 
+### Packaged app (IRIN.app Gateway Pack)
+
+On the installed desktop app, watch is optional and durable without Docker
+surgery:
+
+1. **Enable Gateway** from Settings (pack comes up with 0 sentinels — quiet and
+   healthy).
+2. Open War Room → **Watch**. Flip **Watch sentinels** On. The app installs the
+   bundled default profile (file-inbox, tenant `canary`) into Application
+   Support and recreates the pack once so the sidecar loads it.
+3. Use **Open inbox folder**, drop a `.txt`, and wait one polling cycle (~10s)
+   for a fire to appear. `action_production_armed` stays false; producer and
+   dispatcher remain hardcoded off in the pack compose.
+4. Quit and relaunch: resume keeps the profile loaded (no re-toggle). Off
+   removes the profile file and returns to quiet-with-reason.
+
+Operator state lives under the app-support gateway directory (`sentinels/` and
+`inbox/`), never inside the staged pack tree. An empty or unset
+`SENTINELS_CONFIG_PATH` is treated as “no profile”; an explicit path that is
+missing or invalid fails the sidecar boot (never silent 0 sentinels while
+enabled). The development canary compose overlay is unchanged.
+
 ## Producer states and arming
 
 “Arming Gateway” means arming the Gateway **Watch producer**, not starting the
