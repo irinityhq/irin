@@ -1,8 +1,22 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Activity, Flame, Gauge, ShieldCheck, Thermometer, Wallet } from "lucide-react";
+import {
+  Activity,
+  Flame,
+  FolderOpen,
+  Gauge,
+  ShieldCheck,
+  Thermometer,
+  Wallet,
+} from "lucide-react";
 import { cn, fmtCost } from "@/lib/cn";
+import {
+  getWatchSentinelsEnabled,
+  isTauri,
+  openWatchInbox,
+  setWatchSentinelsEnabled,
+} from "@/lib/tauri";
 import {
   deriveCooldownState,
   fetchWatchSnapshot,
@@ -36,6 +50,10 @@ export default function WatchView(
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [nowMs, setNowMs] = useState(() => Date.now());
+  const [profileOn, setProfileOn] = useState(false);
+  const [toggleBusy, setToggleBusy] = useState(false);
+  const [toggleError, setToggleError] = useState<string | null>(null);
+  const desktop = isTauri();
 
   const load = useCallback(async () => {
     try {
@@ -50,16 +68,65 @@ export default function WatchView(
     }
   }, []);
 
+  const refreshProfileFlag = useCallback(async () => {
+    if (!desktop) return;
+    try {
+      setProfileOn(await getWatchSentinelsEnabled());
+    } catch {
+      // Non-fatal: snapshot still drives visibility.
+    }
+  }, [desktop]);
+
   useEffect(() => {
     void load();
-    const onConfig = () => void load();
+    void refreshProfileFlag();
+    const onConfig = () => {
+      void load();
+      void refreshProfileFlag();
+    };
     window.addEventListener("warroom-config-changed", onConfig);
-    const id = setInterval(() => void load(), POLL_MS);
+    const id = setInterval(() => {
+      void load();
+      void refreshProfileFlag();
+    }, POLL_MS);
     return () => {
       clearInterval(id);
       window.removeEventListener("warroom-config-changed", onConfig);
     };
-  }, [load]);
+  }, [load, refreshProfileFlag]);
+
+  const onToggle = async (next: boolean) => {
+    if (!desktop || toggleBusy) return;
+    setToggleBusy(true);
+    setToggleError(null);
+    try {
+      const enabled = await setWatchSentinelsEnabled(next);
+      setProfileOn(enabled);
+      // Pack recreate drops the connection briefly; poll once after a beat.
+      await new Promise((r) => setTimeout(r, 1500));
+      await load();
+    } catch (err: unknown) {
+      setToggleError(err instanceof Error ? err.message : String(err));
+      await refreshProfileFlag();
+    } finally {
+      setToggleBusy(false);
+    }
+  };
+
+  const onOpenInbox = async () => {
+    if (!desktop || toggleBusy) return;
+    setToggleError(null);
+    try {
+      await openWatchInbox();
+    } catch (err: unknown) {
+      setToggleError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const quietNoProfile =
+    snapshot != null &&
+    snapshot.sentinels.length === 0 &&
+    !profileOn;
 
   return (
     <div data-testid="watch-view" className="space-y-5">
@@ -69,8 +136,8 @@ export default function WatchView(
             Watch Plane
           </h2>
           <p className="text-sm text-fg-muted mt-1">
-            Read-only sentinel readiness, recent fires, redacted execute receipts, budget, and
-            degradation counters.
+            Sentinel readiness, recent fires, redacted execute receipts, budget, and degradation
+            counters. Profile toggle recreates the Gateway pack briefly.
           </p>
         </div>
         {snapshot && (
@@ -80,6 +147,16 @@ export default function WatchView(
           </div>
         )}
       </div>
+
+      {desktop && (
+        <WatchEnablementBar
+          profileOn={profileOn}
+          busy={toggleBusy}
+          error={toggleError}
+          onToggle={onToggle}
+          onOpenInbox={onOpenInbox}
+        />
+      )}
 
       {loading && !snapshot ? (
         <div className="panel p-12 text-center text-xs font-mono text-fg-dim animate-pulse">
@@ -94,17 +171,93 @@ export default function WatchView(
               Refresh failed; showing the last successful snapshot. {error}
             </div>
           )}
+          {quietNoProfile && (
+            <div
+              data-testid="watch-quiet-reason"
+              className="panel p-4 text-sm text-fg-muted"
+            >
+              <span className="font-mono text-[11px] uppercase tracking-widest text-fg-dim">
+                Quiet
+              </span>
+              <p className="mt-1">
+                No sentinel profile installed. Watch is healthy with 0 sentinels — flip{" "}
+                <strong className="text-fg">Watch sentinels</strong> on to load the bundled
+                file-inbox profile (tenant canary).
+              </p>
+            </div>
+          )}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
             <TemperatureCard snapshot={snapshot} />
             <BudgetCard snapshot={snapshot} />
             <ActivityCard snapshot={snapshot} />
           </div>
-          <RegistryTable rows={snapshot.sentinels} nowMs={nowMs} />
+          <RegistryTable
+            rows={snapshot.sentinels}
+            nowMs={nowMs}
+            quietNoProfile={quietNoProfile}
+          />
           <FireLogTable fires={snapshot.recent_fires} />
           <ExecuteReceiptTable receipts={snapshot.recent_execute_receipts} />
           <DegradationPanel degradation={snapshot.degradation} />
         </>
       ) : null}
+    </div>
+  );
+}
+
+function WatchEnablementBar({
+  profileOn,
+  busy,
+  error,
+  onToggle,
+  onOpenInbox,
+}: {
+  profileOn: boolean;
+  busy: boolean;
+  error: string | null;
+  onToggle: (next: boolean) => void;
+  onOpenInbox: () => void;
+}) {
+  return (
+    <div
+      data-testid="watch-enablement"
+      className="panel p-4 flex flex-col md:flex-row md:items-center md:justify-between gap-3"
+    >
+      <div className="space-y-1">
+        <div className="label">Watch sentinels</div>
+        <p className="text-xs text-fg-muted">
+          {profileOn
+            ? "Profile installed under app-support. Toggling off removes it and recreates the pack."
+            : "Off — no profile file. 0 sentinels is the normal quiet state."}
+        </p>
+        {error && (
+          <p className="text-xs font-mono text-danger" data-testid="watch-toggle-error">
+            {error}
+          </p>
+        )}
+      </div>
+      <div className="flex items-center gap-2 shrink-0">
+        <button
+          type="button"
+          data-testid="watch-open-inbox"
+          className="btn btn-ghost text-xs font-mono"
+          disabled={busy}
+          onClick={() => onOpenInbox()}
+        >
+          <FolderOpen className="w-3.5 h-3.5 mr-1 inline" />
+          Open inbox folder
+        </button>
+        <button
+          type="button"
+          data-testid="watch-sentinels-toggle"
+          className={cn("btn text-xs font-mono", profileOn ? "btn-primary" : "btn-ghost")}
+          disabled={busy}
+          aria-pressed={profileOn}
+          onClick={() => onToggle(!profileOn)}
+        >
+          {busy ? "Working…" : profileOn ? "On" : "Off"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -192,14 +345,26 @@ function ActivityCard({ snapshot }: { snapshot: WatchSnapshot }) {
   );
 }
 
-function RegistryTable({ rows, nowMs }: { rows: WatchRegistryRow[]; nowMs: number }) {
+function RegistryTable({
+  rows,
+  nowMs,
+  quietNoProfile,
+}: {
+  rows: WatchRegistryRow[];
+  nowMs: number;
+  quietNoProfile?: boolean;
+}) {
   return (
     <section className="space-y-2">
       <header className="flex items-center gap-2 text-[10px] font-mono uppercase tracking-widest text-fg-dim">
         <Activity className="w-3.5 h-3.5" /> Registered watches
       </header>
       {rows.length === 0 ? (
-        <div className="panel p-8 text-center text-sm text-fg-muted">No sentinels registered for this canary.</div>
+        <div className="panel p-8 text-center text-sm text-fg-muted">
+          {quietNoProfile
+            ? "No sentinel profile installed."
+            : "No sentinels registered for this canary."}
+        </div>
       ) : (
         <div className="border border-border rounded overflow-hidden bg-bg-elevated">
           <table className="w-full text-left text-xs font-mono">

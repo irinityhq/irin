@@ -54,7 +54,8 @@ pub use enable::{
 };
 
 pub use watch_profile::{
-    set_watch_sentinels_enabled, watch_inbox_path_string, watch_sentinels_enabled,
+    open_watch_inbox, set_watch_sentinels_enabled, watch_inbox_path_string,
+    watch_sentinels_enabled,
 };
 
 #[cfg(test)]

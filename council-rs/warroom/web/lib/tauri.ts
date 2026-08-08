@@ -168,6 +168,26 @@ export async function uninstallGatewayPack(): Promise<DesktopStatusSnapshot> {
   return invoke<DesktopStatusSnapshot>("gateway_pack_uninstall");
 }
 
+/** Install or remove the pack-native watch profile (bounded pack recreate). */
+export async function setWatchSentinelsEnabled(enabled: boolean): Promise<boolean> {
+  if (!isTauri()) {
+    throw new Error("Watch profile toggle requires the desktop app");
+  }
+  return invoke<boolean>("gateway_pack_set_watch_sentinels", { enabled });
+}
+
+export async function getWatchSentinelsEnabled(): Promise<boolean> {
+  if (!isTauri()) return false;
+  return invoke<boolean>("gateway_pack_watch_sentinels_enabled");
+}
+
+export async function openWatchInbox(): Promise<string> {
+  if (!isTauri()) {
+    throw new Error("Open inbox requires the desktop app");
+  }
+  return invoke<string>("gateway_pack_open_watch_inbox");
+}
+
 /** Renderer-safe projection of the native Touch ID ceremony. */
 export type TouchIdState =
   | "unavailable"

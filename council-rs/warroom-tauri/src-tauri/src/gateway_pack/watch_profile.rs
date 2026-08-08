@@ -29,6 +29,26 @@ pub fn watch_inbox_path_string() -> Result<String, String> {
     Ok(watch_inbox_dir().display().to_string())
 }
 
+/// Open the watch inbox in the host file manager (macOS `open`).
+pub fn open_watch_inbox() -> Result<String, String> {
+    let path = watch_inbox_path_string()?;
+    #[cfg(target_os = "macos")]
+    {
+        let status = std::process::Command::new("open")
+            .arg(&path)
+            .status()
+            .map_err(|e| format!("open inbox: {e}"))?;
+        if !status.success() {
+            return Err(format!("open inbox failed with {status}"));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        return Err(format!("open inbox is only supported on macOS (path={path})"));
+    }
+    Ok(path)
+}
+
 /// Locate the bundled default template (installed pack first, then bundled root).
 fn default_template_path() -> Result<PathBuf, String> {
     if let Some(root) = installed_pack_root() {

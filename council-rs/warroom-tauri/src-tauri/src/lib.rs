@@ -1227,6 +1227,12 @@ fn gateway_pack_watch_inbox_path() -> Result<String, String> {
     gateway_pack::watch_inbox_path_string()
 }
 
+/// Reveal the watch inbox in Finder (macOS).
+#[tauri::command]
+fn gateway_pack_open_watch_inbox() -> Result<String, String> {
+    gateway_pack::open_watch_inbox()
+}
+
 /// Destructive uninstall of the desktop pack only. Explicit operator action.
 /// Propagates Council Direct restart failures.
 #[tauri::command]
@@ -1647,6 +1653,7 @@ pub fn run() {
             gateway_pack_set_watch_sentinels,
             gateway_pack_watch_sentinels_enabled,
             gateway_pack_watch_inbox_path,
+            gateway_pack_open_watch_inbox,
             touch_id_status,
             touch_id_enroll,
             touch_id_arm,
