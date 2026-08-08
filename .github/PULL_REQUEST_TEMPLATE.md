@@ -1,6 +1,16 @@
-## Summary
+## Why
+
+<!-- One or two sentences: what problem does this solve, and who benefits? -->
+
+## What changed
 
 -
+
+## Feature-execution precheck (when this PR changes product behavior)
+
+- [ ] Opened the matching change-class checklist under `docs/seams/` (if any) and
+      used its landing modules and proof commands before inventing a path. Not
+      applicable for pure docs/CI/process.
 
 ## Verification
 

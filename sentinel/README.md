@@ -43,6 +43,14 @@ built-in worker loop remains a separate, default-off development path.
 The `sovereign-protocol` crate contains shared envelope, directive, canonical
 JSON, and validation types used by Council and Gateway.
 
+## Implementation map (for feature work)
+
+- Wire crate: `sovereign-protocol/` (`cargo test -p sovereign-protocol`)
+- Runtime hosts of the watch contract: Gateway sidecar (see
+  [`gateway/README.md`](../gateway/README.md))
+- Capability-token and related execute seams:
+  [`../docs/seams/`](../docs/seams/) (start with structured execute authority)
+
 ## Documentation
 
 - [`COMMS_CONTRACT.md`](COMMS_CONTRACT.md)

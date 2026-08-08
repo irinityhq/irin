@@ -57,6 +57,15 @@ Useful operator documentation:
 - [`docs/watch-plane-retention.md`](docs/watch-plane-retention.md)
 - [`COUNCIL_GATEWAY_CONTRACT.md`](COUNCIL_GATEWAY_CONTRACT.md)
 
+## Implementation map (for feature work)
+
+- Rust watch core: `sidecar-rs/` (API, dispatcher, worker, DB, keymgmt)
+- Protocol / token wire types: `../sentinel/sovereign-protocol/`
+- Edge allowlist / proxy: `lua/`, `nginx.conf`
+- UI snapshot / redacted receipts: War Room Web (`../council-rs/warroom/web/`)
+- Change-class checklists (where to land, what must not break, which proof):
+  [`../docs/seams/`](../docs/seams/)
+
 Gateway is fail-closed when caller credentials are absent. Enabling a Sentinel
 does not enable the watch producer or arm an action path. Report vulnerabilities
 using the repository root [`SECURITY.md`](../SECURITY.md).
