@@ -165,21 +165,41 @@ pub(super) async fn admin_revoke_key(
     }
 }
 
-pub(super) async fn auth_rotate_key(
-    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
-    Json(req): Json<RotateKeyRequest>,
-) -> impl IntoResponse {
-    if req.admin_key.is_empty() {
+/// Core rotate path (handler + tests). `root_pubkey` Some → refuse with 409
+/// before any staging write or ledger record.
+pub(crate) async fn rotate_key_impl(
+    root_pubkey: Option<&ed25519_dalek::VerifyingKey>,
+    auth: &crate::auth::AuthService,
+    admin_key: &str,
+    ledger: &ledger::AuditLedger,
+    ledger_signing_key: &ed25519_dalek::SigningKey,
+    staging_path: &std::path::Path,
+) -> (StatusCode, Json<serde_json::Value>) {
+    if admin_key.is_empty() {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "admin_key required"})),
         );
     }
-    let auth = state.auth.check(&req.admin_key, "127.0.0.1").await;
-    if !auth.allowed || auth.tier != "admin" {
+    let auth_decision = auth.check(admin_key, "127.0.0.1").await;
+    if !auth_decision.allowed || auth_decision.tier != "admin" {
         return (
             StatusCode::FORBIDDEN,
             Json(serde_json::json!({"error": "Admin tier required for key rotation"})),
+        );
+    }
+
+    // Root mode: online rotate can only emit active-key-signed introduce
+    // envelopes, which are unauthorized under a configured ROOT. Operators
+    // use the offline ceremony tooling with a root-signed envelope instead.
+    if root_pubkey.is_some() {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "online /auth/rotate is disabled when ROOT_PUBKEY_HEX is configured; \
+                          use offline ceremony tooling (gateway-ceremony introduce) with a \
+                          root-signed envelope"
+            })),
         );
     }
 
@@ -187,8 +207,8 @@ pub(super) async fn auth_rotate_key(
     let new_pubkey_hex = hex::encode(new_signing_key.verifying_key().as_bytes());
 
     let introduce_payload = keymgmt::sign_introduce(
-        &state.ledger_signing_key,
-        &new_key_bytes,
+        ledger_signing_key,
+        &new_signing_key.verifying_key(),
         keymgmt::CeremonyPurpose::LedgerSigning,
     );
 
@@ -197,40 +217,37 @@ pub(super) async fn auth_rotate_key(
         target: ledger::EVENT_KEY_INTRODUCE.into(),
         payload: serde_json::to_value(&introduce_payload).unwrap(),
         metadata: serde_json::json!({
-            "admin_key_id": auth.key_id,
+            "admin_key_id": auth_decision.key_id,
             "action": "rotation",
         }),
-        caller_key: Some(auth.key_id),
+        caller_key: Some(auth_decision.key_id),
     };
 
-    // Write new key to a staging file so it never appears in logs/responses.
-    let staging_path = std::env::var("LEDGER_NEW_KEY_STAGING_PATH")
-        .unwrap_or_else(|_| "/run/sidecar/new_ledger_key.bin".to_string());
-    if let Some(parent) = std::path::Path::new(&staging_path).parent() {
+    if let Some(parent) = staging_path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    if let Err(e) = std::fs::write(&staging_path, new_key_bytes) {
+    if let Err(e) = std::fs::write(staging_path, new_key_bytes) {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Failed to stage new key: {}", e)})),
         );
     }
     let _ = std::fs::set_permissions(
-        &staging_path,
+        staging_path,
         std::os::unix::fs::PermissionsExt::from_mode(0o600),
     );
 
-    match state.ledger.record_event(input).await {
+    match ledger.record_event(input).await {
         Ok(event) => (
             StatusCode::OK,
             Json(serde_json::json!({
                 "success": true,
                 "new_pubkey_hex": new_pubkey_hex,
-                "new_key_staging_path": staging_path,
+                "new_key_staging_path": staging_path.display().to_string(),
                 "introduce_event_id": event.id,
                 "introduce_event_hash": event.hash,
                 "deploy_instructions": [
-                    format!("1. Inspect staged key at {}", staging_path),
+                    format!("1. Inspect staged key at {}", staging_path.display()),
                     "2. Move to LEDGER_SIGNING_KEY_PATH (ensure chmod 600)",
                     "3. Set LEDGER_OLD_SIGNING_KEY_PATH to the current key path",
                     "4. Restart sidecar",
@@ -242,5 +259,128 @@ pub(super) async fn auth_rotate_key(
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("Failed to record introduce event: {}", e)})),
         ),
+    }
+}
+
+pub(super) async fn auth_rotate_key(
+    axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    Json(req): Json<RotateKeyRequest>,
+) -> impl IntoResponse {
+    let staging_path = std::env::var("LEDGER_NEW_KEY_STAGING_PATH")
+        .unwrap_or_else(|_| "/run/sidecar/new_ledger_key.bin".to_string());
+    rotate_key_impl(
+        state.root_pubkey.as_ref(),
+        &state.auth,
+        &req.admin_key,
+        &state.ledger,
+        &state.ledger_signing_key,
+        std::path::Path::new(&staging_path),
+    )
+    .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::{to_bytes, Body},
+        http::Request,
+        routing::post,
+        Json, Router,
+    };
+    use ed25519_dalek::SigningKey;
+    use rand_core::OsRng;
+    use tower::ServiceExt;
+
+    /// Real rotate handler body with root configured: HTTP 409, no staging, no ledger event.
+    #[tokio::test]
+    async fn rotate_with_root_returns_409_no_side_effects() {
+        std::env::set_var("GATEWAY_AUTH_FAIL_CLOSED", "false");
+        std::env::set_var("AUTH_PEPPER", "rotate-root-test-pepper");
+
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("ledger.db");
+        let staging_path = tmp.path().join("new_ledger_key.bin");
+        let auth_cfg = tmp.path().join("auth_keys.json");
+
+        let seed = SigningKey::generate(&mut OsRng).to_bytes();
+        let ledger = ledger::AuditLedger::new(db_path.to_str().unwrap(), Some(&seed), None, None)
+            .await
+            .unwrap();
+        let sk = SigningKey::from_bytes(&seed);
+        let root = SigningKey::generate(&mut OsRng).verifying_key();
+
+        let auth = crate::auth::AuthService::new(Some(auth_cfg));
+        let admin = auth
+            .provision_key("rotate_admin", "admin", 600, None)
+            .await
+            .unwrap();
+        let admin_key = admin.raw_key.clone();
+
+        let before = ledger.export_events(100, 0).await.unwrap().len();
+        assert!(!staging_path.exists());
+
+        // HTTP oneshot → rotate_key_impl (same body as auth_rotate_key).
+        let auth = Arc::new(auth);
+        let ledger = Arc::new(ledger);
+        let ledger_check = Arc::clone(&ledger);
+        let sk = Arc::new(sk);
+        let root = Arc::new(root);
+        let staging = Arc::new(staging_path.clone());
+        let app = Router::new().route(
+            "/auth/rotate",
+            post(move |Json(req): Json<RotateKeyRequest>| {
+                let auth = Arc::clone(&auth);
+                let ledger = Arc::clone(&ledger);
+                let sk = Arc::clone(&sk);
+                let root = Arc::clone(&root);
+                let staging = Arc::clone(&staging);
+                async move {
+                    rotate_key_impl(
+                        Some(root.as_ref()),
+                        auth.as_ref(),
+                        &req.admin_key,
+                        ledger.as_ref(),
+                        sk.as_ref(),
+                        staging.as_ref(),
+                    )
+                    .await
+                }
+            }),
+        );
+
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/auth/rotate")
+                    .header("content-type", "application/json")
+                    .body(Body::from(
+                        serde_json::to_vec(&serde_json::json!({ "admin_key": admin_key })).unwrap(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        let bytes = to_bytes(resp.into_body(), 64 * 1024).await.unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(
+            v["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("ROOT_PUBKEY_HEX"),
+            "body={v}"
+        );
+        assert!(
+            !staging_path.exists(),
+            "staging file must not be created on root refusal"
+        );
+        let after = ledger_check.export_events(100, 0).await.unwrap().len();
+        assert_eq!(
+            before, after,
+            "no ledger event may be recorded on root refusal"
+        );
     }
 }

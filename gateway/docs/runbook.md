@@ -94,14 +94,39 @@ use the second admin key.
 
 ## Verify the ledger
 
+Online admin-gated chain check (sidecar HTTP):
+
 ```bash
 LEDGER_ADMIN_KEY="$ADMIN_KEY" make -C gateway ledger-verify
-make -C gateway ledger-fsck
 ```
 
+Offline cryptographic fsck (`gateway-ledger`; requires the active signing seed):
+
+```bash
+# Default active key at ~/.irin/ledger_key.pem (LEDGER_KEY_PATH)
+make -C gateway ledger-fsck
+
+# During A→B rotation, keep the prior seed trusted via LEDGER_OLD_SIGNING_KEY_PATH:
+LEDGER_OLD_SIGNING_KEY_PATH=~/.irin/ledger_key_old.pem make -C gateway ledger-fsck
+
+# Equivalent direct CLI (active + old seeds; both are 32 raw bytes, not PEM):
+gateway-ledger fsck /path/to/ledger.db \
+  --key ~/.irin/ledger_key.pem \
+  --old-key ~/.irin/ledger_key_old.pem
+```
+
+`--key` is required for a signed result. Without it the CLI fails closed.
+`--hash-only` skips row-signature/trust proof (signatures are **not**
+verified) while keeping hash-link checks and, on `fsck`, unsigned semantic
+checks (revoked-key use, duplicate introduces, ceremony envelopes). It is
+not cryptographic proof of signing.
+
 The signing key is exactly 32 bytes. Never replace it in place while the
-sidecar is running. A signing-key rotation must keep the prior key available
-for verification until the intended retention window has elapsed.
+sidecar is running. Verification walks the chain from genesis, so after an
+A→B rotation every retained row still signed by A requires the prior seed
+(`LEDGER_OLD_SIGNING_KEY_PATH` / `--old-key`) for as long as those rows
+remain — not only during a dual-signing window. Drop `--old-key` only after
+A-signed history is pruned or re-anchored under B.
 
 ## Sentinel configuration
 

@@ -232,7 +232,14 @@ fn cmd_introduce(
         }
     };
 
-    let payload: KeyIntroducePayload = keymgmt::sign_introduce(&signer, &new_pk_bytes, purpose);
+    let new_vk = match ed25519_dalek::VerifyingKey::from_bytes(&new_pk_bytes) {
+        Ok(vk) => vk,
+        Err(e) => {
+            eprintln!("Error: new key is not a valid Ed25519 public key: {}", e);
+            return ExitCode::from(2);
+        }
+    };
+    let payload: KeyIntroducePayload = keymgmt::sign_introduce(&signer, &new_vk, purpose);
 
     if verify_after && !keymgmt::verify_introduce(&payload, &signer.verifying_key()) {
         eprintln!("❌ Self-verification failed — refusing to write output");

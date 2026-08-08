@@ -191,13 +191,18 @@ async fn initialize_authority(config: BootConfig) -> BootAuthority {
     // Initialize Cryptographic Ledger with persistent Ed25519 signing key.
     // Fails closed (panics) if the key file is missing, wrong size, or has
     // wrong permissions. See load_ledger_signing_key() for details.
+    // Ceremony root is loaded first so present-but-invalid ROOT_PUBKEY_HEX
+    // refuses boot before the ledger opens.
     let ledger_path = std::env::var("LEDGER_DB_PATH").unwrap_or_else(|_| "ledger.db".to_string());
     let signing_key_bytes = load_ledger_signing_key();
     let old_key_bytes = load_old_ledger_key();
+    let root_pubkey =
+        load_root_pubkey().expect("FATAL: ROOT_PUBKEY_HEX is set but invalid (refuse boot)");
     let audit_ledger = ledger::AuditLedger::new(
         &ledger_path,
         Some(&signing_key_bytes),
         old_key_bytes.as_deref(),
+        root_pubkey, // VerifyingKey is Copy; same value stays in BootAuthority
     )
     .await
     .expect("FATAL: failed to initialize audit ledger");
@@ -259,8 +264,6 @@ async fn initialize_authority(config: BootConfig) -> BootAuthority {
     let mut sk_bytes = [0u8; 32];
     sk_bytes.copy_from_slice(&signing_key_bytes);
     let ledger_sk = ed25519_dalek::SigningKey::from_bytes(&sk_bytes);
-
-    let root_pubkey = load_root_pubkey();
 
     // Spec P1 #14: in-memory idempotency means replays initiated before this
     // PID started cannot be observed. Surface that explicitly at boot rather
