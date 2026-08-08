@@ -14,7 +14,7 @@ is the worker/effect boundary.
 - You change quarantine execute, drain ack, claim lease, or row-identity checks.
 - You change typed nacks for recommend/prepare/unimplemented execute.
 
-## Where the change lands (conditional)
+## Where the change lands
 
 | If you change… | Land here first |
 | --- | --- |

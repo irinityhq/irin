@@ -9,7 +9,7 @@
 ## Feature-execution precheck (when this PR changes product behavior)
 
 - [ ] Opened the matching change-class checklist under `docs/seams/` (if any) and
-      used its landings and proof commands before inventing a path. Not
+      used its landing modules and proof commands before inventing a path. Not
       applicable for pure docs/CI/process.
 
 ## Verification

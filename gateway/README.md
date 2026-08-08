@@ -62,7 +62,7 @@ Useful operator documentation:
 - Rust watch core: `sidecar-rs/` (API, dispatcher, worker, DB, keymgmt)
 - Protocol / token wire types: `../sentinel/sovereign-protocol/`
 - Edge allowlist / proxy: `lua/`, `nginx.conf`
-- Surface / redacted receipts: War Room Web (`../council-rs/warroom/web/`)
+- UI snapshot / redacted receipts: War Room Web (`../council-rs/warroom/web/`)
 - Change-class checklists (where to land, what must not break, which proof):
   [`../docs/seams/`](../docs/seams/)
 

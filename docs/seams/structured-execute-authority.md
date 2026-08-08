@@ -12,7 +12,7 @@ Also called capability-token mint/verify/authorize.
 - You change who may mint or what fields mint pins server-side.
 - You change durable consumption / same-directive retry semantics.
 
-## Where the change lands (conditional)
+## Where the change lands
 
 | If you change… | Land here first |
 | --- | --- |

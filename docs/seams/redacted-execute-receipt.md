@@ -13,7 +13,7 @@ Token wire/JCS authority is
 - You change redaction rules (what must never appear).
 - You change War Room parsing of `recent_execute_receipts`.
 
-## Where the change lands (conditional)
+## Where the change lands
 
 | If you change… | Land here first |
 | --- | --- |
