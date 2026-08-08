@@ -96,13 +96,16 @@ fn revoke_preimage(revoked_pubkey_hex: &str, reason: &str, signer_pubkey_hex: &s
 // Signing
 // ---------------------------------------------------------------------------
 
+/// Sign a key_introduce ceremony. `new_key` is the introduced *public* key
+/// (never a signing seed) so the ledger cannot persist private material as
+/// `new_pubkey_hex`.
 pub fn sign_introduce(
     signer: &SigningKey,
-    new_pubkey_bytes: &[u8; 32],
+    new_key: &VerifyingKey,
     purpose: CeremonyPurpose,
 ) -> KeyIntroducePayload {
     let signer_pubkey_hex = hex::encode(signer.verifying_key().as_bytes());
-    let new_pubkey_hex = hex::encode(new_pubkey_bytes);
+    let new_pubkey_hex = hex::encode(new_key.as_bytes());
 
     let preimage = introduce_preimage(&new_pubkey_hex, purpose.as_str(), &signer_pubkey_hex);
     let mut hasher = Sha256::new();
@@ -144,7 +147,6 @@ pub fn sign_revoke(
 // Verification
 // ---------------------------------------------------------------------------
 
-#[allow(dead_code)]
 pub fn verify_introduce(payload: &KeyIntroducePayload, expected_signer: &VerifyingKey) -> bool {
     let preimage = introduce_preimage(
         &payload.new_pubkey_hex,
@@ -154,7 +156,6 @@ pub fn verify_introduce(payload: &KeyIntroducePayload, expected_signer: &Verifyi
     verify_envelope(&preimage, &payload.envelope_signature_hex, expected_signer)
 }
 
-#[allow(dead_code)]
 pub fn verify_revoke(payload: &KeyRevokePayload, expected_signer: &VerifyingKey) -> bool {
     let preimage = revoke_preimage(
         &payload.revoked_pubkey_hex,
@@ -164,7 +165,6 @@ pub fn verify_revoke(payload: &KeyRevokePayload, expected_signer: &VerifyingKey)
     verify_envelope(&preimage, &payload.envelope_signature_hex, expected_signer)
 }
 
-#[allow(dead_code)]
 fn verify_envelope(preimage: &[u8], sig_hex: &str, vk: &VerifyingKey) -> bool {
     let mut hasher = Sha256::new();
     hasher.update(preimage);
@@ -177,6 +177,172 @@ fn verify_envelope(preimage: &[u8], sig_hex: &str, vk: &VerifyingKey) -> bool {
     let sig_array: [u8; 64] = sig_bytes.try_into().unwrap();
     let sig = Signature::from_bytes(&sig_array);
     vk.verify_strict(&digest, &sig).is_ok()
+}
+
+/// Fail-closed validation before expanding the ledger verify trust set from a
+/// `key_introduce` row. Full payload required; `purpose == ledger_signing`;
+/// introduced key must be a valid Ed25519 point (not merely 32 bytes).
+///
+/// Ceremony authority is one-at-a-time (matches fsck ROOT overlay):
+/// - `ceremony_root = Some(root)`: require `introduced_by_pubkey_hex == hex(root)`
+///   and envelope verifies under root. Row-signer cross-check does **not** apply
+///   (ROOT never signs ledger rows).
+/// - `ceremony_root = None`: introducer must equal the row's
+///   `signing_key_pubkey` and the envelope verifies under that introducer.
+///
+/// Returns the authorized `new_pubkey_hex` on success.
+pub fn validate_introduce_for_trust(
+    payload_json: &str,
+    row_signing_key_pubkey: Option<&str>,
+    ceremony_root: Option<&VerifyingKey>,
+) -> Result<String, String> {
+    // Reject missing/wrong-purpose/malformed fields via typed parse (required
+    // fields: new_pubkey_hex, purpose, introduced_by_pubkey_hex, envelope_signature_hex).
+    let raw: serde_json::Value = serde_json::from_str(payload_json)
+        .map_err(|e| format!("malformed key_introduce payload: {e}"))?;
+
+    for field in [
+        "new_pubkey_hex",
+        "purpose",
+        "introduced_by_pubkey_hex",
+        "envelope_signature_hex",
+    ] {
+        match raw.get(field) {
+            None => return Err(format!("key_introduce missing required field: {field}")),
+            Some(v) if v.is_null() => {
+                return Err(format!("key_introduce missing required field: {field}"))
+            }
+            _ => {}
+        }
+    }
+
+    let purpose = raw.get("purpose").and_then(|v| v.as_str()).unwrap_or("");
+    if purpose != CeremonyPurpose::LedgerSigning.as_str() {
+        return Err(format!(
+            "key_introduce purpose must be \"{}\" (got \"{}\")",
+            CeremonyPurpose::LedgerSigning.as_str(),
+            purpose
+        ));
+    }
+
+    let payload: KeyIntroducePayload =
+        serde_json::from_value(raw).map_err(|e| format!("malformed key_introduce payload: {e}"))?;
+
+    // Introduced key must be a valid curve point — rejects raw seeds and
+    // other non-point 32-byte values that could leak private material.
+    let new_bytes =
+        hex::decode(&payload.new_pubkey_hex).map_err(|_| "invalid new_pubkey_hex".to_string())?;
+    if new_bytes.len() != 32 {
+        return Err("new_pubkey_hex wrong length".to_string());
+    }
+    let new_arr: [u8; 32] = new_bytes
+        .try_into()
+        .map_err(|_| "new_pubkey_hex wrong length".to_string())?;
+    VerifyingKey::from_bytes(&new_arr)
+        .map_err(|_| "new_pubkey_hex is not a valid Ed25519 point".to_string())?;
+
+    if let Some(root) = ceremony_root {
+        let root_hex = hex::encode(root.as_bytes());
+        if payload.introduced_by_pubkey_hex != root_hex {
+            return Err(
+                "introduce not signed by configured ROOT_PUBKEY_HEX (ceremony authority)".into(),
+            );
+        }
+        if !verify_introduce(&payload, root) {
+            return Err("introduce envelope signature invalid".to_string());
+        }
+    } else {
+        let row_pk = row_signing_key_pubkey
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "key_introduce row missing signing_key_pubkey".to_string())?;
+        if payload.introduced_by_pubkey_hex != row_pk {
+            return Err(
+                "introduce envelope signer mismatches chain signing_key_pubkey".to_string(),
+            );
+        }
+
+        let signer_bytes = hex::decode(&payload.introduced_by_pubkey_hex)
+            .map_err(|_| "invalid introduced_by_pubkey_hex".to_string())?;
+        let signer_arr: [u8; 32] = signer_bytes
+            .try_into()
+            .map_err(|_| "introduced_by_pubkey_hex wrong length".to_string())?;
+        let introducer_vk = VerifyingKey::from_bytes(&signer_arr)
+            .map_err(|_| "invalid introduced_by verifying key".to_string())?;
+
+        if !verify_introduce(&payload, &introducer_vk) {
+            return Err("introduce envelope signature invalid".to_string());
+        }
+    }
+
+    Ok(payload.new_pubkey_hex)
+}
+
+/// Fail-closed validation for a `key_revoke` ceremony row. Same one-at-a-time
+/// authority rule as introductions:
+/// - `ceremony_root = Some(root)`: `revoked_by_pubkey_hex == hex(root)` and
+///   envelope verifies under root (no row-signer cross-check).
+/// - `ceremony_root = None`: revoker must equal the row's `signing_key_pubkey`
+///   and the envelope verifies under that key.
+///
+/// Returns the authorized `revoked_pubkey_hex` on success.
+pub fn validate_revoke_for_trust(
+    payload_json: &str,
+    row_signing_key_pubkey: Option<&str>,
+    ceremony_root: Option<&VerifyingKey>,
+) -> Result<String, String> {
+    let raw: serde_json::Value = serde_json::from_str(payload_json)
+        .map_err(|e| format!("malformed key_revoke payload: {e}"))?;
+
+    for field in [
+        "revoked_pubkey_hex",
+        "reason",
+        "revoked_by_pubkey_hex",
+        "envelope_signature_hex",
+    ] {
+        match raw.get(field) {
+            None => return Err(format!("key_revoke missing required field: {field}")),
+            Some(v) if v.is_null() => {
+                return Err(format!("key_revoke missing required field: {field}"))
+            }
+            _ => {}
+        }
+    }
+
+    let payload: KeyRevokePayload =
+        serde_json::from_value(raw).map_err(|e| format!("malformed key_revoke payload: {e}"))?;
+
+    if let Some(root) = ceremony_root {
+        let root_hex = hex::encode(root.as_bytes());
+        if payload.revoked_by_pubkey_hex != root_hex {
+            return Err(
+                "revoke not signed by configured ROOT_PUBKEY_HEX (ceremony authority)".into(),
+            );
+        }
+        if !verify_revoke(&payload, root) {
+            return Err("revoke envelope signature invalid".to_string());
+        }
+    } else {
+        let row_pk = row_signing_key_pubkey
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "key_revoke row missing signing_key_pubkey".to_string())?;
+        if payload.revoked_by_pubkey_hex != row_pk {
+            return Err("revoke envelope signer mismatches chain signing_key_pubkey".to_string());
+        }
+
+        let signer_bytes = hex::decode(&payload.revoked_by_pubkey_hex)
+            .map_err(|_| "invalid revoked_by_pubkey_hex".to_string())?;
+        let signer_arr: [u8; 32] = signer_bytes
+            .try_into()
+            .map_err(|_| "revoked_by_pubkey_hex wrong length".to_string())?;
+        let revoker_vk = VerifyingKey::from_bytes(&signer_arr)
+            .map_err(|_| "invalid revoked_by verifying key".to_string())?;
+
+        if !verify_revoke(&payload, &revoker_vk) {
+            return Err("revoke envelope signature invalid".to_string());
+        }
+    }
+
+    Ok(payload.revoked_pubkey_hex)
 }
 
 // ---------------------------------------------------------------------------
@@ -200,14 +366,214 @@ mod tests {
     #[test]
     fn test_introduce_sign_and_verify() {
         let signer = SigningKey::generate(&mut rand_core::OsRng);
-        let (_new_key, new_bytes) = generate_keypair();
+        let (new_key, _) = generate_keypair();
 
-        let payload = sign_introduce(&signer, &new_bytes, CeremonyPurpose::LedgerSigning);
+        let payload = sign_introduce(
+            &signer,
+            &new_key.verifying_key(),
+            CeremonyPurpose::LedgerSigning,
+        );
 
         assert!(verify_introduce(&payload, &signer.verifying_key()));
+        // Must record the public key, never the seed.
+        assert_eq!(
+            payload.new_pubkey_hex,
+            hex::encode(new_key.verifying_key().as_bytes())
+        );
+        assert_ne!(payload.new_pubkey_hex, hex::encode(new_key.to_bytes()));
 
         let wrong_key = SigningKey::generate(&mut rand_core::OsRng);
         assert!(!verify_introduce(&payload, &wrong_key.verifying_key()));
+    }
+
+    #[test]
+    fn test_validate_introduce_reject_classes_table() {
+        let signer = SigningKey::generate(&mut rand_core::OsRng);
+        let (new_key, _) = generate_keypair();
+        let good = sign_introduce(
+            &signer,
+            &new_key.verifying_key(),
+            CeremonyPurpose::LedgerSigning,
+        );
+        let good_json = serde_json::to_string(&good).unwrap();
+        let row_pk = hex::encode(signer.verifying_key().as_bytes());
+        let root = SigningKey::generate(&mut rand_core::OsRng);
+        let root_signed = sign_introduce(
+            &root,
+            &new_key.verifying_key(),
+            CeremonyPurpose::LedgerSigning,
+        );
+        let root_json = serde_json::to_string(&root_signed).unwrap();
+
+        // Accept: row-signer mode, valid ceremony.
+        assert!(validate_introduce_for_trust(&good_json, Some(&row_pk), None).is_ok());
+
+        // Accept: root mode, envelope signed by root.
+        assert!(validate_introduce_for_trust(
+            &root_json,
+            Some(&row_pk), // row signer ignored in root mode
+            Some(&root.verifying_key()),
+        )
+        .is_ok());
+
+        // Reject: R-signed when root NOT configured (introducer mismatch).
+        let err = validate_introduce_for_trust(&root_json, Some(&row_pk), None).unwrap_err();
+        assert!(
+            err.contains("mismatches") || err.contains("signing_key_pubkey"),
+            "{err}"
+        );
+
+        // Reject: A-signed when root IS configured.
+        let err =
+            validate_introduce_for_trust(&good_json, Some(&row_pk), Some(&root.verifying_key()))
+                .unwrap_err();
+        assert!(
+            err.contains("ROOT") || err.contains("ceremony authority"),
+            "{err}"
+        );
+
+        // Reject: absent field.
+        let err = validate_introduce_for_trust(r#"{"new_pubkey_hex":"aa"}"#, Some(&row_pk), None)
+            .unwrap_err();
+        assert!(
+            err.contains("missing") || err.contains("malformed"),
+            "{err}"
+        );
+
+        // Reject: explicit null field.
+        let mut null_v = serde_json::to_value(&good).unwrap();
+        null_v["envelope_signature_hex"] = serde_json::Value::Null;
+        let err = validate_introduce_for_trust(
+            &serde_json::to_string(&null_v).unwrap(),
+            Some(&row_pk),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("missing") || err.contains("malformed"),
+            "{err}"
+        );
+
+        // Reject: wrong purpose.
+        let mut bad_purpose = serde_json::to_value(&good).unwrap();
+        bad_purpose["purpose"] = serde_json::json!("admin_other");
+        let err = validate_introduce_for_trust(
+            &serde_json::to_string(&bad_purpose).unwrap(),
+            Some(&row_pk),
+            None,
+        )
+        .unwrap_err();
+        assert!(err.contains("purpose"), "{err}");
+
+        // Reject: mismatched introducer (row-signer mode).
+        let other_pk = hex::encode(
+            SigningKey::generate(&mut rand_core::OsRng)
+                .verifying_key()
+                .as_bytes(),
+        );
+        let err = validate_introduce_for_trust(&good_json, Some(&other_pk), None).unwrap_err();
+        assert!(err.contains("mismatches"), "{err}");
+
+        // Reject: bad envelope signature.
+        let mut bad_sig = serde_json::to_value(&good).unwrap();
+        bad_sig["envelope_signature_hex"] = serde_json::json!("00".repeat(64));
+        let err = validate_introduce_for_trust(
+            &serde_json::to_string(&bad_sig).unwrap(),
+            Some(&row_pk),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("signature") || err.contains("invalid"),
+            "{err}"
+        );
+
+        // Reject: wrong-length new key.
+        let mut bad_len = serde_json::to_value(&good).unwrap();
+        bad_len["new_pubkey_hex"] = serde_json::json!("aa");
+        // Re-sign would be needed for envelope — just length check runs after parse;
+        // envelope will fail first if preimage changes. Craft minimal JSON with
+        // valid-looking envelope fields but short new key.
+        let err = validate_introduce_for_trust(
+            &serde_json::to_string(&bad_len).unwrap(),
+            Some(&row_pk),
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("wrong length")
+                || err.contains("signature")
+                || err.contains("malformed")
+                || err.contains("point"),
+            "{err}"
+        );
+
+        // Reject: non-point 32-byte new key. Pick a fixed non-decompressible
+        // encoding (y-coordinate not on the curve) and assert the exact error.
+        let mut non_point_bytes = [0u8; 32];
+        non_point_bytes[0] = 0x02; // not a valid compressed Edwards Y for ed25519
+        assert!(
+            VerifyingKey::from_bytes(&non_point_bytes).is_err(),
+            "fixture 02||00*31 must be non-decompressible"
+        );
+        let mut non_point = serde_json::to_value(&good).unwrap();
+        non_point["new_pubkey_hex"] = serde_json::json!(hex::encode(non_point_bytes));
+        let err = validate_introduce_for_trust(
+            &serde_json::to_string(&non_point).unwrap(),
+            Some(&row_pk),
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err, "new_pubkey_hex is not a valid Ed25519 point",
+            "expected exact point-parse error, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_validate_revoke_root_and_row_signer_modes() {
+        let sk_a = SigningKey::generate(&mut rand_core::OsRng);
+        let sk_r = SigningKey::generate(&mut rand_core::OsRng);
+        let pk_b = hex::encode(
+            SigningKey::generate(&mut rand_core::OsRng)
+                .verifying_key()
+                .as_bytes(),
+        );
+        let row_a = hex::encode(sk_a.verifying_key().as_bytes());
+        let a_json = serde_json::to_string(&sign_revoke(&sk_a, &pk_b, "retired")).unwrap();
+        let r_json = serde_json::to_string(&sign_revoke(&sk_r, &pk_b, "retired")).unwrap();
+
+        assert!(validate_revoke_for_trust(&a_json, Some(&row_a), None).is_ok());
+        assert!(
+            validate_revoke_for_trust(&r_json, Some(&row_a), Some(&sk_r.verifying_key())).is_ok()
+        );
+        let err = validate_revoke_for_trust(&a_json, Some(&row_a), Some(&sk_r.verifying_key()))
+            .unwrap_err();
+        assert!(
+            err.contains("ROOT") || err.contains("ceremony authority"),
+            "{err}"
+        );
+        let err = validate_revoke_for_trust(&r_json, Some(&row_a), None).unwrap_err();
+        assert!(err.contains("mismatches"), "{err}");
+    }
+
+    #[test]
+    fn test_sign_introduce_records_public_key_not_seed() {
+        let signer = SigningKey::generate(&mut rand_core::OsRng);
+        let (new_key, seed) = generate_keypair();
+        let payload = sign_introduce(
+            &signer,
+            &new_key.verifying_key(),
+            CeremonyPurpose::LedgerSigning,
+        );
+        let pub_hex = hex::encode(new_key.verifying_key().as_bytes());
+        let seed_hex = hex::encode(seed);
+        assert_eq!(payload.new_pubkey_hex, pub_hex);
+        assert_ne!(payload.new_pubkey_hex, seed_hex);
+        // Curve point parse must succeed for the recorded value.
+        let bytes = hex::decode(&payload.new_pubkey_hex).unwrap();
+        let arr: [u8; 32] = bytes.try_into().unwrap();
+        assert!(VerifyingKey::from_bytes(&arr).is_ok());
     }
 
     #[test]
@@ -234,8 +600,12 @@ mod tests {
     #[test]
     fn test_introduce_payload_serializes_correctly() {
         let signer = SigningKey::generate(&mut rand_core::OsRng);
-        let (_, new_bytes) = generate_keypair();
-        let payload = sign_introduce(&signer, &new_bytes, CeremonyPurpose::LedgerSigning);
+        let (new_key, _) = generate_keypair();
+        let payload = sign_introduce(
+            &signer,
+            &new_key.verifying_key(),
+            CeremonyPurpose::LedgerSigning,
+        );
 
         let json = serde_json::to_value(&payload).unwrap();
         assert_eq!(json["purpose"], "ledger_signing");
@@ -246,10 +616,14 @@ mod tests {
     #[test]
     fn test_domain_separation_prevents_cross_type_forgery() {
         let signer = SigningKey::generate(&mut rand_core::OsRng);
-        let (_, new_bytes) = generate_keypair();
-        let new_pubkey_hex = hex::encode(new_bytes);
+        let (new_key, _) = generate_keypair();
+        let new_pubkey_hex = hex::encode(new_key.verifying_key().as_bytes());
 
-        let introduce = sign_introduce(&signer, &new_bytes, CeremonyPurpose::LedgerSigning);
+        let introduce = sign_introduce(
+            &signer,
+            &new_key.verifying_key(),
+            CeremonyPurpose::LedgerSigning,
+        );
 
         // Craft a fake revoke using the introduce's envelope signature
         let fake_revoke = KeyRevokePayload {

@@ -336,7 +336,7 @@ Two ceremony event targets are defined for key rotation:
 | `key_introduce` | `new_pubkey_hex`, `purpose` (enum: `ledger_signing`), `introduced_by_pubkey_hex`, `envelope_signature_hex` |
 | `key_revoke` | `revoked_pubkey_hex`, `reason`, `revoked_by_pubkey_hex`, `envelope_signature_hex` |
 
-Each carries a domain-separated envelope signature (`GW-INTRODUCE-v1` / `GW-REVOKE-v1` tag + length-prefixed fields). The `gateway-ledger fsck` command verifies both the chain signature and the envelope signature, cross-checking `introduced_by_pubkey_hex` against the row's `signing_key_pubkey`.
+Each carries a domain-separated envelope signature (`GW-INTRODUCE-v1` / `GW-REVOKE-v1` tag + length-prefixed fields). The `gateway-ledger fsck` command verifies both the chain signature and the envelope signature, cross-checking `introduced_by_pubkey_hex` against the row's `signing_key_pubkey`. When `ROOT_PUBKEY_HEX` is configured, ceremony envelopes must be signed by that root instead of the row signer.
 
 ### Provider cache optimization
 
@@ -483,11 +483,14 @@ individually signed. Ledger audit events and directive outbox rows are
 Ed25519-signed. Key ceremony events and `fsck` own key lifecycle verification.
 
 **Key rotation:** `POST /auth/rotate` (admin-only) generates a new keypair,
-writes a `key_introduce` ceremony event signed by the current active key,
-and stages the new key to `LEDGER_NEW_KEY_STAGING_PATH` (default
-`/run/sidecar/new_ledger_key.bin`, 0600). The operator inspects, deploys,
-sets `LEDGER_OLD_SIGNING_KEY_PATH` to the previous key, and restarts.
-The old key remains accepted for verification during the dual-signing window.
+writes a `key_introduce` ceremony event signed by the current active key
+(recording the new *public* key only), and stages the new key seed to
+`LEDGER_NEW_KEY_STAGING_PATH` (default `/run/sidecar/new_ledger_key.bin`,
+0600). The operator inspects, deploys, sets `LEDGER_OLD_SIGNING_KEY_PATH` to
+the previous key, and restarts. Verification walks from genesis, so keep the
+prior seed available for as long as any retained row still signed by it remains
+— drop `--old-key` / `LEDGER_OLD_SIGNING_KEY_PATH` only after those rows are
+pruned or re-anchored.
 
 ---
 

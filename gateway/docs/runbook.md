@@ -122,9 +122,11 @@ checks (revoked-key use, duplicate introduces, ceremony envelopes). It is
 not cryptographic proof of signing.
 
 The signing key is exactly 32 bytes. Never replace it in place while the
-sidecar is running. A signing-key rotation must keep the prior key available
-for verification (`LEDGER_OLD_SIGNING_KEY_PATH` / `--old-key`) until the
-intended dual-signing window has elapsed.
+sidecar is running. Verification walks the chain from genesis, so after an
+A→B rotation every retained row still signed by A requires the prior seed
+(`LEDGER_OLD_SIGNING_KEY_PATH` / `--old-key`) for as long as those rows
+remain — not only during a dual-signing window. Drop `--old-key` only after
+A-signed history is pruned or re-anchored under B.
 
 ## Sentinel configuration
 

@@ -55,10 +55,8 @@ pub(crate) struct AppState {
     ledger: ledger::AuditLedger,
     ledger_signing_key: ed25519_dalek::SigningKey,
     /// Air-gapped root verifying key, loaded from ROOT_PUBKEY_HEX at startup.
-    /// When `Some`, ceremony events (key_introduce/key_revoke) signed by the
-    /// root are verifiable; when `None`, root verification is skipped with a
-    /// warning at startup (backward compatibility).
-    #[allow(dead_code)]
+    /// When `Some`, ceremony envelopes must be signed by this root and
+    /// `POST /auth/rotate` is refused (use offline ceremony tooling instead).
     root_pubkey: Option<ed25519_dalek::VerifyingKey>,
     auth: auth::AuthService,
     vertex_token: vertex_auth::VertexTokenProvider,
@@ -165,50 +163,45 @@ fn load_ledger_signing_key() -> Vec<u8> {
 // The air-gapped root signing key never reaches a running sidecar — only its
 // public counterpart is needed for verification. When `ROOT_PUBKEY_HEX` is
 // set to a 64-character hex string (32 raw Ed25519 public-key bytes), it is
-// parsed into a `VerifyingKey` and held on AppState. This enables ceremony
-// (key_introduce / key_revoke) envelope verification at fsck/verify time.
+// parsed into a `VerifyingKey` and held on AppState / AuditLedger.
 //
-// When unset or unparseable, the function returns `None` and we log a warning
-// — the sidecar continues to start so existing deployments keep working.
-// Operators graduating to PKI provide the hex; everyone else stays on the
-// implicit-root model with the active signing key as the de-facto root.
+// Fail-closed:
+// - absent / empty → Ok(None) (row-signer ceremony mode; warn once)
+// - present but bad length/hex/non-point → Err (refuse boot)
 // ---------------------------------------------------------------------------
-fn load_root_pubkey() -> Option<ed25519_dalek::VerifyingKey> {
+#[cfg_attr(test, allow(dead_code))]
+pub(crate) fn load_root_pubkey() -> Result<Option<ed25519_dalek::VerifyingKey>, String> {
     let hex_str = match std::env::var("ROOT_PUBKEY_HEX") {
         Ok(v) if !v.trim().is_empty() => v.trim().to_string(),
         _ => {
             warn!("ROOT_PUBKEY_HEX not set — ceremony envelope root-verification disabled");
-            return None;
+            return Ok(None);
         }
     };
     if hex_str.len() != 64 {
-        warn!(
-            len = hex_str.len(),
-            "ROOT_PUBKEY_HEX must be exactly 64 hex chars (32 bytes) — root verification disabled"
-        );
-        return None;
+        return Err(format!(
+            "ROOT_PUBKEY_HEX must be exactly 64 hex chars (32 bytes), got {}",
+            hex_str.len()
+        ));
     }
-    let bytes = match hex::decode(&hex_str) {
-        Ok(b) => b,
-        Err(e) => {
-            warn!(
-                "ROOT_PUBKEY_HEX is not valid hex ({}) — root verification disabled",
-                e
-            );
-            return None;
-        }
-    };
+    let bytes =
+        hex::decode(&hex_str).map_err(|e| format!("ROOT_PUBKEY_HEX is not valid hex ({e})"))?;
+    if bytes.len() != 32 {
+        return Err(format!(
+            "ROOT_PUBKEY_HEX decoded to {} bytes (want 32)",
+            bytes.len()
+        ));
+    }
     let mut arr = [0u8; 32];
     arr.copy_from_slice(&bytes);
     match ed25519_dalek::VerifyingKey::from_bytes(&arr) {
         Ok(vk) => {
             info!(pubkey = %hex_str, "ROOT_PUBKEY_HEX loaded — ceremony root verification enabled");
-            Some(vk)
+            Ok(Some(vk))
         }
-        Err(e) => {
-            warn!("ROOT_PUBKEY_HEX bytes do not form a valid Ed25519 point ({}) — root verification disabled", e);
-            None
-        }
+        Err(e) => Err(format!(
+            "ROOT_PUBKEY_HEX is not a valid Ed25519 point ({e})"
+        )),
     }
 }
 

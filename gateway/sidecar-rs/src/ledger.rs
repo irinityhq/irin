@@ -110,14 +110,20 @@ pub struct AuditLedger {
     signing_key: SigningKey,
     verifying_key: VerifyingKey,
     old_verifying_key: Option<VerifyingKey>,
+    /// Ceremony envelope authority from `ROOT_PUBKEY_HEX` (boot-loaded).
+    /// When `Some`, key_introduce/key_revoke must be signed by this root.
+    ceremony_root: Option<VerifyingKey>,
 }
 
 impl AuditLedger {
     /// Initializes the schema, configures WAL and auto_vacuum, and supports key rotation.
+    /// `ceremony_root` is the optional air-gapped root verifying key (same value
+    /// boot loads from `ROOT_PUBKEY_HEX`); it is never a row-signing trust root.
     pub async fn new(
         db_path: &str,
         signing_key_bytes: Option<&[u8]>,
         old_verifying_key_bytes: Option<&[u8]>,
+        ceremony_root: Option<VerifyingKey>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let conn = Connection::open(db_path).await?;
 
@@ -245,7 +251,14 @@ impl AuditLedger {
             signing_key,
             verifying_key,
             old_verifying_key,
+            ceremony_root,
         })
+    }
+
+    /// Ceremony root verifying key, if configured at construction.
+    #[allow(dead_code)]
+    pub fn ceremony_root(&self) -> Option<&VerifyingKey> {
+        self.ceremony_root.as_ref()
     }
 
     /// Check the database size and run a manual VACUUM if it exceeds the threshold (e.g. 50MB)
@@ -462,6 +475,7 @@ impl AuditLedger {
         let conn_lock = self.conn.lock().await;
         let verifying_key = self.verifying_key;
         let old_verifying_key = self.old_verifying_key;
+        let ceremony_root = self.ceremony_root;
 
         let is_valid = conn_lock.call(move |conn| {
             let mut stmt = conn.prepare("SELECT id, timestamp, source, target, payload, metadata, caller_key, signing_key_pubkey, schema_version, prev_hash, hash, signature FROM audit_events ORDER BY id ASC")?;
@@ -611,15 +625,25 @@ impl AuditLedger {
                     return Ok(false);
                 }
 
-                // Expand trust after a verified key_introduce event.
+                // Expand trust only after a fully validated key_introduce
+                // ceremony (envelope + purpose + introducer match). Fail closed
+                // on malformed/missing/wrong-purpose introduces.
                 if event.target == EVENT_KEY_INTRODUCE {
-                    if let Ok(payload) =
-                        serde_json::from_str::<serde_json::Value>(&event.payload)
-                    {
-                        if let Some(new_pk) =
-                            payload.get("new_pubkey_hex").and_then(|v| v.as_str())
-                        {
-                            trusted_pubkeys.insert(new_pk.to_string());
+                    match crate::keymgmt::validate_introduce_for_trust(
+                        &event.payload,
+                        event.signing_key_pubkey.as_deref(),
+                        ceremony_root.as_ref(),
+                    ) {
+                        Ok(new_pk) => {
+                            trusted_pubkeys.insert(new_pk);
+                        }
+                        Err(reason) => {
+                            error!(
+                                id = event.id,
+                                %reason,
+                                "ledger verification failed: invalid key_introduce ceremony"
+                            );
+                            return Ok(false);
                         }
                     }
                 }
@@ -650,6 +674,7 @@ impl AuditLedger {
         if let Some(old_key) = &self.old_verifying_key {
             configured_signers.insert(hex::encode(old_key.as_bytes()));
         }
+        let ceremony_root = self.ceremony_root;
 
         let conn_lock = self.conn.lock().await;
         let report = conn_lock
@@ -692,6 +717,7 @@ impl AuditLedger {
                 let mut duplicate_introduces: Vec<String> = Vec::new();
                 let mut revoked_key_uses: Vec<i64> = Vec::new();
                 let mut unintroduced_signer_events: Vec<i64> = Vec::new();
+                let mut ceremony_failures: Vec<(i64, String)> = Vec::new();
                 let mut warnings: Vec<String> = Vec::new();
 
                 // Order-aware introduce-before-use: configured roots seed the
@@ -729,31 +755,38 @@ impl AuditLedger {
                         }
                     }
 
-                    // Key lifecycle event detection
+                    // Key lifecycle: expand introduce/revoke trust only via the
+                    // shared ceremony validators (same fail-closed gate as verify_chain).
                     if event.target == EVENT_KEY_INTRODUCE {
-                        if let Ok(payload) =
-                            serde_json::from_str::<serde_json::Value>(&event.payload)
-                        {
-                            if let Some(new_pk) =
-                                payload.get("new_pubkey_hex").and_then(|v| v.as_str())
-                            {
-                                if introduced_keys.contains(new_pk) {
-                                    duplicate_introduces.push(new_pk.to_string());
+                        match crate::keymgmt::validate_introduce_for_trust(
+                            &event.payload,
+                            event.signing_key_pubkey.as_deref(),
+                            ceremony_root.as_ref(),
+                        ) {
+                            Ok(new_pk) => {
+                                if introduced_keys.contains(&new_pk) {
+                                    duplicate_introduces.push(new_pk.clone());
                                 }
-                                introduced_keys.insert(new_pk.to_string());
-                                known_keys.insert(new_pk.to_string());
-                                introduces.push((eid, new_pk.to_string()));
+                                introduced_keys.insert(new_pk.clone());
+                                known_keys.insert(new_pk.clone());
+                                introduces.push((eid, new_pk));
+                            }
+                            Err(reason) => {
+                                ceremony_failures.push((eid, reason));
                             }
                         }
                     } else if event.target == EVENT_KEY_REVOKE {
-                        if let Ok(payload) =
-                            serde_json::from_str::<serde_json::Value>(&event.payload)
-                        {
-                            if let Some(revoked_pk) =
-                                payload.get("revoked_pubkey_hex").and_then(|v| v.as_str())
-                            {
-                                revoked_keys.insert(revoked_pk.to_string());
-                                revokes.push((eid, revoked_pk.to_string()));
+                        match crate::keymgmt::validate_revoke_for_trust(
+                            &event.payload,
+                            event.signing_key_pubkey.as_deref(),
+                            ceremony_root.as_ref(),
+                        ) {
+                            Ok(revoked_pk) => {
+                                revoked_keys.insert(revoked_pk.clone());
+                                revokes.push((eid, revoked_pk));
+                            }
+                            Err(reason) => {
+                                ceremony_failures.push((eid, reason));
                             }
                         }
                     }
@@ -782,6 +815,7 @@ impl AuditLedger {
                     revoked_keys,
                     revoked_key_uses,
                     duplicate_introduces,
+                    ceremony_failures,
                     warnings,
                 })
             })
@@ -812,19 +846,23 @@ pub struct FsckReport {
     pub revoked_keys: HashSet<String>,
     pub revoked_key_uses: Vec<i64>,
     pub duplicate_introduces: Vec<String>,
+    /// Invalid introduce/revoke ceremony rows (fail-closed; consulted by is_healthy).
+    pub ceremony_failures: Vec<(i64, String)>,
     pub warnings: Vec<String>,
 }
 
 impl FsckReport {
     /// Healthy when the chain verifies and policy holds: schema monotonic,
-    /// no use-after-revoke, no duplicate introduces, and every observed signer
-    /// is either configured or introduced (`signers_seen ⊆ introduced ∪ configured`).
+    /// no use-after-revoke, no duplicate introduces, no ceremony failures,
+    /// and every observed signer is either configured or introduced
+    /// (`signers_seen ⊆ introduced ∪ configured`).
     #[allow(dead_code)]
     pub fn is_healthy(&self) -> bool {
         self.chain_valid
             && self.schema_monotonic
             && self.revoked_key_uses.is_empty()
             && self.duplicate_introduces.is_empty()
+            && self.ceremony_failures.is_empty()
             && self.unintroduced_signer_events.is_empty()
             && self
                 .signers_seen
@@ -854,7 +892,7 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
-        let ledger = AuditLedger::new(path.to_str().unwrap(), None, None)
+        let ledger = AuditLedger::new(path.to_str().unwrap(), None, None, None)
             .await
             .unwrap();
         (ledger, path)
@@ -1157,7 +1195,7 @@ mod tests {
 
         let result = std::panic::catch_unwind(|| {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async { AuditLedger::new(path.to_str().unwrap(), None, None).await })
+            rt.block_on(async { AuditLedger::new(path.to_str().unwrap(), None, None, None).await })
         });
         assert!(result.is_err(), "should panic on old schema");
         cleanup(&path);
@@ -1264,12 +1302,13 @@ mod tests {
 
         let (ledger, path) = test_ledger("fsck_introduce").await;
 
-        let (_, new_bytes) = keymgmt::generate_keypair();
+        let (new_sk, _) = keymgmt::generate_keypair();
         let payload = keymgmt::sign_introduce(
             &ledger.signing_key,
-            &new_bytes,
+            &new_sk.verifying_key(),
             keymgmt::CeremonyPurpose::LedgerSigning,
         );
+        let expected_pk = hex::encode(new_sk.verifying_key().as_bytes());
 
         let input = EventInput {
             source: "keymgmt".into(),
@@ -1283,7 +1322,7 @@ mod tests {
         let report = ledger.fsck().await.unwrap();
         assert!(report.is_healthy());
         assert_eq!(report.introduces.len(), 1);
-        assert_eq!(report.introduces[0].1, hex::encode(new_bytes));
+        assert_eq!(report.introduces[0].1, expected_pk);
         assert_eq!(report.introduced_keys.len(), 1);
         // Configured signer is trusted without ceremony; introduce expands set.
         assert!(report.unintroduced_signer_events.is_empty());
@@ -1396,6 +1435,7 @@ mod tests {
             revoked_keys: HashSet::new(),
             revoked_key_uses: vec![],
             duplicate_introduces: vec![],
+            ceremony_failures: vec![],
             warnings: vec![],
         };
         assert!(healthy.is_healthy());
@@ -1421,6 +1461,7 @@ mod tests {
             revoked_keys: HashSet::new(),
             revoked_key_uses: vec![],
             duplicate_introduces: vec![],
+            ceremony_failures: vec![],
             warnings: vec![],
         };
         assert!(
@@ -1501,7 +1542,7 @@ mod tests {
 
         // Record under A.
         {
-            let ledger_a = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None)
+            let ledger_a = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None, None)
                 .await
                 .unwrap();
             let event = ledger_a.record_event(test_input("from_a")).await.unwrap();
@@ -1510,7 +1551,7 @@ mod tests {
         }
 
         // Reopen with B active + A as old signing seed (not raw VK bytes).
-        let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&seed_b), Some(&seed_a))
+        let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&seed_b), Some(&seed_a), None)
             .await
             .unwrap();
         assert!(
@@ -1535,7 +1576,7 @@ mod tests {
         let seed_b = SigningKey::generate(&mut OsRng).to_bytes();
 
         {
-            let ledger_a = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None)
+            let ledger_a = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None, None)
                 .await
                 .unwrap();
             ledger_a.record_event(test_input("legacy_a")).await.unwrap();
@@ -1553,12 +1594,522 @@ mod tests {
             assert!(ledger_a.verify_chain().await.unwrap());
         }
 
-        let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&seed_b), Some(&seed_a))
+        let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&seed_b), Some(&seed_a), None)
             .await
             .unwrap();
         assert!(
             ledger.verify_chain().await.unwrap(),
             "legacy null-pubkey A rows must trial against old SigningKey seed"
+        );
+        cleanup(&path);
+    }
+
+    /// Route-level ceremony: A introduces B via sign_introduce(&VerifyingKey);
+    /// recorded new_pubkey_hex is B's public key (never seed); B-signed row verifies.
+    #[tokio::test]
+    async fn test_rotate_ceremony_records_public_key_and_authorizes_b() {
+        let path = temp_db_path("rotate_pub_not_seed");
+        let _ = std::fs::remove_file(&path);
+        let seed_a = SigningKey::generate(&mut OsRng).to_bytes();
+        let (sk_b, seed_b) = {
+            let sk = SigningKey::generate(&mut OsRng);
+            let seed = sk.to_bytes();
+            (sk, seed)
+        };
+        let pk_b = hex::encode(sk_b.verifying_key().as_bytes());
+        let seed_b_hex = hex::encode(seed_b);
+
+        let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None, None)
+            .await
+            .unwrap();
+        // Same shape as POST /auth/rotate: ceremony over verifying_key, stage seed separately.
+        let intro = crate::keymgmt::sign_introduce(
+            &ledger.signing_key,
+            &sk_b.verifying_key(),
+            crate::keymgmt::CeremonyPurpose::LedgerSigning,
+        );
+        assert_eq!(intro.new_pubkey_hex, pk_b);
+        assert_ne!(intro.new_pubkey_hex, seed_b_hex);
+        let arr: [u8; 32] = hex::decode(&intro.new_pubkey_hex)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        assert!(
+            VerifyingKey::from_bytes(&arr).is_ok(),
+            "recorded ceremony key must be a valid curve point"
+        );
+
+        ledger
+            .record_event(EventInput {
+                source: "keymgmt".into(),
+                target: EVENT_KEY_INTRODUCE.into(),
+                payload: serde_json::to_value(&intro).unwrap(),
+                metadata: serde_json::json!({"action": "rotation"}),
+                caller_key: Some("k_admin".into()),
+            })
+            .await
+            .unwrap();
+
+        // Hand-insert a B-signed follow-on row (simulates post-rotation ledger key).
+        let prev = ledger.get_latest_event().await.unwrap().unwrap();
+        let ts = prev.timestamp + 1;
+        let payload = serde_json::to_string(&serde_json::json!({"action": "from_b"})).unwrap();
+        let metadata = "{}".to_string();
+        let preimage = build_hash_preimage_v3(
+            ts,
+            "test",
+            "test",
+            &payload,
+            &metadata,
+            LEDGER_SCHEMA_VERSION,
+            "",
+            &prev.hash,
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(preimage.as_bytes());
+        let hash_bytes = hasher.finalize();
+        let hash_hex = hex::encode(hash_bytes);
+        let sig_hex = hex::encode(sk_b.sign(&hash_bytes).to_bytes());
+        let conn = ledger.conn.lock().await;
+        conn.call(move |c| {
+            c.execute(
+                "INSERT INTO audit_events (timestamp, source, target, payload, metadata, \
+                 caller_key, signing_key_pubkey, schema_version, prev_hash, hash, signature) \
+                 VALUES (?1, 'test', 'test', ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    ts,
+                    payload,
+                    metadata,
+                    pk_b,
+                    LEDGER_SCHEMA_VERSION,
+                    prev.hash,
+                    hash_hex,
+                    sig_hex
+                ],
+            )?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .await
+        .unwrap();
+        drop(conn);
+
+        assert!(
+            ledger.verify_chain().await.unwrap(),
+            "chain must verify after valid introduce of B's public key"
+        );
+        cleanup(&path);
+    }
+
+    /// Root-mode three-row: A → R-signed introduce of B (chain-signed by A) → B.
+    /// Asserts verify_chain expands live trust to B. Also rejects A-envelope under root.
+    #[tokio::test]
+    async fn test_root_mode_accepts_r_signed_introduce_rejects_a_signed() {
+        let path = temp_db_path("root_mode_intro");
+        let _ = std::fs::remove_file(&path);
+        let seed_a = SigningKey::generate(&mut OsRng).to_bytes();
+        let sk_r = SigningKey::generate(&mut OsRng);
+        let sk_b = SigningKey::generate(&mut OsRng);
+        let root = sk_r.verifying_key();
+        let pk_b = hex::encode(sk_b.verifying_key().as_bytes());
+
+        let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None, Some(root))
+            .await
+            .unwrap();
+
+        // Row 1: ordinary A-signed event.
+        ledger.record_event(test_input("from_a")).await.unwrap();
+
+        // Row 2: A-signed chain row carrying R-signed introduce of B.
+        let intro_r = crate::keymgmt::sign_introduce(
+            &sk_r,
+            &sk_b.verifying_key(),
+            crate::keymgmt::CeremonyPurpose::LedgerSigning,
+        );
+        ledger
+            .record_event(EventInput {
+                source: "keymgmt".into(),
+                target: EVENT_KEY_INTRODUCE.into(),
+                payload: serde_json::to_value(&intro_r).unwrap(),
+                metadata: serde_json::json!({}),
+                caller_key: None,
+            })
+            .await
+            .unwrap();
+
+        // Row 3: B-signed follow-on — trust must expand from the R ceremony.
+        let prev = ledger.get_latest_event().await.unwrap().unwrap();
+        let ts = prev.timestamp + 1;
+        let payload = serde_json::to_string(&serde_json::json!({"action": "from_b"})).unwrap();
+        let metadata = "{}".to_string();
+        let preimage = build_hash_preimage_v3(
+            ts,
+            "test",
+            "test",
+            &payload,
+            &metadata,
+            LEDGER_SCHEMA_VERSION,
+            "",
+            &prev.hash,
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(preimage.as_bytes());
+        let hash_bytes = hasher.finalize();
+        let hash_hex = hex::encode(hash_bytes);
+        let sig_hex = hex::encode(sk_b.sign(&hash_bytes).to_bytes());
+        let conn = ledger.conn.lock().await;
+        let pk_b_ins = pk_b.clone();
+        let ph = prev.hash.clone();
+        conn.call(move |c| {
+            c.execute(
+                "INSERT INTO audit_events (timestamp, source, target, payload, metadata, \
+                 caller_key, signing_key_pubkey, schema_version, prev_hash, hash, signature) \
+                 VALUES (?1, 'test', 'test', ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    ts,
+                    payload,
+                    metadata,
+                    pk_b_ins,
+                    LEDGER_SCHEMA_VERSION,
+                    ph,
+                    hash_hex,
+                    sig_hex
+                ],
+            )?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .await
+        .unwrap();
+        drop(conn);
+
+        assert!(
+            ledger.verify_chain().await.unwrap(),
+            "A → R-introduce(B) → B must verify under ceremony_root (B in live trust set)"
+        );
+        cleanup(&path);
+
+        // A-envelope introduce under root must fail.
+        let path2 = temp_db_path("root_mode_intro_a");
+        let _ = std::fs::remove_file(&path2);
+        let ledger2 = AuditLedger::new(path2.to_str().unwrap(), Some(&seed_a), None, Some(root))
+            .await
+            .unwrap();
+        let intro_a = crate::keymgmt::sign_introduce(
+            &ledger2.signing_key,
+            &sk_b.verifying_key(),
+            crate::keymgmt::CeremonyPurpose::LedgerSigning,
+        );
+        ledger2
+            .record_event(EventInput {
+                source: "keymgmt".into(),
+                target: EVENT_KEY_INTRODUCE.into(),
+                payload: serde_json::to_value(&intro_a).unwrap(),
+                metadata: serde_json::json!({}),
+                caller_key: None,
+            })
+            .await
+            .unwrap();
+        assert!(
+            !ledger2.verify_chain().await.unwrap(),
+            "A-signed introduce must fail when ceremony_root is configured"
+        );
+        cleanup(&path2);
+    }
+
+    /// Invalid revoke ceremonies (root and row-signer authority) make is_healthy false.
+    #[tokio::test]
+    async fn test_fsck_invalid_revoke_unhealthy() {
+        // Root-authority invalid: chain signed by A, envelope claims wrong authority.
+        let path = temp_db_path("fsck_bad_revoke_root");
+        let _ = std::fs::remove_file(&path);
+        let seed_a = SigningKey::generate(&mut OsRng).to_bytes();
+        let sk_r = SigningKey::generate(&mut OsRng);
+        let root = sk_r.verifying_key();
+        let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None, Some(root))
+            .await
+            .unwrap();
+        // A-signed revoke envelope while root is configured → ceremony failure.
+        let pk_b = hex::encode(SigningKey::generate(&mut OsRng).verifying_key().as_bytes());
+        let bad_revoke = crate::keymgmt::sign_revoke(&ledger.signing_key, &pk_b, "gone");
+        ledger
+            .record_event(EventInput {
+                source: "keymgmt".into(),
+                target: EVENT_KEY_REVOKE.into(),
+                payload: serde_json::to_value(&bad_revoke).unwrap(),
+                metadata: serde_json::json!({}),
+                caller_key: None,
+            })
+            .await
+            .unwrap();
+        let report = ledger.fsck().await.unwrap();
+        // chain_valid may be true (row sig ok) but ceremony_failures must unhealth.
+        assert!(
+            !report.ceremony_failures.is_empty(),
+            "{:?}",
+            report.ceremony_failures
+        );
+        assert!(
+            !report.is_healthy(),
+            "invalid root-authority revoke must be unhealthy"
+        );
+        cleanup(&path);
+
+        // Row-authority invalid: missing envelope fields.
+        let (ledger2, path2) = test_ledger("fsck_bad_revoke_row").await;
+        ledger2
+            .record_event(EventInput {
+                source: "keymgmt".into(),
+                target: EVENT_KEY_REVOKE.into(),
+                payload: serde_json::json!({"revoked_pubkey_hex": pk_b}),
+                metadata: serde_json::json!({}),
+                caller_key: None,
+            })
+            .await
+            .unwrap();
+        let report2 = ledger2.fsck().await.unwrap();
+        assert!(
+            !report2.ceremony_failures.is_empty(),
+            "{:?}",
+            report2.ceremony_failures
+        );
+        assert!(
+            !report2.is_healthy(),
+            "invalid row-authority revoke must be unhealthy"
+        );
+        cleanup(&path2);
+    }
+
+    /// Malformed introduce must not enter fsck introduced_keys / known_keys.
+    #[tokio::test]
+    async fn test_fsck_malformed_introduce_not_in_trust_sets() {
+        let (ledger, path) = test_ledger("fsck_malformed_intro").await;
+        let attacker = SigningKey::generate(&mut OsRng);
+        let attacker_pk = hex::encode(attacker.verifying_key().as_bytes());
+        ledger
+            .record_event(EventInput {
+                source: "keymgmt".into(),
+                target: EVENT_KEY_INTRODUCE.into(),
+                payload: serde_json::json!({
+                    "new_pubkey_hex": attacker_pk,
+                    "purpose": "ledger_signing",
+                }),
+                metadata: serde_json::json!({}),
+                caller_key: None,
+            })
+            .await
+            .unwrap();
+        // Append attacker-signed row claiming the key from the malformed introduce.
+        let prev = ledger.get_latest_event().await.unwrap().unwrap();
+        let ts = prev.timestamp + 1;
+        let payload = r#"{"action":"x"}"#.to_string();
+        let metadata = "{}".to_string();
+        let preimage = build_hash_preimage_v3(
+            ts,
+            "test",
+            "test",
+            &payload,
+            &metadata,
+            LEDGER_SCHEMA_VERSION,
+            "",
+            &prev.hash,
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(preimage.as_bytes());
+        let hash_bytes = hasher.finalize();
+        let hash_hex = hex::encode(hash_bytes);
+        let sig_hex = hex::encode(attacker.sign(&hash_bytes).to_bytes());
+        let conn = ledger.conn.lock().await;
+        let apk = attacker_pk.clone();
+        let ph = prev.hash.clone();
+        conn.call(move |c| {
+            c.execute(
+                "INSERT INTO audit_events (timestamp, source, target, payload, metadata, \
+                 caller_key, signing_key_pubkey, schema_version, prev_hash, hash, signature) \
+                 VALUES (?1, 'test', 'test', ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    ts,
+                    payload,
+                    metadata,
+                    apk,
+                    LEDGER_SCHEMA_VERSION,
+                    ph,
+                    hash_hex,
+                    sig_hex
+                ],
+            )?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .await
+        .unwrap();
+        drop(conn);
+
+        let report = ledger.fsck().await.unwrap();
+        assert!(
+            !report.introduced_keys.contains(&attacker_pk),
+            "malformed introduce must not populate introduced_keys"
+        );
+        assert!(
+            !report.unintroduced_signer_events.is_empty(),
+            "attacker row must be reported as unintroduced signer"
+        );
+        cleanup(&path);
+    }
+
+    /// Invalid ceremony must fail verify and must not authorize a later attacker signer.
+    #[tokio::test]
+    async fn test_invalid_introduce_never_authorizes_later_signer() {
+        let (ledger, path) = test_ledger("invalid_intro_no_auth").await;
+        let attacker = SigningKey::generate(&mut OsRng);
+        let attacker_pk = hex::encode(attacker.verifying_key().as_bytes());
+
+        // Malformed introduce (no envelope).
+        ledger
+            .record_event(EventInput {
+                source: "keymgmt".into(),
+                target: EVENT_KEY_INTRODUCE.into(),
+                payload: serde_json::json!({
+                    "new_pubkey_hex": attacker_pk,
+                    "purpose": "ledger_signing",
+                }),
+                metadata: serde_json::json!({}),
+                caller_key: None,
+            })
+            .await
+            .unwrap();
+        assert!(!ledger.verify_chain().await.unwrap());
+
+        // Even if we append an attacker-signed row with consistent hashes, trust
+        // must not expand — verify still fails.
+        let prev = ledger.get_latest_event().await.unwrap().unwrap();
+        let ts = prev.timestamp + 1;
+        let payload = r#"{"action":"stolen"}"#.to_string();
+        let metadata = "{}".to_string();
+        let preimage = build_hash_preimage_v3(
+            ts,
+            "test",
+            "test",
+            &payload,
+            &metadata,
+            LEDGER_SCHEMA_VERSION,
+            "",
+            &prev.hash,
+        );
+        let mut hasher = Sha256::new();
+        hasher.update(preimage.as_bytes());
+        let hash_bytes = hasher.finalize();
+        let hash_hex = hex::encode(hash_bytes);
+        let sig_hex = hex::encode(attacker.sign(&hash_bytes).to_bytes());
+        let conn = ledger.conn.lock().await;
+        let apk = attacker_pk.clone();
+        let ph = prev.hash.clone();
+        conn.call(move |c| {
+            c.execute(
+                "INSERT INTO audit_events (timestamp, source, target, payload, metadata, \
+                 caller_key, signing_key_pubkey, schema_version, prev_hash, hash, signature) \
+                 VALUES (?1, 'test', 'test', ?2, ?3, NULL, ?4, ?5, ?6, ?7, ?8)",
+                rusqlite::params![
+                    ts,
+                    payload,
+                    metadata,
+                    apk,
+                    LEDGER_SCHEMA_VERSION,
+                    ph,
+                    hash_hex,
+                    sig_hex
+                ],
+            )?;
+            Ok::<(), rusqlite::Error>(())
+        })
+        .await
+        .unwrap();
+        drop(conn);
+
+        assert!(
+            !ledger.verify_chain().await.unwrap(),
+            "attacker must not be authorized by a failed introduce"
+        );
+        cleanup(&path);
+    }
+
+    /// No-envelope key_introduce must fail chain verification (not expand trust).
+    #[tokio::test]
+    async fn test_verify_no_envelope_introduce_rejected() {
+        let (ledger, path) = test_ledger("no_envelope_intro").await;
+        let (_new_sk, new_bytes) = crate::keymgmt::generate_keypair();
+        let new_pk = hex::encode(
+            SigningKey::from_bytes(&new_bytes)
+                .verifying_key()
+                .as_bytes(),
+        );
+        // Record a chain row that looks like introduce but lacks ceremony fields.
+        let input = EventInput {
+            source: "keymgmt".into(),
+            target: EVENT_KEY_INTRODUCE.into(),
+            payload: serde_json::json!({
+                "new_pubkey_hex": new_pk,
+                "purpose": "ledger_signing",
+            }),
+            metadata: serde_json::json!({}),
+            caller_key: None,
+        };
+        ledger.record_event(input).await.unwrap();
+        assert!(
+            !ledger.verify_chain().await.unwrap(),
+            "introduce without ceremony envelope must fail closed"
+        );
+        cleanup(&path);
+    }
+
+    /// Wrong-purpose key_introduce must fail chain verification.
+    #[tokio::test]
+    async fn test_verify_wrong_purpose_introduce_rejected() {
+        let (ledger, path) = test_ledger("wrong_purpose_intro").await;
+        let (new_sk, _) = crate::keymgmt::generate_keypair();
+        let mut payload = crate::keymgmt::sign_introduce(
+            &ledger.signing_key,
+            &new_sk.verifying_key(),
+            crate::keymgmt::CeremonyPurpose::LedgerSigning,
+        );
+        // Force a non-ledger purpose after signing.
+        let mut v = serde_json::to_value(&payload).unwrap();
+        v["purpose"] = serde_json::json!("not_ledger_signing");
+        let _ = &mut payload;
+
+        let input = EventInput {
+            source: "keymgmt".into(),
+            target: EVENT_KEY_INTRODUCE.into(),
+            payload: v,
+            metadata: serde_json::json!({}),
+            caller_key: None,
+        };
+        ledger.record_event(input).await.unwrap();
+        assert!(
+            !ledger.verify_chain().await.unwrap(),
+            "wrong-purpose introduce must fail closed"
+        );
+        cleanup(&path);
+    }
+
+    /// Fields-absent introduce (only new_pubkey_hex) fails verify_chain.
+    #[tokio::test]
+    async fn test_verify_fields_absent_introduce_rejected() {
+        let (ledger, path) = test_ledger("fields_absent_intro").await;
+        let (_new_sk, new_bytes) = crate::keymgmt::generate_keypair();
+        let new_pk = hex::encode(
+            SigningKey::from_bytes(&new_bytes)
+                .verifying_key()
+                .as_bytes(),
+        );
+        let input = EventInput {
+            source: "keymgmt".into(),
+            target: EVENT_KEY_INTRODUCE.into(),
+            payload: serde_json::json!({ "new_pubkey_hex": new_pk }),
+            metadata: serde_json::json!({}),
+            caller_key: None,
+        };
+        ledger.record_event(input).await.unwrap();
+        assert!(
+            !ledger.verify_chain().await.unwrap(),
+            "fields-absent introduce must fail closed"
         );
         cleanup(&path);
     }
@@ -1587,14 +2138,15 @@ mod tests {
             let _ = std::fs::remove_file(&path);
             let seed_b = SigningKey::generate(&mut OsRng).to_bytes();
             {
-                let ledger_a = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None)
+                let ledger_a = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None, None)
                     .await
                     .unwrap();
                 ledger_a.record_event(test_input("a")).await.unwrap();
             }
-            let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&seed_b), Some(&seed_a))
-                .await
-                .unwrap();
+            let ledger =
+                AuditLedger::new(path.to_str().unwrap(), Some(&seed_b), Some(&seed_a), None)
+                    .await
+                    .unwrap();
             assert_eq!(
                 hex::encode(ledger.old_verifying_key.unwrap().as_bytes()),
                 hex::encode(derived.as_bytes())
