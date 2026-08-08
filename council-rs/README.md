@@ -46,6 +46,12 @@ help`. The Tauri app always attempts to start and own its bundled Council. An
 occupied Council port is reported as a conflict; the app never adopts that
 listener.
 
+## Implementation map (for feature work)
+
+- War Room Web (receipts / UI snapshot client): `warroom/web/`
+- Change-class checklists (e.g. redacted execute receipt):
+  [`../docs/seams/`](../docs/seams/)
+
 ## Documentation
 
 - [`docs/operator-guide.md`](docs/operator-guide.md)

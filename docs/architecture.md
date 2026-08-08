@@ -224,6 +224,8 @@ token is required, set it in the browser Settings on the remote device.
 - [`docs/security-tooling.md`](security-tooling.md) — local scanners, Selene,
   and the config-key search convention.
 - [`docs/surface-map.md`](surface-map.md) — compact operator surface index.
+- [`docs/seams/`](seams/) — change-class checklists for feature execution
+  (where a change lands, what must not break, which proof is enough).
 - [`council-rs/docs/war-room.md`](../council-rs/docs/war-room.md) — War Room
   runtime shape and backend contract in detail.
 - [`gateway/COUNCIL_GATEWAY_CONTRACT.md`](../gateway/COUNCIL_GATEWAY_CONTRACT.md)
