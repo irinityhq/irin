@@ -3,6 +3,7 @@
 use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -13,11 +14,54 @@ use crate::stream::events::StreamEvent;
 use crate::stream::intervention::{Intervention, InterventionQueue};
 use crate::warroom;
 
+/// Default start-frame wait when env is unset or invalid (10s).
+pub(super) const DEFAULT_WS_START_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Inclusive maximum accepted for `COUNCIL_WS_START_TIMEOUT_MS` (2 minutes).
+/// Values above this fall back to [`DEFAULT_WS_START_TIMEOUT`] so a typo or
+/// hostile env cannot restore a permanent permit pin.
+pub(super) const MAX_WS_START_TIMEOUT_MS: u64 = 120_000;
+
+/// How long `/ws/deliberate` waits for the first `{type:"start"}` frame after
+/// upgrade. Bounds idle sockets that would otherwise hold a deliberate
+/// concurrency permit forever. Override via `COUNCIL_WS_START_TIMEOUT_MS`
+/// (milliseconds): accepted range is `1..=120_000` (2 min max); unset, empty,
+/// non-positive, unparseable, or above max → default 10s.
+pub(super) fn start_frame_timeout() -> Duration {
+    resolve_start_frame_timeout_ms(std::env::var("COUNCIL_WS_START_TIMEOUT_MS").ok())
+}
+
+/// Pure parse of the start-timeout env value (testable without process env).
+pub(super) fn resolve_start_frame_timeout_ms(raw: Option<String>) -> Duration {
+    raw.and_then(|s| s.trim().parse::<u64>().ok())
+        .filter(|ms| *ms > 0 && *ms <= MAX_WS_START_TIMEOUT_MS)
+        .map(Duration::from_millis)
+        .unwrap_or(DEFAULT_WS_START_TIMEOUT)
+}
+
 pub(super) async fn handle_ws(socket: WebSocket, state: AppState) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
-    // Wait for the start message (first message must be {type: "start", payload: {...}})
-    let start_msg = match ws_rx.next().await {
+    // Wait for the start message (first message must be {type: "start", payload: {...}}).
+    // Bounded so idle upgrades cannot pin a deliberate permit forever; timeout
+    // returns, drops the permit held by `ws_deliberate`, and closes the socket.
+    let first = match tokio::time::timeout(start_frame_timeout(), ws_rx.next()).await {
+        Ok(msg) => msg,
+        Err(_) => {
+            let err = StreamEvent::error(
+                "",
+                "start frame timed out; send {type:'start'} within the timeout",
+                true,
+            );
+            let _ = ws_tx
+                .send(Message::Text(
+                    serde_json::to_string(&err).unwrap_or_default().into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let start_msg = match first {
         Some(Ok(Message::Text(text))) => match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(v) => v,
             Err(_) => {
@@ -534,3 +578,36 @@ mod smoke_seat_events_tests;
 #[cfg(test)]
 #[path = "ws_cancel_tests.rs"]
 mod ws_cancel_tests;
+
+#[cfg(test)]
+mod start_frame_timeout_tests {
+    use super::{
+        DEFAULT_WS_START_TIMEOUT, MAX_WS_START_TIMEOUT_MS, resolve_start_frame_timeout_ms,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn resolve_start_frame_timeout_ms_table() {
+        let cases: &[(Option<&str>, Duration)] = &[
+            (None, DEFAULT_WS_START_TIMEOUT),
+            (Some(""), DEFAULT_WS_START_TIMEOUT),
+            (Some("0"), DEFAULT_WS_START_TIMEOUT),
+            (Some("-5"), DEFAULT_WS_START_TIMEOUT),
+            (Some("abc"), DEFAULT_WS_START_TIMEOUT),
+            (Some("  200  "), Duration::from_millis(200)),
+            (
+                Some("120000"),
+                Duration::from_millis(MAX_WS_START_TIMEOUT_MS),
+            ),
+            (Some("120001"), DEFAULT_WS_START_TIMEOUT),
+            (Some("18446744073709551615"), DEFAULT_WS_START_TIMEOUT), // u64::MAX
+        ];
+        for (raw, expected) in cases {
+            let got = resolve_start_frame_timeout_ms(raw.map(str::to_string));
+            assert_eq!(
+                got, *expected,
+                "resolve_start_frame_timeout_ms({raw:?}) = {got:?}, want {expected:?}"
+            );
+        }
+    }
+}
