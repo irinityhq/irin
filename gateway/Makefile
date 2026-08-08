@@ -332,8 +332,17 @@ contract-check:
 ledger-fsck:
 	@DB_PATH=$${LEDGER_DB_PATH:-ledger.db}; \
 	KEY_FLAG=""; \
+	OLD_KEY_FLAG=""; \
 	if [ -f "$(LEDGER_KEY_PATH)" ]; then KEY_FLAG="--key $(LEDGER_KEY_PATH)"; fi; \
-	cd sidecar-rs && cargo run --locked --release --bin gateway-ledger -- fsck "$$DB_PATH" $$KEY_FLAG
+	if [ -n "$${LEDGER_OLD_SIGNING_KEY_PATH:-}" ] && [ -f "$${LEDGER_OLD_SIGNING_KEY_PATH}" ]; then \
+		OLD_KEY_FLAG="--old-key $${LEDGER_OLD_SIGNING_KEY_PATH}"; \
+	fi; \
+	if [ -z "$$KEY_FLAG" ]; then \
+		echo "FATAL: ledger-fsck requires a signing key at $(LEDGER_KEY_PATH) (or set LEDGER_KEY_PATH)."; \
+		echo "       For unsigned hash diagnostics only: cargo run -p gateway-sidecar --bin gateway-ledger -- fsck <db> --hash-only"; \
+		exit 1; \
+	fi; \
+	cd sidecar-rs && cargo run --locked --release --bin gateway-ledger -- fsck "$$DB_PATH" $$KEY_FLAG $$OLD_KEY_FLAG
 # T23: --locked on release path + committed lock (buildability). Clean clone + this proves no missing pins for sovereign-protocol dep.
 
 up: ledger-key-dev

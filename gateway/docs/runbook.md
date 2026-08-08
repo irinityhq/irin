@@ -94,14 +94,35 @@ use the second admin key.
 
 ## Verify the ledger
 
+Online admin-gated chain check (sidecar HTTP):
+
 ```bash
 LEDGER_ADMIN_KEY="$ADMIN_KEY" make -C gateway ledger-verify
-make -C gateway ledger-fsck
 ```
+
+Offline cryptographic fsck (`gateway-ledger`; requires the active signing seed):
+
+```bash
+# Default active key at ~/.irin/ledger_key.pem (LEDGER_KEY_PATH)
+make -C gateway ledger-fsck
+
+# During A→B rotation, keep the prior seed trusted via LEDGER_OLD_SIGNING_KEY_PATH:
+LEDGER_OLD_SIGNING_KEY_PATH=~/.irin/ledger_key_old.pem make -C gateway ledger-fsck
+
+# Equivalent direct CLI (active + old seeds; both are 32 raw bytes, not PEM):
+gateway-ledger fsck /path/to/ledger.db \
+  --key ~/.irin/ledger_key.pem \
+  --old-key ~/.irin/ledger_key_old.pem
+```
+
+`--key` is required for a signed result. Without it the CLI fails closed.
+`--hash-only` is diagnostics only (hash links; signatures are **not**
+verified) and must not be treated as cryptographic proof.
 
 The signing key is exactly 32 bytes. Never replace it in place while the
 sidecar is running. A signing-key rotation must keep the prior key available
-for verification until the intended retention window has elapsed.
+for verification (`LEDGER_OLD_SIGNING_KEY_PATH` / `--old-key`) until the
+intended dual-signing window has elapsed.
 
 ## Sentinel configuration
 

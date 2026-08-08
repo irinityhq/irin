@@ -410,19 +410,43 @@ The `GUARD_DRY_RUN=1` env var overrides the file's `dry_run` field.
 
 Standalone binary (`src/bin/gateway_ledger.rs`), three subcommands:
 
-**`gateway-ledger verify <db-path> [--key <path>]`** — hash chain + signature check.
+**`gateway-ledger verify <db-path> --key <path> [--old-key <path>]`** — hash
+chain + Ed25519 signature check against the configured trust set. `--key` is
+**required** for cryptographic verification (the active 32-byte signing seed).
+Optional `--old-key` is the previous configured seed during rotation (mirrors
+sidecar `LEDGER_OLD_SIGNING_KEY_PATH`). Row `signing_key_pubkey` selects within
+that set only — never an implicit root. Keys introduced via verified
+`key_introduce` events expand the trust set.
 
-**`gateway-ledger fsck <db-path> [--key <path>]`** — full semantic check:
+**`gateway-ledger fsck <db-path> --key <path> [--old-key <path>]`** — full
+semantic check (same trust set as `verify`):
 1. Hash chain integrity + signature validity
 2. Schema version monotonicity (versions never decrease)
 3. `signing_key_pubkey` presence on v3+ events
-4. Key lifecycle scanning (introduce/revoke detection)
+4. Key lifecycle scanning (introduce/revoke detection, introduce-before-use)
 5. Envelope signature verification with signer cross-check
 6. Revoked-key usage detection, duplicate introduce detection
 
 **`gateway-ledger generate-key <output-path>`** — generates a 32-byte Ed25519 seed file (chmod 600).
 
-Exit codes: `0` = valid/healthy, `1` = tampered/unhealthy, `2` = usage/IO error.
+**`--hash-only`** — optional flag for both `verify` and `fsck`. Checks hash
+links only; **signatures are NOT verified**. Exit 0 means the chain is
+self-consistent, not that it is signed. Use only for unsigned diagnostics;
+normal operator runs must pass `--key`.
+
+Without `--key` and without `--hash-only`, `verify`/`fsck` **fail closed**
+(exit 1).
+
+Rotated ledger (dual-signing window after A→B):
+
+```bash
+# Active key B, previous key A still trusted for early rows
+gateway-ledger fsck ledger.db --key /path/to/key-b --old-key /path/to/key-a
+# Makefile target forwards LEDGER_OLD_SIGNING_KEY_PATH when set:
+LEDGER_OLD_SIGNING_KEY_PATH=/path/to/key-a make -C gateway ledger-fsck
+```
+
+Exit codes: `0` = valid/healthy (or hash-only self-consistent), `1` = tampered/unhealthy/missing key, `2` = usage/IO error.
 
 ---
 

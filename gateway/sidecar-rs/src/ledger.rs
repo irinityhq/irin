@@ -228,11 +228,14 @@ impl AuditLedger {
 
         let verifying_key = signing_key.verifying_key();
 
+        // Old key path carries a 32-byte *signing seed* (same as
+        // LEDGER_SIGNING_KEY_PATH / CLI --old-key), not a raw verifying-key
+        // point. Derive via SigningKey so sidecar trust matches gateway-ledger.
         let old_verifying_key = match old_verifying_key_bytes {
             Some(bytes) if bytes.len() == 32 => {
                 let mut b = [0u8; 32];
                 b.copy_from_slice(&bytes[..32]);
-                VerifyingKey::from_bytes(&b).ok()
+                Some(SigningKey::from_bytes(&b).verifying_key())
             }
             _ => None,
         };
@@ -1474,5 +1477,127 @@ mod tests {
         assert!(!report.unintroduced_signer_events.is_empty());
         assert!(!report.is_healthy());
         cleanup(&path);
+    }
+
+    // -----------------------------------------------------------------------
+    // Sidecar old-key seed derivation (must match CLI --old-key / SigningKey)
+    // -----------------------------------------------------------------------
+
+    /// A-to-B rotation: rows signed under key A (with stored pubkey) must verify
+    /// when the ledger is reopened with active B and old seed A.
+    #[tokio::test]
+    async fn test_verify_old_key_seed_accepts_prior_pubkey_rows() {
+        let path = temp_db_path("old_key_pubkey");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+
+        let seed_a = SigningKey::generate(&mut OsRng).to_bytes();
+        let seed_b = SigningKey::generate(&mut OsRng).to_bytes();
+        let pk_a = hex::encode(SigningKey::from_bytes(&seed_a).verifying_key().as_bytes());
+
+        // Record under A.
+        {
+            let ledger_a = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None)
+                .await
+                .unwrap();
+            let event = ledger_a.record_event(test_input("from_a")).await.unwrap();
+            assert_eq!(event.signing_key_pubkey.as_deref(), Some(pk_a.as_str()));
+            assert!(ledger_a.verify_chain().await.unwrap());
+        }
+
+        // Reopen with B active + A as old signing seed (not raw VK bytes).
+        let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&seed_b), Some(&seed_a))
+            .await
+            .unwrap();
+        assert!(
+            ledger.verify_chain().await.unwrap(),
+            "A-signed rows with stored pubkey must verify under LEDGER_OLD_SIGNING_KEY_PATH seed"
+        );
+        let report = ledger.fsck().await.unwrap();
+        assert!(report.is_healthy());
+        assert!(report.configured_signers.contains(&pk_a));
+        cleanup(&path);
+    }
+
+    /// Legacy null-pubkey A rows trial-verify against the old configured seed.
+    #[tokio::test]
+    async fn test_verify_old_key_seed_accepts_legacy_null_pubkey_rows() {
+        let path = temp_db_path("old_key_legacy_null");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_file(format!("{}-wal", path.display()));
+        let _ = std::fs::remove_file(format!("{}-shm", path.display()));
+
+        let seed_a = SigningKey::generate(&mut OsRng).to_bytes();
+        let seed_b = SigningKey::generate(&mut OsRng).to_bytes();
+
+        {
+            let ledger_a = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None)
+                .await
+                .unwrap();
+            ledger_a.record_event(test_input("legacy_a")).await.unwrap();
+            let conn = ledger_a.conn.lock().await;
+            conn.call(|c| {
+                c.execute(
+                    "UPDATE audit_events SET signing_key_pubkey = NULL WHERE id = 1",
+                    [],
+                )?;
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await
+            .unwrap();
+            drop(conn);
+            assert!(ledger_a.verify_chain().await.unwrap());
+        }
+
+        let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&seed_b), Some(&seed_a))
+            .await
+            .unwrap();
+        assert!(
+            ledger.verify_chain().await.unwrap(),
+            "legacy null-pubkey A rows must trial against old SigningKey seed"
+        );
+        cleanup(&path);
+    }
+
+    /// Regression: treating the signing seed as VerifyingKey::from_bytes fails
+    /// for almost all seeds; derive via SigningKey so trust is non-empty.
+    #[tokio::test]
+    async fn test_old_key_seed_is_not_raw_verifying_key_bytes() {
+        let seed_a = SigningKey::generate(&mut OsRng).to_bytes();
+        // Direct VerifyingKey::from_bytes on a signing seed is almost always invalid.
+        let raw_vk = VerifyingKey::from_bytes(&seed_a);
+        let derived = SigningKey::from_bytes(&seed_a).verifying_key();
+        // When raw parse fails, the pre-fix path dropped old trust entirely.
+        // The product path must still have a real old verifying key.
+        if raw_vk.is_err() {
+            // Common case: seed is not a curve point — product path still works.
+            let path = temp_db_path("old_key_not_vk");
+            let _ = std::fs::remove_file(&path);
+            let seed_b = SigningKey::generate(&mut OsRng).to_bytes();
+            {
+                let ledger_a = AuditLedger::new(path.to_str().unwrap(), Some(&seed_a), None)
+                    .await
+                    .unwrap();
+                ledger_a.record_event(test_input("a")).await.unwrap();
+            }
+            let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&seed_b), Some(&seed_a))
+                .await
+                .unwrap();
+            assert_eq!(
+                hex::encode(ledger.old_verifying_key.unwrap().as_bytes()),
+                hex::encode(derived.as_bytes())
+            );
+            assert!(ledger.verify_chain().await.unwrap());
+            cleanup(&path);
+        } else {
+            // Extremely rare: seed happened to be a valid point — still must
+            // use the SigningKey-derived pubkey, not the seed-as-point.
+            assert_ne!(
+                hex::encode(raw_vk.unwrap().as_bytes()),
+                hex::encode(derived.as_bytes()),
+                "if seed is accidentally a valid point, product still uses SigningKey derivation"
+            );
+        }
     }
 }
