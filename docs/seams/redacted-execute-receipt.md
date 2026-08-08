@@ -33,15 +33,25 @@ Token wire/JCS authority is
 
    Note: plain `npm test` is Playwright and does **not** run these unit tests.
 
-2. **Full War Room web lane (when web surface is in the PR):**
+2. **War Room web lane (when web surface is in the PR, no Tauri/Pack):**
+
+   ```bash
+   make -C council-rs warroom-web-check
+   ```
+
+   That gate runs npm audit, lint, typecheck, `test:ci` (unit + Playwright),
+   export, and asset-build proof. Lint + typecheck + `test:unit` alone is
+   **not** equivalent.
+
+3. **Pack / Tauri surface (when shipping surface changes):**
 
    ```bash
    make -C council-rs warroom-check
    ```
 
-   or lint + typecheck + `test:unit` in `council-rs/warroom/web/`.
+   Includes `warroom-web-check` plus the Tauri hybrid smoke.
 
-3. **Server projection (when sidecar snapshot/list changes):**
+4. **Server projection (when sidecar snapshot/list changes):**
 
    ```bash
    cargo test -p gateway-sidecar --test watch_api gate4_ui_snapshot
@@ -57,10 +67,10 @@ Token wire/JCS authority is
    `gate4_ui_snapshot_has_exact_whitelist_and_no_raw_values` (matched by the
    `gate4_ui_snapshot` filter above).
 
-4. **Path-selected:** `make check` while iterating; `make ship-check` once before
+5. **Path-selected:** `make check` while iterating; `make ship-check` once before
    PR readiness (required when both Rust and npm lanes are in the diff).
 
-5. **`make verify`:** not required for receipt-redaction-only changes.
+6. **`make verify`:** not required for receipt-redaction-only changes.
 
 ## Must not break (test names / contracts)
 

@@ -83,10 +83,19 @@ From repository root:
   `test_worker_no_verifier_fails_closed`,
   `test_worker_rejects_unknown_authority_no_silent_downgrade`
 
+## Coverage gaps (do not over-claim)
+
+- **`prepare` authority nack** shares the same non-executing branch as
+  `recommend` in `worker.rs`, but the suite has a dedicated nack test only for
+  recommend (`test_worker_recommend_without_token_is_nacked`). There is no
+  focused `prepare` nack regression. If you change prepare handling, add and
+  cite a dedicated test in the same PR.
+
 ## Do not
 
-- Reintroduce fake effect acks for recommend/prepare/stub execute (see
-  `test_worker_*_nacked` / refuse tests above).
+- Reintroduce fake effect acks for recommend / stub execute (see
+  `test_worker_recommend_without_token_is_nacked` and
+  `test_worker_execute_without_executor_is_nacked`).
 - Split token authorize policy into a parallel worker-only ruleset — policy
   authority stays on the structured-execute seam; worker rechecks, does not
   redefine wire policy.
