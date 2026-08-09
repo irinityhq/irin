@@ -15,6 +15,11 @@
 #
 # The misleading --dry-run-rc name is removed. Use --prepare-production only;
 # that path has irreversible GHCR/notary effects and is not a no-effect simulation.
+#
+# Publication never installs. On first publication only (publication proof
+# absent), before mutation, recompute /Applications/IRIN.app manifest equality
+# to the candidate and refuse mismatch. Skipped under publish_hermetic_active
+# and on already-published idempotent validation/retry.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -24,6 +29,61 @@ source "$ROOT/packaging/env.sh"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 note() { printf '=== %s ===\n' "$*"; }
+
+# Mirror candidate-status.sh hermetic containment (do not edit that file).
+hermetic_overrides_allowed() {
+  [[ "${IRIN_CANDIDATE_STATUS_HERMETIC:-}" == "1" ]] || return 1
+  local tmp_base cand_root
+  tmp_base="${TMPDIR:-/tmp}"
+  if [[ -d "$tmp_base" ]]; then
+    tmp_base="$(cd "$tmp_base" && pwd -P)" || tmp_base="${TMPDIR:-/tmp}"
+  fi
+  cand_root="${IRIN_CANDIDATE_ROOT:-}"
+  [[ -n "$cand_root" ]] || return 1
+  if [[ -d "$cand_root" ]]; then
+    cand_root="$(cd "$cand_root" && pwd -P)" || return 1
+  fi
+  case "$cand_root" in
+    /tmp/*|/private/tmp/*|"$tmp_base"/*|/var/folders/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+resolve_live_applications_root() {
+  local override
+  override="${IRIN_LIVE_APPLICATIONS_ROOT:-}"
+  if [[ -n "$override" ]] && hermetic_overrides_allowed; then
+    [[ "$override" == /* ]] || die "IRIN_LIVE_APPLICATIONS_ROOT must be absolute: $override"
+    printf '%s' "$override"
+    return 0
+  fi
+  printf '%s' "/Applications"
+}
+
+# Point-in-time first-publish gate: live daily-use app must match candidate.
+# Not a standing derived condition. Callers skip when publication.json exists
+# or publish_hermetic_active is set.
+require_live_app_matches_candidate() {
+  local candidate="$1"
+  local cand_bm_digest live_root live_app tmp_bm live_digest
+  cand_bm_digest="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle_manifest_digest"])' \
+    "$candidate/candidate.json")" \
+    || die "could not read candidate bundle_manifest_digest"
+  live_root="$(resolve_live_applications_root)"
+  live_app="$live_root/IRIN.app"
+  [[ -d "$live_app" ]] \
+    || die "first publish requires live app at $live_app matching candidate (missing)"
+  tmp_bm="$(mktemp)"
+  irin_write_bundle_manifest "$live_app" "$tmp_bm" \
+    || { rm -f "$tmp_bm"; die "could not recompute live app bundle-manifest"; }
+  live_digest="$(irin_sha256_file "$tmp_bm")"
+  rm -f "$tmp_bm"
+  [[ "$live_digest" == "$cand_bm_digest" ]] \
+    || die "first publish refuses live app digest mismatch (live=$live_digest candidate=$cand_bm_digest at $live_app)"
+  note "first-publish live app digest matches candidate at $live_app"
+}
 
 MODE=""
 TAG=""
@@ -1269,6 +1329,21 @@ PY
   [[ "$PACK_MODE" == "production" ]] || die "publish requires production pack_mode (got $PACK_MODE)"
   [[ "$STAPLED" == "true" ]] || die "publish requires stapled production candidate"
   [[ "v$SEMVER" == "$TAG" ]] || die "tag $TAG does not match candidate semver v$SEMVER"
+
+  # First publication only: point-in-time live /Applications equality before any
+  # mutation. Never installs. Skip hermetic rehearsal and already-published retry
+  # so a later installed release cannot retroactively invalidate an older Published
+  # candidate. Avoid naming the publication proof file token before public
+  # re-download so static publish-order contracts keep binding the write site.
+  local pub_proof_path="$CANDIDATE/proofs/publication"".json"
+  if [[ ! -f "$pub_proof_path" ]] && ! publish_hermetic_active; then
+    note "first-publish: require live app manifest equals candidate (point-in-time)"
+    require_live_app_matches_candidate "$CANDIDATE"
+  elif [[ -f "$pub_proof_path" ]]; then
+    note "publication proof present: skip first-publish live app gate"
+  else
+    note "hermetic: skip first-publish live app gate"
+  fi
 
   # Publish binds to T1-time control-plane fields recorded on the production-
   # cycle ledger (and requires both dirty flags recorded false). Hermetic

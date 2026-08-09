@@ -6,10 +6,14 @@
 # still matches, validate the existing acceptance and write only t2.json
 # (no rewrite of acceptance; no second phrase required for resume).
 #
+# Production pins --installed-app to /Applications/IRIN.app (the daily-use
+# app). Hermetic temp-store tests may target a live Applications override
+# under the same containment policy as candidate-status hermetic overrides.
+#
 # Usage:
 #   scripts/record-acceptance.sh \
 #     --candidate ABSOLUTE_STORE_PATH \
-#     --installed-app ABSOLUTE_APP_PATH
+#     --installed-app /Applications/IRIN.app
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -19,6 +23,38 @@ source "$ROOT/packaging/env.sh"
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 note() { printf '=== %s ===\n' "$*"; }
 
+# Mirror candidate-status.sh hermetic containment (do not edit that file).
+hermetic_overrides_allowed() {
+  [[ "${IRIN_CANDIDATE_STATUS_HERMETIC:-}" == "1" ]] || return 1
+  local tmp_base cand_root
+  tmp_base="${TMPDIR:-/tmp}"
+  if [[ -d "$tmp_base" ]]; then
+    tmp_base="$(cd "$tmp_base" && pwd -P)" || tmp_base="${TMPDIR:-/tmp}"
+  fi
+  cand_root="${IRIN_CANDIDATE_ROOT:-}"
+  [[ -n "$cand_root" ]] || return 1
+  if [[ -d "$cand_root" ]]; then
+    cand_root="$(cd "$cand_root" && pwd -P)" || return 1
+  fi
+  case "$cand_root" in
+    /tmp/*|/private/tmp/*|"$tmp_base"/*|/var/folders/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+resolve_required_installed_app() {
+  local override
+  override="${IRIN_LIVE_APPLICATIONS_ROOT:-}"
+  if [[ -n "$override" ]] && hermetic_overrides_allowed; then
+    [[ "$override" == /* ]] || die "IRIN_LIVE_APPLICATIONS_ROOT must be absolute: $override"
+    printf '%s' "$override/IRIN.app"
+    return 0
+  fi
+  printf '%s' "/Applications/IRIN.app"
+}
+
 CANDIDATE_ARG=""
 INSTALLED_APP=""
 while [[ $# -gt 0 ]]; do
@@ -27,9 +63,13 @@ while [[ $# -gt 0 ]]; do
     --installed-app) INSTALLED_APP="${2:-}"; shift 2 ;;
     -h|--help)
       cat <<'EOF'
-Usage: record-acceptance.sh --candidate ABSOLUTE_STORE_PATH --installed-app ABSOLUTE_APP_PATH
+Usage: record-acceptance.sh --candidate ABSOLUTE_STORE_PATH --installed-app /Applications/IRIN.app
 
 Final-production acceptance (T2). Requires a real tty for a fresh phrase.
+Production pins --installed-app to /Applications/IRIN.app (point-in-time
+live bytes Dave exercised). Hermetic temp-store tests may use a live
+Applications override via IRIN_LIVE_APPLICATIONS_ROOT under the same
+hermetic containment as candidate-status.
 If acceptance.json already exists without t2.json, resumes by validating the
 existing acceptance against pending-t2 and writing only t2.json.
 EOF
@@ -51,6 +91,17 @@ case "$(basename "$INSTALLED_APP")" in
   IRIN.app) ;;
   *) die "installed app must be named IRIN.app (got $(basename "$INSTALLED_APP"))" ;;
 esac
+
+REQUIRED_INSTALLED="$(resolve_required_installed_app)"
+INST_CANON_EARLY="$(cd "$INSTALLED_APP" && pwd)"
+if [[ -d "$REQUIRED_INSTALLED" ]]; then
+  REQ_CANON="$(cd "$REQUIRED_INSTALLED" && pwd)"
+else
+  REQ_CANON="$REQUIRED_INSTALLED"
+fi
+if [[ "$INST_CANON_EARLY" != "$REQ_CANON" ]]; then
+  die "production acceptance requires --installed-app $REQUIRED_INSTALLED (got $INSTALLED_APP); candidate-local extract is not the T2 live path"
+fi
 
 CANDIDATE_ID="$(basename "$CANDIDATE")"
 [[ "$CANDIDATE_ID" =~ ^[0-9a-f]{64}$ ]] || die "bad candidate-id path: $CANDIDATE"
