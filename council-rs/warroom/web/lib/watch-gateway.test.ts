@@ -30,7 +30,24 @@ const corpusPath = path.resolve(
   path.dirname(fileURLToPath(import.meta.url)),
   "../../../../docs/seams/fixtures/execute_receipt_cases.json",
 );
-const executeReceiptCases = JSON.parse(readFileSync(corpusPath, "utf8")) as CorpusCase[];
+const executeReceiptCases: CorpusCase[] = (() => {
+  const raw: unknown = JSON.parse(readFileSync(corpusPath, "utf8"));
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`execute-receipt corpus must be a non-empty array: ${corpusPath}`);
+  }
+  return raw.map((entry) => {
+    const kase = entry as CorpusCase;
+    if (kase.expect !== "accept" && kase.expect !== "reject") {
+      throw new Error(
+        `corpus case '${String(kase.name)}': expect must be accept|reject, got '${String(kase.expect)}'`,
+      );
+    }
+    if (kase.expect === "reject" && !kase.reason_substring) {
+      throw new Error(`corpus reject case '${kase.name}' must pin reason_substring`);
+    }
+    return kase;
+  });
+})();
 
 describe("parseWatchSnapshot", () => {
   it("uses configured canary truth from the BFF", () => {
@@ -70,9 +87,8 @@ describe("parseWatchSnapshot", () => {
           expect(parsed.recent_execute_receipts).toHaveLength(1);
           expect(parsed.recent_execute_receipts[0]).toMatchObject(c.receipt);
         } else {
-          expect(() => parseWatchSnapshot(body)).toThrow(
-            c.reason_substring ? new RegExp(c.reason_substring) : /./,
-          );
+          // Loader guarantees reject cases pin a reason — no catch-all fallback.
+          expect(() => parseWatchSnapshot(body)).toThrow(new RegExp(c.reason_substring as string));
         }
       });
     }
