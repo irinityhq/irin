@@ -127,12 +127,12 @@ audit-rust:
 	@cd sidecar-rs && cargo audit -D warnings
 
 # --------------------------------------------------------------------------
-# lint-lua — structural lints on Lua hot-path code. Today this is just the
-# timer-closure rule (no sidecar.X inside ngx.timer.at bodies; bind at
-# module load). Add new rules to test/lint-*.sh as the spine grows.
+# lint-lua — structural lints on Lua hot-path code. Rules live in
+# test/lint-*.sh (timer-closure binding + ledger_record admin-key contract).
 # --------------------------------------------------------------------------
 lint-lua:
 	bash test/lint-timer-closures.sh
+	bash test/lint-ledger-record-admin.sh
 
 # Behavioral Lua unit tests (no nginx/openresty runtime needed — pure-string
 # modules). Closes the Wave-2 TODO for credential_scrub (security tripwire:

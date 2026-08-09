@@ -27,6 +27,11 @@ services:
       # Quoted because YAML would otherwise parse the colons as a mapping.
       - "SIDECAR_ADDR=unix:/run/sidecar/sidecar.sock:"
       - SIDECAR_TIMEOUT_MS=200
+      # Admin-tier virtual key for OpenResty → sidecar POST /ledger/record
+      # (W1b X-Admin-Key). Provision via `make -C gateway provision-key
+      # BUDGET=ops TIER=admin` and export the raw_key here. BOOTSTRAP_TOKEN
+      # will not work. Empty → ledger writes fail closed (no silent drop).
+      - LEDGER_ADMIN_KEY=${LEDGER_ADMIN_KEY:-}
       - CLAUDE_PROXY_URL=http://192.168.65.254:9090
       - CODEX_PROXY_URL=${CODEX_PROXY_URL:-http://192.168.65.254:9091}
       - GEMINI_PROXY_URL=${GEMINI_PROXY_URL:-http://192.168.65.254:9092}
