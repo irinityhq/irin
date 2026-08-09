@@ -108,11 +108,13 @@ digest. Prepare also records the checkout HEAD and whether `scripts/` or
 CANDIDATE=<absolute candidate_path from prepare>
 
 # Fresh-extract the candidate DMG, then staged-swap into /Applications/IRIN.app.
-# Refuses if IRIN.app is running, or if the live app root is a symlink.
-# On success writes proofs/install.json with candidate-local digests plus
-# live_installed_app_path and live_installed_bundle_manifest_digest
-# (point-in-time equality only). On post-swap failure restores the prior app
-# and writes no install proof. Successful replacement archives the prior under
+# Refuses if IRIN.app is running. An existing live path (including a root
+# symlink) is displaced aside like any prior; the installer does not refuse
+# solely because the prior root is a symlink. On success writes
+# proofs/install.json with candidate-local digests plus live_installed_app_path
+# and live_installed_bundle_manifest_digest (point-in-time equality only). On
+# post-swap failure restores the prior app and writes no install proof.
+# Successful replacement archives the prior under
 # ~/.local/state/irin/displaced-apps/ and may retain a hidden sibling under
 # /Applications (see Live install recovery below).
 scripts/install-verify-candidate.sh --candidate "$CANDIDATE" --live
@@ -124,7 +126,8 @@ irin-mission create-pending-t2 \
   --expiry 2099-01-01T00:00:00Z
 
 # Interactive only — phrase must include full source SHA + DMG hash +
-# installed bundle-manifest digest. Production pins the daily-use path.
+# installed bundle-manifest digest. Production pins the daily-use path and
+# refuses a symlink-root installed app (first-publish gate does too).
 scripts/record-acceptance.sh \
   --candidate "$CANDIDATE" \
   --installed-app /Applications/IRIN.app

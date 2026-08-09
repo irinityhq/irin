@@ -1075,6 +1075,44 @@ chmod -R u+w "$LIVE_DEST_B/proofs" 2>/dev/null || true
   || fail "unrestored prior sibling must not remain after successful restore"
 pass "--live rollback restores prior app and writes no install proof"
 
+# (b2) physical displaced-apps containment: IRIN_STATE_ROOT is a symlink into
+# the live bundle (→ IRIN.app/Contents). After swap, mkdir of displaced-apps
+# lands inside the new bundle; pwd -P must refuse nest, rollback prior, write
+# no install.json. (Static grep of pwd -P is insufficient.)
+PHYS_DEST="$(make_live_candidate pc)"
+rm -rf "$LIVE_APP"
+mkdir -p "$LIVE_APP/Contents/MacOS"
+printf 'prior-phys' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+printf 'prior-side' >"$LIVE_APP/Contents/MacOS/council"
+PHYS_PRIOR_MARKER="$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")"
+rm -f "$PHYS_DEST/proofs/install.json"
+# Symlink state root into the live app's Contents (always present after swap).
+PHYS_STATE_LINK="$TEST_HOME/state-symlink-into-live"
+rm -rf "$PHYS_STATE_LINK"
+ln -sfn "$LIVE_APP/Contents" "$PHYS_STATE_LINK"
+set +e
+PHYS_OUT="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  IRIN_STATE_ROOT="$PHYS_STATE_LINK" \
+  IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT" \
+  "$INSTALL" --candidate "$PHYS_DEST" --live 2>&1
+)"
+PHYS_EC=$?
+set -e
+[[ $PHYS_EC -ne 0 ]] || fail "state root symlink into live bundle must refuse: $PHYS_OUT"
+[[ "$PHYS_OUT" == *"refusing displaced-apps nest"* || "$PHYS_OUT" == *"nest under live"* ]] \
+  || fail "expected physical nest refuse: $PHYS_OUT"
+[[ ! -f "$PHYS_DEST/proofs/install.json" ]] \
+  || fail "physical nest refuse must leave no install proof"
+[[ -d "$LIVE_APP" && ! -L "$LIVE_APP" ]] || fail "physical nest refuse must restore real prior app"
+[[ "$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")" == "$PHYS_PRIOR_MARKER" ]] \
+  || fail "physical nest refuse must restore prior app bytes: $PHYS_OUT"
+# Must not leave a displaced-apps archive tree nested inside the live app.
+[[ -z "$(find "$LIVE_APP" -path '*/displaced-apps/*' 2>/dev/null | head -1)" ]] \
+  || fail "must not leave displaced-apps nest inside live app after refuse"
+pass "--live physical containment refuses symlink-into-live state root"
+
 # Default (no --live): reuse existing real candidate; must not touch Applications.
 rm -rf "$LIVE_APP"
 mkdir -p "$LIVE_APP/Contents/MacOS"
@@ -1148,8 +1186,11 @@ grep -q 'symlink-root live app' "$TX" \
   || fail "first-publish live gate must refuse symlink-root live app"
 grep -q 'must not be a symlink at bundle root' "$ACCEPT" \
   || fail "T2 acceptance must refuse symlink-root installed app"
-grep -q 'pwd -P' "$INSTALL" \
-  || fail "live install must physically resolve displaced-apps containment"
+# Source contract for physical containment (runtime fixture is (b2) above).
+grep -q 'refusing displaced-apps nest under live app path' "$INSTALL" \
+  || fail "live install must refuse physically nested displaced-apps"
+grep -q 'DISPLACE_PHYS' "$INSTALL" \
+  || fail "live install must resolve physical displaced-apps path"
 python3 - "$TX" <<'PY' || fail "do_publish must invoke maybe_require_first_publish_live_app before mutation"
 import sys
 text = open(sys.argv[1]).read()
