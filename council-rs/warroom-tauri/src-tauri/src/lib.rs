@@ -1203,6 +1203,36 @@ async fn gateway_pack_stop(app: AppHandle) -> Result<DesktopStatusSnapshot, Stri
     .map_err(|e| e.to_string())?
 }
 
+/// Install or remove the pack-native watch profile and recreate the pack so the
+/// sidecar reloads. Toggle is a bounded force-recreate (in-flight requests drop).
+#[tauri::command]
+async fn gateway_pack_set_watch_sentinels(enabled: bool) -> Result<bool, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let store = KeychainSecretStore;
+        gateway_pack::set_watch_sentinels_enabled(&store, enabled)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Whether the durable watch profile file is installed under app-support.
+#[tauri::command]
+fn gateway_pack_watch_sentinels_enabled() -> bool {
+    gateway_pack::watch_sentinels_enabled()
+}
+
+/// Absolute host path of the watch inbox folder (created if needed).
+#[tauri::command]
+fn gateway_pack_watch_inbox_path() -> Result<String, String> {
+    gateway_pack::watch_inbox_path_string()
+}
+
+/// Reveal the watch inbox in Finder (macOS).
+#[tauri::command]
+fn gateway_pack_open_watch_inbox() -> Result<String, String> {
+    gateway_pack::open_watch_inbox()
+}
+
 /// Destructive uninstall of the desktop pack only. Explicit operator action.
 /// Propagates Council Direct restart failures.
 #[tauri::command]
@@ -1620,6 +1650,10 @@ pub fn run() {
             gateway_pack_disable,
             gateway_pack_stop,
             gateway_pack_uninstall,
+            gateway_pack_set_watch_sentinels,
+            gateway_pack_watch_sentinels_enabled,
+            gateway_pack_watch_inbox_path,
+            gateway_pack_open_watch_inbox,
             touch_id_status,
             touch_id_enroll,
             touch_id_arm,

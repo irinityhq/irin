@@ -20,6 +20,7 @@ mod launch;
 mod paths;
 mod status;
 mod types;
+mod watch_profile;
 
 // --- Public surface (unchanged from monolithic mod.rs) ---
 
@@ -35,8 +36,9 @@ pub use status::{
 };
 
 pub use paths::{
-    arm_keys_path, bundled_pack_root, gateway_data_dir, installed_marker_path, is_pack_installed,
-    ledger_key_path, public_env_path, runtime_env_path, ARM_KEYS_CONTAINER_PATH,
+    arm_keys_path, bundled_pack_root, ensure_watch_dirs, gateway_data_dir, installed_marker_path,
+    is_pack_installed, ledger_key_path, public_env_path, runtime_env_path, sentinels_dir,
+    watch_inbox_dir, watch_profile_path, ARM_KEYS_CONTAINER_PATH, WATCH_PROFILE_CONTAINER_PATH,
 };
 
 pub use keys::{ensure_arm_keys_file, serialize_public_env, validate_env_value};
@@ -51,16 +53,20 @@ pub use enable::{
     uninstall_gateway_pack,
 };
 
+pub use watch_profile::{
+    open_watch_inbox, set_watch_sentinels_enabled, watch_inbox_path_string, watch_sentinels_enabled,
+};
+
 #[cfg(test)]
 pub use launch::{
     cold_launch_owned_via_gateway, decide_launch_resume_outcome, decide_launch_via_gateway,
     frontend_may_start_council, LaunchResumeOutcome,
 };
 pub use launch::{
-    default_secret_store, governed_launch_after_watch_reconciliation,
-    may_promote_to_governed, pack_auth_revalidated, pack_auth_revalidated_with_key,
-    promote_may_call_resume, resume_installed_pack, resume_installed_pack_with_key,
-    status_with_council_route, watch_admin_surfaces_authenticated,
+    default_secret_store, governed_launch_after_watch_reconciliation, may_promote_to_governed,
+    pack_auth_revalidated, pack_auth_revalidated_with_key, promote_may_call_resume,
+    resume_installed_pack, resume_installed_pack_with_key, status_with_council_route,
+    watch_admin_surfaces_authenticated,
 };
 
 #[cfg(test)]

@@ -9,7 +9,8 @@ use super::keys::{random_hex, serialize_public_env, validate_env_value, write_at
 use super::manifest::{ImageRef, ValidatedManifest};
 use super::paths::{
     arm_keys_path, ensure_gateway_dir, ledger_key_path, public_env_path, runtime_env_path,
-    ARM_KEYS_CONTAINER_PATH,
+    sentinels_dir, watch_inbox_dir, watch_profile_path, ARM_KEYS_CONTAINER_PATH,
+    WATCH_PROFILE_CONTAINER_PATH,
 };
 use crate::docker_cli::{path_is_safe_argv, ComposeEnv};
 use crate::keychain::{
@@ -96,6 +97,18 @@ pub(crate) fn pack_pin_pairs(
     if !path_is_safe_argv(&arm_keys) {
         return Err("arm attest keys path rejected".to_string());
     }
+    let sentinels = sentinels_dir();
+    let inbox = watch_inbox_dir();
+    if !path_is_safe_argv(&sentinels) || !path_is_safe_argv(&inbox) {
+        return Err("watch sentinels/inbox path rejected".to_string());
+    }
+    // Profile path is set only when the app-support file exists; empty means
+    // no profile (sidecar treats empty SENTINELS_CONFIG_PATH as unset).
+    let profile_pin = if watch_profile_path().is_file() {
+        WATCH_PROFILE_CONTAINER_PATH.to_string()
+    } else {
+        String::new()
+    };
     let mut pairs = vec![
         (
             "IRIN_DESKTOP_ARM_KEYS".into(),
@@ -105,6 +118,15 @@ pub(crate) fn pack_pin_pairs(
             "GW_ARM_ATTEST_KEYS_PATH".into(),
             ARM_KEYS_CONTAINER_PATH.to_string(),
         ),
+        (
+            "IRIN_DESKTOP_SENTINELS_DIR".into(),
+            sentinels.display().to_string(),
+        ),
+        (
+            "IRIN_DESKTOP_WATCH_INBOX_DIR".into(),
+            inbox.display().to_string(),
+        ),
+        ("IRIN_WATCH_PROFILE_PATH".into(), profile_pin),
         (
             "IRIN_GATEWAY_IMAGE".into(),
             gateway_image.as_str().to_string(),
@@ -459,6 +481,18 @@ pub(crate) fn teardown_compose_env(pack_root: &Path, key_id: Option<&str>) -> Co
         .or_insert_with(|| arm_keys_path().display().to_string());
     env.entry("GW_ARM_ATTEST_KEYS_PATH".to_string())
         .or_insert_with(|| ARM_KEYS_CONTAINER_PATH.to_string());
+    env.entry("IRIN_DESKTOP_SENTINELS_DIR".to_string())
+        .or_insert_with(|| sentinels_dir().display().to_string());
+    env.entry("IRIN_DESKTOP_WATCH_INBOX_DIR".to_string())
+        .or_insert_with(|| watch_inbox_dir().display().to_string());
+    env.entry("IRIN_WATCH_PROFILE_PATH".to_string())
+        .or_insert_with(|| {
+            if watch_profile_path().is_file() {
+                WATCH_PROFILE_CONTAINER_PATH.to_string()
+            } else {
+                String::new()
+            }
+        });
     env
 }
 

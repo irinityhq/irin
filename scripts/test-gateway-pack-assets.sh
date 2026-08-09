@@ -23,6 +23,19 @@ grep -q 'WATCH_DISPATCHER_ENABLED=false' "$COMPOSE" || die "dispatcher false"
 grep -q '127.0.0.1:18080:8080' "$COMPOSE" || die "fixed loopback port"
 grep -q 'IRIN_DESKTOP_LEDGER_KEY' "$COMPOSE" || die "app-owned ledger mount"
 grep -q 'IRIN_DESKTOP_PACK_ROOT' "$COMPOSE" || die "pack root mount"
+grep -qF -- '- SENTINELS_CONFIG_PATH=${IRIN_WATCH_PROFILE_PATH:-}' "$COMPOSE" ||
+  die "SENTINELS_CONFIG_PATH must interpolate IRIN_WATCH_PROFILE_PATH"
+SENTINELS_MOUNT='${IRIN_DESKTOP_SENTINELS_DIR}:/var/lib/gateway/sentinels:ro'
+INBOX_MOUNT='${IRIN_DESKTOP_WATCH_INBOX_DIR}:/var/lib/gateway/inbox'
+[[ "$(grep -Fc "$SENTINELS_MOUNT" "$COMPOSE")" -eq 1 ]] ||
+  die "sentinels dir must be read-only sidecar mount"
+[[ "$(grep -Fc "$INBOX_MOUNT" "$COMPOSE")" -eq 1 ]] ||
+  die "watch inbox must be sidecar-mounted"
+TEMPLATE="$ROOT/packaging/gateway-pack/default-sentinels.yaml"
+[[ -f "$TEMPLATE" ]] || die "bundled default-sentinels.yaml missing"
+grep -qE '^[[:space:]]*tenant:[[:space:]]*canary[[:space:]]*$' "$TEMPLATE" ||
+  die "default profile tenant must be canary"
+grep -q 'file-inbox-watch' "$TEMPLATE" || die "default profile must declare file-inbox-watch"
 ARM_MOUNT='${IRIN_DESKTOP_ARM_KEYS}:/run/secrets/arm_attest_keys.json:ro'
 [[ "$(grep -Fc "$ARM_MOUNT" "$COMPOSE")" -eq 1 ]] ||
   die "Touch ID public registry must be read-only and sidecar-only"
@@ -100,12 +113,19 @@ IRIN_GATEWAY_PACK_MODE=local-dev \
 [[ -f "$TMP/gateway-pack/docker-compose.yml" ]] || die "stage compose"
 [[ -f "$TMP/gateway-pack/nginx.conf" ]] || die "stage nginx"
 [[ -f "$TMP/gateway-pack/arm-bridge-enabled" ]] || die "stage arm bridge marker"
+[[ -f "$TMP/gateway-pack/default-sentinels.yaml" ]] || die "stage default-sentinels.yaml"
 python3 -c 'import os,sys; assert (os.stat(sys.argv[1]).st_mode & 0o777) == 0o644' \
   "$TMP/gateway-pack/arm-bridge-enabled" || die "arm bridge marker must be mode 0644"
 [[ -d "$TMP/gateway-pack/conf" ]] || die "stage conf"
 [[ -d "$TMP/gateway-pack/lua" ]] || die "stage lua"
 [[ -f "$TMP/gateway-pack/image-manifest.json" ]] || die "stage manifest"
 grep -q 'mode=local-dev' "$TMP/gateway-pack/STAGED_MODE.txt" || die "staged mode stamp"
+grep -q 'WATCH_PRODUCER_ENABLED=false' "$TMP/gateway-pack/docker-compose.yml" ||
+  die "staged compose lost producer false"
+grep -q 'WATCH_DISPATCHER_ENABLED=false' "$TMP/gateway-pack/docker-compose.yml" ||
+  die "staged compose lost dispatcher false"
+grep -qF -- '- SENTINELS_CONFIG_PATH=${IRIN_WATCH_PROFILE_PATH:-}' \
+  "$TMP/gateway-pack/docker-compose.yml" || die "staged compose lost profile env pin"
 
 # Staged Lua must be content-identical to gateway/lua (freshness gate).
 # Existence checks alone allowed stale generated copies to slip through.

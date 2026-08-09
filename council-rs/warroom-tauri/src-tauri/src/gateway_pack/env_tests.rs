@@ -3,13 +3,14 @@ use crate::docker_cli::ComposeEnv;
 use crate::gateway_pack::keys::{serialize_public_env, validate_env_value};
 use crate::gateway_pack::manifest::{ImageRef, ManifestMode, ValidatedManifest};
 use crate::gateway_pack::paths::{
-    arm_keys_path, gateway_data_dir, public_env_path, ARM_KEYS_CONTAINER_PATH,
+    arm_keys_path, ensure_watch_dirs, gateway_data_dir, public_env_path, sentinels_dir,
+    watch_inbox_dir, watch_profile_path, ARM_KEYS_CONTAINER_PATH, WATCH_PROFILE_CONTAINER_PATH,
 };
 use crate::keychain::{MemorySecretStore, SecretStore, ARM_PRINCIPAL_NAME};
 use crate::private_config::test_env_lock;
 use std::collections::BTreeSet;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 #[test]
@@ -209,6 +210,30 @@ fn pin_env_forces_manifest_and_app_paths_over_ambient_decoys() {
 
     for (k, _) in &decoys {
         std::env::remove_var(k);
+    }
+}
+
+/// Every pin the pack env-builder emits must pass the compose spawn-env
+/// allowlist, or enable/resume fails at validate_compose_invocation with
+/// "env key not allow-listed" before docker is even invoked.
+#[test]
+fn every_pack_pin_key_is_compose_allow_listed() {
+    let _g = test_env_lock();
+    let gateway = test_image_ref("ghcr.io/irin/gateway", "a");
+    let sidecar = test_image_ref("ghcr.io/irin/sidecar", "b");
+    let pins = build_pack_pin_env(
+        Path::new("/app/pack"),
+        Path::new("/app/ledger"),
+        &gateway,
+        &sidecar,
+        Some("k_abcdef12"),
+    )
+    .unwrap();
+    for key in pins.keys() {
+        assert!(
+            crate::docker_cli::COMPOSE_ENV_KEY_ALLOWLIST.contains(&key.as_str()),
+            "pack pin {key} would be rejected at compose spawn — add it to COMPOSE_ENV_KEY_ALLOWLIST"
+        );
     }
 }
 
@@ -446,6 +471,90 @@ fn teardown_env_drops_arm_principals_but_keeps_path_pins() {
         Some(ARM_KEYS_CONTAINER_PATH)
     );
     assert!(env.contains_key("IRIN_DESKTOP_ARM_KEYS"));
+    assert!(env.contains_key("IRIN_DESKTOP_SENTINELS_DIR"));
+    assert!(env.contains_key("IRIN_DESKTOP_WATCH_INBOX_DIR"));
+    assert!(env.contains_key("IRIN_WATCH_PROFILE_PATH"));
+}
+
+/// Watch profile/inbox pins always present; IRIN_WATCH_PROFILE_PATH is empty
+/// when no profile file is installed and the container path when it is.
+#[test]
+fn watch_profile_pins_empty_without_file_and_set_when_present() {
+    let _g = test_env_lock();
+    let prev_support = std::env::var(crate::private_config::APP_SUPPORT_ROOT_ENV).ok();
+    let support =
+        std::env::temp_dir().join(format!("gw-watch-pins-support-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&support);
+    fs::create_dir_all(&support).unwrap();
+    std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, &support);
+    ensure_watch_dirs().unwrap();
+    let profile = watch_profile_path();
+
+    let pins_off = build_pack_pin_env(
+        Path::new("/app/pack"),
+        Path::new("/app/ledger"),
+        &test_image_ref("ghcr.io/irin/gateway", "e"),
+        &test_image_ref("ghcr.io/irin/sidecar", "f"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        pins_off
+            .get("IRIN_DESKTOP_SENTINELS_DIR")
+            .map(String::as_str),
+        Some(sentinels_dir().display().to_string().as_str())
+    );
+    assert_eq!(
+        pins_off
+            .get("IRIN_DESKTOP_WATCH_INBOX_DIR")
+            .map(String::as_str),
+        Some(watch_inbox_dir().display().to_string().as_str())
+    );
+    assert_eq!(
+        pins_off.get("IRIN_WATCH_PROFILE_PATH").map(String::as_str),
+        Some("")
+    );
+
+    fs::write(&profile, "placeholder\n").unwrap();
+    let pins_on = build_pack_pin_env(
+        Path::new("/app/pack"),
+        Path::new("/app/ledger"),
+        &test_image_ref("ghcr.io/irin/gateway", "e"),
+        &test_image_ref("ghcr.io/irin/sidecar", "f"),
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        pins_on.get("IRIN_WATCH_PROFILE_PATH").map(String::as_str),
+        Some(WATCH_PROFILE_CONTAINER_PATH)
+    );
+    match prev_support {
+        Some(v) => std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, v),
+        None => std::env::remove_var(crate::private_config::APP_SUPPORT_ROOT_ENV),
+    }
+    let _ = fs::remove_dir_all(&support);
+}
+
+#[test]
+fn ensure_watch_dirs_creates_sentinels_and_inbox() {
+    let _g = test_env_lock();
+    let prev_support = std::env::var(crate::private_config::APP_SUPPORT_ROOT_ENV).ok();
+    let support =
+        std::env::temp_dir().join(format!("gw-watch-dirs-support-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&support);
+    fs::create_dir_all(&support).unwrap();
+    std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, &support);
+    // Fresh support root proves the create path.
+    let s = sentinels_dir();
+    let i = watch_inbox_dir();
+    ensure_watch_dirs().unwrap();
+    assert!(s.is_dir());
+    assert!(i.is_dir());
+    match prev_support {
+        Some(v) => std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, v),
+        None => std::env::remove_var(crate::private_config::APP_SUPPORT_ROOT_ENV),
+    }
+    let _ = fs::remove_dir_all(&support);
 }
 
 #[test]

@@ -679,6 +679,12 @@ pub const COMPOSE_ENV_KEY_ALLOWLIST: &[&str] = &[
     // Same class as IRIN_DESKTOP_LEDGER_KEY: a validated app-owned path, not an
     // arm-surface knob.
     "IRIN_DESKTOP_ARM_KEYS",
+    // Watch enablement pins: two app-owned host bind-source dirs (same class
+    // as IRIN_DESKTOP_LEDGER_KEY) and one non-secret in-container path pin
+    // (same class as GW_ARM_ATTEST_KEYS_PATH; empty = no profile installed).
+    "IRIN_DESKTOP_SENTINELS_DIR",
+    "IRIN_DESKTOP_WATCH_INBOX_DIR",
+    "IRIN_WATCH_PROFILE_PATH",
     // Host CLI adapters (Claude/Codex): URL is non-secret but must still be
     // forced from the validated pack env; tokens are Keychain-held secrets.
     "CLAUDE_PROXY_URL",

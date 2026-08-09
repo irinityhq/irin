@@ -79,6 +79,44 @@ if grep -E '^[[:space:]]*-[[:space:]]*(GW_ARM_DEVIATION_FLAG|GW_ARM_PRINCIPAL_DO
     "$SRC_PACK/docker-compose.yml" >/dev/null; then
   die "gateway pack admits only GW_ARM_PRINCIPALS and GW_ARM_ATTEST_KEYS_PATH on the arm surface"
 fi
+# Pack-native watch profile/inbox: exact interpolation + mount forms only.
+# Profile mount is read-only; inbox is the sole writable operator mount.
+# Producer/dispatcher stay hardcoded false (guards above never relaxed).
+if ! grep -qF -- '- SENTINELS_CONFIG_PATH=${IRIN_WATCH_PROFILE_PATH:-}' \
+    "$SRC_PACK/docker-compose.yml"; then
+  die "gateway pack compose must interpolate SENTINELS_CONFIG_PATH from IRIN_WATCH_PROFILE_PATH"
+fi
+SENTINELS_MOUNT='${IRIN_DESKTOP_SENTINELS_DIR}:/var/lib/gateway/sentinels:ro'
+INBOX_MOUNT='${IRIN_DESKTOP_WATCH_INBOX_DIR}:/var/lib/gateway/inbox'
+if [[ "$(grep -Fc "$SENTINELS_MOUNT" "$SRC_PACK/docker-compose.yml")" -ne 1 ]]; then
+  die "gateway pack compose must mount IRIN_DESKTOP_SENTINELS_DIR read-only at /var/lib/gateway/sentinels"
+fi
+if [[ "$(grep -Fc "$INBOX_MOUNT" "$SRC_PACK/docker-compose.yml")" -ne 1 ]]; then
+  die "gateway pack compose must mount IRIN_DESKTOP_WATCH_INBOX_DIR at /var/lib/gateway/inbox"
+fi
+# The bind-source variables may appear only as those exact mounts — a second
+# mount (e.g. a writable duplicate) would satisfy the counts above and bypass
+# the :ro policy below.
+if [[ "$(grep -Fc 'IRIN_DESKTOP_SENTINELS_DIR' "$SRC_PACK/docker-compose.yml")" -ne 1 ]]; then
+  die "IRIN_DESKTOP_SENTINELS_DIR must appear exactly once in compose (the read-only profile mount)"
+fi
+if [[ "$(grep -Fc 'IRIN_DESKTOP_WATCH_INBOX_DIR' "$SRC_PACK/docker-compose.yml")" -ne 1 ]]; then
+  die "IRIN_DESKTOP_WATCH_INBOX_DIR must appear exactly once in compose (the inbox mount)"
+fi
+# Refuse writable profile mounts (must stay :ro).
+if grep -E 'IRIN_DESKTOP_SENTINELS_DIR.*sentinels[^:]*$' "$SRC_PACK/docker-compose.yml" \
+    | grep -v ':ro' >/dev/null; then
+  die "gateway pack sentinels profile mount must be read-only"
+fi
+[[ -f "$SRC_PACK/default-sentinels.yaml" ]] \
+  || die "missing bundled default watch profile template: $SRC_PACK/default-sentinels.yaml"
+if ! grep -qE '^[[:space:]]*tenant:[[:space:]]*canary[[:space:]]*$' \
+    "$SRC_PACK/default-sentinels.yaml"; then
+  die "bundled default watch profile tenant must be canary (PACK_WATCH_CANARY_TENANT)"
+fi
+if ! grep -q 'file-inbox-watch' "$SRC_PACK/default-sentinels.yaml"; then
+  die "bundled default watch profile must declare file-inbox-watch"
+fi
 
 stage_smoke_inert() {
   rm -rf "$DEST"
@@ -92,6 +130,7 @@ stage_smoke_inert() {
   chmod 0644 "$DEST/arm-bridge-enabled"
   cp -f "$SRC_PACK/docker-compose.yml" "$DEST/docker-compose.yml"
   cp -f "$SRC_PACK/README.md" "$DEST/README.md"
+  cp -f "$SRC_PACK/default-sentinels.yaml" "$DEST/default-sentinels.yaml"
   cp -f "$GATEWAY/nginx.conf" "$DEST/nginx.conf"
   rsync -a --delete "$GATEWAY/conf/" "$DEST/conf/"
   rsync -a --delete "$GATEWAY/lua/" "$DEST/lua/"
@@ -179,6 +218,7 @@ printf '' >"$DEST/arm-bridge-enabled"
 chmod 0644 "$DEST/arm-bridge-enabled"
 cp -f "$SRC_PACK/docker-compose.yml" "$DEST/docker-compose.yml"
 cp -f "$SRC_PACK/README.md" "$DEST/README.md"
+cp -f "$SRC_PACK/default-sentinels.yaml" "$DEST/default-sentinels.yaml"
 cp -f "$GATEWAY/nginx.conf" "$DEST/nginx.conf"
 rsync -a --delete "$GATEWAY/conf/" "$DEST/conf/"
 rsync -a --delete "$GATEWAY/lua/" "$DEST/lua/"
@@ -188,6 +228,11 @@ cp -f "$MANIFEST_SRC" "$DEST/image-manifest.json"
 printf 'mode=%s\nmanifest_src=%s\n' "$MODE" "$MANIFEST_SRC" >"$DEST/STAGED_MODE.txt"
 
 grep -q 'WATCH_PRODUCER_ENABLED=false' "$DEST/docker-compose.yml" || die "staged compose lost watch-off"
+grep -q 'WATCH_DISPATCHER_ENABLED=false' "$DEST/docker-compose.yml" \
+  || die "staged compose lost dispatcher-off"
+grep -qF -- '- SENTINELS_CONFIG_PATH=${IRIN_WATCH_PROFILE_PATH:-}' "$DEST/docker-compose.yml" \
+  || die "staged compose lost SENTINELS_CONFIG_PATH interpolation"
+[[ -f "$DEST/default-sentinels.yaml" ]] || die "staged pack lost default-sentinels.yaml"
 
 printf 'staged gateway pack -> %s (mode=%s, manifest=%s)\n' "$DEST" "$MODE" "$MANIFEST_SRC"
 find "$DEST" -type f | wc -l | awk '{print "files:", $1}'
