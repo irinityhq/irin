@@ -102,3 +102,27 @@ fn stop_without_installed_pack_emits_ordered_lifecycle_contract() {
     }
     let _ = fs::remove_dir_all(&tmp);
 }
+
+#[test]
+fn enable_loads_stable_keychain_accounts_once_per_flight() {
+    let source = include_str!("enable.rs");
+    assert_eq!(
+        source
+            .matches("load_launch_secrets(store, preloaded_pepper)")
+            .count(),
+        1
+    );
+    assert_eq!(
+        source
+            .matches("build_full_compose_env_with_launch_secrets(")
+            .count(),
+        3
+    );
+    assert!(!source.contains("build_full_compose_env("));
+
+    let port_check = source.find("if port_busy_by_foreign_gateway()?").unwrap();
+    let secret_load = source
+        .find("load_launch_secrets(store, preloaded_pepper)")
+        .unwrap();
+    assert!(port_check < secret_load);
+}
