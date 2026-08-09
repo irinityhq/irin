@@ -95,6 +95,19 @@ pub fn lifecycle_stage(stage: &str, detail: &str) {
 /// Caller (lib.rs) must restart Council into governed mode and treat restart
 /// failure as overall failure (not ready).
 pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, String> {
+    enable_gateway_pack_with_probes(store, port_busy_by_foreign_gateway, probe_docker_daemon)
+}
+
+/// Probe-injectable body of [`enable_gateway_pack`]. Tests substitute the
+/// foreign-port and Docker probes to prove, against a counting `SecretStore`,
+/// that the foreign-port refusal happens before any Keychain account read —
+/// including the Docker-abort returns, which read `GW_API_KEY` via
+/// `gateway_pack_status_fresh`.
+pub(crate) fn enable_gateway_pack_with_probes(
+    store: &dyn SecretStore,
+    foreign_port_busy: impl FnOnce() -> Result<bool, String>,
+    docker_probe: impl FnOnce() -> DockerDaemonState,
+) -> Result<GatewayPackStatus, String> {
     let _guard = LIFECYCLE_LOCK
         .lock()
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
@@ -105,7 +118,20 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     crate::touch_id::clear_rehearsal_passed();
     lifecycle_stage("enable_begin", "ok");
 
-    match probe_docker_daemon() {
+    // Foreign-port refusal comes first: every later return path (including the
+    // Docker-abort status reads) may touch the Keychain, and a foreign
+    // listener must be refused before any account read can prompt.
+    if foreign_port_busy()? {
+        lifecycle_stage("port_check", "foreign_busy");
+        return Err(
+            "port 18080 is in use by a process outside irin-desktop-gateway; \
+             stop the foreign Gateway or free the port. The desktop pack will not replace it."
+                .to_string(),
+        );
+    }
+    lifecycle_stage("port_check", "ok");
+
+    match docker_probe() {
         DockerDaemonState::CliMissing => {
             lifecycle_stage("enable_abort", "docker_cli_missing");
             return Ok(gateway_pack_status_fresh(store));
@@ -148,16 +174,6 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         lifecycle_stage("watch_dirs", "error");
     })?;
     lifecycle_stage("watch_dirs", "ok");
-
-    if port_busy_by_foreign_gateway()? {
-        lifecycle_stage("port_check", "foreign_busy");
-        return Err(
-            "port 18080 is in use by a process outside irin-desktop-gateway; \
-             stop the foreign Gateway or free the port. The desktop pack will not replace it."
-                .to_string(),
-        );
-    }
-    lifecycle_stage("port_check", "ok");
 
     // Load stable Keychain material once for this Enable flight, then reuse it
     // across adapters and every compose recreation.
