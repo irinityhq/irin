@@ -44,7 +44,9 @@ pub fn open_watch_inbox() -> Result<String, String> {
     }
     #[cfg(not(target_os = "macos"))]
     {
-        return Err(format!("open inbox is only supported on macOS (path={path})"));
+        return Err(format!(
+            "open inbox is only supported on macOS (path={path})"
+        ));
     }
     Ok(path)
 }
@@ -165,10 +167,7 @@ fn reconcile_pack_for_profile(store: &dyn SecretStore) -> Result<(), String> {
 /// Off: remove profile file and recreate back to 0 sentinels.
 ///
 /// Takes the same lifecycle lock as Enable/Disable so mutations never interleave.
-pub fn set_watch_sentinels_enabled(
-    store: &dyn SecretStore,
-    enabled: bool,
-) -> Result<bool, String> {
+pub fn set_watch_sentinels_enabled(store: &dyn SecretStore, enabled: bool) -> Result<bool, String> {
     let _guard = LIFECYCLE_LOCK
         .lock()
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
@@ -212,7 +211,11 @@ pub fn set_watch_sentinels_enabled(
     }
     lifecycle_stage(
         "watch_profile",
-        if enabled { "reconciled_on" } else { "reconciled_off" },
+        if enabled {
+            "reconciled_on"
+        } else {
+            "reconciled_off"
+        },
     );
     Ok(watch_sentinels_enabled())
 }

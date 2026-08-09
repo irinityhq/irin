@@ -54,8 +54,7 @@ pub use enable::{
 };
 
 pub use watch_profile::{
-    open_watch_inbox, set_watch_sentinels_enabled, watch_inbox_path_string,
-    watch_sentinels_enabled,
+    open_watch_inbox, set_watch_sentinels_enabled, watch_inbox_path_string, watch_sentinels_enabled,
 };
 
 #[cfg(test)]
@@ -64,10 +63,10 @@ pub use launch::{
     frontend_may_start_council, LaunchResumeOutcome,
 };
 pub use launch::{
-    default_secret_store, governed_launch_after_watch_reconciliation,
-    may_promote_to_governed, pack_auth_revalidated, pack_auth_revalidated_with_key,
-    promote_may_call_resume, resume_installed_pack, resume_installed_pack_with_key,
-    status_with_council_route, watch_admin_surfaces_authenticated,
+    default_secret_store, governed_launch_after_watch_reconciliation, may_promote_to_governed,
+    pack_auth_revalidated, pack_auth_revalidated_with_key, promote_may_call_resume,
+    resume_installed_pack, resume_installed_pack_with_key, status_with_council_route,
+    watch_admin_surfaces_authenticated,
 };
 
 #[cfg(test)]

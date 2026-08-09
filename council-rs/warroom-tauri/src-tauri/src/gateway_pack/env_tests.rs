@@ -213,6 +213,30 @@ fn pin_env_forces_manifest_and_app_paths_over_ambient_decoys() {
     }
 }
 
+/// Every pin the pack env-builder emits must pass the compose spawn-env
+/// allowlist, or enable/resume fails at validate_compose_invocation with
+/// "env key not allow-listed" before docker is even invoked.
+#[test]
+fn every_pack_pin_key_is_compose_allow_listed() {
+    let _g = test_env_lock();
+    let gateway = test_image_ref("ghcr.io/irin/gateway", "a");
+    let sidecar = test_image_ref("ghcr.io/irin/sidecar", "b");
+    let pins = build_pack_pin_env(
+        Path::new("/app/pack"),
+        Path::new("/app/ledger"),
+        &gateway,
+        &sidecar,
+        Some("k_abcdef12"),
+    )
+    .unwrap();
+    for key in pins.keys() {
+        assert!(
+            crate::docker_cli::COMPOSE_ENV_KEY_ALLOWLIST.contains(&key.as_str()),
+            "pack pin {key} would be rejected at compose spawn — add it to COMPOSE_ENV_KEY_ALLOWLIST"
+        );
+    }
+}
+
 #[test]
 fn full_compose_env_secrets_win_over_pin_defaults() {
     let _g = test_env_lock();
@@ -470,7 +494,9 @@ fn watch_profile_pins_empty_without_file_and_set_when_present() {
     )
     .unwrap();
     assert_eq!(
-        pins_off.get("IRIN_DESKTOP_SENTINELS_DIR").map(String::as_str),
+        pins_off
+            .get("IRIN_DESKTOP_SENTINELS_DIR")
+            .map(String::as_str),
         Some(sentinels_dir().display().to_string().as_str())
     );
     assert_eq!(
