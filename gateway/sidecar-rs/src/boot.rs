@@ -1257,19 +1257,13 @@ pub(crate) fn sentinels_boot_disposition(
     match (policy, path_exists) {
         (SentinelsConfigPolicy::Require { path }, true)
         | (SentinelsConfigPolicy::OptionalDefault { path }, true) => {
-            SentinelsBootDisposition::Load {
-                path: path.clone(),
-            }
+            SentinelsBootDisposition::Load { path: path.clone() }
         }
         (SentinelsConfigPolicy::Require { path }, false) => {
-            SentinelsBootDisposition::FatalMissing {
-                path: path.clone(),
-            }
+            SentinelsBootDisposition::FatalMissing { path: path.clone() }
         }
         (SentinelsConfigPolicy::OptionalDefault { path }, false) => {
-            SentinelsBootDisposition::EmptyWarn {
-                path: path.clone(),
-            }
+            SentinelsBootDisposition::EmptyWarn { path: path.clone() }
         }
     }
 }
