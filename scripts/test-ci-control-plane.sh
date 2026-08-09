@@ -174,6 +174,187 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Review settlement gate: pre-queue required-check producer (#0101 / PR #70)
+# ---------------------------------------------------------------------------
+REVIEW_SETTLEMENT_YML="$ROOT/.github/workflows/review-settlement.yml"
+REVIEW_SETTLEMENT_SH="$ROOT/scripts/check-review-settlement.sh"
+if [[ ! -f "$REVIEW_SETTLEMENT_YML" ]]; then
+  fail "review-settlement.yml missing"
+elif [[ ! -f "$REVIEW_SETTLEMENT_SH" ]]; then
+  fail "scripts/check-review-settlement.sh missing"
+else
+  pass "review settlement workflow + evaluator present"
+fi
+if ! on_has_merge_group "$REVIEW_SETTLEMENT_YML"; then
+  fail "review-settlement.yml must trigger on merge_group (required-check producer)"
+else
+  pass "review-settlement.yml triggers on merge_group"
+fi
+# Review-related events that re-evaluate settlement on the current head.
+for needle in \
+  'review_requested' \
+  'review_request_removed' \
+  'synchronize' \
+  'ready_for_review' \
+  'pull_request_review:' \
+  'submitted' \
+  'dismissed'
+do
+  if ! file_has_fixed "$needle" "$REVIEW_SETTLEMENT_YML"; then
+    fail "review-settlement.yml missing event surface: $needle"
+  fi
+done
+pass "review-settlement.yml covers request/review/SHA event surfaces"
+if ! grep -E '^[[:space:]]+name: Review settlement[[:space:]]*$' "$REVIEW_SETTLEMENT_YML" >/dev/null; then
+  fail "review-settlement job name must stay 'Review settlement' (protected context)"
+else
+  pass "review-settlement protected job name preserved"
+fi
+if ! file_has_fixed 'pull-requests: read' "$REVIEW_SETTLEMENT_YML"; then
+  fail "review-settlement.yml must request pull-requests: read for GraphQL review fields"
+else
+  pass "review-settlement.yml has pull-requests: read"
+fi
+if ! file_has_fixed 'scripts/check-review-settlement.sh' "$REVIEW_SETTLEMENT_YML"; then
+  fail "review-settlement.yml must invoke scripts/check-review-settlement.sh"
+else
+  pass "review-settlement.yml invokes the settlement evaluator"
+fi
+# Concurrency split mirrors dependency-review: PR cancels, merge_group does not.
+if ! python3 - "$REVIEW_SETTLEMENT_YML" <<'PY'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+m = re.search(r"(?m)^concurrency:\n((?:  .*\n)+)", text)
+if not m:
+    sys.stderr.write("review-settlement.yml missing concurrency block\n")
+    sys.exit(1)
+block = m.group(1)
+if not re.search(
+    r"cancel-in-progress:\s*\$\{\{\s*github\.event_name\s*!=\s*'merge_group'\s*\}\}",
+    block,
+):
+    sys.stderr.write(
+        "review-settlement cancel-in-progress must be "
+        "${{ github.event_name != 'merge_group' }}\n"
+    )
+    sys.exit(1)
+if "merge-group-" not in block and "merge_group" not in block:
+    sys.stderr.write("review-settlement concurrency must namespace merge_group\n")
+    sys.exit(1)
+# PR number for PR + review events must key on github.event.pull_request.number
+if "github.event.pull_request.number" not in block:
+    sys.stderr.write(
+        "review-settlement concurrency must key non-merge_group on "
+        "github.event.pull_request.number\n"
+    )
+    sys.exit(1)
+if "pull_request_review.pull_request" in block:
+    sys.stderr.write(
+        "review-settlement must not use pull_request_review.pull_request "
+        "(wrong payload path)\n"
+    )
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+  fail "review-settlement concurrency contract"
+else
+  pass "review-settlement concurrency: PR cancel, merge_group retain"
+fi
+# #0106: pull_request_review resolves PR via root github.event.pull_request.number
+if ! python3 - "$REVIEW_SETTLEMENT_YML" <<'PY'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+# Resolver must treat pull_request|pull_request_review with PR_NUMBER from
+# github.event.pull_request.number — never github.event.pull_request_review.*
+if "github.event.pull_request_review.pull_request" in text:
+    sys.stderr.write(
+        "review-settlement.yml must not read PR under pull_request_review object\n"
+    )
+    sys.exit(1)
+if "REVIEW_PR_NUMBER" in text:
+    sys.stderr.write(
+        "review-settlement.yml must not define REVIEW_PR_NUMBER (wrong path)\n"
+    )
+    sys.exit(1)
+if "PR_NUMBER: ${{ github.event.pull_request.number }}" not in text:
+    sys.stderr.write(
+        "review-settlement.yml must set PR_NUMBER from "
+        "github.event.pull_request.number\n"
+    )
+    sys.exit(1)
+if not re.search(
+    r"pull_request\|pull_request_review\)",
+    text,
+):
+    sys.stderr.write(
+        "review-settlement resolver must handle pull_request|pull_request_review "
+        "with the root PR_NUMBER\n"
+    )
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+  fail "review-settlement pull_request_review PR number path (#0106)"
+else
+  pass "review-settlement pull_request_review uses github.event.pull_request.number"
+fi
+# #0104: GraphQL connections must inspect pageInfo.hasNextPage and fail closed
+if ! file_has_fixed 'hasNextPage' "$REVIEW_SETTLEMENT_SH"; then
+  fail "check-review-settlement.sh must inspect pageInfo.hasNextPage (#0104)"
+else
+  pass "check-review-settlement.sh inspects hasNextPage"
+fi
+if ! file_has_fixed 'truncatedConnections' "$REVIEW_SETTLEMENT_SH"; then
+  fail "check-review-settlement.sh must fail closed on truncatedConnections"
+else
+  pass "check-review-settlement.sh has truncatedConnections fail-closed path"
+fi
+if ! file_has_fixed 'pageInfo' "$REVIEW_SETTLEMENT_SH"; then
+  fail "check-review-settlement.sh GraphQL query must request pageInfo"
+else
+  pass "check-review-settlement.sh GraphQL query requests pageInfo"
+fi
+# #0105: threads owned by conversation resolution — evaluator must not block on them
+if file_has_fixed 'unresolved_actionable_threads' "$REVIEW_SETTLEMENT_SH"; then
+  fail "check-review-settlement.sh must not evaluate unresolved threads (#0105)"
+else
+  pass "check-review-settlement.sh does not evaluate review threads"
+fi
+if file_has_fixed 'reviewThreads(first:' "$REVIEW_SETTLEMENT_SH"; then
+  fail "check-review-settlement.sh must not query reviewThreads GraphQL connection"
+else
+  pass "check-review-settlement.sh does not query reviewThreads"
+fi
+if ! grep -qiE 'conversation[[:space:]-]*resolution' "$REVIEW_SETTLEMENT_YML"; then
+  fail "review-settlement.yml must document conversation-resolution owns threads"
+else
+  pass "review-settlement.yml documents conversation-resolution thread ownership"
+fi
+# Deterministic evaluator contracts (PR #70 class + SHA invalidation + #0104/#0105).
+if ! bash "$REVIEW_SETTLEMENT_SH" --self-test; then
+  fail "check-review-settlement.sh --self-test"
+else
+  pass "check-review-settlement.sh --self-test"
+fi
+# Force-full policy must include the settlement evaluator so a rewrite cannot
+# land under a light matrix only.
+if ! file_has_fixed 'scripts/check-review-settlement.sh' "$CLASSIFIER"; then
+  fail "classifier must force-full on scripts/check-review-settlement.sh"
+else
+  pass "classifier force-full includes check-review-settlement.sh"
+fi
+if ! file_has_fixed 'scripts/check-review-settlement.sh' "$CI_YML"; then
+  fail "ci.yml path_forces_full must include scripts/check-review-settlement.sh"
+else
+  pass "ci.yml force-full includes check-review-settlement.sh"
+fi
+
+# ---------------------------------------------------------------------------
 # Static: path-scoped main push still uses before...sha (not full-matrix always)
 # ---------------------------------------------------------------------------
 if ! file_has_ere 'before="\$\{\{ github\.event\.before \}\}"' "$CI_YML"; then
@@ -320,7 +501,8 @@ for needle in \
   '.github/workflows/*' \
   'scripts/classify-ci-paths.sh' \
   'scripts/test-classify-ci-paths.sh' \
-  'scripts/test-ci-control-plane.sh'
+  'scripts/test-ci-control-plane.sh' \
+  'scripts/check-review-settlement.sh'
 do
   if ! file_has_fixed "$needle" "$CI_YML"; then
     fail "force-full policy path missing: $needle"
@@ -408,6 +590,7 @@ path_universe_file="$tmp/path-universe.txt"
     scripts/test-export-import-candidate.sh \
     scripts/classify-ci-paths.sh scripts/test-classify-ci-paths.sh \
     scripts/test-ci-control-plane.sh scripts/test-ci-candidate-observability.sh \
+    scripts/check-review-settlement.sh \
     scripts/run-actionlint.sh scripts/bootstrap-actionlint.sh \
     scripts/stage-gateway-pack.sh scripts/release-transaction.sh \
     scripts/test-release-transaction-w3.sh scripts/install-verify-candidate.sh \
@@ -545,6 +728,7 @@ simulate_overlays() {
       scripts/test-classify-ci-paths.sh|\
       scripts/test-ci-control-plane.sh|\
       scripts/test-ci-candidate-observability.sh|\
+      scripts/check-review-settlement.sh|\
       scripts/run-actionlint.sh|\
       scripts/bootstrap-actionlint.sh|\
       __manual_dispatch__|__scheduled_proof__|__integrated_main__|__unknown_base__|__unknown_event__)

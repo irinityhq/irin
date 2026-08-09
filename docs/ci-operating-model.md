@@ -198,20 +198,67 @@ check rejects newly introduced vulnerabilities of moderate severity or higher.
 Merge-queue runs pass the merge group's base and head refs explicitly, because
 the action derives them automatically only on a pull-request event.
 
+## Review settlement (pre-queue)
+
+Solo-maintainer branch protection keeps `required_approving_review_count` at
+zero and enables conversation resolution. That combination does **not** wait
+for a pending review *request* to clear: a requested bot or human review can
+still be in flight while a PR enters the merge queue. PR #70 is the reference
+incident (Copilot requested, queue/merge completed, review landed afterward on
+the same head).
+
+`Review settlement` is a stable required-check *producer* in
+`.github/workflows/review-settlement.yml`. It reuses the existing required
+status-check and merge-queue mechanism (not a second control plane). The job
+name is the protected context name. Evaluation lives in
+`scripts/check-review-settlement.sh` and is covered by deterministic fixtures
+in `scripts/test-ci-control-plane.sh`.
+
+Fail closed when any of the following hold on the current pull-request head:
+
+- `reviewRequests` is nonempty;
+- a non-dismissed latest review is not bound to the current `headRefOid`
+  (a new commit invalidates prior settlement); or
+- `CHANGES_REQUESTED` is present on the current head.
+
+GraphQL `reviewRequests` and `latestReviews` are fetched with `first: 100` and
+must include `pageInfo.hasNextPage`. Any truncated connection fails closed
+(schema/transport failure) rather than reporting SETTLED. Full pagination is
+not implemented; fail-closed on overflow is the deliberate small bound.
+
+**Threads are out of scope for this check.** GitHub emits no supported Actions
+workflow event when a conversation is resolved, so a custom required check that
+failed on unresolved threads would stay red until a manual rerun and could not
+be repaired by `merge_group` alone. Required conversation-resolution branch
+protection (already enabled on `main`) is the sole enforceable layer for open
+review threads. This job does not query or evaluate `reviewThreads`, and must
+not add a webhook or dispatch control plane to re-run on resolve.
+
+Event surfaces: pull-request open/reopen/synchronize/ready/draft conversion,
+review requested/removed, pull-request review submitted/edited/dismissed, and
+`merge_group` `checks_requested`. Both `pull_request` and `pull_request_review`
+resolve the PR number from `github.event.pull_request.number` (the review
+object does not nest the PR). Draft PRs are treated as not-ready (the check
+passes with a note); `ready_for_review` re-evaluates.
+
+Register `Review settlement` as a required context only after the job has
+appeared on a real pull request. Do not rename the job lightly.
+
 ## Branch-protection contract
 
 Once all contexts have appeared on a real pull request, `main` requires:
 
 - `ci / CI required`;
 - `CodeQL required`;
-- `Dependency Review`.
+- `Dependency Review`;
+- `Review settlement` (after first real-PR registration; manual follow-up).
 
 The exact names are operating contracts. Rename a caller job or aggregate only
 in a maintenance window where the replacement context first registers on a
 real pull request. Main protection also applies to administrators.
 `CODEOWNERS` records the maintainer for authority-bearing paths, but does not
 require a second personal account to approve the primary maintainer's changes.
-The required CI, CodeQL, dependency-review, current-base, and
+The required CI, CodeQL, dependency-review, review-settlement, current-base, and
 conversation-resolution gates provide the solo-maintainer merge boundary.
 
 ## Promotion and pre-public checklist
