@@ -243,6 +243,19 @@ if not re.search(
 if "merge-group-" not in block and "merge_group" not in block:
     sys.stderr.write("review-settlement concurrency must namespace merge_group\n")
     sys.exit(1)
+# PR number for PR + review events must key on github.event.pull_request.number
+if "github.event.pull_request.number" not in block:
+    sys.stderr.write(
+        "review-settlement concurrency must key non-merge_group on "
+        "github.event.pull_request.number\n"
+    )
+    sys.exit(1)
+if "pull_request_review.pull_request" in block:
+    sys.stderr.write(
+        "review-settlement must not use pull_request_review.pull_request "
+        "(wrong payload path)\n"
+    )
+    sys.exit(1)
 sys.exit(0)
 PY
 then
@@ -250,7 +263,79 @@ then
 else
   pass "review-settlement concurrency: PR cancel, merge_group retain"
 fi
-# Deterministic evaluator contracts (PR #70 class + SHA invalidation).
+# #0106: pull_request_review resolves PR via root github.event.pull_request.number
+if ! python3 - "$REVIEW_SETTLEMENT_YML" <<'PY'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+# Resolver must treat pull_request|pull_request_review with PR_NUMBER from
+# github.event.pull_request.number — never github.event.pull_request_review.*
+if "github.event.pull_request_review.pull_request" in text:
+    sys.stderr.write(
+        "review-settlement.yml must not read PR under pull_request_review object\n"
+    )
+    sys.exit(1)
+if "REVIEW_PR_NUMBER" in text:
+    sys.stderr.write(
+        "review-settlement.yml must not define REVIEW_PR_NUMBER (wrong path)\n"
+    )
+    sys.exit(1)
+if "PR_NUMBER: ${{ github.event.pull_request.number }}" not in text:
+    sys.stderr.write(
+        "review-settlement.yml must set PR_NUMBER from "
+        "github.event.pull_request.number\n"
+    )
+    sys.exit(1)
+if not re.search(
+    r"pull_request\|pull_request_review\)",
+    text,
+):
+    sys.stderr.write(
+        "review-settlement resolver must handle pull_request|pull_request_review "
+        "with the root PR_NUMBER\n"
+    )
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+  fail "review-settlement pull_request_review PR number path (#0106)"
+else
+  pass "review-settlement pull_request_review uses github.event.pull_request.number"
+fi
+# #0104: GraphQL connections must inspect pageInfo.hasNextPage and fail closed
+if ! file_has_fixed 'hasNextPage' "$REVIEW_SETTLEMENT_SH"; then
+  fail "check-review-settlement.sh must inspect pageInfo.hasNextPage (#0104)"
+else
+  pass "check-review-settlement.sh inspects hasNextPage"
+fi
+if ! file_has_fixed 'truncatedConnections' "$REVIEW_SETTLEMENT_SH"; then
+  fail "check-review-settlement.sh must fail closed on truncatedConnections"
+else
+  pass "check-review-settlement.sh has truncatedConnections fail-closed path"
+fi
+if ! file_has_fixed 'pageInfo' "$REVIEW_SETTLEMENT_SH"; then
+  fail "check-review-settlement.sh GraphQL query must request pageInfo"
+else
+  pass "check-review-settlement.sh GraphQL query requests pageInfo"
+fi
+# #0105: threads owned by conversation resolution — evaluator must not block on them
+if file_has_fixed 'unresolved_actionable_threads' "$REVIEW_SETTLEMENT_SH"; then
+  fail "check-review-settlement.sh must not evaluate unresolved threads (#0105)"
+else
+  pass "check-review-settlement.sh does not evaluate review threads"
+fi
+if file_has_fixed 'reviewThreads(first:' "$REVIEW_SETTLEMENT_SH"; then
+  fail "check-review-settlement.sh must not query reviewThreads GraphQL connection"
+else
+  pass "check-review-settlement.sh does not query reviewThreads"
+fi
+if ! grep -qiE 'conversation[[:space:]-]*resolution' "$REVIEW_SETTLEMENT_YML"; then
+  fail "review-settlement.yml must document conversation-resolution owns threads"
+else
+  pass "review-settlement.yml documents conversation-resolution thread ownership"
+fi
+# Deterministic evaluator contracts (PR #70 class + SHA invalidation + #0104/#0105).
 if ! bash "$REVIEW_SETTLEMENT_SH" --self-test; then
   fail "check-review-settlement.sh --self-test"
 else

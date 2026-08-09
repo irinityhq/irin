@@ -1,20 +1,25 @@
 name: Review settlement
 
-# Pre-queue review settlement gate (issue #0101 / PR #70 class).
+# Pre-queue review settlement gate (issue #0101 / PR #70 class; #0104–#0106).
 # Fail closed while reviewRequests is nonempty, when a non-dismissed latest
-# review is not bound to the current headRefOid, when CHANGES_REQUESTED is on
-# head, or when actionable review threads remain unresolved.
+# review is not bound to the current headRefOid, or when CHANGES_REQUESTED is
+# on head. GraphQL connections are first:100 with pageInfo.hasNextPage; any
+# truncated page fails closed (never SETTLED).
+#
+# Review threads are NOT evaluated here. GitHub emits no supported Actions
+# event when a conversation is resolved, so a custom required check cannot
+# refresh on resolve without a second control plane. Required
+# conversation-resolution on main owns thread blocking; do not re-implement
+# it in this job.
 #
 # This is a stable required-check *producer*. Register the exact job name
 # "Review settlement" in branch protection / the main merge-queue ruleset only
 # after the context has appeared on a real PR (do not rename lightly).
 #
 # Boundary GitHub cannot enforce natively with required_approving_review_count=0:
-# pending review *requests* do not block merge/queue. Conversation resolution
-# covers open threads once they exist but does not wait for a requested review
-# to land. This check is the smallest enforceable layer for that gap, reusing
-# the existing required-status-check / merge-queue mechanism (not a second
-# control plane).
+# pending review *requests* do not block merge/queue. This check is the smallest
+# enforceable layer for that gap, reusing the existing required-status-check /
+# merge-queue mechanism (not a second control plane).
 
 on:
   pull_request:
@@ -40,8 +45,9 @@ permissions:
   pull-requests: read
 
 # PR updates cancel; merge_group must not cancel (same split as dependency-review).
+# pull_request and pull_request_review both expose github.event.pull_request.number.
 concurrency:
-  group: ${{ github.event_name == 'merge_group' && format('{0}-merge-group-{1}', github.workflow, github.event.merge_group.head_sha) || format('{0}-pr-{1}', github.workflow, github.event.pull_request.number || github.event.pull_request_review.pull_request.number) }}
+  group: ${{ github.event_name == 'merge_group' && format('{0}-merge-group-{1}', github.workflow, github.event.merge_group.head_sha) || format('{0}-pr-{1}', github.workflow, github.event.pull_request.number) }}
   cancel-in-progress: ${{ github.event_name != 'merge_group' }}
 
 jobs:
@@ -58,18 +64,16 @@ jobs:
         shell: bash
         env:
           EVENT_NAME: ${{ github.event_name }}
+          # pull_request and pull_request_review both carry the PR at the root
+          # payload path github.event.pull_request (not under the review object).
           PR_NUMBER: ${{ github.event.pull_request.number }}
-          REVIEW_PR_NUMBER: ${{ github.event.pull_request_review.pull_request.number }}
           MERGE_HEAD_REF: ${{ github.event.merge_group.head_ref }}
         run: |
           set -euo pipefail
           number=""
           case "$EVENT_NAME" in
-            pull_request)
+            pull_request|pull_request_review)
               number="${PR_NUMBER:-}"
-              ;;
-            pull_request_review)
-              number="${REVIEW_PR_NUMBER:-}"
               ;;
             merge_group)
               # head_ref looks like:

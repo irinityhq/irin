@@ -205,7 +205,7 @@ zero and enables conversation resolution. That combination does **not** wait
 for a pending review *request* to clear: a requested bot or human review can
 still be in flight while a PR enters the merge queue. PR #70 is the reference
 incident (Copilot requested, queue/merge completed, review landed afterward on
-the same head with actionable threads).
+the same head).
 
 `Review settlement` is a stable required-check *producer* in
 `.github/workflows/review-settlement.yml`. It reuses the existing required
@@ -218,19 +218,29 @@ Fail closed when any of the following hold on the current pull-request head:
 
 - `reviewRequests` is nonempty;
 - a non-dismissed latest review is not bound to the current `headRefOid`
-  (a new commit invalidates prior settlement);
-- `CHANGES_REQUESTED` is present on the current head; or
-- an actionable review thread remains unresolved (open and not outdated).
+  (a new commit invalidates prior settlement); or
+- `CHANGES_REQUESTED` is present on the current head.
+
+GraphQL `reviewRequests` and `latestReviews` are fetched with `first: 100` and
+must include `pageInfo.hasNextPage`. Any truncated connection fails closed
+(schema/transport failure) rather than reporting SETTLED. Full pagination is
+not implemented; fail-closed on overflow is the deliberate small bound.
+
+**Threads are out of scope for this check.** GitHub emits no supported Actions
+workflow event when a conversation is resolved, so a custom required check that
+failed on unresolved threads would stay red until a manual rerun and could not
+be repaired by `merge_group` alone. Required conversation-resolution branch
+protection (already enabled on `main`) is the sole enforceable layer for open
+review threads. This job does not query or evaluate `reviewThreads`, and must
+not add a webhook or dispatch control plane to re-run on resolve.
 
 Event surfaces: pull-request open/reopen/synchronize/ready/draft conversion,
 review requested/removed, pull-request review submitted/edited/dismissed, and
-`merge_group` `checks_requested`. Draft PRs are treated as not-ready (the check
+`merge_group` `checks_requested`. Both `pull_request` and `pull_request_review`
+resolve the PR number from `github.event.pull_request.number` (the review
+object does not nest the PR). Draft PRs are treated as not-ready (the check
 passes with a note); `ready_for_review` re-evaluates.
 
-**GitHub boundary (explicit):** there is no reliable dedicated workflow event
-for “thread resolved.” Conversation-resolution branch protection remains the
-complementary layer for that transition; this check re-reads thread state
-whenever a review or head-SHA event fires and again on the merge-queue check.
 Register `Review settlement` as a required context only after the job has
 appeared on a real pull request. Do not rename the job lightly.
 
