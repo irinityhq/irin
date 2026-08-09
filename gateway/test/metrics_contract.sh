@@ -56,6 +56,8 @@ UNLABELED_METRICS=(
     "gw_watch_cap_token_db_error_deny_total counter"
     "gw_watch_arm_rejected_unauth_total counter"
     "gw_watch_action_production_armed gauge"
+    "gw_watch_sentinel_fires_read_failures_total counter"
+    "gw_watch_temperature_read_failures_total counter"
 )
 
 # --------------------------------------------------------------------------

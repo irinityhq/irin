@@ -219,6 +219,16 @@ pub struct WatchStats {
     /// Emitted as labeled `gw_watch_sentinel_*` families.
     #[serde(default)]
     pub sentinels: Vec<WatchSentinelStat>,
+    /// Durable fire-count query failures. When non-zero and rising, omit
+    /// `fires_total` (blind), never silent zeros. Emitted as
+    /// `gw_watch_sentinel_fires_read_failures_total`.
+    #[serde(default)]
+    pub sentinel_fires_read_failures_total: u64,
+    /// Temperature assembly failures (tenant list or window counts). Failed
+    /// slices are omitted from `temperatures`. Emitted as
+    /// `gw_watch_temperature_read_failures_total`.
+    #[serde(default)]
+    pub temperature_read_failures_total: u64,
 }
 
 /// Per-tenant temperature slice for `/watch/stats` → Prometheus.
@@ -236,8 +246,11 @@ pub struct WatchTemperatureStat {
 pub struct WatchSentinelStat {
     pub tenant: String,
     pub sentinel: String,
-    /// Lifetime fire count from `watch_fires`.
-    pub fires_total: u64,
+    /// Lifetime fire count from `watch_fires` for registered pairs only.
+    /// Omitted (not zero) when the durable fire-count query failed so scrapers
+    /// see a blind field rather than a false reset.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fires_total: Option<u64>,
     pub ticks_fired: u64,
     pub ticks_uninteresting: u64,
     pub ticks_failure: u64,
@@ -271,58 +284,96 @@ pub async fn build_watch_stats(quarantine: &QuarantineState, db: Option<&WatchDb
         None => 0.0,
     };
 
-    let mut fire_counts: std::collections::HashMap<(String, String), u64> =
-        std::collections::HashMap::new();
+    // Durable fire counts: on failure OMIT fires_total (blind), never zero.
+    let mut fire_counts: Option<std::collections::HashMap<(String, String), u64>> = None;
     let mut temperatures: Vec<WatchTemperatureStat> = Vec::new();
     if let Some(db) = db {
-        if let Ok(rows) = db.count_fires_by_sentinel().await {
-            for (tenant, sentinel, n) in rows {
-                fire_counts.insert((tenant, sentinel), n);
+        match db.count_fires_by_sentinel().await {
+            Ok(rows) => {
+                let mut map = std::collections::HashMap::new();
+                for (tenant, sentinel, n) in rows {
+                    map.insert((tenant, sentinel), n);
+                }
+                fire_counts = Some(map);
+            }
+            Err(e) => {
+                quarantine.bump_sentinel_fires_read_failure();
+                tracing::warn!(
+                    error = %e,
+                    "watch/stats: fire-count query failed; omitting fires_total (sentinel_fires_read_failures_total bumped)"
+                );
             }
         }
-        if let Ok(tenants) = db.list_sentinel_tenants().await {
-            let now_ms = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_millis() as i64;
-            let one_hour_ago = now_ms - 3_600_000;
-            let one_day_ago = now_ms - 86_400_000;
-            for tenant in tenants {
-                let fires_1h = db
-                    .count_fires_since(&tenant, one_hour_ago)
-                    .await
-                    .unwrap_or(0) as u64;
-                let fires_24h = db
-                    .count_fires_since(&tenant, one_day_ago)
-                    .await
-                    .unwrap_or(0) as u64;
-                let raw = 0.7 * (fires_1h as f64 / 5.0) + 0.3 * (fires_24h as f64 / 24.0);
-                let value = raw.clamp(0.0, 1.0);
-                let level = if value < 0.15 {
-                    "cold"
-                } else if value < 0.6 {
-                    "warm"
-                } else {
-                    "hot"
+        match db.list_sentinel_tenants().await {
+            Ok(tenants) => {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis() as i64;
+                let one_hour_ago = now_ms - 3_600_000;
+                let one_day_ago = now_ms - 86_400_000;
+                for tenant in tenants {
+                    let fires_1h = match db.count_fires_since(&tenant, one_hour_ago).await {
+                        Ok(n) => n as u64,
+                        Err(e) => {
+                            quarantine.bump_temperature_read_failure();
+                            tracing::warn!(
+                                error = %e,
+                                %tenant,
+                                "watch/stats: temperature 1h fire count failed; omitting tenant slice"
+                            );
+                            continue;
+                        }
+                    };
+                    let fires_24h = match db.count_fires_since(&tenant, one_day_ago).await {
+                        Ok(n) => n as u64,
+                        Err(e) => {
+                            quarantine.bump_temperature_read_failure();
+                            tracing::warn!(
+                                error = %e,
+                                %tenant,
+                                "watch/stats: temperature 24h fire count failed; omitting tenant slice"
+                            );
+                            continue;
+                        }
+                    };
+                    let raw = 0.7 * (fires_1h as f64 / 5.0) + 0.3 * (fires_24h as f64 / 24.0);
+                    let value = raw.clamp(0.0, 1.0);
+                    let level = if value < 0.15 {
+                        "cold"
+                    } else if value < 0.6 {
+                        "warm"
+                    } else {
+                        "hot"
+                    }
+                    .to_string();
+                    temperatures.push(WatchTemperatureStat {
+                        tenant,
+                        value,
+                        level,
+                        fires_last_hour: fires_1h,
+                        fires_last_24h: fires_24h,
+                    });
                 }
-                .to_string();
-                temperatures.push(WatchTemperatureStat {
-                    tenant,
-                    value,
-                    level,
-                    fires_last_hour: fires_1h,
-                    fires_last_24h: fires_24h,
-                });
+            }
+            Err(e) => {
+                quarantine.bump_temperature_read_failure();
+                tracing::warn!(
+                    error = %e,
+                    "watch/stats: list_sentinel_tenants failed; omitting temperatures"
+                );
             }
         }
     }
 
-    // Merge tick cells with fire counts; include fire-only sentinels too.
+    // Merge tick cells with fire counts; fire-only rows only when counts known.
     let mut sentinels: Vec<WatchSentinelStat> = Vec::new();
     let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
     for tick in quarantine.sentinel_tick_snapshot() {
         let key = (tick.tenant.clone(), tick.sentinel.clone());
-        let fires_total = fire_counts.get(&key).copied().unwrap_or(0);
+        let fires_total = fire_counts
+            .as_ref()
+            .map(|m| m.get(&key).copied().unwrap_or(0));
         seen.insert(key);
         sentinels.push(WatchSentinelStat {
             tenant: tick.tenant,
@@ -335,20 +386,22 @@ pub async fn build_watch_stats(quarantine: &QuarantineState, db: Option<&WatchDb
             last_tick_ms: tick.last_tick_ms,
         });
     }
-    for ((tenant, sentinel), fires_total) in fire_counts {
-        if seen.contains(&(tenant.clone(), sentinel.clone())) {
-            continue;
+    if let Some(ref counts) = fire_counts {
+        for ((tenant, sentinel), fires_total) in counts {
+            if seen.contains(&(tenant.clone(), sentinel.clone())) {
+                continue;
+            }
+            sentinels.push(WatchSentinelStat {
+                tenant: tenant.clone(),
+                sentinel: sentinel.clone(),
+                fires_total: Some(*fires_total),
+                ticks_fired: 0,
+                ticks_uninteresting: 0,
+                ticks_failure: 0,
+                ticks_gated: 0,
+                last_tick_ms: 0,
+            });
         }
-        sentinels.push(WatchSentinelStat {
-            tenant,
-            sentinel,
-            fires_total,
-            ticks_fired: 0,
-            ticks_uninteresting: 0,
-            ticks_failure: 0,
-            ticks_gated: 0,
-            last_tick_ms: 0,
-        });
     }
     sentinels.sort_by(|a, b| (&a.tenant, &a.sentinel).cmp(&(&b.tenant, &b.sentinel)));
 
@@ -381,6 +434,8 @@ pub async fn build_watch_stats(quarantine: &QuarantineState, db: Option<&WatchDb
         action_production_armed: quarantine.action_production_armed(),
         temperatures,
         sentinels,
+        sentinel_fires_read_failures_total: quarantine.sentinel_fires_read_failures_total(),
+        temperature_read_failures_total: quarantine.temperature_read_failures_total(),
     }
 }
 

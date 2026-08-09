@@ -305,6 +305,14 @@ pub struct QuarantineState {
     /// Distinguishes "genuinely zero spend" from "the gauge is blind" on the
     /// scrape surface. Exposed as `spend_gauge_read_failures_total`.
     spend_gauge_read_failures_total: AtomicU64,
+    /// `/watch/stats` fire-count reads that failed. When this rises the
+    /// per-sentinel `fires_total` field is omitted (blind), not zeroed.
+    /// Exposed as `sentinel_fires_read_failures_total`.
+    sentinel_fires_read_failures_total: AtomicU64,
+    /// Temperature assembly reads that failed (tenant list or fire window
+    /// counts). Failed slices are omitted from `temperatures`. Exposed as
+    /// `temperature_read_failures_total`.
+    temperature_read_failures_total: AtomicU64,
     /// count of kill-switch drains that hit the 5s
     /// timeout (the producer did not ack). Each timeout also records a
     /// 5000ms floor observation into the latency last/max so the scraped
@@ -395,6 +403,8 @@ impl QuarantineState {
             recon_cap_breach_total: AtomicU64::new(0),
             settle_ceiling_overshoot_total: AtomicU64::new(0),
             spend_gauge_read_failures_total: AtomicU64::new(0),
+            sentinel_fires_read_failures_total: AtomicU64::new(0),
+            temperature_read_failures_total: AtomicU64::new(0),
             kill_switch_drain_timeout_total: AtomicU64::new(0),
             arm_rejected_unauth_total: AtomicU64::new(0),
             sentinel_ticks: Mutex::new(HashMap::new()),
@@ -423,6 +433,8 @@ impl QuarantineState {
             recon_cap_breach_total: AtomicU64::new(0),
             settle_ceiling_overshoot_total: AtomicU64::new(0),
             spend_gauge_read_failures_total: AtomicU64::new(0),
+            sentinel_fires_read_failures_total: AtomicU64::new(0),
+            temperature_read_failures_total: AtomicU64::new(0),
             kill_switch_drain_timeout_total: AtomicU64::new(0),
             arm_rejected_unauth_total: AtomicU64::new(0),
             sentinel_ticks: Mutex::new(HashMap::new()),
@@ -718,6 +730,27 @@ impl QuarantineState {
     /// `/watch/stats` field `spend_gauge_read_failures_total`.
     pub fn spend_gauge_read_failures_total(&self) -> u64 {
         self.spend_gauge_read_failures_total.load(Ordering::Relaxed)
+    }
+
+    /// Durable fire-count query failed; omit `fires_total` on the scrape.
+    pub fn bump_sentinel_fires_read_failure(&self) {
+        self.sentinel_fires_read_failures_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn sentinel_fires_read_failures_total(&self) -> u64 {
+        self.sentinel_fires_read_failures_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Temperature assembly read failed; omit the failed temperature slice(s).
+    pub fn bump_temperature_read_failure(&self) {
+        self.temperature_read_failures_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn temperature_read_failures_total(&self) -> u64 {
+        self.temperature_read_failures_total.load(Ordering::Relaxed)
     }
 
     /// record one kill-switch drain TIMEOUT: bump the

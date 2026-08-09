@@ -438,16 +438,20 @@ impl WatchDb {
     }
 
     /// Per-sentinel lifetime fire counts from `watch_fires` for `/watch/stats`.
-    /// Bounded by registered sentinel count (pack default: few tenants × ≤10).
+    /// Restricted to **currently registered** `(tenant, name)` pairs in
+    /// `watch_sentinels` so historical/unregistered rows cannot grow scrape
+    /// cardinality forever. Pack default: few tenants × ≤10 sentinels.
     pub async fn count_fires_by_sentinel(&self) -> anyhow::Result<Vec<(String, String, u64)>> {
         let rows = self
             .conn
             .call(move |conn| {
                 let mut stmt = conn.prepare(
-                    "SELECT tenant, sentinel, COUNT(*) as n
-                     FROM watch_fires
-                     GROUP BY tenant, sentinel
-                     ORDER BY tenant ASC, sentinel ASC",
+                    "SELECT f.tenant, f.sentinel, COUNT(*) as n
+                     FROM watch_fires f
+                     INNER JOIN watch_sentinels s
+                       ON s.tenant = f.tenant AND s.name = f.sentinel
+                     GROUP BY f.tenant, f.sentinel
+                     ORDER BY f.tenant ASC, f.sentinel ASC",
                 )?;
                 let rows: Vec<(String, String, u64)> = stmt
                     .query_map([], |r| {

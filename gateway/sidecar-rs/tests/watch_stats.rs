@@ -307,6 +307,8 @@ async fn p0d_watch_stats_exposes_four_new_metrics() {
         "temperatures",
         "sentinels",
         "arm_rejected_unauth_total",
+        "sentinel_fires_read_failures_total",
+        "temperature_read_failures_total",
     ] {
         assert!(
             v.get(field).is_some(),
@@ -740,35 +742,185 @@ async fn p0d_recon_yesterday_lookback_alarms_on_closed_bucket() {
     assert_eq!(q.recon_divergence_total(), 1);
 }
 
-/// Per-sentinel tick choke point + wiring into /watch/stats.sentinels.
+/// H3 — ticks + outcome mapping must go through `handle_fire_outcome`, not
+/// a direct `note_runner_tick` call that would miss mapping regressions.
 #[tokio::test]
-async fn sentinel_ticks_surface_on_watch_stats() {
-    use gateway_sidecar::watch::quarantine::RunnerTickOutcome;
+async fn sentinel_ticks_surface_via_handle_fire_outcome() {
+    use async_trait::async_trait;
+    use gateway_sidecar::watch::runner::handle_fire_outcome;
+    use gateway_sidecar::watch::runtime::{FireOutcome, QuarantineGate};
+    use gateway_sidecar::watch::{
+        EscalateError, Escalation, ObserveError, Sentinel, SentinelState, Tier,
+    };
+    use std::time::Duration as StdDuration;
+
+    struct StubSentinel {
+        name: String,
+        tenant: String,
+    }
+    #[async_trait]
+    impl Sentinel for StubSentinel {
+        fn name(&self) -> &str {
+            &self.name
+        }
+        fn tenant(&self) -> &str {
+            &self.tenant
+        }
+        fn tier(&self) -> Tier {
+            Tier::Fast
+        }
+        fn cooldown(&self) -> StdDuration {
+            StdDuration::from_millis(0)
+        }
+        async fn observe(&self) -> Result<SentinelState, ObserveError> {
+            unreachable!()
+        }
+        fn interesting(&self, _: &SentinelState) -> Option<String> {
+            unreachable!()
+        }
+        async fn escalate(&self, _: SentinelState, _: String) -> Result<Escalation, EscalateError> {
+            unreachable!()
+        }
+    }
 
     let q = Arc::new(QuarantineState::test_default());
-    q.note_runner_tick("canary", "silence-watch", RunnerTickOutcome::Uninteresting);
-    q.note_runner_tick("canary", "silence-watch", RunnerTickOutcome::Uninteresting);
-    q.note_runner_tick("canary", "silence-watch", RunnerTickOutcome::Fired);
-    q.note_runner_tick("canary", "file-inbox-watch", RunnerTickOutcome::Gated);
+    let silence = StubSentinel {
+        name: "silence-watch".into(),
+        tenant: "canary".into(),
+    };
+    let inbox = StubSentinel {
+        name: "file-inbox-watch".into(),
+        tenant: "canary".into(),
+    };
+
+    handle_fire_outcome(FireOutcome::Uninteresting, &silence, &q).await;
+    handle_fire_outcome(FireOutcome::Uninteresting, &silence, &q).await;
+    handle_fire_outcome(FireOutcome::Fired(1), &silence, &q).await;
+    handle_fire_outcome(FireOutcome::Gated(QuarantineGate::Quarantined), &inbox, &q).await;
+    handle_fire_outcome(
+        FireOutcome::ObserveErr(ObserveError::TransientUpstream("x".into())),
+        &inbox,
+        &q,
+    )
+    .await;
+    handle_fire_outcome(FireOutcome::AuditWriteErr("disk".into()), &inbox, &q).await;
 
     let stats = build_watch_stats(&q, None).await;
     assert!(!stats.action_production_armed);
     assert!(stats.temperatures.is_empty(), "no db → no temperatures");
     assert_eq!(stats.sentinels.len(), 2);
 
-    let silence = stats
+    let silence_row = stats
         .sentinels
         .iter()
         .find(|s| s.sentinel == "silence-watch")
         .expect("silence-watch row");
-    assert_eq!(silence.tenant, "canary");
-    assert_eq!(silence.ticks_uninteresting, 2);
-    assert_eq!(silence.ticks_fired, 1);
-    assert_eq!(silence.fires_total, 0);
-    assert!(silence.last_tick_ms > 0);
+    assert_eq!(silence_row.tenant, "canary");
+    assert_eq!(silence_row.ticks_uninteresting, 2);
+    assert_eq!(silence_row.ticks_fired, 1);
+    assert!(
+        silence_row.fires_total.is_none(),
+        "no durable fire-count query → omit fires_total (blind), not zero"
+    );
+    assert!(silence_row.last_tick_ms > 0);
+
+    let inbox_row = stats
+        .sentinels
+        .iter()
+        .find(|s| s.sentinel == "file-inbox-watch")
+        .expect("file-inbox-watch row");
+    assert_eq!(inbox_row.ticks_gated, 1);
+    // ObserveErr → failure; AuditWriteErr also maps to failure for tick label.
+    assert_eq!(inbox_row.ticks_failure, 2);
 
     let v = serde_json::to_value(&stats).expect("serialize");
     assert_eq!(v["directive_verify_failed_total"], 0);
     assert_eq!(v["cap_token_db_error_deny_total"], 0);
     assert_eq!(v["action_production_armed"], false);
+    assert_eq!(v["sentinel_fires_read_failures_total"], 0);
+}
+
+/// P1 — failed durable fire-count query must omit fires_total and bump the
+/// failure counter (never silent zeros that look like a counter reset).
+#[tokio::test]
+async fn sentinel_fires_read_failure_omits_fires_total() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_watch_db(&tmp).await;
+    let q = Arc::new(QuarantineState::new_with_db(
+        QuarantineConfig::default(),
+        Arc::clone(&db),
+    ));
+    q.note_runner_tick(
+        "canary",
+        "silence-watch",
+        gateway_sidecar::watch::quarantine::RunnerTickOutcome::Fired,
+    );
+
+    // Break the fire-count source (JOIN against watch_sentinels / watch_fires).
+    let conn = rusqlite::Connection::open(tmp.path().join("watch.db")).unwrap();
+    conn.execute("DROP TABLE watch_fires", []).unwrap();
+
+    let stats = build_watch_stats(&q, Some(db.as_ref())).await;
+    assert_eq!(
+        q.sentinel_fires_read_failures_total(),
+        1,
+        "failed fire-count query must bump the companion counter"
+    );
+    assert_eq!(stats.sentinel_fires_read_failures_total, 1);
+    let row = stats
+        .sentinels
+        .iter()
+        .find(|s| s.sentinel == "silence-watch")
+        .expect("tick row still present");
+    assert!(
+        row.fires_total.is_none(),
+        "fires_total must be omitted on read failure, not zeroed"
+    );
+    let json = serde_json::to_value(&stats).unwrap();
+    assert!(
+        json["sentinels"][0].get("fires_total").is_none(),
+        "JSON must omit fires_total when blind; got {}",
+        json["sentinels"][0]
+    );
+}
+
+/// H1 — fire counts only for registered sentinels (historical pairs excluded).
+#[tokio::test]
+async fn count_fires_by_sentinel_restricted_to_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let db = temp_watch_db(&tmp).await;
+    db.upsert_sentinel_registration("canary", "live-s", "polling", 1000, "{}")
+        .await
+        .unwrap();
+    let now = now_ms();
+    db.insert_fire("canary", "live-s", now, "{}", "live", "{}", 1)
+        .await
+        .unwrap();
+    // Historical pair never registered — must not appear.
+    db.insert_fire("canary", "retired-s", now + 1, "{}", "old", "{}", 1)
+        .await
+        .unwrap();
+
+    let rows = db.count_fires_by_sentinel().await.unwrap();
+    assert_eq!(rows.len(), 1, "only registered pairs: {rows:?}");
+    assert_eq!(rows[0].0, "canary");
+    assert_eq!(rows[0].1, "live-s");
+    assert_eq!(rows[0].2, 1);
+
+    let q = Arc::new(QuarantineState::new_with_db(
+        QuarantineConfig::default(),
+        Arc::clone(&db),
+    ));
+    let stats = build_watch_stats(&q, Some(db.as_ref())).await;
+    assert!(
+        stats.sentinels.iter().all(|s| s.sentinel != "retired-s"),
+        "unregistered historical sentinel must not appear in stats: {:?}",
+        stats.sentinels
+    );
+    let live = stats
+        .sentinels
+        .iter()
+        .find(|s| s.sentinel == "live-s")
+        .expect("registered live-s");
+    assert_eq!(live.fires_total, Some(1));
 }

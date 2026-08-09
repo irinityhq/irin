@@ -24,6 +24,7 @@ local hash             = require "lib.hash"
 local ledger           = require "lib.ledger"
 local credential_scrub = require "lib.credential_scrub"
 local responses_stream = require "lib.responses_stream"
+local watch_metric_keys = require "lib.watch_metric_keys"
 
 -- Module-level function bindings for timer closures. Capturing
 -- `sidecar.route_outcome` etc. INSIDE a closure would resolve the table
@@ -1172,14 +1173,30 @@ end
 -- gw_watch_persist_failures_total. Closes the silent-unscrape gap: without
 -- this poller, /watch/stats is reachable but invisible on /metrics, so SRE
 -- sees zero watch_* counters and assumes "no incidents."
+--- Drop sticky labeled watch series so removed sentinels / failed polls do
+--- not leave stale Prometheus samples forever.
+local function clear_labeled_watch_series(metrics)
+    if not metrics then return end
+    local keys = metrics:get_keys(2048) or {}
+    for _, key in ipairs(keys) do
+        if watch_metric_keys.is_labeled_watch_key(key) then
+            metrics:delete(key)
+        end
+    end
+end
+
 function _M.poll_watch_stats()
+    local metrics = ngx.shared.gw_metrics
     local stats, err = sidecar_watch_stats()
     if not stats then
         ngx.log(ngx.WARN, "watch_stats poll failed: ", err)
+        -- Blind labeled series on failed poll (no sticky stale values).
+        clear_labeled_watch_series(metrics)
         return
     end
-    local metrics = ngx.shared.gw_metrics
     if not metrics then return end
+    -- Successful poll: replace labeled set atomically (clear then apply).
+    clear_labeled_watch_series(metrics)
     metrics:set("watch_audit_infra_errors_total", stats.audit_infra_errors_total or 0)
     metrics:set("watch_persist_failures_total",   stats.persist_failures_total   or 0)
     -- Snapshot gauge for records parked in pending_hard_kill_persist limbo.
@@ -1222,6 +1239,10 @@ function _M.poll_watch_stats()
     metrics:set("watch_cap_token_rejected_total",        stats.cap_token_rejected_total        or 0)
     metrics:set("watch_directive_verify_failed_total",   stats.directive_verify_failed_total   or 0)
     metrics:set("watch_cap_token_db_error_deny_total",   stats.cap_token_db_error_deny_total   or 0)
+    metrics:set("watch_sentinel_fires_read_failures_total",
+                stats.sentinel_fires_read_failures_total or 0)
+    metrics:set("watch_temperature_read_failures_total",
+                stats.temperature_read_failures_total or 0)
     -- 0/1 gauge: live producer kill channel held.
     local armed = 0
     if stats.action_production_armed == true or stats.action_production_armed == 1 then
@@ -1229,35 +1250,54 @@ function _M.poll_watch_stats()
     end
     metrics:set("watch_action_production_armed", armed)
 
-    -- Per-tenant temperature (labeled). Clear prior series by overwriting
-    -- known keys; bounded by registered-tenant count.
+    -- Per-tenant temperature (labeled). Keys use length-prefixed tenant
+    -- so ":" inside the name cannot split the cache key.
     if type(stats.temperatures) == "table" then
         for _, t in ipairs(stats.temperatures) do
             if type(t) == "table" and type(t.tenant) == "string" and t.tenant ~= "" then
-                metrics:set("watch_temperature:" .. t.tenant, tonumber(t.value) or 0)
+                local enc = watch_metric_keys.lp_encode({ t.tenant })
+                if enc then
+                    metrics:set("watch_temperature:" .. enc, tonumber(t.value) or 0)
+                end
             end
         end
     end
 
-    -- Per-sentinel fires + ticks (4 outcomes) + last-tick. Keys use colon
-    -- separators; labels are tenant/sentinel names from the registry.
+    -- Per-sentinel fires + ticks (4 outcomes) + last-tick.
+    -- fires_total is optional: when omitted (DB blind), do not set the fires key.
     if type(stats.sentinels) == "table" then
         for _, s in ipairs(stats.sentinels) do
             if type(s) == "table"
                 and type(s.tenant) == "string" and s.tenant ~= ""
                 and type(s.sentinel) == "string" and s.sentinel ~= ""
             then
-                local base = s.tenant .. ":" .. s.sentinel
-                metrics:set("watch_sentinel_fires:" .. base, tonumber(s.fires_total) or 0)
-                metrics:set("watch_sentinel_last_tick_ms:" .. base, tonumber(s.last_tick_ms) or 0)
-                metrics:set("watch_sentinel_ticks:" .. base .. ":fired",
-                    tonumber(s.ticks_fired) or 0)
-                metrics:set("watch_sentinel_ticks:" .. base .. ":uninteresting",
-                    tonumber(s.ticks_uninteresting) or 0)
-                metrics:set("watch_sentinel_ticks:" .. base .. ":failure",
-                    tonumber(s.ticks_failure) or 0)
-                metrics:set("watch_sentinel_ticks:" .. base .. ":gated",
-                    tonumber(s.ticks_gated) or 0)
+                local base = watch_metric_keys.lp_encode({ s.tenant, s.sentinel })
+                if base then
+                    if s.fires_total ~= nil then
+                        metrics:set("watch_sentinel_fires:" .. base, tonumber(s.fires_total) or 0)
+                    end
+                    metrics:set("watch_sentinel_last_tick_ms:" .. base, tonumber(s.last_tick_ms) or 0)
+                    metrics:set(
+                        "watch_sentinel_ticks:" .. watch_metric_keys.lp_encode({
+                            s.tenant, s.sentinel, "fired",
+                        }),
+                        tonumber(s.ticks_fired) or 0)
+                    metrics:set(
+                        "watch_sentinel_ticks:" .. watch_metric_keys.lp_encode({
+                            s.tenant, s.sentinel, "uninteresting",
+                        }),
+                        tonumber(s.ticks_uninteresting) or 0)
+                    metrics:set(
+                        "watch_sentinel_ticks:" .. watch_metric_keys.lp_encode({
+                            s.tenant, s.sentinel, "failure",
+                        }),
+                        tonumber(s.ticks_failure) or 0)
+                    metrics:set(
+                        "watch_sentinel_ticks:" .. watch_metric_keys.lp_encode({
+                            s.tenant, s.sentinel, "gated",
+                        }),
+                        tonumber(s.ticks_gated) or 0)
+                end
             end
         end
     end
@@ -1321,6 +1361,8 @@ function _M.prometheus()
         "watch_cap_token_db_error_deny_total",
         "watch_arm_rejected_unauth_total",
         "watch_action_production_armed",
+        "watch_sentinel_fires_read_failures_total",
+        "watch_temperature_read_failures_total",
         "council_stored_bytes"
     }) do
         if not metrics:get(k) then
@@ -1418,9 +1460,13 @@ function _M.prometheus()
         "# TYPE gw_watch_cap_token_db_error_deny_total counter",
         "# HELP gw_watch_action_production_armed 1 when a live producer kill-switch channel is held; 0 otherwise",
         "# TYPE gw_watch_action_production_armed gauge",
+        "# HELP gw_watch_sentinel_fires_read_failures_total Durable fire-count query failures; fires_total omitted while this rises",
+        "# TYPE gw_watch_sentinel_fires_read_failures_total counter",
+        "# HELP gw_watch_temperature_read_failures_total Temperature assembly read failures; failed tenant slices omitted",
+        "# TYPE gw_watch_temperature_read_failures_total counter",
         "# HELP gw_watch_temperature Per-tenant watch heat score (0-1)",
         "# TYPE gw_watch_temperature gauge",
-        "# HELP gw_watch_sentinel_fires_total Lifetime watch_fires count per sentinel",
+        "# HELP gw_watch_sentinel_fires_total Lifetime watch_fires count per registered sentinel",
         "# TYPE gw_watch_sentinel_fires_total counter",
         "# HELP gw_watch_sentinel_ticks_total Runner ticks per sentinel by outcome (fired|uninteresting|failure|gated)",
         "# TYPE gw_watch_sentinel_ticks_total counter",
@@ -1512,28 +1558,39 @@ function _M.prometheus()
                 metric_lines[#metric_lines + 1] = string.format('gw_watch_arm_rejected_unauth_total %s', tostring(val))
             elseif key == "watch_action_production_armed" then
                 metric_lines[#metric_lines + 1] = string.format('gw_watch_action_production_armed %s', tostring(val))
+            elseif key == "watch_sentinel_fires_read_failures_total" then
+                metric_lines[#metric_lines + 1] = string.format(
+                    'gw_watch_sentinel_fires_read_failures_total %s', tostring(val))
+            elseif key == "watch_temperature_read_failures_total" then
+                metric_lines[#metric_lines + 1] = string.format(
+                    'gw_watch_temperature_read_failures_total %s', tostring(val))
             else
-                -- Labeled watch temperature: watch_temperature:tenant
-                local temp_tenant = key:match("^watch_temperature:(.+)$")
-                local sf_tenant, sf_name = key:match("^watch_sentinel_fires:([^:]+):(.+)$")
-                local sl_tenant, sl_name = key:match("^watch_sentinel_last_tick_ms:([^:]+):(.+)$")
-                local st_tenant, st_name, st_out =
-                    key:match("^watch_sentinel_ticks:([^:]+):([^:]+):([^:]+)$")
-                if temp_tenant then
+                -- Labeled series: length-prefixed payloads after the family prefix.
+                local esc = watch_metric_keys.prom_escape_label
+                local temp_blob = key:match("^watch_temperature:(.+)$")
+                local fires_blob = key:match("^watch_sentinel_fires:(.+)$")
+                local last_blob = key:match("^watch_sentinel_last_tick_ms:(.+)$")
+                local ticks_blob = key:match("^watch_sentinel_ticks:(.+)$")
+                local temp_parts = temp_blob and watch_metric_keys.lp_decode_all(temp_blob)
+                local fires_parts = fires_blob and watch_metric_keys.lp_decode_all(fires_blob)
+                local last_parts = last_blob and watch_metric_keys.lp_decode_all(last_blob)
+                local ticks_parts = ticks_blob and watch_metric_keys.lp_decode_all(ticks_blob)
+                if temp_parts and #temp_parts == 1 then
                     metric_lines[#metric_lines + 1] = string.format(
-                        'gw_watch_temperature{tenant="%s"} %s', temp_tenant, tostring(val))
-                elseif sf_tenant and sf_name then
+                        'gw_watch_temperature{tenant="%s"} %s',
+                        esc(temp_parts[1]), tostring(val))
+                elseif fires_parts and #fires_parts == 2 then
                     metric_lines[#metric_lines + 1] = string.format(
                         'gw_watch_sentinel_fires_total{tenant="%s",sentinel="%s"} %s',
-                        sf_tenant, sf_name, tostring(val))
-                elseif sl_tenant and sl_name then
+                        esc(fires_parts[1]), esc(fires_parts[2]), tostring(val))
+                elseif last_parts and #last_parts == 2 then
                     metric_lines[#metric_lines + 1] = string.format(
                         'gw_watch_sentinel_last_tick_ms{tenant="%s",sentinel="%s"} %s',
-                        sl_tenant, sl_name, tostring(val))
-                elseif st_tenant and st_name and st_out then
+                        esc(last_parts[1]), esc(last_parts[2]), tostring(val))
+                elseif ticks_parts and #ticks_parts == 3 then
                     metric_lines[#metric_lines + 1] = string.format(
                         'gw_watch_sentinel_ticks_total{tenant="%s",sentinel="%s",outcome="%s"} %s',
-                        st_tenant, st_name, st_out, tostring(val))
+                        esc(ticks_parts[1]), esc(ticks_parts[2]), esc(ticks_parts[3]), tostring(val))
                 else
                     -- Histogram keys: latency_bucket:provider:model:le
                     local htype, provider, model, le = key:match("^(latency_bucket):([^:]+):([^:]+):(.+)$")
