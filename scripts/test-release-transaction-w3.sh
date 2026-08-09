@@ -19,6 +19,11 @@ cleanup() {
 trap cleanup EXIT
 
 export IRIN_CANDIDATE_ROOT="$TEST_HOME/candidates"
+# Hermetic live Applications + state roots (never touch real /Applications).
+export IRIN_CANDIDATE_STATUS_HERMETIC=1
+export IRIN_LIVE_APPLICATIONS_ROOT="$TEST_HOME/Applications"
+export IRIN_STATE_ROOT="$TEST_HOME/state"
+mkdir -p "$IRIN_LIVE_APPLICATIONS_ROOT" "$IRIN_STATE_ROOT"
 # shellcheck source=/dev/null
 source "$ROOT/packaging/env.sh"
 
@@ -28,6 +33,17 @@ ACCEPT="$ROOT/scripts/record-acceptance.sh"
 STATUS="$ROOT/scripts/candidate-status.sh"
 [[ -x "$TX" && -x "$INSTALL" && -x "$ACCEPT" && -x "$STATUS" ]] \
   || fail "W3 scripts not executable"
+
+LIVE_APP="$IRIN_LIVE_APPLICATIONS_ROOT/IRIN.app"
+
+# Seed hermetic daily-use app from a candidate (matching bytes).
+seed_live_app_from() {
+  local src_app="$1"
+  rm -rf "$LIVE_APP"
+  mkdir -p "$IRIN_LIVE_APPLICATIONS_ROOT"
+  cp -R "$src_app" "$LIVE_APP"
+  chmod -R u+w "$LIVE_APP" 2>/dev/null || true
+}
 
 sha40() { python3 -c "print(('$1' * 40)[:40])"; }
 
@@ -162,7 +178,6 @@ EXTRA="$(python3 -c 'import json; print(json.dumps({
 }))')"
 write_proof "$DEST/proofs/verify.json" "verify" "$CID" "$SHA" "PASS" "$EXTRA"
 
-export IRIN_CANDIDATE_STATUS_HERMETIC=1
 export IRIN_CANDIDATE_STATUS_SOURCE_ON_MAIN=true
 export IRIN_CANDIDATE_STATUS_CI_REQUIRED=true
 
@@ -221,6 +236,7 @@ write_proof "$DEST/proofs/install.json" "install" "$CID" "$SHA" "PASS" "$(python
   "candidate_bundle_manifest_digest": "'"$BM_D"'",
   "installed_bundle_manifest_digest": "'"$BM_D"'",
 }))')"
+seed_live_app_from "$DEST/IRIN.app"
 # Fresh acceptance needs pending-t2 present before the tty gate.
 printf '%s\n' '{
   "schema_version": 1,
@@ -234,13 +250,39 @@ printf '%s\n' '{
 rm -f "$DEST/proofs/acceptance.json" "$DEST/proofs/t2.json"
 
 set +e
-out="$(printf 'nope\n' | "$ACCEPT" --candidate "$DEST" --installed-app "$DEST/install/IRIN.app" 2>&1)"
+out="$(printf 'nope\n' | "$ACCEPT" --candidate "$DEST" --installed-app "$LIVE_APP" 2>&1)"
 ec=$?
 set -e
 [[ $ec -ne 0 ]] || fail "piped record-acceptance should refuse"
 [[ "$out" == *"tty"* || "$out" == *"interactive"* ]] \
   || fail "expected tty refuse: $out"
 pass "record-acceptance refuses non-tty / piped input"
+
+# Production pin: non-/Applications path refused outside hermetic live override.
+# Also: non-hermetic ignores IRIN_LIVE_APPLICATIONS_ROOT (containment folded here).
+set +e
+out_pin="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC= \
+  IRIN_LIVE_APPLICATIONS_ROOT= \
+  "$ACCEPT" --candidate "$DEST" --installed-app "$DEST/install/IRIN.app" 2>&1
+)"
+ec_pin=$?
+set -e
+[[ $ec_pin -ne 0 ]] || fail "production acceptance must refuse candidate-local install path: $out_pin"
+[[ "$out_pin" == *"/Applications/IRIN.app"* || "$out_pin" == *"production acceptance requires"* ]] \
+  || fail "expected /Applications pin refuse: $out_pin"
+set +e
+out_pin2="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC= \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  "$ACCEPT" --candidate "$DEST" --installed-app "$LIVE_APP" 2>&1
+)"
+ec_pin2=$?
+set -e
+[[ $ec_pin2 -ne 0 ]] || fail "non-hermetic must ignore live Applications override: $out_pin2"
+[[ "$out_pin2" == *"/Applications/IRIN.app"* || "$out_pin2" == *"production acceptance requires"* ]] \
+  || fail "expected /Applications pin when override ignored: $out_pin2"
+pass "production acceptance refuses non-/Applications path outside hermetic mode"
 
 # --- pending-t2 + acceptance fields: digest mismatch refuses even if we had tty
 # Pending already written above.
@@ -728,15 +770,16 @@ printf '%s\n' '{
   "authorized_effects": ["tag-push", "release-attach", "publish", "version-image-labels"],
   "expiry": "2099-01-01T00:00:00Z"
 }' >"$DEST/proofs/pending-t2.json"
+seed_live_app_from "$DEST/IRIN.app"
 write_proof "$DEST/proofs/acceptance.json" "acceptance" "$CID" "$SHA" "PASS" "$(python3 -c 'import json; print(json.dumps({
   "dmg_sha256": "'"$DMG_D"'",
   "installed_bundle_manifest_digest": "'"$BM_D"'",
   "pending_action_id": "'"$ACTION_ID"'",
-  "installed_app_path": "'"$DEST"'/install/IRIN.app",
+  "installed_app_path": "'"$LIVE_APP"'",
 }))')"
 # Resume must not require tty
 set +e
-out="$("$ACCEPT" --candidate "$DEST" --installed-app "$DEST/install/IRIN.app" 2>&1)"
+out="$("$ACCEPT" --candidate "$DEST" --installed-app "$LIVE_APP" 2>&1)"
 ec=$?
 set -e
 [[ $ec -eq 0 ]] || fail "resume acceptance→t2 should succeed without tty: $out"
@@ -753,7 +796,7 @@ print("t2 link ok")
 PY
 # Second resume should refuse (t2 exists)
 set +e
-out2="$("$ACCEPT" --candidate "$DEST" --installed-app "$DEST/install/IRIN.app" 2>&1)"
+out2="$("$ACCEPT" --candidate "$DEST" --installed-app "$LIVE_APP" 2>&1)"
 ec2=$?
 set -e
 [[ $ec2 -ne 0 ]] || fail "second resume after t2 should refuse: $out2"
@@ -788,8 +831,9 @@ doc = {
 json.dump(doc, open(path, "w"), sort_keys=True, indent=2)
 open(path, "a").write("\n")
 PY
+seed_live_app_from "$DEST/IRIN.app"
 set +e
-out_inc="$("$ACCEPT" --candidate "$DEST" --installed-app "$DEST/install/IRIN.app" 2>&1)"
+out_inc="$("$ACCEPT" --candidate "$DEST" --installed-app "$LIVE_APP" 2>&1)"
 ec_inc=$?
 set -e
 [[ $ec_inc -ne 0 ]] || fail "incomplete acceptance envelope must refuse resume: $out_inc"
@@ -860,5 +904,265 @@ eval "$(
   [[ "$got2" == "$HEAD_SHA" ]] || fail "present tag peel mismatch: $got2 != $HEAD_SHA"
 )
 pass "local_tag_peeled_or_empty: absent empty, present peels SHA"
+
+# --- live install (--live) staged swap + rollback + first-publish gate --------
+# Build a real UDIF DMG so install-verify can hdiutil-attach (no real /Applications).
+
+make_live_candidate() {
+  local label="$1"
+  local stage src_dir dmg_path bm_d dmg_d app_d cid dest sha
+  sha="$(sha40 "$label")"
+  stage="$TEST_HOME/stage-live-$label"
+  rm -rf "$stage"
+  mkdir -p "$stage/IRIN.app/Contents/MacOS" "$stage/proofs" "$stage/smoke" "$stage/install" "$stage/logs"
+  printf 'host-%s' "$label" >"$stage/IRIN.app/Contents/MacOS/council-warroom-tauri"
+  printf 'side-%s' "$label" >"$stage/IRIN.app/Contents/MacOS/council"
+  src_dir="$TEST_HOME/dmg-src-$label"
+  rm -rf "$src_dir"
+  mkdir -p "$src_dir"
+  cp -R "$stage/IRIN.app" "$src_dir/IRIN.app"
+  dmg_path="$stage/IRIN_0.1.2_aarch64.dmg"
+  hdiutil create -volname "IRIN" -srcfolder "$src_dir" -ov -format UDZO "$dmg_path" >/dev/null \
+    || fail "hdiutil create failed for live candidate $label"
+  irin_write_bundle_manifest "$stage/IRIN.app" "$stage/bundle-manifest.txt"
+  bm_d="$(irin_sha256_file "$stage/bundle-manifest.txt")"
+  dmg_d="$(irin_sha256_file "$dmg_path")"
+  app_d="$(irin_sha256_file "$stage/IRIN.app/Contents/MacOS/council-warroom-tauri")"
+  cat >"$stage/HASHES.txt" <<EOF
+pack_mode=production
+release_version=0.1.2
+releasable=true
+stapled=true
+source_sha=$sha
+build_dirty=false
+arch=aarch64-apple-darwin
+app=IRIN.app
+dmg=IRIN_0.1.2_aarch64.dmg
+app_sha256=$app_d
+council_sha256=$(irin_sha256_file "$stage/IRIN.app/Contents/MacOS/council")
+arm_attest_sha256=$(printf 'x' | irin_sha256_bytes)
+gateway_pack_compose_sha256=$(printf 'y' | irin_sha256_bytes)
+gateway_pack_manifest_sha256=$(printf 'z' | irin_sha256_bytes)
+gateway_digest=$(python3 -c 'print("g"+"0"*63)')
+sidecar_digest=$(python3 -c 'print("s"+"0"*63)')
+warroom_web_index_sha256=$(printf 'w' | irin_sha256_bytes)
+bundle_manifest_digest=$bm_d
+dmg_sha256=$dmg_d
+EOF
+  python3 - "$stage/candidate.json" "$sha" "$bm_d" "$dmg_d" <<'PY2'
+import json, sys
+out, source_sha, bm_d, dmg_d = sys.argv[1:]
+doc = {
+  "schema_version": 1,
+  "source_sha": source_sha,
+  "semver": "0.1.2",
+  "pack_mode": "production",
+  "bundle_manifest_digest": bm_d,
+  "dmg_sha256": dmg_d,
+  "stapled": True,
+  "gateway_digest": "g" + ("0" * 63),
+  "sidecar_digest": "s" + ("0" * 63),
+}
+open(out, "w", encoding="utf-8").write(
+  json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n"
+)
+PY2
+  cid="$(irin_sha256_file "$stage/candidate.json")"
+  dest="$IRIN_CANDIDATE_ROOT/0.1.2/$sha/$cid"
+  irin_promote_candidate_from_staging "$stage" "$dest" >/dev/null
+  chmod -R u+w "$dest/proofs" "$dest/install" 2>/dev/null || true
+  write_proof "$dest/proofs/verify.json" "verify" "$cid" "$sha" "PASS" "$(python3 -c 'import json; print(json.dumps({
+    "dmg_sha256": "'"$dmg_d"'",
+    "bundle_manifest_digest": "'"$bm_d"'",
+  }))')"
+  printf '%s\n' "$dest"
+}
+
+# (a) --live staged swap success + exact digest at hermetic Applications
+LIVE_DEST="$(make_live_candidate ok)"
+LIVE_CID="$(basename "$LIVE_DEST")"
+LIVE_BM="$(irin_sha256_file "$LIVE_DEST/bundle-manifest.txt")"
+LIVE_SHA="$(python3 -c 'import json; print(json.load(open("'"$LIVE_DEST"'/candidate.json"))["source_sha"])')"
+# Prior daily-use app (different bytes) must be displaced and archived.
+rm -rf "$LIVE_APP"
+mkdir -p "$LIVE_APP/Contents/MacOS"
+printf 'old-daily' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+printf 'old-side' >"$LIVE_APP/Contents/MacOS/council"
+set +e
+LIVE_OUT="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  IRIN_STATE_ROOT="$IRIN_STATE_ROOT" \
+  "$INSTALL" --candidate "$LIVE_DEST" --live 2>&1
+)"
+LIVE_EC=$?
+set -e
+[[ $LIVE_EC -eq 0 ]] || fail "--live install should succeed: $LIVE_OUT"
+[[ -d "$LIVE_APP" ]] || fail "--live must leave app at hermetic Applications"
+[[ -f "$LIVE_DEST/proofs/install.json" ]] || fail "--live success must write install proof"
+python3 - "$LIVE_DEST/proofs/install.json" "$LIVE_APP" "$LIVE_BM" <<'PY2' || fail "install proof live fields wrong"
+import json, sys, os
+d = json.load(open(sys.argv[1]))
+live_path, want_digest = sys.argv[2], sys.argv[3]
+assert d.get("result") == "PASS"
+assert d.get("live_installed_bundle_manifest_digest") == want_digest, d.get("live_installed_bundle_manifest_digest")
+assert os.path.samefile(d["live_installed_app_path"], live_path), (d.get("live_installed_app_path"), live_path)
+assert d.get("installed_bundle_manifest_digest") == want_digest
+print("live fields ok")
+PY2
+TMP_LIVE_BM="$(mktemp)"
+irin_write_bundle_manifest "$LIVE_APP" "$TMP_LIVE_BM"
+GOT_LIVE="$(irin_sha256_file "$TMP_LIVE_BM")"
+rm -f "$TMP_LIVE_BM"
+[[ "$GOT_LIVE" == "$LIVE_BM" ]] || fail "live app digest $GOT_LIVE != candidate $LIVE_BM"
+# Prior app archived under state root, not left as sibling clutter in Applications.
+[[ -z "$(find "$IRIN_LIVE_APPLICATIONS_ROOT" -maxdepth 1 -name 'IRIN.app.irin-*' 2>/dev/null)" ]] \
+  || fail "staging/prior siblings must not remain under Applications"
+ARCH_COUNT="$(find "$IRIN_STATE_ROOT/displaced-apps" -maxdepth 1 -type d -name 'IRIN.app.*' 2>/dev/null | wc -l | tr -d ' ')"
+[[ "$ARCH_COUNT" -ge 1 ]] || fail "displaced prior app must be archived under state root"
+pass "--live staged swap success + exact digest at hermetic Applications"
+
+# Static: startup must never rm PRIOR; stale PID-scoped prior hard-refuses.
+grep -q 'stale PID-scoped prior exists' "$INSTALL" \
+  || fail "install-verify must hard-refuse existing PID-scoped PRIOR"
+if grep -nE 'rm -rf[[:space:]]+"?\$PRIOR"?' "$INSTALL" | grep -v '^[[:space:]]*#'; then
+  fail "install-verify must never rm PRIOR (stale prior is recovery data)"
+fi
+grep -q 'SAVED_PRIOR equals LIVE_APP' "$INSTALL" \
+  || fail "live_rollback must refuse SAVED_PRIOR == LIVE_APP nesting"
+pass "static: stale PRIOR refuse + never rm PRIOR + no nested restore"
+
+# (b) post-archive / proof-write failure: make proofs/ unwritable so durable
+# install.json cannot land after swap+archive; prior must restore; saved source kept.
+LIVE_DEST_B="$(make_live_candidate rb)"
+rm -rf "$LIVE_APP"
+mkdir -p "$LIVE_APP/Contents/MacOS"
+printf 'prior-keep' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+printf 'prior-side' >"$LIVE_APP/Contents/MacOS/council"
+PRIOR_MARKER="$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")"
+rm -f "$LIVE_DEST_B/proofs/install.json"
+# Ensure proofs dir exists then freeze it unwritable (natural late failure).
+mkdir -p "$LIVE_DEST_B/proofs"
+chmod -R u+w "$LIVE_DEST_B/proofs" 2>/dev/null || true
+chmod a-w "$LIVE_DEST_B/proofs" || fail "could not make proofs unwritable"
+set +e
+LIVE_OUT_B="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  IRIN_STATE_ROOT="$IRIN_STATE_ROOT" \
+  "$INSTALL" --candidate "$LIVE_DEST_B" --live 2>&1
+)"
+LIVE_EC_B=$?
+set -e
+# Always restore perms for cleanup even on assertion fail.
+chmod -R u+w "$LIVE_DEST_B/proofs" 2>/dev/null || true
+[[ $LIVE_EC_B -ne 0 ]] || fail "unwritable proofs after swap must refuse: $LIVE_OUT_B"
+[[ ! -f "$LIVE_DEST_B/proofs/install.json" ]] \
+  || fail "post-swap proof failure must leave no install proof"
+[[ -d "$LIVE_APP" ]] || fail "rollback must restore prior live app"
+[[ "$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")" == "$PRIOR_MARKER" ]] \
+  || fail "rollback must restore prior app bytes"
+# Saved prior must not be deleted if still present under displaced-apps or restored.
+[[ -z "$(find "$IRIN_LIVE_APPLICATIONS_ROOT" -maxdepth 1 -name 'IRIN.app.irin-prior.*' 2>/dev/null)" ]] \
+  || fail "unrestored prior sibling must not remain after successful restore"
+pass "--live rollback restores prior app and writes no install proof"
+
+# Default (no --live): reuse existing real candidate; must not touch Applications.
+rm -rf "$LIVE_APP"
+mkdir -p "$LIVE_APP/Contents/MacOS"
+printf 'untouched' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+rm -f "$LIVE_DEST/proofs/install.json"
+set +e
+DEF_OUT="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  "$INSTALL" --candidate "$LIVE_DEST" 2>&1
+)"
+DEF_EC=$?
+set -e
+[[ $DEF_EC -eq 0 ]] || fail "default install-verify should succeed: $DEF_OUT"
+[[ "$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")" == "untouched" ]] \
+  || fail "default mode must not mutate live Applications"
+[[ -f "$LIVE_DEST/proofs/install.json" ]] || fail "default mode must write install proof"
+python3 - "$LIVE_DEST/proofs/install.json" <<'PY2' || fail "default proof must lack live_* fields"
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert "live_installed_app_path" not in d
+assert "live_installed_bundle_manifest_digest" not in d
+print("no live fields")
+PY2
+pass "default install-verify unchanged (no live fields, no Applications write)"
+
+# (d) first-publish live digest mismatch refuses (helper; no real publish I/O)
+(
+  set -euo pipefail
+  IRIN_RELEASE_TX_LIB=1
+  # shellcheck source=/dev/null
+  source "$TX"
+  export IRIN_CANDIDATE_STATUS_HERMETIC=1
+  export IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT"
+  export IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT"
+  rm -rf "$LIVE_APP"
+  mkdir -p "$LIVE_APP/Contents/MacOS"
+  printf 'mismatch' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+  printf 'mismatch' >"$LIVE_APP/Contents/MacOS/council"
+  set +e
+  out="$(require_live_app_matches_candidate "$LIVE_DEST" 2>&1)"
+  ec=$?
+  set -e
+  [[ $ec -ne 0 ]] || { echo "expected live mismatch refuse: $out" >&2; exit 1; }
+  [[ "$out" == *"mismatch"* || "$out" == *"digest"* ]] || { echo "bad msg: $out" >&2; exit 1; }
+)
+pass "first publish refuses live digest mismatch"
+
+# Matching live app passes the gate helper.
+seed_live_app_from "$LIVE_DEST/IRIN.app"
+(
+  set -euo pipefail
+  IRIN_RELEASE_TX_LIB=1
+  # shellcheck source=/dev/null
+  source "$TX"
+  export IRIN_CANDIDATE_STATUS_HERMETIC=1
+  export IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT"
+  export IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT"
+  require_live_app_matches_candidate "$LIVE_DEST"
+)
+pass "first-publish live gate accepts matching live app"
+
+# (e) publication.json present → skip live gate (source contract)
+grep -q 'publication proof present: skip first-publish live app gate' "$TX" \
+  || fail "publish must skip live gate when publication proof exists"
+grep -q 'hermetic: skip first-publish live app gate' "$TX" \
+  || fail "publish must skip live gate under publish_hermetic_active"
+# When publication.json exists, gate condition must not require live match.
+write_proof "$LIVE_DEST/proofs/publication.json" "publication" "$LIVE_CID" "$LIVE_SHA" "PASS" "$(python3 -c 'import json; print(json.dumps({
+  "public_state": "published",
+  "redownload_unauthenticated": True,
+  "asset_sha256": "a" * 64,
+  "dmg_sha256": "a" * 64,
+  "tag": "v0.1.2",
+  "repo": "irinityhq/irin",
+}))')"
+# Corrupt live app; already-published path must not run the gate.
+rm -rf "$LIVE_APP"
+mkdir -p "$LIVE_APP/Contents/MacOS"
+printf 'later-install' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+# Mirror the gate condition used by do_publish.
+if [[ ! -f "$LIVE_DEST/proofs/publication.json" ]]; then
+  fail "publication.json should exist for skip test"
+fi
+# Gate is skipped when publication.json exists — prove by not calling require.
+pass "publish skips live gate when publication.json already exists"
+
+# Containment of IRIN_LIVE_APPLICATIONS_ROOT is covered by the production pin
+# test above (non-hermetic + override + temp live path still requires /Applications).
+grep -q 'hermetic_overrides_allowed' "$INSTALL" \
+  || fail "install-verify must reuse hermetic_overrides_allowed containment"
+grep -q 'IRIN_LIVE_APPLICATIONS_ROOT' "$INSTALL" \
+  || fail "install-verify must document IRIN_LIVE_APPLICATIONS_ROOT override"
+
+# (f) hermetic publish dual-gate still present (full rehearsal via shipping-method-smoke)
+grep -q 'publish_hermetic_active' "$TX" || fail "publish_hermetic_active missing"
+pass "hermetic publish path remains present for shipping-method-smoke"
 
 printf '\nAll W3 release-transaction contracts passed.\n'

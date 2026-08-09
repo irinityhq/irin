@@ -102,12 +102,17 @@ that SHA and mention Apple, and each exception packet is single-use by its own
 digest. Prepare also records the checkout HEAD and whether `scripts/` or
 `packaging/` was dirty at that moment.
 
-### 2) Install proof + T2 acceptance
+### 2) Live install proof + T2 acceptance
 
 ```bash
 CANDIDATE=<absolute candidate_path from prepare>
 
-scripts/install-verify-candidate.sh --candidate "$CANDIDATE"
+# Fresh-extract the candidate DMG, then staged-swap into /Applications/IRIN.app.
+# Refuses if IRIN.app is running. On success writes proofs/install.json with
+# candidate-local digests plus live_installed_app_path and
+# live_installed_bundle_manifest_digest (point-in-time equality only).
+# On post-swap failure restores the prior app and writes no install proof.
+scripts/install-verify-candidate.sh --candidate "$CANDIDATE" --live
 # → proofs/install.json  (digests only; not Arm/Watch product proof)
 
 # Board creates a pending T2 action (not yet authorization)
@@ -116,12 +121,18 @@ irin-mission create-pending-t2 \
   --expiry 2099-01-01T00:00:00Z
 
 # Interactive only — phrase must include full source SHA + DMG hash +
-# installed bundle-manifest digest
+# installed bundle-manifest digest. Production pins the daily-use path.
 scripts/record-acceptance.sh \
   --candidate "$CANDIDATE" \
-  --installed-app "$CANDIDATE/install/IRIN.app"
+  --installed-app /Applications/IRIN.app
 # → proofs/acceptance.json then proofs/t2.json (one-way; no rewrite)
 ```
+
+Equality between the live app and the named candidate is a **point-in-time**
+invariant at Installed, Accepted, and first-Published closure writes only. It
+is recorded in those proof envelopes and is never a standing derived condition.
+`candidate-status` still derives Installed from the candidate-local install
+witness; Published remains immutable historical evidence for that candidate.
 
 Caveat: Accepted does not cryptographically prove who typed a structurally
 valid receipt. The human boundary is the operator-controlled T2 action.
@@ -136,12 +147,16 @@ scripts/release-transaction.sh \
   --t2-packet "$CANDIDATE/proofs/t2.json"
 ```
 
-Publication:
+Publication is publication-only — it never installs `/Applications/IRIN.app`.
 
 1. Requires production pack mode, version/tag/source equality, Installed proof,
    and final T2 acceptance (`candidate-status --require Accepted`). It also
    requires the same checkout HEAD prepare recorded for that source SHA and a
-   currently clean `scripts/` and `packaging/` tree
+   currently clean `scripts/` and `packaging/` tree. On **first** publication
+   only (`proofs/publication.json` absent), before mutation, recomputes
+   `/Applications/IRIN.app` bundle-manifest equality to the candidate and
+   refuses mismatch. Already-published idempotent validation/retry skips that
+   gate so a later installed release cannot demote an older Published candidate.
 2. Promotes the candidate's exact Gateway/sidecar digest refs to immutable
    `vX.Y.Z` labels and re-resolves both labels before the git tag push
 3. Pushes the git tag; waits for the draft release (`release.yml` may attach
