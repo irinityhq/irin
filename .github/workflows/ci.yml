@@ -261,6 +261,7 @@ jobs:
               scripts/test-classify-ci-paths.sh|\
               scripts/test-ci-control-plane.sh|\
               scripts/test-ci-candidate-observability.sh|\
+              scripts/check-review-settlement.sh|\
               scripts/run-actionlint.sh|\
               scripts/bootstrap-actionlint.sh|\
               __manual_dispatch__|__scheduled_proof__|__integrated_main__|__unknown_base__|__unknown_event__)

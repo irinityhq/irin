@@ -247,7 +247,7 @@ if [[ "$mode" == "check" ]]; then
     run "Candidate CI observability contracts" bash scripts/test-ci-candidate-observability.sh
   fi
   # Concurrency / force-full / exact-policy contracts when CI control plane moves.
-  if printf '%s\n' "${paths[@]}" | grep -Eq '^\.github/workflows/|^scripts/test-ci-control-plane\.sh$|^scripts/run-actionlint\.sh$|^scripts/classify-ci-paths\.sh$'; then
+  if printf '%s\n' "${paths[@]}" | grep -Eq '^\.github/workflows/|^scripts/test-ci-control-plane\.sh$|^scripts/check-review-settlement\.sh$|^scripts/run-actionlint\.sh$|^scripts/classify-ci-paths\.sh$'; then
     run "CI control-plane contracts" bash scripts/test-ci-control-plane.sh
   fi
   run "Diff whitespace" git diff --check origin/main --

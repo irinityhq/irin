@@ -174,6 +174,102 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Review settlement gate: pre-queue required-check producer (#0101 / PR #70)
+# ---------------------------------------------------------------------------
+REVIEW_SETTLEMENT_YML="$ROOT/.github/workflows/review-settlement.yml"
+REVIEW_SETTLEMENT_SH="$ROOT/scripts/check-review-settlement.sh"
+if [[ ! -f "$REVIEW_SETTLEMENT_YML" ]]; then
+  fail "review-settlement.yml missing"
+elif [[ ! -f "$REVIEW_SETTLEMENT_SH" ]]; then
+  fail "scripts/check-review-settlement.sh missing"
+else
+  pass "review settlement workflow + evaluator present"
+fi
+if ! on_has_merge_group "$REVIEW_SETTLEMENT_YML"; then
+  fail "review-settlement.yml must trigger on merge_group (required-check producer)"
+else
+  pass "review-settlement.yml triggers on merge_group"
+fi
+# Review-related events that re-evaluate settlement on the current head.
+for needle in \
+  'review_requested' \
+  'review_request_removed' \
+  'synchronize' \
+  'ready_for_review' \
+  'pull_request_review:' \
+  'submitted' \
+  'dismissed'
+do
+  if ! file_has_fixed "$needle" "$REVIEW_SETTLEMENT_YML"; then
+    fail "review-settlement.yml missing event surface: $needle"
+  fi
+done
+pass "review-settlement.yml covers request/review/SHA event surfaces"
+if ! grep -E '^[[:space:]]+name: Review settlement[[:space:]]*$' "$REVIEW_SETTLEMENT_YML" >/dev/null; then
+  fail "review-settlement job name must stay 'Review settlement' (protected context)"
+else
+  pass "review-settlement protected job name preserved"
+fi
+if ! file_has_fixed 'pull-requests: read' "$REVIEW_SETTLEMENT_YML"; then
+  fail "review-settlement.yml must request pull-requests: read for GraphQL review fields"
+else
+  pass "review-settlement.yml has pull-requests: read"
+fi
+if ! file_has_fixed 'scripts/check-review-settlement.sh' "$REVIEW_SETTLEMENT_YML"; then
+  fail "review-settlement.yml must invoke scripts/check-review-settlement.sh"
+else
+  pass "review-settlement.yml invokes the settlement evaluator"
+fi
+# Concurrency split mirrors dependency-review: PR cancels, merge_group does not.
+if ! python3 - "$REVIEW_SETTLEMENT_YML" <<'PY'
+import re
+import sys
+from pathlib import Path
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+m = re.search(r"(?m)^concurrency:\n((?:  .*\n)+)", text)
+if not m:
+    sys.stderr.write("review-settlement.yml missing concurrency block\n")
+    sys.exit(1)
+block = m.group(1)
+if not re.search(
+    r"cancel-in-progress:\s*\$\{\{\s*github\.event_name\s*!=\s*'merge_group'\s*\}\}",
+    block,
+):
+    sys.stderr.write(
+        "review-settlement cancel-in-progress must be "
+        "${{ github.event_name != 'merge_group' }}\n"
+    )
+    sys.exit(1)
+if "merge-group-" not in block and "merge_group" not in block:
+    sys.stderr.write("review-settlement concurrency must namespace merge_group\n")
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+  fail "review-settlement concurrency contract"
+else
+  pass "review-settlement concurrency: PR cancel, merge_group retain"
+fi
+# Deterministic evaluator contracts (PR #70 class + SHA invalidation).
+if ! bash "$REVIEW_SETTLEMENT_SH" --self-test; then
+  fail "check-review-settlement.sh --self-test"
+else
+  pass "check-review-settlement.sh --self-test"
+fi
+# Force-full policy must include the settlement evaluator so a rewrite cannot
+# land under a light matrix only.
+if ! file_has_fixed 'scripts/check-review-settlement.sh' "$CLASSIFIER"; then
+  fail "classifier must force-full on scripts/check-review-settlement.sh"
+else
+  pass "classifier force-full includes check-review-settlement.sh"
+fi
+if ! file_has_fixed 'scripts/check-review-settlement.sh' "$CI_YML"; then
+  fail "ci.yml path_forces_full must include scripts/check-review-settlement.sh"
+else
+  pass "ci.yml force-full includes check-review-settlement.sh"
+fi
+
+# ---------------------------------------------------------------------------
 # Static: path-scoped main push still uses before...sha (not full-matrix always)
 # ---------------------------------------------------------------------------
 if ! file_has_ere 'before="\$\{\{ github\.event\.before \}\}"' "$CI_YML"; then
@@ -320,7 +416,8 @@ for needle in \
   '.github/workflows/*' \
   'scripts/classify-ci-paths.sh' \
   'scripts/test-classify-ci-paths.sh' \
-  'scripts/test-ci-control-plane.sh'
+  'scripts/test-ci-control-plane.sh' \
+  'scripts/check-review-settlement.sh'
 do
   if ! file_has_fixed "$needle" "$CI_YML"; then
     fail "force-full policy path missing: $needle"
@@ -408,6 +505,7 @@ path_universe_file="$tmp/path-universe.txt"
     scripts/test-export-import-candidate.sh \
     scripts/classify-ci-paths.sh scripts/test-classify-ci-paths.sh \
     scripts/test-ci-control-plane.sh scripts/test-ci-candidate-observability.sh \
+    scripts/check-review-settlement.sh \
     scripts/run-actionlint.sh scripts/bootstrap-actionlint.sh \
     scripts/stage-gateway-pack.sh scripts/release-transaction.sh \
     scripts/test-release-transaction-w3.sh scripts/install-verify-candidate.sh \
@@ -545,6 +643,7 @@ simulate_overlays() {
       scripts/test-classify-ci-paths.sh|\
       scripts/test-ci-control-plane.sh|\
       scripts/test-ci-candidate-observability.sh|\
+      scripts/check-review-settlement.sh|\
       scripts/run-actionlint.sh|\
       scripts/bootstrap-actionlint.sh|\
       __manual_dispatch__|__scheduled_proof__|__integrated_main__|__unknown_base__|__unknown_event__)
