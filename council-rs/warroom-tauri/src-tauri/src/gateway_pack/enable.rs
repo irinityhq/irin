@@ -1,9 +1,10 @@
 //! Pack lifecycle mutations: enable / disable / stop / uninstall.
 
-use super::cli_adapters::{
-    ensure_cli_adapters_with_tokens, ensure_proxy_tokens, stop_cli_adapters,
+use super::cli_adapters::{ensure_cli_adapters_with_tokens, stop_cli_adapters};
+use super::env::{
+    build_full_compose_env_with_launch_secrets, load_launch_secrets, teardown_compose_env,
+    write_public_compose_env,
 };
-use super::env::{build_full_compose_env, teardown_compose_env, write_public_compose_env};
 use super::health::{
     admin_surface_ready, desktop_project_running, gateway_health_ok, models_authenticated,
     models_fail_closed_without_key, provision_council_client,
@@ -24,7 +25,8 @@ use crate::docker_cli::{
     ComposeEnv, DockerDaemonState, DOCKER_CMD_TIMEOUT, DOCKER_COMPOSE_UP_TIMEOUT,
 };
 use crate::keychain::{
-    delete_all_gateway_pack_secrets, is_valid_gw_raw_key, load_gw_api_key, SecretStore,
+    delete_all_gateway_pack_secrets, is_valid_gw_raw_key, load_auth_pepper, load_gw_api_key,
+    SecretStore,
 };
 use crate::private_config::{load_or_create_private_config, write_private_config_at};
 use std::fs::{self, OpenOptions};
@@ -93,6 +95,19 @@ pub fn lifecycle_stage(stage: &str, detail: &str) {
 /// Caller (lib.rs) must restart Council into governed mode and treat restart
 /// failure as overall failure (not ready).
 pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus, String> {
+    enable_gateway_pack_with_probes(store, port_busy_by_foreign_gateway, probe_docker_daemon)
+}
+
+/// Probe-injectable body of [`enable_gateway_pack`]. Tests substitute the
+/// foreign-port and Docker probes to prove, against a counting `SecretStore`,
+/// that the foreign-port refusal happens before any Keychain account read —
+/// including the Docker-abort returns, which read `GW_API_KEY` via
+/// `gateway_pack_status_fresh`.
+pub(crate) fn enable_gateway_pack_with_probes(
+    store: &dyn SecretStore,
+    foreign_port_busy: impl FnOnce() -> Result<bool, String>,
+    docker_probe: impl FnOnce() -> DockerDaemonState,
+) -> Result<GatewayPackStatus, String> {
     let _guard = LIFECYCLE_LOCK
         .lock()
         .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
@@ -103,7 +118,20 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     crate::touch_id::clear_rehearsal_passed();
     lifecycle_stage("enable_begin", "ok");
 
-    match probe_docker_daemon() {
+    // Foreign-port refusal comes first: every later return path (including the
+    // Docker-abort status reads) may touch the Keychain, and a foreign
+    // listener must be refused before any account read can prompt.
+    if foreign_port_busy()? {
+        lifecycle_stage("port_check", "foreign_busy");
+        return Err(
+            "port 18080 is in use by a process outside irin-desktop-gateway; \
+             stop the foreign Gateway or free the port. The desktop pack will not replace it."
+                .to_string(),
+        );
+    }
+    lifecycle_stage("port_check", "ok");
+
+    match docker_probe() {
         DockerDaemonState::CliMissing => {
             lifecycle_stage("enable_abort", "docker_cli_missing");
             return Ok(gateway_pack_status_fresh(store));
@@ -147,14 +175,18 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     })?;
     lifecycle_stage("watch_dirs", "ok");
 
-    // Host CLI adapters before compose env: mint Keychain tokens once and start
-    // app-owned Claude/Codex listeners when CLIs are present+authenticated.
-    // Tokens are reused for every compose secret env on this enable flight so
-    // each proxy account is read at most once (Keychain can prompt per get).
-    // Missing CLI leaves that route empty (fail-closed) and does not abort Enable.
-    let proxy_tokens = ensure_proxy_tokens(store).inspect_err(|_| {
-        lifecycle_stage("cli_adapters", "token_error");
+    // Load stable Keychain material once for this Enable flight, then reuse it
+    // across adapters and every compose recreation.
+    let preloaded_pepper = load_auth_pepper(store).inspect_err(|_| {
+        lifecycle_stage("launch_secrets", "pepper_error");
     })?;
+    let launch_secrets = load_launch_secrets(store, preloaded_pepper).inspect_err(|_| {
+        lifecycle_stage("launch_secrets", "keychain_error");
+    })?;
+    let proxy_tokens = launch_secrets.proxy_tokens.clone();
+
+    // Start app-owned Claude/Codex listeners when CLIs are present+authenticated.
+    // Missing CLI leaves that route empty (fail-closed) and does not abort Enable.
     let adapter_status = ensure_cli_adapters_with_tokens(&proxy_tokens.0, &proxy_tokens.1);
     lifecycle_stage(
         "cli_adapters",
@@ -186,16 +218,6 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     })?;
     lifecycle_stage("public_env", "ok");
 
-    if port_busy_by_foreign_gateway()? {
-        lifecycle_stage("port_check", "foreign_busy");
-        return Err(
-            "port 18080 is in use by a process outside irin-desktop-gateway; \
-             stop the foreign Gateway or free the port. The desktop pack will not replace it."
-                .to_string(),
-        );
-    }
-    lifecycle_stage("port_check", "ok");
-
     let compose = compose_file(&pack_root);
 
     // Reuse existing Keychain key if still valid after start; else provision with bootstrap.
@@ -213,14 +235,13 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     let need_provision = match existing.as_ref() {
         Some(k) => {
             // Start without bootstrap first if we might already be provisioned.
-            let spawn_env = build_full_compose_env(
-                store,
+            let spawn_env = build_full_compose_env_with_launch_secrets(
                 None,
                 &pack_root,
                 &ledger,
                 &validated,
                 existing_key_id.as_deref(),
-                Some(proxy_tokens.clone()),
+                &launch_secrets,
             )
             .inspect_err(|_| {
                 lifecycle_stage("secret_env", "error");
@@ -246,14 +267,13 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
     let key_id = if need_provision {
         // Generate bootstrap only for provisioning.
         let bootstrap = random_hex(32)?;
-        let spawn_env = build_full_compose_env(
-            store,
+        let spawn_env = build_full_compose_env_with_launch_secrets(
             Some(&bootstrap),
             &pack_root,
             &ledger,
             &validated,
             existing_key_id.as_deref(),
-            Some(proxy_tokens.clone()),
+            &launch_secrets,
         )
         .inspect_err(|e| {
             // Fixed non-secret categories only — never log the error body if it
@@ -290,14 +310,13 @@ pub fn enable_gateway_pack(store: &dyn SecretStore) -> Result<GatewayPackStatus,
         // repopulated during provisioning cannot survive the credential change.
         invalidate_auth_observation();
         // Blank bootstrap and recreate sidecar without it.
-        let spawn_env_blank = build_full_compose_env(
-            store,
+        let spawn_env_blank = build_full_compose_env_with_launch_secrets(
             None,
             &pack_root,
             &ledger,
             &validated,
             Some(&kid),
-            Some(proxy_tokens.clone()),
+            &launch_secrets,
         )
         .inspect_err(|_| {
             lifecycle_stage("secret_env_blank", "error");

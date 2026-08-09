@@ -1,7 +1,7 @@
 use super::*;
 use crate::docker_cli::DESKTOP_COMPOSE_PROJECT;
 use crate::gateway_pack::paths::gateway_data_dir;
-use crate::keychain::MemorySecretStore;
+use crate::keychain::{MemorySecretStore, SecretStore};
 use crate::private_config::test_env_lock;
 use std::fs;
 use std::sync::Mutex;
@@ -91,6 +91,96 @@ fn stop_without_installed_pack_emits_ordered_lifecycle_contract() {
     let complete = log.find(" stage=stop_complete detail=ok\n").unwrap();
     assert!(begin < lock && lock < config && config < complete);
     assert!(!log.contains(" stage=stop_compose detail="));
+
+    match prev_home {
+        Some(v) => std::env::set_var("HOME", v),
+        None => std::env::remove_var("HOME"),
+    }
+    match prev_support {
+        Some(v) => std::env::set_var("IRIN_APP_SUPPORT_ROOT", v),
+        None => std::env::remove_var("IRIN_APP_SUPPORT_ROOT"),
+    }
+    let _ = fs::remove_dir_all(&tmp);
+}
+
+#[test]
+fn enable_loads_stable_keychain_accounts_once_per_flight() {
+    let source = include_str!("enable.rs");
+    assert_eq!(
+        source
+            .matches("load_launch_secrets(store, preloaded_pepper)")
+            .count(),
+        1
+    );
+    assert_eq!(
+        source
+            .matches("build_full_compose_env_with_launch_secrets(")
+            .count(),
+        3
+    );
+    assert!(!source.contains("build_full_compose_env("));
+}
+
+/// Records every Keychain get; foreign-port refusal must perform zero.
+struct RecordingSecretStore {
+    inner: MemorySecretStore,
+    gets: Mutex<Vec<String>>,
+}
+
+impl crate::keychain::SecretStore for RecordingSecretStore {
+    fn set_password(&self, service: &str, account: &str, password: &str) -> Result<(), String> {
+        self.inner.set_password(service, account, password)
+    }
+
+    fn get_password(&self, service: &str, account: &str) -> Result<Option<String>, String> {
+        self.gets.lock().unwrap().push(account.to_string());
+        self.inner.get_password(service, account)
+    }
+
+    fn delete_password(&self, service: &str, account: &str) -> Result<(), String> {
+        self.inner.delete_password(service, account)
+    }
+}
+
+/// Runtime ordering proof: a foreign listener on 18080 is refused before ANY
+/// Keychain account read — including the Docker-abort returns, whose
+/// `gateway_pack_status_fresh` reads `GW_API_KEY`. The Docker probe panicking
+/// proves the refusal also precedes the Docker branch entirely.
+#[test]
+fn enable_refuses_foreign_port_before_any_keychain_read() {
+    let _g = test_env_lock();
+    let prev_home = std::env::var("HOME").ok();
+    let prev_support = std::env::var("IRIN_APP_SUPPORT_ROOT").ok();
+    let tmp = std::env::temp_dir().join(format!(
+        "gw-pack-foreign-port-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
+    let _ = fs::remove_dir_all(&tmp);
+    fs::create_dir_all(&tmp).unwrap();
+    std::env::set_var("HOME", &tmp);
+    std::env::remove_var("IRIN_APP_SUPPORT_ROOT");
+
+    let store = RecordingSecretStore {
+        inner: MemorySecretStore::default(),
+        gets: Mutex::new(Vec::new()),
+    };
+    let result = enable_gateway_pack_with_probes(
+        &store,
+        || Ok(true),
+        || unreachable!("Docker probed before foreign-port refusal"),
+    );
+
+    let err = result.unwrap_err();
+    assert!(err.contains("port 18080"), "unexpected error: {err}");
+    assert!(
+        store.gets.lock().unwrap().is_empty(),
+        "foreign-port refusal must read no Keychain accounts, got {:?}",
+        store.gets.lock().unwrap()
+    );
 
     match prev_home {
         Some(v) => std::env::set_var("HOME", v),
