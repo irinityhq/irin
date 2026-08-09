@@ -906,6 +906,14 @@ eval "$(
 pass "local_tag_peeled_or_empty: absent empty, present peels SHA"
 
 # --- live install (--live) staged swap + rollback + first-publish gate --------
+# These contracts require macOS UDIF, mount, and ditto primitives. The Linux CI
+# control-plane lane keeps all preceding W3 contracts and records this boundary.
+if [[ "$(uname -s)" != "Darwin" ]]; then
+  pass "macOS live install contracts skipped on non-Darwin"
+  printf '\nAll W3 release-transaction contracts passed.\n'
+  exit 0
+fi
+
 # Build a real UDIF DMG so install-verify can hdiutil-attach (no real /Applications).
 
 make_live_candidate() {
