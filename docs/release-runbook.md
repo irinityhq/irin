@@ -108,10 +108,13 @@ digest. Prepare also records the checkout HEAD and whether `scripts/` or
 CANDIDATE=<absolute candidate_path from prepare>
 
 # Fresh-extract the candidate DMG, then staged-swap into /Applications/IRIN.app.
-# Refuses if IRIN.app is running. On success writes proofs/install.json with
-# candidate-local digests plus live_installed_app_path and
-# live_installed_bundle_manifest_digest (point-in-time equality only).
-# On post-swap failure restores the prior app and writes no install proof.
+# Refuses if IRIN.app is running, or if the live app root is a symlink.
+# On success writes proofs/install.json with candidate-local digests plus
+# live_installed_app_path and live_installed_bundle_manifest_digest
+# (point-in-time equality only). On post-swap failure restores the prior app
+# and writes no install proof. Successful replacement archives the prior under
+# ~/.local/state/irin/displaced-apps/ and may retain a hidden sibling under
+# /Applications (see Live install recovery below).
 scripts/install-verify-candidate.sh --candidate "$CANDIDATE" --live
 # → proofs/install.json  (digests only; not Arm/Watch product proof)
 
@@ -155,8 +158,10 @@ Publication is publication-only — it never installs `/Applications/IRIN.app`.
    currently clean `scripts/` and `packaging/` tree. On **first** publication
    only (`proofs/publication.json` absent), before mutation, recomputes
    `/Applications/IRIN.app` bundle-manifest equality to the candidate and
-   refuses mismatch. Already-published idempotent validation/retry skips that
-   gate so a later installed release cannot demote an older Published candidate.
+   refuses mismatch (and refuses a symlink-root live app). Already-published
+   idempotent validation/retry skips that gate **only when** the existing
+   publication proof actually reaches Published via `candidate-status`; a
+   stale or partial proof fails closed instead of bypassing the live gate.
 2. Promotes the candidate's exact Gateway/sidecar digest refs to immutable
    `vX.Y.Z` labels and re-resolves both labels before the git tag push
 3. Pushes the git tag; waits for the draft release (`release.yml` may attach
@@ -201,6 +206,54 @@ never reused; the fix ships under the next patch version as a **superseding**
 candidate. A published defective candidate is never replaced under its tag or
 asset name. Site deploy is outside Published scope until it has its own
 re-download proof.
+
+## Live install recovery and archives
+
+`--live` install never deletes the prior daily-use app. Know where recovery
+copies live and how to inspect them.
+
+### Successful replacement
+
+After a successful staged swap and durable `proofs/install.json`:
+
+1. **State archive (authoritative prior copy)** under
+   `~/.local/state/irin/displaced-apps/` (or `$IRIN_STATE_ROOT/displaced-apps`
+   when hermetic overrides are active). Name shape:
+   `IRIN.app.<UTC-ts>.<candidate-id-prefix>.<pid>`. The archive is a faithful
+   ditto copy whose bundle-manifest digest was matched to the displaced prior
+   before the Applications sibling was renamed.
+2. **Hidden Applications sibling** retained when the prior could not be removed
+   from `/Applications` (macOS `sunlnk` and related constraints):
+   `/Applications/.IRIN.app.irin-prior.<UTC-ts>.<candidate-id-prefix>.<pid>`.
+   Same bytes as the state archive at write time; leave both until you confirm
+   the new live app.
+
+Inspect either tree with Finder or `open`, or recompute a bundle-manifest
+digest against the candidate you meant to displace. To restore a prior after a
+bad install you already accepted: quit IRIN, move the current
+`/Applications/IRIN.app` aside, then `ditto` the chosen archive (or rename the
+hidden sibling) back to `/Applications/IRIN.app`. Clean archives only after you
+no longer need them — scripts never auto-delete recovery copies.
+
+### Failed post-swap install (rollback)
+
+When digest or proof write fails after displacement:
+
+- Rollback restores the prior into `/Applications/IRIN.app` from the saved
+  prior/archive path and **writes no** `proofs/install.json`.
+- The recovery copy is retained (not deleted) so a second failure cannot erase
+  the only prior.
+- If a half-written live path cannot be removed cleanly, it may be moved to a
+  failed-live sibling under `/Applications` (name includes `irin-failed` /
+  PID). Inspect and remove those manually after confirming rollback restored
+  the expected prior.
+
+### Stale PID-scoped prior refuse
+
+If a previous install left
+`/Applications/IRIN.app.irin-prior.<pid>` for the current PID, `--live` hard-
+refuses without deleting it. Inspect that bundle, move it aside only if
+intentional, then retry.
 
 ## First-run notes for operators upgrading from "Council War Room"
 

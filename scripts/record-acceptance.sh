@@ -86,6 +86,10 @@ irin_require_candidate_path
 CANDIDATE="$IRIN_CANDIDATE_PATH"
 
 [[ "$INSTALLED_APP" == /* ]] || die "--installed-app must be absolute: $INSTALLED_APP"
+# Refuse bundle-root symlink before -d/cd (both follow it). A symlink from the
+# live path into a candidate-local extract must not satisfy T2 acceptance.
+[[ ! -L "$INSTALLED_APP" ]] \
+  || die "installed app must not be a symlink at bundle root: $INSTALLED_APP"
 [[ -d "$INSTALLED_APP" ]] || die "installed app missing: $INSTALLED_APP"
 case "$(basename "$INSTALLED_APP")" in
   IRIN.app) ;;
@@ -93,6 +97,8 @@ case "$(basename "$INSTALLED_APP")" in
 esac
 
 REQUIRED_INSTALLED="$(resolve_required_installed_app)"
+[[ ! -L "$REQUIRED_INSTALLED" ]] \
+  || die "required installed app path must not be a symlink at bundle root: $REQUIRED_INSTALLED"
 INST_CANON_EARLY="$(cd "$INSTALLED_APP" && pwd)"
 if [[ -d "$REQUIRED_INSTALLED" ]]; then
   REQ_CANON="$(cd "$REQUIRED_INSTALLED" && pwd)"

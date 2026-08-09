@@ -404,9 +404,21 @@ if [[ "$LIVE_MODE" == "1" ]]; then
   # Archive displaced old app under state root (never delete; never leave in Applications).
   if [[ "$DISPLACED" == "1" && -n "$SAVED_PRIOR" && ( -e "$SAVED_PRIOR" || -L "$SAVED_PRIOR" ) ]]; then
     mkdir -p "$DISPLACE_ROOT" || live_rollback "could not create displaced-apps root"
-    case "$DISPLACE_ROOT" in
-      "$LIVE_APP"|"$LIVE_APP"/*|"$APPS_ROOT/$APP_NAME"|"$APPS_ROOT/$APP_NAME"/*)
-        live_rollback "refusing displaced-apps nest under live app path: $DISPLACE_ROOT"
+    # Physical containment: resolve both sides with pwd -P so a symlink-rooted
+    # displaced-apps (or ancestor) into the newly installed app cannot archive
+    # inside the live bundle after its digest was already verified.
+    DISPLACE_PHYS="$(cd "$DISPLACE_ROOT" && pwd -P)" \
+      || live_rollback "could not resolve physical displaced-apps path: $DISPLACE_ROOT"
+    if [[ -d "$LIVE_APP" && ! -L "$LIVE_APP" ]]; then
+      LIVE_PHYS="$(cd "$LIVE_APP" && pwd -P)" \
+        || live_rollback "could not resolve physical live app path: $LIVE_APP"
+    else
+      LIVE_PHYS="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$LIVE_APP")" \
+        || live_rollback "could not resolve physical live app path: $LIVE_APP"
+    fi
+    case "$DISPLACE_PHYS" in
+      "$LIVE_PHYS"|"$LIVE_PHYS"/*)
+        live_rollback "refusing displaced-apps nest under live app path: $DISPLACE_ROOT (phys $DISPLACE_PHYS under $LIVE_PHYS)"
         ;;
     esac
     TS="$(date -u +%Y%m%dT%H%M%SZ)"

@@ -63,8 +63,8 @@ resolve_live_applications_root() {
 }
 
 # Point-in-time first-publish gate: live daily-use app must match candidate.
-# Not a standing derived condition. Callers skip when publication.json exists
-# or publish_hermetic_active is set.
+# Not a standing derived condition. Callers skip only when an existing
+# publication proof actually reaches Published, or under publish_hermetic_active.
 require_live_app_matches_candidate() {
   local candidate="$1"
   local cand_bm_digest live_root live_app tmp_bm live_digest
@@ -73,6 +73,10 @@ require_live_app_matches_candidate() {
     || die "could not read candidate bundle_manifest_digest"
   live_root="$(resolve_live_applications_root)"
   live_app="$live_root/IRIN.app"
+  # Refuse bundle-root symlink before -d (which follows it) so a pointer into
+  # a candidate-local extract cannot satisfy the live daily-use gate.
+  [[ ! -L "$live_app" ]] \
+    || die "first publish refuses symlink-root live app at $live_app"
   [[ -d "$live_app" ]] \
     || die "first publish requires live app at $live_app matching candidate (missing)"
   tmp_bm="$(mktemp)"
@@ -83,6 +87,31 @@ require_live_app_matches_candidate() {
   [[ "$live_digest" == "$cand_bm_digest" ]] \
     || die "first publish refuses live app digest mismatch (live=$live_digest candidate=$cand_bm_digest at $live_app)"
   note "first-publish live app digest matches candidate at $live_app"
+}
+
+# do_publish branch: first-publish live gate vs already-Published/hermetic skip.
+# Extracted so W3 can exercise the same decision path as production publish.
+# When a publication proof file exists, require candidate-status Published before
+# treating this as an idempotent skip (malformed/partial proof must not bypass).
+maybe_require_first_publish_live_app() {
+  local candidate="$1"
+  # Avoid naming the publication proof file token before public re-download so
+  # static publish-order contracts keep binding the write site in do_publish.
+  local pub_proof_path="$candidate/proofs/publication"".json"
+  if [[ -f "$pub_proof_path" ]]; then
+    if ! bash "$ROOT/scripts/candidate-status.sh" --candidate "$candidate" --require "Published"; then
+      bash "$ROOT/scripts/candidate-status.sh" --candidate "$candidate" --json || true
+      die "publication proof present but candidate does not reach Published; refuse skip of first-publish live gate"
+    fi
+    note "publication proof reaches Published: skip first-publish live app gate"
+    return 0
+  fi
+  if publish_hermetic_active; then
+    note "hermetic: skip first-publish live app gate"
+    return 0
+  fi
+  note "first-publish: require live app manifest equals candidate (point-in-time)"
+  require_live_app_matches_candidate "$candidate"
 }
 
 MODE=""
@@ -1331,19 +1360,10 @@ PY
   [[ "v$SEMVER" == "$TAG" ]] || die "tag $TAG does not match candidate semver v$SEMVER"
 
   # First publication only: point-in-time live /Applications equality before any
-  # mutation. Never installs. Skip hermetic rehearsal and already-published retry
-  # so a later installed release cannot retroactively invalidate an older Published
-  # candidate. Avoid naming the publication proof file token before public
-  # re-download so static publish-order contracts keep binding the write site.
-  local pub_proof_path="$CANDIDATE/proofs/publication"".json"
-  if [[ ! -f "$pub_proof_path" ]] && ! publish_hermetic_active; then
-    note "first-publish: require live app manifest equals candidate (point-in-time)"
-    require_live_app_matches_candidate "$CANDIDATE"
-  elif [[ -f "$pub_proof_path" ]]; then
-    note "publication proof present: skip first-publish live app gate"
-  else
-    note "hermetic: skip first-publish live app gate"
-  fi
+  # mutation. Never installs. Already-Published idempotent validation/retry and
+  # hermetic rehearsal skip the gate via maybe_require_first_publish_live_app
+  # (existing publication proof must actually reach Published before skip).
+  maybe_require_first_publish_live_app "$CANDIDATE"
 
   # Publish binds to T1-time control-plane fields recorded on the production-
   # cycle ledger (and requires both dirty flags recorded false). Hermetic
