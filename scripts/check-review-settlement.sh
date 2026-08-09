@@ -5,6 +5,12 @@
 # non-dismissed latest review is bound to the current headRefOid (a new commit
 # invalidates prior settlement), and no CHANGES_REQUESTED on head.
 #
+# Both latestReviews AND latestOpinionatedReviews are evaluated.
+# latestReviews keeps only each user's most recent review of ANY state, so a
+# later COMMENTED review would mask that user's still-active CHANGES_REQUESTED.
+# latestOpinionatedReviews keeps the most recent APPROVED/CHANGES_REQUESTED per
+# user, closing that gap.
+#
 # Review *threads* are intentionally out of scope here. GitHub emits no
 # supported Actions event when a conversation is resolved, so a custom required
 # check that failed on unresolved threads would stick red until a manual rerun.
@@ -103,39 +109,51 @@ for item in requests:
         login = "unknown"
     reasons.append(f"pending_review_request:{login}")
 
-reviews = data.get("latestReviews")
-if reviews is None:
-    print("schema: latestReviews required", file=sys.stderr)
-    sys.exit(2)
-if not isinstance(reviews, list):
-    print("schema: latestReviews must be a list", file=sys.stderr)
-    sys.exit(2)
+def add_reason(reason):
+    # A review present in both connections must not double-report.
+    if reason not in reasons:
+        reasons.append(reason)
 
-for rev in reviews:
-    if not isinstance(rev, dict):
-        reasons.append("schema: latestReviews entry must be object")
-        continue
-    author = str(rev.get("author") or rev.get("login") or "unknown")
-    state = str(rev.get("state") or "").upper()
-    commit = rev.get("commitOid") or rev.get("commit") or ""
-    if isinstance(commit, dict):
-        commit = commit.get("oid") or ""
-    commit = str(commit).strip()
 
-    if state in {"", "DISMISSED"}:
-        # Dismissed reviews do not settle and do not block.
-        continue
-    if state == "PENDING":
-        reasons.append(f"pending_review:{author}")
-        continue
-    if not commit:
-        reasons.append(f"review_missing_commit:{author}:{state or 'UNKNOWN'}")
-        continue
-    if commit != head:
-        reasons.append(f"review_not_on_head:{author}:{state}:{commit}")
-        continue
-    if state == "CHANGES_REQUESTED":
-        reasons.append(f"changes_requested_on_head:{author}")
+def evaluate_reviews(name, reviews):
+    for rev in reviews:
+        if not isinstance(rev, dict):
+            add_reason(f"schema: {name} entry must be object")
+            continue
+        author = str(rev.get("author") or rev.get("login") or "unknown")
+        state = str(rev.get("state") or "").upper()
+        commit = rev.get("commitOid") or rev.get("commit") or ""
+        if isinstance(commit, dict):
+            commit = commit.get("oid") or ""
+        commit = str(commit).strip()
+
+        if state in {"", "DISMISSED"}:
+            # Dismissed reviews do not settle and do not block.
+            continue
+        if state == "PENDING":
+            add_reason(f"pending_review:{author}")
+            continue
+        if not commit:
+            add_reason(f"review_missing_commit:{author}:{state or 'UNKNOWN'}")
+            continue
+        if commit != head:
+            add_reason(f"review_not_on_head:{author}:{state}:{commit}")
+            continue
+        if state == "CHANGES_REQUESTED":
+            add_reason(f"changes_requested_on_head:{author}")
+
+
+# Both connections are required: latestReviews alone lets a later COMMENTED
+# review mask the same user's active CHANGES_REQUESTED (fail open).
+for name in ("latestReviews", "latestOpinionatedReviews"):
+    reviews = data.get(name)
+    if reviews is None:
+        print(f"schema: {name} required", file=sys.stderr)
+        sys.exit(2)
+    if not isinstance(reviews, list):
+        print(f"schema: {name} must be a list", file=sys.stderr)
+        sys.exit(2)
+    evaluate_reviews(name, reviews)
 
 # reviewThreads are intentionally ignored: conversation-resolution owns them.
 
@@ -186,7 +204,7 @@ if not pr or not isinstance(pr, dict):
     print("graphql: pullRequest missing", file=sys.stderr)
     sys.exit(2)
 
-WATCHED = ("reviewRequests", "latestReviews")
+WATCHED = ("reviewRequests", "latestReviews", "latestOpinionatedReviews")
 truncated = []
 for name in WATCHED:
     conn = pr.get(name)
@@ -230,23 +248,27 @@ for node in (pr.get("reviewRequests") or {}).get("nodes") or []:
     else:
         requests.append({"login": rr.get("__typename") or "unknown"})
 
-reviews = []
-for node in (pr.get("latestReviews") or {}).get("nodes") or []:
-    author = ((node or {}).get("author") or {}).get("login") or "unknown"
-    commit = ((node or {}).get("commit") or {}).get("oid") or ""
-    reviews.append(
-        {
-            "author": author,
-            "state": (node or {}).get("state") or "",
-            "commitOid": commit,
-        }
-    )
+def normalize_reviews(name):
+    reviews = []
+    for node in (pr.get(name) or {}).get("nodes") or []:
+        author = ((node or {}).get("author") or {}).get("login") or "unknown"
+        commit = ((node or {}).get("commit") or {}).get("oid") or ""
+        reviews.append(
+            {
+                "author": author,
+                "state": (node or {}).get("state") or "",
+                "commitOid": commit,
+            }
+        )
+    return reviews
+
 
 out = {
     "headRefOid": pr.get("headRefOid") or "",
     "isDraft": bool(pr.get("isDraft")),
     "reviewRequests": requests,
-    "latestReviews": reviews,
+    "latestReviews": normalize_reviews("latestReviews"),
+    "latestOpinionatedReviews": normalize_reviews("latestOpinionatedReviews"),
     "truncatedConnections": [],
 }
 dst.write_text(json.dumps(out) + "\n", encoding="utf-8")
@@ -291,6 +313,14 @@ query($owner:String!,$name:String!,$number:Int!) {
         }
       }
       latestReviews(first:100) {
+        pageInfo { hasNextPage }
+        nodes {
+          author { login }
+          state
+          commit { oid }
+        }
+      }
+      latestOpinionatedReviews(first:100) {
         pageInfo { hasNextPage }
         nodes {
           author { login }
@@ -392,7 +422,7 @@ run_self_test() {
 
   # PR #70 pre-merge: Copilot requested, no review yet → fail closed.
   write_case pr70_pending_request "$(cat <<EOF
-{"headRefOid":"$head","isDraft":false,"reviewRequests":[{"login":"copilot-pull-request-reviewer"}],"latestReviews":[],"truncatedConnections":[]}
+{"headRefOid":"$head","isDraft":false,"reviewRequests":[{"login":"copilot-pull-request-reviewer"}],"latestReviews":[],"latestOpinionatedReviews":[],"truncatedConnections":[]}
 EOF
 )"
   expect pr70_pending_request unsettled
@@ -401,45 +431,61 @@ EOF
   # A snapshot that still carries thread-like noise must settle if request/review
   # state is clean — proves we do not re-implement thread blocking here.
   write_case threads_ignored_settle "$(cat <<EOF
-{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"copilot-pull-request-reviewer","state":"COMMENTED","commitOid":"$head"}],"reviewThreads":[{"isResolved":false,"isOutdated":false}],"truncatedConnections":[]}
+{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"copilot-pull-request-reviewer","state":"COMMENTED","commitOid":"$head"}],"latestOpinionatedReviews":[],"reviewThreads":[{"isResolved":false,"isOutdated":false}],"truncatedConnections":[]}
 EOF
 )"
   expect threads_ignored_settle settled
 
   # New commit invalidates prior review (not on headRefOid).
   write_case stale_review_after_push "$(cat <<EOF
-{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"copilot-pull-request-reviewer","state":"COMMENTED","commitOid":"$old"}],"truncatedConnections":[]}
+{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"copilot-pull-request-reviewer","state":"COMMENTED","commitOid":"$old"}],"latestOpinionatedReviews":[],"truncatedConnections":[]}
 EOF
 )"
   expect stale_review_after_push unsettled
 
   write_case stale_approval "$(cat <<EOF
-{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"reviewer","state":"APPROVED","commitOid":"$old"}],"truncatedConnections":[]}
+{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"reviewer","state":"APPROVED","commitOid":"$old"}],"latestOpinionatedReviews":[{"author":"reviewer","state":"APPROVED","commitOid":"$old"}],"truncatedConnections":[]}
 EOF
 )"
   expect stale_approval unsettled
 
   write_case changes_requested_on_head "$(cat <<EOF
-{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"reviewer","state":"CHANGES_REQUESTED","commitOid":"$head"}],"truncatedConnections":[]}
+{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"reviewer","state":"CHANGES_REQUESTED","commitOid":"$head"}],"latestOpinionatedReviews":[{"author":"reviewer","state":"CHANGES_REQUESTED","commitOid":"$head"}],"truncatedConnections":[]}
 EOF
 )"
   expect changes_requested_on_head unsettled
 
+  # CHANGES_REQUESTED then a later COMMENTED by the same reviewer:
+  # latestReviews carries only the COMMENTED node, but the changes request is
+  # still active and must block via latestOpinionatedReviews.
+  write_case changes_requested_then_commented "$(cat <<EOF
+{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"reviewer","state":"COMMENTED","commitOid":"$head"}],"latestOpinionatedReviews":[{"author":"reviewer","state":"CHANGES_REQUESTED","commitOid":"$head"}],"truncatedConnections":[]}
+EOF
+)"
+  expect changes_requested_then_commented unsettled
+
+  # Missing latestOpinionatedReviews is a schema failure (fail closed), never
+  # a silent fall back to the maskable latestReviews-only evaluation.
+  write_case missing_opinionated error
+  printf '%s\n' "{\"headRefOid\":\"$head\",\"isDraft\":false,\"reviewRequests\":[],\"latestReviews\":[],\"truncatedConnections\":[]}" \
+    >"$tmp/missing_opinionated.json"
+  expect missing_opinionated error
+
   # Clean solo PR: no requests, no reviews.
   write_case clean_solo "$(cat <<EOF
-{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[],"truncatedConnections":[]}
+{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[],"latestOpinionatedReviews":[],"truncatedConnections":[]}
 EOF
 )"
   expect clean_solo settled
 
   write_case settled_on_head "$(cat <<EOF
-{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"copilot-pull-request-reviewer","state":"COMMENTED","commitOid":"$head"}],"truncatedConnections":[]}
+{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"copilot-pull-request-reviewer","state":"COMMENTED","commitOid":"$head"}],"latestOpinionatedReviews":[],"truncatedConnections":[]}
 EOF
 )"
   expect settled_on_head settled
 
   write_case draft_ok "$(cat <<EOF
-{"headRefOid":"$head","isDraft":true,"reviewRequests":[{"login":"copilot-pull-request-reviewer"}],"latestReviews":[],"truncatedConnections":[]}
+{"headRefOid":"$head","isDraft":true,"reviewRequests":[{"login":"copilot-pull-request-reviewer"}],"latestReviews":[],"latestOpinionatedReviews":[],"truncatedConnections":[]}
 EOF
 )"
   expect draft_ok settled
@@ -456,7 +502,7 @@ EOF
   expect truncated_reviews error
 
   write_case missing_head error
-  printf '%s\n' '{"reviewRequests":[],"latestReviews":[],"truncatedConnections":[]}' >"$tmp/missing_head.json"
+  printf '%s\n' '{"reviewRequests":[],"latestReviews":[],"latestOpinionatedReviews":[],"truncatedConnections":[]}' >"$tmp/missing_head.json"
   expect missing_head error
 
   # Normalize path: hasNextPage true fails closed; false normalizes.
@@ -466,7 +512,8 @@ EOF
   "isDraft":false,
   "headRefOid":"$head",
   "reviewRequests":{"pageInfo":{"hasNextPage":true},"nodes":[]},
-  "latestReviews":{"pageInfo":{"hasNextPage":false},"nodes":[]}
+  "latestReviews":{"pageInfo":{"hasNextPage":false},"nodes":[]},
+  "latestOpinionatedReviews":{"pageInfo":{"hasNextPage":false},"nodes":[]}
 }}}}
 EOF
   expect_normalize gql_truncated_requests error
@@ -477,7 +524,8 @@ EOF
   "isDraft":false,
   "headRefOid":"$head",
   "reviewRequests":{"pageInfo":{"hasNextPage":false},"nodes":[]},
-  "latestReviews":{"pageInfo":{"hasNextPage":true},"nodes":[]}
+  "latestReviews":{"pageInfo":{"hasNextPage":true},"nodes":[]},
+  "latestOpinionatedReviews":{"pageInfo":{"hasNextPage":false},"nodes":[]}
 }}}}
 EOF
   expect_normalize gql_truncated_reviews error
@@ -488,7 +536,8 @@ EOF
   "isDraft":false,
   "headRefOid":"$head",
   "reviewRequests":{"nodes":[]},
-  "latestReviews":{"pageInfo":{"hasNextPage":false},"nodes":[]}
+  "latestReviews":{"pageInfo":{"hasNextPage":false},"nodes":[]},
+  "latestOpinionatedReviews":{"pageInfo":{"hasNextPage":false},"nodes":[]}
 }}}}
 EOF
   expect_normalize gql_missing_pageinfo error
@@ -499,7 +548,8 @@ EOF
   "isDraft":false,
   "headRefOid":"$head",
   "reviewRequests":{"pageInfo":{"hasNextPage":false},"nodes":[{"requestedReviewer":{"login":"copilot-pull-request-reviewer"}}]},
-  "latestReviews":{"pageInfo":{"hasNextPage":false},"nodes":[]}
+  "latestReviews":{"pageInfo":{"hasNextPage":false},"nodes":[]},
+  "latestOpinionatedReviews":{"pageInfo":{"hasNextPage":false},"nodes":[]}
 }}}}
 EOF
   expect_normalize gql_ok ok
