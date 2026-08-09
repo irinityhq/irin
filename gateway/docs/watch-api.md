@@ -11,10 +11,11 @@
   quarantine clear, tenant policy, stats, and the capability-token mint — is
   reachable on the UDS only.
 - Errors use **RFC 9457 problem+json** on the guarded API paths documented
-  below, with two exceptions that return a plain `{"error": …}` JSON body: the
-  canary `403 single_tenant_violation`, and the admin `401` on the outbox
-  mutation routes (claim / heartbeat / ack / worker_ack / nack),
-  `POST /watch/tenant-policy/{tenant}`, and the capability-token mint.
+  below, with two exceptions that return a plain `{"error": …}` JSON body:
+  - the canary `403 single_tenant_violation`;
+  - the admin `401` on the outbox mutation routes (claim / heartbeat / ack /
+    worker_ack / nack), `POST /watch/tenant-policy/{tenant}`, and the
+    capability-token mint.
 - **Canary:** when `WATCH_CANARY_TENANT` is set (compose often `canary`), tenant-scoped admin paths reject other tenants with `403 single_tenant_violation`. Unset → default tenant name `sovereign` for the tripwire config.
 
 ### Auth classes
@@ -75,7 +76,9 @@ Earned Execution receipts with exactly seven fields — `token_id`, `decision`
 (`completed`/`refused`/`pending`/`expired`/`dismissed`/`bound`), `action`
 (`quarantine_producer`), `result`, `directive_id`, `in_response_to`, `at_ms`.
 `result` is only `"acked"` or a ProblemDetails **title** (capped at 96 chars);
-it is null for lifecycle-only decisions. Raw capability tokens, signatures,
+it is null for lifecycle-only decisions. `in_response_to` is null when the
+joined Outbox row no longer exists (a receipt may outlive its escalation).
+Raw capability tokens, signatures,
 envelopes, and free-form `last_error` detail are never projected.
 
 ---

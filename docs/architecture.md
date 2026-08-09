@@ -168,8 +168,9 @@ verification, precedent integrity). The canonical local runtime loads no
 Sentinel profile by default (the compose stack sets no `SENTINELS_CONFIG_PATH`
 and boots with zero sentinels; only the canary overlay pins a committed test
 profile), and the watch producer and dispatcher are disabled by default
-(`WATCH_DISPATCHER_ENABLED=false`, `WATCH_PRODUCER_ENABLED=false`). Enabling a Sentinel definition does not
-enable the producer, and enabling the producer does not arm an action path
+(`WATCH_DISPATCHER_ENABLED=false`, `WATCH_PRODUCER_ENABLED=false`). Enabling
+a Sentinel definition does not enable the producer, and enabling the producer
+does not arm an action path
 — those are three independent gates. Arming requires an explicit,
 hardware-backed operator ceremony; see
 [`gateway/docs/runbooks/arming-authorization.md`](../gateway/docs/runbooks/arming-authorization.md).

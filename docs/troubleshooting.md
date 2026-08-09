@@ -110,7 +110,7 @@ port 443, so another Serve root on 443 can remain. The ready URL is
 any device that is both on the same tailnet and allowed by the operator's
 Tailscale ACLs or grants; War Room uses same-origin REST and WebSocket.
 
-Council applies one origin allow-list to both CORS and WebSocket upgrades:
+Council applies one origin allowlist to both CORS and WebSocket upgrades:
 any loopback origin, plus the origins listed in `COUNCIL_CORS_ORIGINS`. A
 tailnet origin is not loopback, so if the phone loads the page but the
 deliberation socket is refused with 403, add that exact origin (for example
