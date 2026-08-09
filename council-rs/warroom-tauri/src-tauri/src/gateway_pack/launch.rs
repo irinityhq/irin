@@ -5,7 +5,7 @@ use super::cli_adapters::{
     CliAdaptersStatus,
 };
 use super::enable::{
-    compose_up, lifecycle_stage, port_busy_by_foreign_gateway, wait_control_plane,
+    compose_up, lifecycle_stage, port_busy_by_foreign_gateway, wait_control_plane, LIFECYCLE_LOCK,
 };
 use super::env::{
     build_full_compose_env, build_full_compose_env_with_launch_secrets,
@@ -164,6 +164,12 @@ pub fn resume_installed_pack(store: &dyn SecretStore) -> Result<(), String> {
     let _flight = resume_flight_lock()
         .lock()
         .map_err(|_| "gateway pack resume lock poisoned".to_string())?;
+    // Lock order: flight → lifecycle. Serializes resume compose/env work with
+    // enable/disable/stop and the watch-profile toggle so a background promote
+    // cannot recreate the pack without a just-installed profile pin.
+    let _guard = LIFECYCLE_LOCK
+        .lock()
+        .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
     resume_installed_pack_locked(store, None, None)
 }
 
@@ -177,6 +183,10 @@ pub fn resume_installed_pack_with_key(
     let _flight = resume_flight_lock()
         .lock()
         .map_err(|_| "gateway pack resume lock poisoned".to_string())?;
+    // Lock order: flight → lifecycle (see resume_installed_pack).
+    let _guard = LIFECYCLE_LOCK
+        .lock()
+        .map_err(|_| "gateway pack lifecycle lock poisoned".to_string())?;
     resume_installed_pack_locked(store, Some(key.to_string()), Some(launch_secrets))
 }
 
@@ -250,7 +260,7 @@ fn resume_installed_pack_locked(
     verify_images_present(&validated)?;
     let ledger = ensure_ledger_key()?;
     let _ = ensure_arm_keys_file();
-    let _ = ensure_watch_dirs();
+    ensure_watch_dirs()?;
     // Single-pass Keychain for Claude/Codex: load tokens once, start adapters
     // with those values, inject the same values into compose env (no second get).
     let proxy_tokens = match launch_secrets {

@@ -53,13 +53,15 @@ pub fn open_watch_inbox() -> Result<String, String> {
 
 /// Locate the bundled default template (installed pack first, then bundled root).
 fn default_template_path() -> Result<PathBuf, String> {
-    if let Some(root) = installed_pack_root() {
+    // Prefer the code-signed bundled asset; the installed pack copy is
+    // user-writable and only a fallback for older installs without resources.
+    if let Some(root) = bundled_pack_root() {
         let p = root.join(DEFAULT_TEMPLATE_NAME);
         if p.is_file() {
             return Ok(p);
         }
     }
-    if let Some(root) = bundled_pack_root() {
+    if let Some(root) = installed_pack_root() {
         let p = root.join(DEFAULT_TEMPLATE_NAME);
         if p.is_file() {
             return Ok(p);
@@ -267,7 +269,18 @@ mod tests {
     #[test]
     fn watch_inbox_path_creates_dir() {
         let _g = test_env_lock();
+        let prev_support = std::env::var(APP_SUPPORT_ROOT_ENV).ok();
+        let support =
+            std::env::temp_dir().join(format!("gw-watch-inbox-support-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&support);
+        fs::create_dir_all(&support).unwrap();
+        std::env::set_var(APP_SUPPORT_ROOT_ENV, &support);
         let p = watch_inbox_path_string().unwrap();
         assert!(Path::new(&p).is_dir());
+        match prev_support {
+            Some(v) => std::env::set_var(APP_SUPPORT_ROOT_ENV, v),
+            None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),
+        }
+        let _ = fs::remove_dir_all(&support);
     }
 }

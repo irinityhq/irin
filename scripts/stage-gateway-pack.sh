@@ -94,6 +94,15 @@ fi
 if [[ "$(grep -Fc "$INBOX_MOUNT" "$SRC_PACK/docker-compose.yml")" -ne 1 ]]; then
   die "gateway pack compose must mount IRIN_DESKTOP_WATCH_INBOX_DIR at /var/lib/gateway/inbox"
 fi
+# The bind-source variables may appear only as those exact mounts — a second
+# mount (e.g. a writable duplicate) would satisfy the counts above and bypass
+# the :ro policy below.
+if [[ "$(grep -Fc 'IRIN_DESKTOP_SENTINELS_DIR' "$SRC_PACK/docker-compose.yml")" -ne 1 ]]; then
+  die "IRIN_DESKTOP_SENTINELS_DIR must appear exactly once in compose (the read-only profile mount)"
+fi
+if [[ "$(grep -Fc 'IRIN_DESKTOP_WATCH_INBOX_DIR' "$SRC_PACK/docker-compose.yml")" -ne 1 ]]; then
+  die "IRIN_DESKTOP_WATCH_INBOX_DIR must appear exactly once in compose (the inbox mount)"
+fi
 # Refuse writable profile mounts (must stay :ro).
 if grep -E 'IRIN_DESKTOP_SENTINELS_DIR.*sentinels[^:]*$' "$SRC_PACK/docker-compose.yml" \
     | grep -v ':ro' >/dev/null; then

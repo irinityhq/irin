@@ -123,7 +123,10 @@ export default function WatchView(
     }
   };
 
+  // Desktop-only: the browser has no native command that can establish
+  // profile-file absence, and zero rows may just mean no registered sentinels.
   const quietNoProfile =
+    desktop &&
     snapshot != null &&
     snapshot.sentinels.length === 0 &&
     !profileOn;
@@ -180,15 +183,9 @@ export default function WatchView(
                 Quiet
               </span>
               <p className="mt-1">
-                {desktop ? (
-                  <>
-                    No sentinel profile installed. Watch is healthy with 0 sentinels — flip{" "}
-                    <strong className="text-fg">Watch sentinels</strong> on to load the bundled
-                    file-inbox profile (tenant canary).
-                  </>
-                ) : (
-                  <>No sentinel profile installed.</>
-                )}
+                No sentinel profile installed. Watch is healthy with 0 sentinels — flip{" "}
+                <strong className="text-fg">Watch sentinels</strong> on to load the bundled
+                file-inbox profile (tenant canary).
               </p>
             </div>
           )}
