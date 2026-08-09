@@ -481,9 +481,14 @@ fn teardown_env_drops_arm_principals_but_keeps_path_pins() {
 #[test]
 fn watch_profile_pins_empty_without_file_and_set_when_present() {
     let _g = test_env_lock();
+    let prev_support = std::env::var(crate::private_config::APP_SUPPORT_ROOT_ENV).ok();
+    let support =
+        std::env::temp_dir().join(format!("gw-watch-pins-support-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&support);
+    fs::create_dir_all(&support).unwrap();
+    std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, &support);
     ensure_watch_dirs().unwrap();
     let profile = watch_profile_path();
-    let _ = fs::remove_file(&profile);
 
     let pins_off = build_pack_pin_env(
         Path::new("/app/pack"),
@@ -523,20 +528,33 @@ fn watch_profile_pins_empty_without_file_and_set_when_present() {
         pins_on.get("IRIN_WATCH_PROFILE_PATH").map(String::as_str),
         Some(WATCH_PROFILE_CONTAINER_PATH)
     );
-    let _ = fs::remove_file(&profile);
+    match prev_support {
+        Some(v) => std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, v),
+        None => std::env::remove_var(crate::private_config::APP_SUPPORT_ROOT_ENV),
+    }
+    let _ = fs::remove_dir_all(&support);
 }
 
 #[test]
 fn ensure_watch_dirs_creates_sentinels_and_inbox() {
     let _g = test_env_lock();
-    // Remove dirs if present so we prove create path.
+    let prev_support = std::env::var(crate::private_config::APP_SUPPORT_ROOT_ENV).ok();
+    let support =
+        std::env::temp_dir().join(format!("gw-watch-dirs-support-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&support);
+    fs::create_dir_all(&support).unwrap();
+    std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, &support);
+    // Fresh support root proves the create path.
     let s = sentinels_dir();
     let i = watch_inbox_dir();
-    let _ = fs::remove_dir_all(&s);
-    let _ = fs::remove_dir_all(&i);
     ensure_watch_dirs().unwrap();
     assert!(s.is_dir());
     assert!(i.is_dir());
+    match prev_support {
+        Some(v) => std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, v),
+        None => std::env::remove_var(crate::private_config::APP_SUPPORT_ROOT_ENV),
+    }
+    let _ = fs::remove_dir_all(&support);
 }
 
 #[test]

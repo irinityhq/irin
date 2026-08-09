@@ -223,12 +223,18 @@ pub fn set_watch_sentinels_enabled(store: &dyn SecretStore, enabled: bool) -> Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::private_config::test_env_lock;
+    use crate::private_config::{test_env_lock, APP_SUPPORT_ROOT_ENV};
     use std::fs;
 
     #[test]
     fn install_and_remove_profile_file() {
         let _g = test_env_lock();
+        let prev_support = std::env::var(APP_SUPPORT_ROOT_ENV).ok();
+        let support =
+            std::env::temp_dir().join(format!("gw-watch-profile-support-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&support);
+        fs::create_dir_all(&support).unwrap();
+        std::env::set_var(APP_SUPPORT_ROOT_ENV, &support);
         let _ = remove_profile_file();
         assert!(!watch_sentinels_enabled());
         install_default_profile_file().expect("install template");
@@ -242,6 +248,11 @@ mod tests {
             .contains("sentinels.yaml"));
         remove_profile_file().unwrap();
         assert!(!watch_sentinels_enabled());
+        match prev_support {
+            Some(v) => std::env::set_var(APP_SUPPORT_ROOT_ENV, v),
+            None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),
+        }
+        let _ = fs::remove_dir_all(&support);
     }
 
     #[test]
