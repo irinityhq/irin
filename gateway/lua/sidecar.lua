@@ -22,10 +22,22 @@ local _M = {}
 
 local SIDECAR_ADDR = "unix:/tmp/gateway-sidecar.sock:"
 local SIDECAR_TIMEOUT_MS = 50
+-- Admin-tier virtual key for POST /ledger/record (W1b X-Admin-Key gate).
+-- Prefer LEDGER_ADMIN_KEY; ADMIN_KEY is the operator alias used by
+-- `make -C gateway ledger-verify`. BOOTSTRAP_TOKEN is NOT valid here —
+-- auth.check requires a provisioned admin-tier key, not the bootstrap secret.
+local LEDGER_ADMIN_KEY = ""
 
 function _M.init()
     SIDECAR_ADDR = os.getenv("SIDECAR_ADDR") or "unix:/tmp/gateway-sidecar.sock:"
     SIDECAR_TIMEOUT_MS = tonumber(os.getenv("SIDECAR_TIMEOUT_MS")) or 50
+    LEDGER_ADMIN_KEY = os.getenv("LEDGER_ADMIN_KEY")
+        or os.getenv("ADMIN_KEY")
+        or ""
+    if LEDGER_ADMIN_KEY == "" then
+        ngx.log(ngx.WARN,
+            "sidecar: LEDGER_ADMIN_KEY/ADMIN_KEY unset — /ledger/record writes will fail closed")
+    end
     ngx.log(ngx.INFO, "sidecar: configured at ", SIDECAR_ADDR,
             " timeout=", SIDECAR_TIMEOUT_MS, "ms")
 end
@@ -212,9 +224,16 @@ end
 -- @param caller_key string|nil   Per-key audit identity (key_id from /auth/check).
 --                                Empty string or nil → sidecar stores NULL
 --                                (legacy / no-auth). Schema v2+.
+--                                NOT authorization — the sidecar gates on
+--                                X-Admin-Key (admin tier) separately.
 -- @return table|nil  Ledger record result
 -- @return string|nil Error message
 function _M.ledger_record(source, target, payload, metadata, caller_key)
+    -- Fail closed before the POST when the writer key is missing: a decoded
+    -- 401 JSON body is not success (ProjectMem #0093).
+    if LEDGER_ADMIN_KEY == "" then
+        return nil, "ledger admin key not configured (set LEDGER_ADMIN_KEY or ADMIN_KEY)"
+    end
     local body = {
         source   = source,
         target   = target,
@@ -224,7 +243,23 @@ function _M.ledger_record(source, target, payload, metadata, caller_key)
     if caller_key and caller_key ~= "" then
         body.caller_key = caller_key
     end
-    return sidecar_post("/ledger/record", body)
+    local result, err, status = sidecar_post("/ledger/record", body, {
+        ["X-Admin-Key"] = LEDGER_ADMIN_KEY,
+    })
+    if err then
+        return nil, err
+    end
+    -- sidecar_post returns (decoded, nil, status) whenever the body parses as
+    -- JSON — including 401/403 error objects. Treat any non-2xx as failure so
+    -- record_with_retry surfaces the drop instead of silently "succeeding".
+    if not status or status < 200 or status >= 300 then
+        local detail = (result and (result.error or result.message)) or "unknown"
+        return nil, "ledger/record HTTP " .. tostring(status or "?") .. ": " .. tostring(detail)
+    end
+    if not result or result.recorded ~= true then
+        return nil, "ledger/record did not confirm recorded=true"
+    end
+    return result, nil
 end
 
 -- ---------------------------------------------------------------------------

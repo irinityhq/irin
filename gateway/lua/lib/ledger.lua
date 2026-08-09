@@ -77,9 +77,15 @@ function _M.record_with_retry(source, target, payload, metadata, caller_key)
     -- caller_key threads through to the sidecar's /ledger/record body where
     -- it becomes the v2 schema's per-key audit identity. Empty string or nil
     -- both mean "no key" — the sidecar collapses both to NULL in the column.
+    -- Authorization is separate: sidecar.ledger_record sends X-Admin-Key and
+    -- fails closed on non-2xx / missing recorded=true (ProjectMem #0093).
     for attempt = 1, MAX_ATTEMPTS do
         local result, err = sidecar_ledger_record(source, target, payload, metadata, caller_key)
-        if result and not err then
+        -- Defense-in-depth: require the success shape, not merely a decoded
+        -- table. A 401 body like {error="X-Admin-Key required"} must never
+        -- count as a commit (ledger_record should already return err, but
+        -- the recorded flag is the durable success signal).
+        if result and result.recorded == true and not err then
             return true
         end
         if attempt < MAX_ATTEMPTS then
