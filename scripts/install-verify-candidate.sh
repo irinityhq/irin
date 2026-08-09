@@ -227,6 +227,12 @@ disarm_live_rollback() {
   trap - EXIT
 }
 
+make_tree_removable() {
+  local path="$1"
+  [[ -e "$path" || -L "$path" ]] || return 0
+  chmod -R u+w "$path"
+}
+
 # Never delete SAVED_PRIOR (sibling or archive). On restore failure leave it and hard-error.
 live_rollback() {
   local msg="$1"
@@ -235,6 +241,7 @@ live_rollback() {
 
   # Guard empty paths — never rm -rf "" or proofs under empty CANDIDATE.
   if [[ -n "${STAGING:-}" ]]; then
+    make_tree_removable "$STAGING" 2>/dev/null || true
     rm -rf "$STAGING" 2>/dev/null || true
   fi
   if [[ -n "${CANDIDATE:-}" ]]; then
@@ -257,28 +264,52 @@ live_rollback() {
       printf 'ERROR: SAVED_PRIOR equals LIVE_APP (%s); refusing nested restore\n' "$SAVED_PRIOR" >&2
       exit 1
     fi
-    # Remove failed replacement only if present; verify gone before mv.
+    # /Applications is sunlnk on macOS: retain an immutable failed replacement
+    # under a hidden same-directory name instead of trying to unlink it.
     if [[ -e "$LIVE_APP" || -L "$LIVE_APP" ]]; then
-      if ! rm -rf "$LIVE_APP"; then
+      local failed_live="$APPS_ROOT/.${APP_NAME}.irin-failed.$$"
+      if [[ -e "$failed_live" || -L "$failed_live" ]]; then
         printf 'ERROR: %s\n' "$msg" >&2
-        printf 'ERROR: could not remove failed replacement at %s; saved prior left at %s (not deleted)\n' "$LIVE_APP" "$SAVED_PRIOR" >&2
+        printf 'ERROR: failed-app recovery collision at %s; saved prior left at %s\n' "$failed_live" "$SAVED_PRIOR" >&2
         exit 1
       fi
-      if [[ -e "$LIVE_APP" || -L "$LIVE_APP" ]]; then
+      if ! mv "$LIVE_APP" "$failed_live"; then
         printf 'ERROR: %s\n' "$msg" >&2
-        printf 'ERROR: replacement still present at %s after rm; saved prior left at %s (not deleted)\n' "$LIVE_APP" "$SAVED_PRIOR" >&2
+        printf 'ERROR: could not retain failed replacement at %s; saved prior left at %s\n' "$failed_live" "$SAVED_PRIOR" >&2
         exit 1
       fi
+      note "retained failed replacement at $failed_live"
     fi
-    if ! mv "$SAVED_PRIOR" "$LIVE_APP"; then
+    if ! ditto "$SAVED_PRIOR" "$LIVE_APP"; then
       printf 'ERROR: %s\n' "$msg" >&2
-      printf 'ERROR: failed to restore prior app from %s; left in place (not deleted)\n' "$SAVED_PRIOR" >&2
+      printf 'ERROR: failed to restore prior app from %s; retained recovery copy\n' "$SAVED_PRIOR" >&2
       exit 1
     fi
-    note "restored prior app to $LIVE_APP"
+    local saved_bm live_bm saved_digest live_digest
+    saved_bm="$(mktemp)"
+    live_bm="$(mktemp)"
+    if ! irin_write_bundle_manifest "$SAVED_PRIOR" "$saved_bm" \
+      || ! irin_write_bundle_manifest "$LIVE_APP" "$live_bm"; then
+      rm -f "$saved_bm" "$live_bm"
+      printf 'ERROR: %s\n' "$msg" >&2
+      printf 'ERROR: could not verify restored prior; recovery copy retained at %s\n' "$SAVED_PRIOR" >&2
+      exit 1
+    fi
+    saved_digest="$(irin_sha256_file "$saved_bm")"
+    live_digest="$(irin_sha256_file "$live_bm")"
+    rm -f "$saved_bm" "$live_bm"
+    if [[ "$saved_digest" != "$live_digest" ]]; then
+      printf 'ERROR: %s\n' "$msg" >&2
+      printf 'ERROR: restored prior digest mismatch; recovery copy retained at %s\n' "$SAVED_PRIOR" >&2
+      exit 1
+    fi
+    note "restored prior app to $LIVE_APP (recovery copy retained at $SAVED_PRIOR)"
   else
-    if [[ -n "${LIVE_APP:-}" ]]; then
-      rm -rf "$LIVE_APP" 2>/dev/null || true
+    if [[ -n "${LIVE_APP:-}" && ( -e "$LIVE_APP" || -L "$LIVE_APP" ) ]]; then
+      local failed_live="$APPS_ROOT/.${APP_NAME}.irin-failed.$$"
+      if [[ ! -e "$failed_live" && ! -L "$failed_live" ]]; then
+        mv "$LIVE_APP" "$failed_live" 2>/dev/null || true
+      fi
     fi
   fi
 
@@ -384,12 +415,43 @@ if [[ "$LIVE_MODE" == "1" ]]; then
     if [[ -e "$ARCHIVE" || -L "$ARCHIVE" ]]; then
       live_rollback "archive destination collision (refusing overwrite): $ARCHIVE"
     fi
-    if ! mv "$SAVED_PRIOR" "$ARCHIVE"; then
+    # /Applications and the state root may be different filesystems. Copy the
+    # prior bundle faithfully, prove the copy, then remove the sibling prior.
+    PRIOR_BM="$(mktemp)"
+    ARCHIVE_BM="$(mktemp)"
+    if ! ditto "$SAVED_PRIOR" "$ARCHIVE"; then
+      rm -f "$PRIOR_BM" "$ARCHIVE_BM"
+      make_tree_removable "$ARCHIVE" 2>/dev/null || true
+      rm -rf "$ARCHIVE"
       live_rollback "could not archive displaced prior app"
     fi
-    # Prior now at archive; rollback restores from here.
+    if ! irin_write_bundle_manifest "$SAVED_PRIOR" "$PRIOR_BM" \
+      || ! irin_write_bundle_manifest "$ARCHIVE" "$ARCHIVE_BM"; then
+      rm -f "$PRIOR_BM" "$ARCHIVE_BM"
+      make_tree_removable "$ARCHIVE" 2>/dev/null || true
+      rm -rf "$ARCHIVE"
+      live_rollback "could not verify archived prior app"
+    fi
+    PRIOR_DIGEST="$(irin_sha256_file "$PRIOR_BM")"
+    ARCHIVE_DIGEST="$(irin_sha256_file "$ARCHIVE_BM")"
+    rm -f "$PRIOR_BM" "$ARCHIVE_BM"
+    if [[ "$PRIOR_DIGEST" != "$ARCHIVE_DIGEST" ]]; then
+      make_tree_removable "$ARCHIVE" 2>/dev/null || true
+      rm -rf "$ARCHIVE"
+      live_rollback "archived prior app digest mismatch"
+    fi
+    # Rollback now restores from the proven archive. /Applications is sunlnk,
+    # so retain the immutable prior under a hidden same-directory name.
     SAVED_PRIOR="$ARCHIVE"
+    HIDDEN_PRIOR="$APPS_ROOT/.${APP_NAME}.irin-prior.${TS}.${CANDIDATE_ID:0:12}.$$"
+    if [[ -e "$HIDDEN_PRIOR" || -L "$HIDDEN_PRIOR" ]]; then
+      live_rollback "hidden prior recovery collision: $HIDDEN_PRIOR"
+    fi
+    if ! mv "$PRIOR" "$HIDDEN_PRIOR"; then
+      live_rollback "could not retain displaced prior under hidden recovery name"
+    fi
     note "archived prior app: $ARCHIVE"
+    note "retained hidden prior app: $HIDDEN_PRIOR"
   fi
 
   LIVE_APP_PATH="$(cd "$LIVE_APP" && pwd)"
