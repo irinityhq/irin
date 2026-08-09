@@ -305,6 +305,14 @@ pub struct QuarantineState {
     /// Distinguishes "genuinely zero spend" from "the gauge is blind" on the
     /// scrape surface. Exposed as `spend_gauge_read_failures_total`.
     spend_gauge_read_failures_total: AtomicU64,
+    /// `/watch/stats` fire-count reads that failed. When this rises the
+    /// per-sentinel `fires_total` field is omitted (blind), not zeroed.
+    /// Exposed as `sentinel_fires_read_failures_total`.
+    sentinel_fires_read_failures_total: AtomicU64,
+    /// Temperature assembly reads that failed (tenant list or fire window
+    /// counts). Failed slices are omitted from `temperatures`. Exposed as
+    /// `temperature_read_failures_total`.
+    temperature_read_failures_total: AtomicU64,
     /// count of kill-switch drains that hit the 5s
     /// timeout (the producer did not ack). Each timeout also records a
     /// 5000ms floor observation into the latency last/max so the scraped
@@ -321,6 +329,11 @@ pub struct QuarantineState {
     /// AUTHENTICATED-but-unauthorized events where the principal identity is
     /// real. Exposed via `/watch/stats` as `arm_rejected_unauth_total`.
     arm_rejected_unauth_total: AtomicU64,
+    /// Per-sentinel runner tick counters + last-tick wall time, updated only
+    /// from `handle_fire_outcome` (the single runner choke point). Quiet
+    /// healthy ticks stay visible so zero-fire is distinguishable from an
+    /// unloaded sentinel. Keys are (tenant, sentinel).
+    sentinel_ticks: Mutex<HashMap<(String, String), SentinelTickCell>>,
     /// Phase 2 §4 — durable watch.db. None in pure in-memory unit tests
     /// (T4 / T5*); Some when wired through main.rs (production) or through
     /// the T21 OCC test. Drives write_fire_row → WatchDb::insert_fire.
@@ -341,6 +354,37 @@ pub struct QuarantineState {
     pub arm_staging: Mutex<Option<StagedArm>>,
 }
 
+/// Four bounded runner-tick outcomes (Prometheus `outcome` label values).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerTickOutcome {
+    Fired,
+    Uninteresting,
+    Gated,
+    Failure,
+}
+
+/// In-process per-sentinel tick cell (not durable across restart).
+#[derive(Debug, Clone, Default)]
+struct SentinelTickCell {
+    ticks_fired: u64,
+    ticks_uninteresting: u64,
+    ticks_failure: u64,
+    ticks_gated: u64,
+    last_tick_ms: u64,
+}
+
+/// Snapshot row for `/watch/stats` → Lua → `gw_watch_sentinel_*`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize, Default, PartialEq, Eq)]
+pub struct SentinelTickSnapshot {
+    pub tenant: String,
+    pub sentinel: String,
+    pub ticks_fired: u64,
+    pub ticks_uninteresting: u64,
+    pub ticks_failure: u64,
+    pub ticks_gated: u64,
+    pub last_tick_ms: u64,
+}
+
 impl QuarantineState {
     pub fn new_in_memory(cfg: QuarantineConfig) -> Self {
         Self {
@@ -359,8 +403,11 @@ impl QuarantineState {
             recon_cap_breach_total: AtomicU64::new(0),
             settle_ceiling_overshoot_total: AtomicU64::new(0),
             spend_gauge_read_failures_total: AtomicU64::new(0),
+            sentinel_fires_read_failures_total: AtomicU64::new(0),
+            temperature_read_failures_total: AtomicU64::new(0),
             kill_switch_drain_timeout_total: AtomicU64::new(0),
             arm_rejected_unauth_total: AtomicU64::new(0),
+            sentinel_ticks: Mutex::new(HashMap::new()),
             db: None,
             producer_kill_state: Mutex::new(None),
             arm_staging: Mutex::new(None),
@@ -386,8 +433,11 @@ impl QuarantineState {
             recon_cap_breach_total: AtomicU64::new(0),
             settle_ceiling_overshoot_total: AtomicU64::new(0),
             spend_gauge_read_failures_total: AtomicU64::new(0),
+            sentinel_fires_read_failures_total: AtomicU64::new(0),
+            temperature_read_failures_total: AtomicU64::new(0),
             kill_switch_drain_timeout_total: AtomicU64::new(0),
             arm_rejected_unauth_total: AtomicU64::new(0),
+            sentinel_ticks: Mutex::new(HashMap::new()),
             db: Some(db),
             producer_kill_state: Mutex::new(None),
             arm_staging: Mutex::new(None),
@@ -605,6 +655,55 @@ impl QuarantineState {
         self.recon_cap_breach_total.load(Ordering::Relaxed)
     }
 
+    /// Record one runner tick at the `handle_fire_outcome` choke point.
+    /// Wall-clock last_tick_ms so scrapers can see "still ticking" without
+    /// process Instant.
+    pub fn note_runner_tick(&self, tenant: &str, sentinel: &str, outcome: RunnerTickOutcome) {
+        let now_ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut map = self.sentinel_ticks.lock();
+        let cell = map
+            .entry((tenant.to_string(), sentinel.to_string()))
+            .or_default();
+        cell.last_tick_ms = now_ms;
+        match outcome {
+            RunnerTickOutcome::Fired => cell.ticks_fired = cell.ticks_fired.saturating_add(1),
+            RunnerTickOutcome::Uninteresting => {
+                cell.ticks_uninteresting = cell.ticks_uninteresting.saturating_add(1)
+            }
+            RunnerTickOutcome::Gated => cell.ticks_gated = cell.ticks_gated.saturating_add(1),
+            RunnerTickOutcome::Failure => cell.ticks_failure = cell.ticks_failure.saturating_add(1),
+        }
+    }
+
+    /// Snapshot of per-sentinel tick cells for `/watch/stats`.
+    pub fn sentinel_tick_snapshot(&self) -> Vec<SentinelTickSnapshot> {
+        let mut rows: Vec<SentinelTickSnapshot> = self
+            .sentinel_ticks
+            .lock()
+            .iter()
+            .map(|((tenant, sentinel), cell)| SentinelTickSnapshot {
+                tenant: tenant.clone(),
+                sentinel: sentinel.clone(),
+                ticks_fired: cell.ticks_fired,
+                ticks_uninteresting: cell.ticks_uninteresting,
+                ticks_failure: cell.ticks_failure,
+                ticks_gated: cell.ticks_gated,
+                last_tick_ms: cell.last_tick_ms,
+            })
+            .collect();
+        rows.sort_by(|a, b| (&a.tenant, &a.sentinel).cmp(&(&b.tenant, &b.sentinel)));
+        rows
+    }
+
+    /// True when a CDC producer kill-switch channel is currently held
+    /// (hardware-armed or boot-env producer running with a live claim).
+    pub fn action_production_armed(&self) -> bool {
+        self.producer_kill_state.lock().is_some()
+    }
+
     /// increment the settle ceiling-overshoot counter.
     /// Called by `dispatcher::note_settle_report` when a settle's valid
     /// realized cost exceeded the per-directive reservation ceiling.
@@ -631,6 +730,27 @@ impl QuarantineState {
     /// `/watch/stats` field `spend_gauge_read_failures_total`.
     pub fn spend_gauge_read_failures_total(&self) -> u64 {
         self.spend_gauge_read_failures_total.load(Ordering::Relaxed)
+    }
+
+    /// Durable fire-count query failed; omit `fires_total` on the scrape.
+    pub fn bump_sentinel_fires_read_failure(&self) {
+        self.sentinel_fires_read_failures_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn sentinel_fires_read_failures_total(&self) -> u64 {
+        self.sentinel_fires_read_failures_total
+            .load(Ordering::Relaxed)
+    }
+
+    /// Temperature assembly read failed; omit the failed temperature slice(s).
+    pub fn bump_temperature_read_failure(&self) {
+        self.temperature_read_failures_total
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn temperature_read_failures_total(&self) -> u64 {
+        self.temperature_read_failures_total.load(Ordering::Relaxed)
     }
 
     /// record one kill-switch drain TIMEOUT: bump the

@@ -691,6 +691,26 @@ pub async fn handle_fire_outcome(
     sentinel: &dyn Sentinel,
     quarantine: &QuarantineState,
 ) {
+    use crate::watch::quarantine::RunnerTickOutcome;
+
+    // Single choke point for per-sentinel tick telemetry: every fire_pipeline
+    // outcome is labeled before quarantine state changes so quiet ticks and
+    // failures stay visible on /watch/stats → /metrics.
+    let tick = match &outcome {
+        FireOutcome::Fired(_) => RunnerTickOutcome::Fired,
+        FireOutcome::Uninteresting => RunnerTickOutcome::Uninteresting,
+        FireOutcome::Gated(_) => RunnerTickOutcome::Gated,
+        FireOutcome::AuditWriteErr(_)
+        | FireOutcome::AuditWorkerCrashed
+        | FireOutcome::Timeout("audit")
+        | FireOutcome::Panic
+        | FireOutcome::BudgetViolation(_)
+        | FireOutcome::Timeout(_)
+        | FireOutcome::ObserveErr(_)
+        | FireOutcome::EscalateErr(_) => RunnerTickOutcome::Failure,
+    };
+    quarantine.note_runner_tick(sentinel.tenant(), sentinel.name(), tick);
+
     // Arm order matters: `Timeout("audit")` must precede the `Timeout(_)`
     // catch-all in the record_failure arm so audit-infra routes correctly.
     match outcome {

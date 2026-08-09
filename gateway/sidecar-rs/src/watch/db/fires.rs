@@ -437,6 +437,53 @@ impl WatchDb {
         Ok(n)
     }
 
+    /// Per-sentinel lifetime fire counts from `watch_fires` for `/watch/stats`.
+    /// Restricted to **currently registered** `(tenant, name)` pairs in
+    /// `watch_sentinels` so historical/unregistered rows cannot grow scrape
+    /// cardinality forever. Pack default: few tenants × ≤10 sentinels.
+    pub async fn count_fires_by_sentinel(&self) -> anyhow::Result<Vec<(String, String, u64)>> {
+        let rows = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn.prepare(
+                    "SELECT f.tenant, f.sentinel, COUNT(*) as n
+                     FROM watch_fires f
+                     INNER JOIN watch_sentinels s
+                       ON s.tenant = f.tenant AND s.name = f.sentinel
+                     GROUP BY f.tenant, f.sentinel
+                     ORDER BY f.tenant ASC, f.sentinel ASC",
+                )?;
+                let rows: Vec<(String, String, u64)> = stmt
+                    .query_map([], |r| {
+                        Ok((
+                            r.get::<_, String>(0)?,
+                            r.get::<_, String>(1)?,
+                            r.get::<_, i64>(2)? as u64,
+                        ))
+                    })?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<Vec<(String, String, u64)>, rusqlite::Error>(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
+    /// Distinct tenants that have registered sentinels (for temperature gauges).
+    pub async fn list_sentinel_tenants(&self) -> anyhow::Result<Vec<String>> {
+        let rows = self
+            .conn
+            .call(move |conn| {
+                let mut stmt = conn
+                    .prepare("SELECT DISTINCT tenant FROM watch_sentinels ORDER BY tenant ASC")?;
+                let rows: Vec<String> = stmt
+                    .query_map([], |r| r.get(0))?
+                    .collect::<Result<Vec<_>, _>>()?;
+                Ok::<Vec<String>, rusqlite::Error>(rows)
+            })
+            .await?;
+        Ok(rows)
+    }
+
     /// T29 — descending fire log for `/watch/audit/{tenant}` cursor pagination.
     /// Cursor: `before_id = None` → newest first; otherwise rows with id < before_id.
     pub async fn list_fires_descending(

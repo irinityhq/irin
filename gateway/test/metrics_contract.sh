@@ -5,15 +5,14 @@
 # Scrapes the live /metrics endpoint over the OpenResty gateway container
 # and asserts that the watch-plane
 # metric names emitted by lua/cost.lua match the WatchStats JSON fields
-# served by sidecar-rs/src/main.rs::watch_stats. A future rename in
+# served by sidecar-rs. A future rename in
 # WatchStats (Rust side) would silently zero a metric on /metrics without
 # this gate — the Lua poller's table lookup would miss and no line would
 # render. This script catches that.
 #
 # Required state: gateway + sidecar containers running and reachable at
-# ${GW_URL:-http://localhost:18080}. Does NOT require provider API keys,
-# the watch plane emits unlabeled values that are present from sidecar
-# startup. Run after `make up`.
+# ${GW_URL:-http://localhost:18080}. Does NOT require provider API keys.
+# Run after `make up`.
 #
 # Wired into `make metrics-contract`. Not part of `make validate` because
 # validate is config-check only (no live container).
@@ -42,41 +41,52 @@ if [ -z "$METRICS_BODY" ]; then
 fi
 
 # --------------------------------------------------------------------------
-# Contract table: (metric_name, kind) — covers watch-plane + council
-# metrics emitted by lua/cost.lua::prometheus() (fresh-start seeded).
-# Includes the Council stored-bytes gauge.
+# Unlabeled families: HELP + TYPE + value line (seeded at 0 before first poll).
 # --------------------------------------------------------------------------
-WATCH_METRICS=(
+UNLABELED_METRICS=(
     "gw_watch_audit_infra_errors_total counter"
     "gw_watch_persist_failures_total counter"
     "gw_watch_pending_pending_records gauge"
     "gw_watch_pending_retry_failures_total counter"
     "gw_watch_pending_oldest_age_ms gauge"
     "gw_council_stored_bytes gauge"
+    "gw_watch_recon_cap_breach_total counter"
+    "gw_watch_cap_token_rejected_total counter"
+    "gw_watch_directive_verify_failed_total counter"
+    "gw_watch_cap_token_db_error_deny_total counter"
+    "gw_watch_arm_rejected_unauth_total counter"
+    "gw_watch_action_production_armed gauge"
+    "gw_watch_sentinel_fires_read_failures_total counter"
+    "gw_watch_temperature_read_failures_total counter"
 )
 
-assert_metric() {
+# --------------------------------------------------------------------------
+# Labeled families: HELP + TYPE always present. Value lines appear only when
+# a series exists (pack default may have zero sentinels / tenants).
+# --------------------------------------------------------------------------
+LABELED_HELP_TYPE=(
+    "gw_watch_temperature gauge"
+    "gw_watch_sentinel_fires_total counter"
+    "gw_watch_sentinel_ticks_total counter"
+    "gw_watch_sentinel_last_tick_ms gauge"
+)
+
+assert_unlabeled() {
     local name="$1"
     local kind="$2"
 
-    # 1) HELP line — any text, just must be present so future renames break.
     if echo "$METRICS_BODY" | grep -qE "^# HELP ${name} "; then
         pass "${name}: # HELP line present"
     else
         fail "${name}: # HELP line MISSING (silent rename in WatchStats?)"
     fi
 
-    # 2) TYPE line — exact kind match (counter vs gauge).
     if echo "$METRICS_BODY" | grep -qE "^# TYPE ${name} ${kind}$"; then
         pass "${name}: # TYPE ${kind} present"
     else
         fail "${name}: # TYPE ${kind} MISSING (kind drift or rename?)"
     fi
 
-    # 3) Value line — unlabeled, integer or float. The watch-plane metrics
-    #    are emitted whenever the cached WatchStats fold has run; the Lua
-    #    poller runs on a timer at startup, so a freshly-up gateway emits
-    #    these as 0 until the first poll. We allow any non-negative number.
     if echo "$METRICS_BODY" | grep -qE "^${name} [0-9]+(\.[0-9]+)?$"; then
         pass "${name}: value line present"
     else
@@ -84,10 +94,33 @@ assert_metric() {
     fi
 }
 
-for entry in "${WATCH_METRICS[@]}"; do
+assert_labeled_meta() {
+    local name="$1"
+    local kind="$2"
+
+    if echo "$METRICS_BODY" | grep -qE "^# HELP ${name} "; then
+        pass "${name}: # HELP line present"
+    else
+        fail "${name}: # HELP line MISSING"
+    fi
+
+    if echo "$METRICS_BODY" | grep -qE "^# TYPE ${name} ${kind}$"; then
+        pass "${name}: # TYPE ${kind} present"
+    else
+        fail "${name}: # TYPE ${kind} MISSING"
+    fi
+}
+
+for entry in "${UNLABELED_METRICS[@]}"; do
     name="${entry% *}"
     kind="${entry##* }"
-    assert_metric "$name" "$kind"
+    assert_unlabeled "$name" "$kind"
+done
+
+for entry in "${LABELED_HELP_TYPE[@]}"; do
+    name="${entry% *}"
+    kind="${entry##* }"
+    assert_labeled_meta "$name" "$kind"
 done
 
 echo ""

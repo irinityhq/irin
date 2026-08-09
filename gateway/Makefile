@@ -143,7 +143,8 @@ lua-unit:
 	echo "lua-unit: using $$LUA"; \
 	$$LUA test/credential_scrub_test.lua && \
 	$$LUA test/sse_redaction_test.lua && \
-	$$LUA test/council_transport_test.lua
+	$$LUA test/council_transport_test.lua && \
+	$$LUA test/watch_metric_keys_test.lua
 
 smoke:
 	bash test/smoke.sh
