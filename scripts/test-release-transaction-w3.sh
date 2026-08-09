@@ -1075,6 +1075,44 @@ chmod -R u+w "$LIVE_DEST_B/proofs" 2>/dev/null || true
   || fail "unrestored prior sibling must not remain after successful restore"
 pass "--live rollback restores prior app and writes no install proof"
 
+# (b2) physical displaced-apps containment: IRIN_STATE_ROOT is a symlink into
+# the live bundle (→ IRIN.app/Contents). After swap, mkdir of displaced-apps
+# lands inside the new bundle; pwd -P must refuse nest, rollback prior, write
+# no install.json. (Static grep of pwd -P is insufficient.)
+PHYS_DEST="$(make_live_candidate pc)"
+rm -rf "$LIVE_APP"
+mkdir -p "$LIVE_APP/Contents/MacOS"
+printf 'prior-phys' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+printf 'prior-side' >"$LIVE_APP/Contents/MacOS/council"
+PHYS_PRIOR_MARKER="$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")"
+rm -f "$PHYS_DEST/proofs/install.json"
+# Symlink state root into the live app's Contents (always present after swap).
+PHYS_STATE_LINK="$TEST_HOME/state-symlink-into-live"
+rm -rf "$PHYS_STATE_LINK"
+ln -sfn "$LIVE_APP/Contents" "$PHYS_STATE_LINK"
+set +e
+PHYS_OUT="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  IRIN_STATE_ROOT="$PHYS_STATE_LINK" \
+  IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT" \
+  "$INSTALL" --candidate "$PHYS_DEST" --live 2>&1
+)"
+PHYS_EC=$?
+set -e
+[[ $PHYS_EC -ne 0 ]] || fail "state root symlink into live bundle must refuse: $PHYS_OUT"
+[[ "$PHYS_OUT" == *"refusing displaced-apps nest"* || "$PHYS_OUT" == *"nest under live"* ]] \
+  || fail "expected physical nest refuse: $PHYS_OUT"
+[[ ! -f "$PHYS_DEST/proofs/install.json" ]] \
+  || fail "physical nest refuse must leave no install proof"
+[[ -d "$LIVE_APP" && ! -L "$LIVE_APP" ]] || fail "physical nest refuse must restore real prior app"
+[[ "$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")" == "$PHYS_PRIOR_MARKER" ]] \
+  || fail "physical nest refuse must restore prior app bytes: $PHYS_OUT"
+# Must not leave a displaced-apps archive tree nested inside the live app.
+[[ -z "$(find "$LIVE_APP" -path '*/displaced-apps/*' 2>/dev/null | head -1)" ]] \
+  || fail "must not leave displaced-apps nest inside live app after refuse"
+pass "--live physical containment refuses symlink-into-live state root"
+
 # Default (no --live): reuse existing real candidate; must not touch Applications.
 rm -rf "$LIVE_APP"
 mkdir -p "$LIVE_APP/Contents/MacOS"
@@ -1137,30 +1175,176 @@ seed_live_app_from "$LIVE_DEST/IRIN.app"
 )
 pass "first-publish live gate accepts matching live app"
 
-# (e) publication.json present → skip live gate (source contract)
-grep -q 'publication proof present: skip first-publish live app gate' "$TX" \
-  || fail "publish must skip live gate when publication proof exists"
+# (e) already-Published skip + malformed publication refuse (same helper do_publish uses)
+grep -q 'maybe_require_first_publish_live_app' "$TX" \
+  || fail "do_publish must call maybe_require_first_publish_live_app"
+grep -q 'publication proof reaches Published: skip first-publish live app gate' "$TX" \
+  || fail "publish must skip live gate only when publication proof reaches Published"
 grep -q 'hermetic: skip first-publish live app gate' "$TX" \
   || fail "publish must skip live gate under publish_hermetic_active"
-# When publication.json exists, gate condition must not require live match.
-write_proof "$LIVE_DEST/proofs/publication.json" "publication" "$LIVE_CID" "$LIVE_SHA" "PASS" "$(python3 -c 'import json; print(json.dumps({
+grep -q 'symlink-root live app' "$TX" \
+  || fail "first-publish live gate must refuse symlink-root live app"
+grep -q 'must not be a symlink at bundle root' "$ACCEPT" \
+  || fail "T2 acceptance must refuse symlink-root installed app"
+# Source contract for physical containment (runtime fixture is (b2) above).
+grep -q 'refusing displaced-apps nest under live app path' "$INSTALL" \
+  || fail "live install must refuse physically nested displaced-apps"
+grep -q 'DISPLACE_PHYS' "$INSTALL" \
+  || fail "live install must resolve physical displaced-apps path"
+python3 - "$TX" <<'PY' || fail "do_publish must invoke maybe_require_first_publish_live_app before mutation"
+import sys
+text = open(sys.argv[1]).read()
+pub = text.split("do_publish()")[1]
+i_helper = pub.find("maybe_require_first_publish_live_app")
+i_tag = pub.find("check remote tag peeled")
+assert i_helper >= 0, "helper call missing in do_publish"
+assert i_tag < 0 or i_helper < i_tag, "live gate must precede remote tag mutation checks"
+print("do_publish already-Published branch order ok")
+PY
+
+# Symlink-root live app refuses first-publish gate (before hashing).
+rm -rf "$LIVE_APP"
+mkdir -p "$IRIN_LIVE_APPLICATIONS_ROOT/real-extract/Contents/MacOS"
+printf 'linked' >"$IRIN_LIVE_APPLICATIONS_ROOT/real-extract/Contents/MacOS/council-warroom-tauri"
+printf 'linked' >"$IRIN_LIVE_APPLICATIONS_ROOT/real-extract/Contents/MacOS/council"
+ln -s "$IRIN_LIVE_APPLICATIONS_ROOT/real-extract" "$LIVE_APP"
+(
+  set -euo pipefail
+  IRIN_RELEASE_TX_LIB=1
+  # shellcheck source=/dev/null
+  source "$TX"
+  export IRIN_CANDIDATE_STATUS_HERMETIC=1
+  export IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT"
+  export IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT"
+  set +e
+  out="$(require_live_app_matches_candidate "$LIVE_DEST" 2>&1)"
+  ec=$?
+  set -e
+  [[ $ec -ne 0 ]] || { echo "expected symlink-root refuse: $out" >&2; exit 1; }
+  [[ "$out" == *"symlink"* ]] || { echo "bad msg: $out" >&2; exit 1; }
+)
+pass "first-publish refuses symlink-root live app"
+
+# Symlink-root installed app refuses T2 pin.
+set +e
+out_sym="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  "$ACCEPT" --candidate "$LIVE_DEST" --installed-app "$LIVE_APP" 2>&1
+)"
+ec_sym=$?
+set -e
+[[ $ec_sym -ne 0 ]] || fail "T2 must refuse symlink-root installed app: $out_sym"
+[[ "$out_sym" == *"symlink"* ]] \
+  || fail "expected symlink refuse for T2: $out_sym"
+pass "T2 acceptance refuses symlink-root installed app"
+rm -rf "$LIVE_APP" "$IRIN_LIVE_APPLICATIONS_ROOT/real-extract"
+
+# Hex-valid source_sha fixture (label "a0" → a0a0… is 40-char lowercase hex).
+# Non-hex labels like "ok" never become well_formed under candidate-status.
+PUB_DEST="$(make_live_candidate a0)"
+PUB_CID="$(basename "$PUB_DEST")"
+PUB_SHA="$(python3 -c 'import json; print(json.load(open("'"$PUB_DEST"'/candidate.json"))["source_sha"])')"
+PUB_BM_D="$(python3 -c 'import json; print(json.load(open("'"$PUB_DEST"'/candidate.json"))["bundle_manifest_digest"])')"
+PUB_DMG_D="$(python3 -c 'import json; print(json.load(open("'"$PUB_DEST"'/candidate.json"))["dmg_sha256"])')"
+mkdir -p "$PUB_DEST/install"
+cp -R "$PUB_DEST/IRIN.app" "$PUB_DEST/install/IRIN.app"
+chmod -R u+w "$PUB_DEST/install" 2>/dev/null || true
+irin_write_bundle_manifest "$PUB_DEST/install/IRIN.app" "$PUB_DEST/install/bundle-manifest.txt"
+write_proof "$PUB_DEST/proofs/install.json" "install" "$PUB_CID" "$PUB_SHA" "PASS" "$(python3 -c 'import json; print(json.dumps({
+  "candidate_bundle_manifest_digest": "'"$PUB_BM_D"'",
+  "installed_bundle_manifest_digest": "'"$PUB_BM_D"'",
+}))')"
+PUB_ACTION="t2-w3-published"
+write_proof "$PUB_DEST/proofs/acceptance.json" "acceptance" "$PUB_CID" "$PUB_SHA" "PASS" "$(python3 -c 'import json; print(json.dumps({
+  "dmg_sha256": "'"$PUB_DMG_D"'",
+  "installed_bundle_manifest_digest": "'"$PUB_BM_D"'",
+  "pending_action_id": "'"$PUB_ACTION"'",
+  "installed_app_path": "'"$PUB_DEST"'/install/IRIN.app",
+}))')"
+PUB_ACC_D="$(irin_sha256_file "$PUB_DEST/proofs/acceptance.json")"
+write_proof "$PUB_DEST/proofs/t2.json" "t2" "$PUB_CID" "$PUB_SHA" "PASS" "$(python3 -c 'import json; print(json.dumps({
+  "action_id": "'"$PUB_ACTION"'",
+  "acceptance_digest": "'"$PUB_ACC_D"'",
+  "authorized_effects": ["tag-push", "release-attach", "publish", "version-image-labels"],
+  "expiry": "2099-01-01T00:00:00Z",
+}))')"
+tier_acc="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_CANDIDATE_STATUS_SOURCE_ON_MAIN=true \
+  IRIN_CANDIDATE_STATUS_CI_REQUIRED=true \
+  "$STATUS" --candidate "$PUB_DEST" --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tier") or "")'
+)"
+[[ "$tier_acc" == "Accepted" ]] || fail "Published-skip fixture must first reach Accepted (got '$tier_acc')"
+
+# Malformed publication proof (file present) must refuse skip — not idempotent.
+write_proof "$PUB_DEST/proofs/publication.json" "publication" "$PUB_CID" "$PUB_SHA" "PASS" "$(python3 -c 'import json; print(json.dumps({
+  "public_state": "draft",
+  "redownload_unauthenticated": False,
+  "asset_sha256": "0" * 64,
+  "tag": "v0.1.2",
+}))')"
+seed_live_app_from "$PUB_DEST/IRIN.app"
+(
+  set -euo pipefail
+  IRIN_RELEASE_TX_LIB=1
+  # shellcheck source=/dev/null
+  source "$TX"
+  export IRIN_CANDIDATE_STATUS_HERMETIC=1
+  export IRIN_CANDIDATE_STATUS_SOURCE_ON_MAIN=true
+  export IRIN_CANDIDATE_STATUS_CI_REQUIRED=true
+  export IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT"
+  export IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT"
+  # Ensure not hermetic-publish (would skip without Published).
+  unset IRIN_PUBLISH_HERMETIC IRIN_PUBLISH_HERMETIC_CONFIRM || true
+  set +e
+  out="$(maybe_require_first_publish_live_app "$PUB_DEST" 2>&1)"
+  ec=$?
+  set -e
+  [[ $ec -ne 0 ]] || { echo "expected malformed publication refuse: $out" >&2; exit 1; }
+  [[ "$out" == *"Published"* || "$out" == *"refuse"* ]] \
+    || { echo "bad msg: $out" >&2; exit 1; }
+)
+pass "malformed publication proof refuses first-publish live-gate skip"
+
+# Valid Published proof: real helper skips even when live app is corrupted.
+write_proof "$PUB_DEST/proofs/publication.json" "publication" "$PUB_CID" "$PUB_SHA" "PASS" "$(python3 -c 'import json; print(json.dumps({
   "public_state": "published",
   "redownload_unauthenticated": True,
-  "asset_sha256": "a" * 64,
-  "dmg_sha256": "a" * 64,
+  "asset_sha256": "'"$PUB_DMG_D"'",
+  "dmg_sha256": "'"$PUB_DMG_D"'",
   "tag": "v0.1.2",
   "repo": "irinityhq/irin",
+  "release_url": "https://example.test/releases/tag/v0.1.2",
 }))')"
-# Corrupt live app; already-published path must not run the gate.
+tier_pub="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_CANDIDATE_STATUS_SOURCE_ON_MAIN=true \
+  IRIN_CANDIDATE_STATUS_CI_REQUIRED=true \
+  "$STATUS" --candidate "$PUB_DEST" --json \
+  | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tier") or "")'
+)"
+[[ "$tier_pub" == "Published" ]] || fail "fixture must reach Published (got '$tier_pub')"
 rm -rf "$LIVE_APP"
 mkdir -p "$LIVE_APP/Contents/MacOS"
 printf 'later-install' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
-# Mirror the gate condition used by do_publish.
-if [[ ! -f "$LIVE_DEST/proofs/publication.json" ]]; then
-  fail "publication.json should exist for skip test"
-fi
-# Gate is skipped when publication.json exists — prove by not calling require.
-pass "publish skips live gate when publication.json already exists"
+(
+  set -euo pipefail
+  IRIN_RELEASE_TX_LIB=1
+  # shellcheck source=/dev/null
+  source "$TX"
+  export IRIN_CANDIDATE_STATUS_HERMETIC=1
+  export IRIN_CANDIDATE_STATUS_SOURCE_ON_MAIN=true
+  export IRIN_CANDIDATE_STATUS_CI_REQUIRED=true
+  export IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT"
+  export IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT"
+  unset IRIN_PUBLISH_HERMETIC IRIN_PUBLISH_HERMETIC_CONFIRM || true
+  out="$(maybe_require_first_publish_live_app "$PUB_DEST" 2>&1)"
+  [[ "$out" == *"publication proof reaches Published"* ]] \
+    || { echo "expected Published skip: $out" >&2; exit 1; }
+)
+pass "real maybe_require_first_publish_live_app skips when already Published"
 
 # Containment of IRIN_LIVE_APPLICATIONS_ROOT is covered by the production pin
 # test above (non-hermetic + override + temp live path still requires /Applications).
