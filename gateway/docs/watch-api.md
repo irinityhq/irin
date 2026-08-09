@@ -4,9 +4,18 @@
 
 ## Base
 
-- Served by **gateway-sidecar** over the management UDS (and whatever nginx proxies in compose).
+- Served by **gateway-sidecar** over the management UDS. In the canonical
+  compose stack nginx proxies only a subset of these routes to the HTTP port:
+  the `/watch/outbox/` prefix, `/watch/ui-snapshot/{tenant}`, and the
+  arm/disarm routes. Everything else on this page — including force-wake,
+  quarantine clear, tenant policy, stats, and the capability-token mint — is
+  reachable on the UDS only.
 - Errors use **RFC 9457 problem+json** on the guarded API paths documented
-  below.
+  below, with two exceptions that return a plain `{"error": …}` JSON body:
+  - the canary `403 single_tenant_violation`;
+  - the admin `401` on the outbox mutation routes (claim / heartbeat / ack /
+    worker_ack / nack), `POST /watch/tenant-policy/{tenant}`, and the
+    capability-token mint.
 - **Canary:** when `WATCH_CANARY_TENANT` is set (compose often `canary`), tenant-scoped admin paths reject other tenants with `403 single_tenant_violation`. Unset → default tenant name `sovereign` for the tripwire config.
 
 ### Auth classes
@@ -14,7 +23,7 @@
 | Class | Mechanism | Typical routes |
 | --- | --- | --- |
 | Public read | No admin header | list, temperature, audit, stats, verify-chain, outbox **pubkey** |
-| Admin bearer | `WATCH_ADMIN_TOKEN` or `BOOTSTRAP_TOKEN` (empty → all admin 401) | ui-snapshot, force-wake, quarantine clear, outbox rows, claim/ack/… |
+| Admin bearer | `WATCH_ADMIN_TOKEN` or `BOOTSTRAP_TOKEN` (empty → all admin 401) | ui-snapshot, force-wake, quarantine clear, outbox rows, claim/ack/…, capability-token mint |
 | Arm principal | `Bearer name:token` from `GW_ARM_PRINCIPALS` | arm stage/confirm; see the [arming runbook](runbooks/arming-authorization.md) |
 
 Admin comparison fails closed for an empty expected secret, caps bearer length
@@ -46,6 +55,13 @@ Fields include id, sentinel, fired_at, state_json, reason, prev_hash, hash.
 ### `GET /watch/stats`
 
 Process-wide WatchStats: infra failures, pending/lease/dup, spend_today + spend_cap_usd, arm_rejected_unauth, recon, etc. Spend gauge degrades to 0.0 on DB failure and bumps a failure counter.
+The response also carries per-sentinel (`sentinels`) and per-tenant
+(`temperatures`) slices. When a slice's query fails the sidecar omits the value
+rather than reporting a zero — `fires_total` is dropped from the sentinel entry
+and the tenant's temperature entry is skipped — and each omission bumps its own
+companion counter (`sentinel_fires_read_failures_total`,
+`temperature_read_failures_total`) so a blind gauge is distinguishable from a
+genuine zero.
 
 ### `GET /watch/verify-chain/{tenant}`
 
@@ -54,6 +70,16 @@ Walk per-tenant hash chain; **5s** budget → 504 on exceed. Returns **200** wit
 ### `GET /watch/ui-snapshot/{tenant}`
 
 **Admin + canary.** Sanitized projection for UI: sentinel readiness, temperature, recent fires (no raw state/reason dump), budget, degradation, **`action_production_armed`** (live kill channel present — not merely env).
+
+It also carries `recent_execute_receipts`: a bounded tail (20) of redacted
+Earned Execution receipts with exactly seven fields — `token_id`, `decision`
+(`completed`/`refused`/`pending`/`expired`/`dismissed`/`bound`), `action`
+(`quarantine_producer`), `result`, `directive_id`, `in_response_to`, `at_ms`.
+`result` is only `"acked"` or a ProblemDetails **title** (capped at 96 chars);
+it is null for lifecycle-only decisions. `in_response_to` is null when the
+joined Outbox row no longer exists (a receipt may outlive its escalation).
+Raw capability tokens, signatures,
+envelopes, and free-form `last_error` detail are never projected.
 
 ---
 
@@ -113,6 +139,26 @@ built-in autonomous worker loop that calls it is separately default-off through
 
 Admin + required `X-Tenant-Scope` + canary. Returns the row to staged/retry
 using `error_reason` and the claim handle.
+
+---
+
+## Capability tokens
+
+### `POST /watch/capability-token/mint`
+
+**Admin bearer + canary tenant.** Body: `tenant` and `directive_id` (both
+required, non-empty → otherwise 400 `invalid-mint-request`), optional `actor`
+(default `operator`) and optional `expires_at` (Unix ms). `expires_at` must be
+later than now and no more than **24h** out; the default lifetime is **1h**.
+
+Mints a v1 structured execute token with a fresh `token_id` bound to the given
+`directive_id`, pinned to `subject=watch-producer`,
+`allowed_actions=["execute"]`, `max_cost_usd=0.0`, and
+`approval_required=true`, signed with the directive signing key. The response
+carries `token_id`, `directive_id`, `tenant`, `expires_at`, and the signed
+`capability_token` — returned once to the admin caller; raw token and
+signature material are never logged. **503** `signing-key-unavailable` when the
+directive signing key is not initialized.
 
 ---
 
@@ -231,9 +277,10 @@ not reach paid Council work.
 
 ## Implementation references
 
-- Route mounting: [`../sidecar-rs/src/main.rs`](../sidecar-rs/src/main.rs)
-- HTTP handlers and authentication guards: [`../sidecar-rs/src/watch/api.rs`](../sidecar-rs/src/watch/api.rs)
-- Outbox and spend storage: [`../sidecar-rs/src/watch/db.rs`](../sidecar-rs/src/watch/db.rs)
+- Route mounting: [`../sidecar-rs/src/routes/mod.rs`](../sidecar-rs/src/routes/mod.rs)
+- HTTP handlers and authentication guards: [`../sidecar-rs/src/watch/api/`](../sidecar-rs/src/watch/api)
+- Outbox storage: [`../sidecar-rs/src/watch/db/outbox_store.rs`](../sidecar-rs/src/watch/db/outbox_store.rs)
+- Spend and claim storage: [`../sidecar-rs/src/watch/db/claims_spend.rs`](../sidecar-rs/src/watch/db/claims_spend.rs)
 - Quarantine state machine: [`../sidecar-rs/src/watch/quarantine.rs`](../sidecar-rs/src/watch/quarantine.rs)
 - Producer startup: [`../sidecar-rs/src/watch/runner.rs`](../sidecar-rs/src/watch/runner.rs)
 - Built-in worker loop: [`../sidecar-rs/src/watch/worker.rs`](../sidecar-rs/src/watch/worker.rs)

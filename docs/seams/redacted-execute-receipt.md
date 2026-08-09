@@ -20,6 +20,7 @@ Token wire/JCS authority is
 | Server projection / list | `gateway/sidecar-rs/src/watch/db/outbox_store.rs` — `list_recent_execute_receipts` |
 | Snapshot assembly | `gateway/sidecar-rs/src/watch/api/stats.rs` — `ui_snapshot_json` path that attaches recent receipts |
 | Client whitelist / parse | `council-rs/warroom/web/lib/watch-gateway.ts` — `EXECUTE_RECEIPT_KEYS`, `assertRedactedExecuteReceipt` |
+| Accept/reject field set (both sides) | `docs/seams/fixtures/execute_receipt_cases.json` — shared corpus loaded by `gateway/sidecar-rs/tests/watch_api.rs` and `watch-gateway.test.ts`; the accept cases are the exact key allowlist, so a field change lands here in the same PR |
 | Client proof | `council-rs/warroom/web/lib/watch-gateway.test.ts` |
 | Pack / Tauri only if shipping surface changes | `make -C council-rs warroom-check` |
 

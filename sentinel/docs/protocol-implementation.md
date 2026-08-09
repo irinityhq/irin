@@ -85,9 +85,10 @@ The conformance tests cover these fail-closed edges as well as the nominal RFC
   (`scope.tenant` must match the expected tenant), and rejection classes for
   `proposal.v1`.
 - The authoritative cases are
-  [`fence_vectors.rs`](../sovereign-protocol/src/fence_vectors.rs) and the
+  [`fence_vectors.rs`](../sovereign-protocol/src/fence_vectors.rs); the
   [`fence_vectors_golden.rs`](../sovereign-protocol/tests/fence_vectors_golden.rs)
-  cross-consumer test.
+  test guards that the shared corpus is well-formed. It does not run a fence —
+  each consumer adds its own test that runs its fence over every case.
 
 ---
 
@@ -99,8 +100,25 @@ The conformance tests cover these fail-closed edges as well as the nominal RFC
 | `WorkerProvenanceGuard` / status | Worker completion; includes fabrication_guard posture |
 | `ProviderProvenance` / `ProviderResponse` | Provider call receipts |
 | `SeatResponse` | Council seat output shape (also referenced from council persistence docs) |
-| `CapabilityToken` | prepare/execute sensitive path — field set must be documented for integrators |
+| `CapabilityToken` | prepare/execute sensitive path — wire fields and signing preimage below |
 | `ProblemDetails` | RFC 9457 problem+json errors |
+
+### CapabilityToken wire shape
+
+Serialized fields: `actor`, `subject`, `tenant`, `allowed_actions`,
+`approval_required`, `expires_at` (Unix epoch milliseconds), `max_cost_usd`
+(nullable), `token_id`, `directive_id`, and `signature` (omitted while unset).
+`token_id` and `directive_id` are required and non-empty on the wire:
+`token_id` with `tenant` is the durable replay key, and `directive_id` names
+the one directive outbox id the token may authorize.
+
+Signature preimage: the signer clears `signature`, canonicalizes the remaining
+fields with `jcs::to_jcs_bytes`, signs those bytes, and stores the base64
+signature back on the token; verification recomputes the same preimage. The
+preimage is therefore RFC 8785 key order with ES6 numbers (a whole
+`max_cost_usd` emits as `10`, not `10.0`), **not** serde declaration order.
+The byte-exact golden is `t22k_capability_token_golden` in
+[`tests/wire_golden.rs`](../sovereign-protocol/tests/wire_golden.rs).
 
 ---
 

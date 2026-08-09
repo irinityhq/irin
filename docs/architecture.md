@@ -163,12 +163,14 @@ is interesting without calling an LLM
 ([`sentinel/COMMS_CONTRACT.md`](../sentinel/COMMS_CONTRACT.md)). Gateway's
 stock Sentinel implementations live under
 `gateway/sidecar-rs/src/watch/sentinels/` (file inbox, silence, queue depth,
-watch health, ledger delta, anomaly, completion verification, precedent
-integrity). The canonical local runtime loads a committed test profile with
-exactly one deterministic file-inbox watch, and the watch producer and
-dispatcher are disabled by default (`WATCH_DISPATCHER_ENABLED=false`,
-`WATCH_PRODUCER_ENABLED=false`). Enabling a Sentinel definition does not
-enable the producer, and enabling the producer does not arm an action path
+watch health, ledger delta, act-directive sequence, anomaly, completion
+verification, precedent integrity). The canonical local runtime loads no
+Sentinel profile by default (the compose stack sets no `SENTINELS_CONFIG_PATH`
+and boots with zero sentinels; only the canary overlay pins a committed test
+profile), and the watch producer and dispatcher are disabled by default
+(`WATCH_DISPATCHER_ENABLED=false`, `WATCH_PRODUCER_ENABLED=false`). Enabling
+a Sentinel definition does not enable the producer, and enabling the producer
+does not arm an action path
 — those are three independent gates. Arming requires an explicit,
 hardware-backed operator ceremony; see
 [`gateway/docs/runbooks/arming-authorization.md`](../gateway/docs/runbooks/arming-authorization.md).

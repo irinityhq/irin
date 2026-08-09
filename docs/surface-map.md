@@ -43,6 +43,7 @@ admin authentication. The arm ceremony uses principals from
 | `POST /watch/outbox/{id}/ack` | Mounted admin API for acknowledgement; dismissed or expired rows return 409. |
 | `POST /watch/outbox/{id}/worker_ack` | Mounted admin completion API accepting `WorkerProvenanceGuard`; it is distinct from the default-off built-in worker loop. |
 | `POST /watch/outbox/{id}/nack` | Mounted admin API returning a row to staged/retry state. |
+| `POST /watch/capability-token/mint` | Admin- and canary-guarded mint of one signed execute capability token bound to a directive id. The server pins subject, allowed actions, approval, and cost cap; expiry defaults to one hour and may not exceed 24 hours. Mounted on the sidecar socket only, not proxied at the OpenResty edge. |
 | Tenant policy get/set | Canary-guarded policy surface used by capability-token checks. |
 
 Admin bearer comparison fails closed for an empty expected secret, caps bearer
@@ -78,6 +79,7 @@ operator procedure is [Arming and authorization](../gateway/docs/runbooks/arming
 | `gateway-active-watch` | Checks HTTP queue depth or a JSONPath threshold. |
 | `watch-health-watch` | Detects quarantined or hard-killed Sentinels and chain breaks. |
 | `ledger-delta-watch` | Compares daily spend with a baseline. |
+| `sequence-watch` | Detects a burst of individually valid Act directives: a read-only sliding-window count of recent Outbox Act rows and their aggregate cost. |
 | `anomaly-watch` | Detects failure-rate spikes against an EWMA. |
 | `completion-verify-watch` | Detects acknowledged Outbox rows without `VerifiedExact` provenance. |
 | `precedent-integrity-watch` | Detects truncation or mutation of the sessions index. |
@@ -140,7 +142,8 @@ and frozen [`COMMS_CONTRACT.md`](../sentinel/COMMS_CONTRACT.md).
 
 ## Implementation references
 
-- Watch route mounting and boot gates: [`gateway/sidecar-rs/src/main.rs`](../gateway/sidecar-rs/src/main.rs)
+- Watch route mounting: [`gateway/sidecar-rs/src/routes/mod.rs`](../gateway/sidecar-rs/src/routes/mod.rs)
+- Boot gates and sentinel-config policy: [`gateway/sidecar-rs/src/boot.rs`](../gateway/sidecar-rs/src/boot.rs)
 - Watch handlers and arm ceremony: [`gateway/sidecar-rs/src/watch/api.rs`](../gateway/sidecar-rs/src/watch/api.rs)
 - Producer startup and writer lifecycle: [`gateway/sidecar-rs/src/watch/runner.rs`](../gateway/sidecar-rs/src/watch/runner.rs)
 - Built-in worker loop: [`gateway/sidecar-rs/src/watch/worker.rs`](../gateway/sidecar-rs/src/watch/worker.rs)

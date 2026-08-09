@@ -95,6 +95,13 @@ It does **not** create, upload to, or publish a GitHub Release. There is no
 `--dry-run-rc` alias; that name was removed because it implied a no-effect
 simulation.
 
+One notarization consumes the production cycle for that source SHA. Retrying
+under the same unexpired T1 packet reuses matching completed effects; a second
+prepare for the same SHA requires `--t3-exception PATH`, whose words must name
+that SHA and mention Apple, and each exception packet is single-use by its own
+digest. Prepare also records the checkout HEAD and whether `scripts/` or
+`packaging/` was dirty at that moment.
+
 ### 2) Install proof + T2 acceptance
 
 ```bash
@@ -132,7 +139,9 @@ scripts/release-transaction.sh \
 Publication:
 
 1. Requires production pack mode, version/tag/source equality, Installed proof,
-   and final T2 acceptance (`candidate-status --require Accepted`)
+   and final T2 acceptance (`candidate-status --require Accepted`). It also
+   requires the same checkout HEAD prepare recorded for that source SHA and a
+   currently clean `scripts/` and `packaging/` tree
 2. Promotes the candidate's exact Gateway/sidecar digest refs to immutable
    `vX.Y.Z` labels and re-resolves both labels before the git tag push
 3. Pushes the git tag; waits for the draft release (`release.yml` may attach

@@ -91,8 +91,8 @@ signed DMG for the native desktop product (`IRIN.app`).
 
 War Room includes deliberation, direct-fire prompts, session history, provider
 discovery, cabinet editing, Gateway outbox and Watch views, drift analysis,
-and optional Librarian integration. Configure API, WebSocket, Gateway,
-Librarian, and auth values in Settings.
+and optional Librarian integration. Configure API, WebSocket, Gateway, and auth
+values in Settings.
 
 The installed app always owns its bundled Council. Foreground `make warroom`
 is a separate development process tree. An occupied Council port is a startup

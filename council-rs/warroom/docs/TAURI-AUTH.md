@@ -16,9 +16,16 @@ How the desktop shell and browser reference UI authenticate against
    token**. Setup does not copy or print it.
 3. REST calls send `Authorization: Bearer <token>`.
 4. WebSocket upgrade offers `Sec-WebSocket-Protocol` values `council` and
-   `token.<token>` (browsers cannot set custom WS headers). The server validates
-   `token.<token>` with constant-time compare, then **negotiates `council`** in the
-   101 response so `WebSocket.protocol` is `council` in the UI.
+   `token.<token>` (browsers cannot set custom WS headers). The server checks
+   `Origin` first, then validates `token.<token>` with constant-time compare,
+   then **negotiates `council`** in the 101 response so `WebSocket.protocol` is
+   `council` in the UI.
+5. The `Origin` gate applies to every WebSocket upgrade, including the
+   token-less loopback posture. A present `Origin` must satisfy the same allow
+   predicate as HTTP CORS — loopback plus configured origins such as
+   `tauri://localhost` — or the upgrade is refused with 403; a correct token
+   does not override it. A request with no `Origin` header is a non-browser
+   local client and stays allowed.
 
 `COUNCIL_DEV_NO_AUTH` is not set by the installed release app.
 

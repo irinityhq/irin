@@ -12,6 +12,7 @@ only on GitHub-hosted runners.
 | --- | --- | --- |
 | Private-repository, same-repository pull request authored by `iws17` | Restricted runner group with the `irin-ci` label; selected Tauri shell work uses `macos-15` | Changed-path lanes plus always-on checks |
 | Public repository, fork, bot, or any other pull request | `ubuntu-latest`; selected Tauri shell work uses `macos-15` | Changed-path lanes plus always-on checks |
+| Merge-queue check (`merge_group`) | Restricted runner group while private; `ubuntu-latest` when public; Tauri shell work uses `macos-15` | Path-scoped to the merge group's exact `base_sha...head_sha` diff plus always-on checks |
 | Push to `main` | `ubuntu-latest`; Tauri shell work uses `macos-15` | Path-scoped to that push's exact `before...sha` diff plus always-on checks; not a full integrated matrix |
 | `workflow_dispatch` | Restricted runner group while private; `ubuntu-latest` when public; Tauri shell work uses `macos-15` | Full matrix; Gateway smoke remains explicit opt-in; an opted-in private `main` run also performs the exact-source no-spend proof |
 | Nightly schedule | Restricted runner group while private; `ubuntu-latest` when public; Tauri shell work uses `macos-15` | Full matrix |
@@ -28,6 +29,12 @@ request event context for the called graph, so scope classification and
 label-gated lanes retain their normal behavior. Called job names receive the
 `ci /` prefix; keeping the caller job id stable preserves the required
 `ci / CI required` context.
+
+Merge-queue checks enter through the same dispatcher and the same base pin, so
+the protected context name is identical for a queued merge and an ordinary pull
+request. `ci.yml` intentionally has no top-level `merge_group` trigger: that
+would dual-run a second graph whose job names lack the `ci /` prefix and never
+satisfy the protected context.
 
 **Consequence:** an ordinary PR that edits `ci.yml` is linted and classified,
 but the proposed workflow revision is **not** executed by the ordinary PR
@@ -64,8 +71,11 @@ covers the discarded merge. Operator recovery if the cap is approached or
 overflow cancels a run: stop the held-fix merge cadence, let the queue drain,
 re-run the cancelled main SHA (or re-push an empty commit only when necessary),
 and do not treat a later path-scoped run as covering a missing receipt.
-Superseded-PR cancellation lives only on `ci-pr.yml` (per-PR group,
-`cancel-in-progress: true`) and never shares a concurrency mapping with
+Superseded-PR cancellation lives only on `ci-pr.yml`, which keys its group on
+the pull-request number with `cancel-in-progress: true`. On that same
+dispatcher, merge-queue runs key on the merge group's head SHA and set
+`cancel-in-progress: false`, so a queued merge cannot be superseded by
+ordinary pull-request updates. Neither group shares a concurrency mapping with
 `queue: max`.
 
 Scheduled and manual runs use the full integrated matrix and unique concurrency
@@ -174,16 +184,19 @@ packages instead of reinstalling them for each run.
 
 ## CodeQL advanced setup
 
-`CodeQL Advanced` runs on pull requests, pushes to `main`, a weekly schedule,
-and manual dispatch. It uses the restricted runner group only for the private,
-same-repository trusted path and GitHub-hosted capacity otherwise. It analyzes
+`CodeQL Advanced` runs on pull requests, merge-queue checks, pushes to `main`,
+a weekly schedule, and manual dispatch. It uses the restricted runner group
+only for the private, same-repository trusted path and GitHub-hosted capacity
+otherwise. It analyzes
 Actions, JavaScript/TypeScript, Python, and Rust independently, then reports
 the stable `CodeQL required` aggregate. The aggregate is a separate
 branch-protection context rather than part of `ci / CI required`.
 
-Dependency review runs on pull requests with read-only permissions and a
-full-SHA-pinned GitHub action. Its stable `Dependency Review` check rejects
-newly introduced vulnerabilities of moderate severity or higher.
+Dependency review runs on pull requests and merge-queue checks with read-only
+permissions and a full-SHA-pinned GitHub action. Its stable `Dependency Review`
+check rejects newly introduced vulnerabilities of moderate severity or higher.
+Merge-queue runs pass the merge group's base and head refs explicitly, because
+the action derives them automatically only on a pull-request event.
 
 ## Branch-protection contract
 

@@ -64,13 +64,15 @@ War Room exposes these primary workflows:
 - **Direct Fire** sends a focused single-seat prompt.
 - **History** reads saved sessions, synthesis, lineage, and exports.
 - **Outbox** reads signed Gateway directives.
-- **Watch** reads registered Sentinels, fires, and watch-plane status.
+- **Watch** reads registered Sentinels, recent fires, redacted execute
+  receipts, budget burn, and narrow degradation counters. On the desktop app it
+  also carries the **Watch sentinels** toggle and **Open inbox folder**.
 - **Discover** scans exact provider transports. It shows unavailable paths for
   setup guidance while cabinet, fork, and validator selectors disable them.
 - **Cabinets** reads and edits local cabinet YAML.
 - **Drift** compares normal and blind reruns.
 - **Librarian** proxies an optional separately configured local service.
-- **Settings** owns runtime endpoints, auth, Council root, and app controls.
+- **Settings** owns runtime endpoints, auth, and app controls.
 
 An empty Outbox does not mean Council is unhealthy. It means no signed
 directive is available from the configured Gateway. A Watch view can be
@@ -78,7 +80,8 @@ readable while action production remains disabled.
 
 ## Backend contract
 
-`src/server.rs` owns the REST and WebSocket server. Core endpoints include:
+The `src/server/` module owns the REST and WebSocket server. Core endpoints
+include:
 
 - `GET /api/health`
 - `GET /api/discover`
@@ -91,11 +94,23 @@ readable while action production remains disabled.
 - `/api/mapmaker/*`
 - `/api/meta-review/*`
 - `/api/librarian/*`
+- `/api/governance/*` (GET-only Gateway Watch and Outbox projection)
 - `GET /ws/deliberate`
+- `GET /ws/librarian/{chat_id}`
 
 The Gateway service endpoint can require `X-Gateway-Auth`. Interactive REST
 uses bearer auth when `COUNCIL_AUTH_TOKEN` is set. The WebSocket client carries
 the same token through its negotiated subprotocol.
+
+WebSocket upgrades are also Origin-gated: a request that carries an `Origin`
+header must match the same allow predicate as HTTP CORS (loopback plus the
+configured origins, which include `tauri://localhost`), otherwise the upgrade
+is refused with 403 before the token is considered. A request without an
+`Origin` header is treated as a non-browser local client and stays allowed.
+
+`/ws/deliberate` shares one concurrency cap with `POST /api/deliberate`. The
+cap defaults to 4 and is set by `COUNCIL_MAX_CONCURRENT_DELIBERATIONS`; an
+upgrade that finds the pool full fails fast with 429 rather than queueing.
 
 ## Deliberation WebSocket
 
@@ -126,8 +141,10 @@ wire-shape authority. Change them together.
 ## Runtime settings
 
 `warroom/web/lib/runtime-config.ts` stores the API base, WebSocket base,
-Gateway base, Librarian base, auth token, and Council root in local storage.
-`NEXT_PUBLIC_*` values provide build-time defaults.
+Gateway base, and Librarian base in local storage. The auth token is kept in
+session storage instead, and a token written by an older build is scrubbed from
+local storage rather than hydrated. `NEXT_PUBLIC_*` values provide build-time
+defaults.
 
 Prefer loopback URLs. Non-loopback endpoints can transmit the configured auth
 token to another host and should be used only across a trusted private
@@ -136,8 +153,10 @@ transport.
 ## Librarian integration
 
 The Librarian tab is optional. Council owns the UI and local chat wrapper;
-the configured Librarian service owns retrieval and generation. Set its base
-URL in Settings. When unavailable, the tab reports an offline state without
+the configured Librarian service owns retrieval and generation. Its base URL
+comes from the `LIBRARIAN_BASE_URL` build default; the debug desktop runtime
+additionally exposes a Librarian base field in Settings that is passed to its
+development sidecar. When unavailable, the tab reports an offline state without
 blocking Council or Gateway workflows.
 
 ## Tests

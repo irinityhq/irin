@@ -23,7 +23,11 @@ not alternate operator installation targets.
 Development-only overrides:
 
 - `COUNCIL_RS_DIR` — repo root (default: parent of `warroom-tauri/`)
-- Council binary path — Settings UI or explicit path to `target/release/council`
+
+The council binary is resolved by the app, never supplied by the operator: the
+bundled `Contents/MacOS/council` when present, otherwise
+`{COUNCIL_RS_DIR|workspace}/target/release/council` for development. Any other
+path is refused.
 
 **Ports:** API/WS default **8765**. Watch and Outbox use Council's authenticated
 `/api/governance/*` proxy; Gateway's default **18080** base is only an optional
@@ -31,7 +35,7 @@ direct health probe in Settings. The desktop connection still accepts only port
 **8765**; debug sidecar spawning uses that same port.
 
 **Settings:** Gear icon in the War Room nav (not Cabinets). Persist API/WS
-bases, an optional Gateway health base, auth token, and optional council binary path. See
+bases, an optional Gateway health base, and an auth token. See
 `warroom/docs/TAURI-AUTH.md`.
 
 ## Internal native development harness
@@ -65,7 +69,7 @@ cargo build --release -p council-rs --bin council
 cd council-rs/warroom/web && npm run dev
 ```
 
-See `../warroom/README.md` and `../docs/war-room.md`.
+See `../docs/war-room.md`.
 
 ## Tests
 

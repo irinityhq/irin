@@ -114,6 +114,12 @@ Only one live producer writer per `watch.db`. Heartbeat default **30s**, stale *
   loop. Authenticated claim, heartbeat, ack, worker-ack, and nack routes remain
   mounted independently. The built-in loop is not an operator-ready autonomous
   execution feature.
+- The only effect the worker loop can execute is `quarantine_producer`, which
+  disarms the producer. It requires a signed `execute` directive whose verified
+  envelope scopes `tenant`, `in_response_to`, `subject=watch-producer`, and
+  `allowed_actions: ["quarantine_producer"]`, plus a capability token that is
+  still valid at effect time. `prepare` and `execute` without a valid token,
+  and every other action, are nacked fail-closed.
 
 ## Related docs
 

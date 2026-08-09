@@ -25,7 +25,7 @@ hand, no hardware enrollment.
 
 Internal machinery names stay unchanged: `test/demo.sh`,
 `docker-compose.demo.yml`, compose project `irin-demo`, and the
-`DEMO_GW_PORT`/`DEMO_COUNCIL_PORT`/`DEMO_ALLOW_BUILD` env vars are implementation
+`DEMO_GW_PORT`/`DEMO_ALLOW_BUILD` env vars are implementation
 details, not the public command names.
 
 ## What it does (and does not do) for you
@@ -33,7 +33,8 @@ details, not the public command names.
 - **Generates throwaway dev secrets** (`openssl rand`) into `.env.demo` — it
   **never writes or reads `.env`**, so it cannot clobber a real config.
 - **Runs fully isolated**: its own compose project (`irin-demo`), its own host
-  ports (gateway `28080`, local deliberation endpoint `28765` — never `18080`), its own named
+  port (gateway `28080` — never `18080`; the local no-spend deliberation
+  endpoint is a compose-internal service and publishes no host port), its own named
   volumes, and its **own ephemeral ledger key** under `.demo-state/` (never your
   `~/.irin/ledger_key.pem`). It is safe to run on a machine that is already
   running `make -C gateway up` or a live/canary stack — it can never
@@ -61,7 +62,6 @@ details, not the public command names.
 | Env | Default | Purpose |
 |---|---|---|
 | `DEMO_GW_PORT` | `28080` | Gateway host port for the isolated verification stack |
-| `DEMO_COUNCIL_PORT` | `28765` | Local no-spend deliberation endpoint port |
 | `DEMO_POLL_TIMEOUT` | `90` | Seconds to wait for the closed loop |
 | `DEMO_ALLOW_BUILD` | `0` | Set `1` on a machine you own to build images from **this checkout** (exact source; ~8GB Docker) |
 | `DEMO_PULL` | `0` | Set `1` only to pull published Hub tags; **may lag this git tip** — not the provenance path |
@@ -69,10 +69,11 @@ details, not the public command names.
 ## Requirements
 
 `git`, `make` (stock Ubuntu server ships without it: `apt install make`),
-`docker` + `docker compose` v2, `openssl`, `python3` (with the stdlib; the
-optional gateway-surface Ed25519 re-verification also uses the `cryptography`
-package if it is importable), and `jq`. The reused image already contains
-`sqlite3`.
+`docker` + `docker compose` v2, `openssl`, `python3` with the `cryptography`
+package (`pip3 install cryptography` — preflight refuses to run without it,
+because the gateway-surface Ed25519 re-verification is a required step and
+fails the run when it does not pass), and `jq`. The reused image already
+contains `sqlite3`.
 
 Building the images yourself (`DEMO_ALLOW_BUILD=1`) additionally requires
 **BuildKit** (`docker buildx`) — included in Docker Desktop and docker-ce; on
@@ -102,5 +103,4 @@ a documented **Day-2 operator** setup, not this fresh-clone path. See
   failure): `docker compose -p irin-demo -f gateway/docker-compose.yml -f
   gateway/docker-compose.demo.yml logs --tail=80 sidecar`, then `make
   verify-down`.
-- **Port already in use** — set `DEMO_GW_PORT` / `DEMO_COUNCIL_PORT` to free
-  ports.
+- **Port already in use** — set `DEMO_GW_PORT` to a free port.

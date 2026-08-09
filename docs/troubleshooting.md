@@ -67,9 +67,10 @@ If `make warroom` or the installed app fails with a port already occupied
 error, another process — often an old manual `council --serve`, `next
 start`, or a previous IRIN runtime that did not shut down cleanly — owns
 that port. Stop the desktop app or the old process, then retry. `make
-verify` never conflicts with the canonical ports: it uses `28080` and
-`28765` by default (`DEMO_GW_PORT`, `DEMO_COUNCIL_PORT`) in an isolated
-Docker Compose project. A `make worktree` runtime gets its own
+verify` never conflicts with the canonical ports: it publishes only its own
+loopback gateway port, `28080` by default (`DEMO_GW_PORT`), in an isolated
+Docker Compose project, and its no-spend deliberation stub stays on the
+Compose network with no host port. A `make worktree` runtime gets its own
 deterministic, non-conflicting port block derived from the worktree path.
 
 The optional CLI adapters bind `0.0.0.0` so Gateway containers can reach them
@@ -107,8 +108,17 @@ phone access after Council is ready: IRIN publishes on dedicated HTTPS port
 port 443, so another Serve root on 443 can remain. The ready URL is
 `https://<MagicDNS>:8443` (include the port). Open that origin in a browser on
 any device that is both on the same tailnet and allowed by the operator's
-Tailscale ACLs or grants; War Room uses same-origin REST and WebSocket. If
-Council requires an auth token, set it under Settings → Auth token on that
+Tailscale ACLs or grants; War Room uses same-origin REST and WebSocket.
+
+Council applies one origin allowlist to both CORS and WebSocket upgrades:
+any loopback origin, plus the origins listed in `COUNCIL_CORS_ORIGINS`. A
+tailnet origin is not loopback, so if the phone loads the page but the
+deliberation socket is refused with 403, add that exact origin (for example
+`https://<MagicDNS>:8443`) to `COUNCIL_CORS_ORIGINS` in the environment that
+launches Council and restart it. A request with no `Origin` header — a CLI or
+other non-browser local client — is still allowed.
+
+If Council requires an auth token, set it under Settings → Auth token on that
 browser and use Test connection. The token remains only for that browser tab's
 session and is not written to durable localStorage. Serve is private, not
 device-exclusive.
@@ -124,9 +134,21 @@ owns its bundled Council; source development uses foreground `make warroom`.
 ## Watch looks empty or quiet
 
 An empty Outbox or a quiet Watch tab is expected behavior, not a health
-problem: the canonical local runtime loads exactly one deterministic
-test Sentinel, and the watch dispatcher and producer are disabled by
-default. Watch's War Room view is also a bounded, sanitized snapshot (recent
+problem: the canonical local runtime loads no Sentinel profile by default
+(zero registered sentinels), and the watch dispatcher and producer are
+disabled by default.
+
+The installed app's Gateway Pack ships with **no** watch profile, so zero
+registered Sentinels is its normal quiet state. War Room's Watch tab carries
+a **Watch sentinels** toggle: turning it on installs the bundled default
+profile (one `file-inbox-watch` Sentinel on the `canary` tenant) into
+app-owned state and briefly recreates the pack so the sidecar reads it;
+turning it off removes the file and recreates back to zero Sentinels.
+**Open inbox folder** opens the host directory that Sentinel polls.
+Registering a Sentinel does not start the producer or dispatcher and does not
+arm anything.
+
+Watch's War Room view is also a bounded, sanitized snapshot (recent
 fire counts and a capped recent-fires list), not the full underlying ledger
 — see [`docs/architecture.md`](architecture.md) for how it relates to the
 signed Outbox. If Council and Gateway both report healthy, a quiet Watch tab
