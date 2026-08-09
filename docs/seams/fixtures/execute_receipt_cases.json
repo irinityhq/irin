@@ -1,0 +1,168 @@
+[
+  {
+    "name": "completed_acked",
+    "fault": "valid completed receipt with acked result — drift canary for the exact 7-field whitelist",
+    "expect": "accept",
+    "reason_substring": null,
+    "receipt": {
+      "token_id": "tok-1",
+      "decision": "completed",
+      "action": "quarantine_producer",
+      "result": "acked",
+      "directive_id": "dir-1",
+      "in_response_to": "esc-1",
+      "at_ms": 42
+    }
+  },
+  {
+    "name": "pending_null_result",
+    "fault": "valid pending lifecycle with null result (lifecycle stays in decision)",
+    "expect": "accept",
+    "reason_substring": null,
+    "receipt": {
+      "token_id": "tok-pending",
+      "decision": "pending",
+      "action": "quarantine_producer",
+      "result": null,
+      "directive_id": "dir-pending",
+      "in_response_to": "esc-pending",
+      "at_ms": 1000
+    }
+  },
+  {
+    "name": "refused_problem_title",
+    "fault": "valid refused with ProblemDetails title in result (detail never projected)",
+    "expect": "accept",
+    "reason_substring": null,
+    "receipt": {
+      "token_id": "tok-refused",
+      "decision": "refused",
+      "action": "quarantine_producer",
+      "result": "invalid-capability-token",
+      "directive_id": "dir-refused",
+      "in_response_to": "esc-refused",
+      "at_ms": 2000
+    }
+  },
+  {
+    "name": "null_in_response_to",
+    "fault": "valid receipt with null in_response_to (orphaned outbox join)",
+    "expect": "accept",
+    "reason_substring": null,
+    "receipt": {
+      "token_id": "tok-orphan",
+      "decision": "bound",
+      "action": "quarantine_producer",
+      "result": null,
+      "directive_id": "dir-orphan",
+      "in_response_to": null,
+      "at_ms": 7
+    }
+  },
+  {
+    "name": "raw_token_present",
+    "fault": "single fault: raw_token secret field present",
+    "expect": "reject",
+    "reason_substring": "field set invalid",
+    "receipt": {
+      "token_id": "tok-1",
+      "decision": "completed",
+      "action": "quarantine_producer",
+      "result": "acked",
+      "directive_id": "dir-1",
+      "in_response_to": "esc-1",
+      "at_ms": 42,
+      "raw_token": "LEAK"
+    }
+  },
+  {
+    "name": "unknown_field",
+    "fault": "single fault: unexpected top-level field",
+    "expect": "reject",
+    "reason_substring": "field set invalid",
+    "receipt": {
+      "token_id": "tok-1",
+      "decision": "completed",
+      "action": "quarantine_producer",
+      "result": "acked",
+      "directive_id": "dir-1",
+      "in_response_to": "esc-1",
+      "at_ms": 42,
+      "extra": 1
+    }
+  },
+  {
+    "name": "unrestricted_decision",
+    "fault": "single fault: decision not in finite set",
+    "expect": "reject",
+    "reason_substring": "decision invalid",
+    "receipt": {
+      "token_id": "tok-1",
+      "decision": "maybe",
+      "action": "quarantine_producer",
+      "result": "acked",
+      "directive_id": "dir-1",
+      "in_response_to": "esc-1",
+      "at_ms": 42
+    }
+  },
+  {
+    "name": "unrestricted_action",
+    "fault": "single fault: action not in finite set",
+    "expect": "reject",
+    "reason_substring": "action invalid",
+    "receipt": {
+      "token_id": "tok-1",
+      "decision": "completed",
+      "action": "shell_exec",
+      "result": "acked",
+      "directive_id": "dir-1",
+      "in_response_to": "esc-1",
+      "at_ms": 42
+    }
+  },
+  {
+    "name": "lifecycle_in_result",
+    "fault": "single fault: lifecycle string smuggled into result",
+    "expect": "reject",
+    "reason_substring": "result only allowed",
+    "receipt": {
+      "token_id": "tok-1",
+      "decision": "pending",
+      "action": "quarantine_producer",
+      "result": "staged",
+      "directive_id": "dir-1",
+      "in_response_to": "esc-1",
+      "at_ms": 42
+    }
+  },
+  {
+    "name": "completed_without_acked",
+    "fault": "single fault: completed with null result",
+    "expect": "reject",
+    "reason_substring": "result required",
+    "receipt": {
+      "token_id": "tok-1",
+      "decision": "completed",
+      "action": "quarantine_producer",
+      "result": null,
+      "directive_id": "dir-1",
+      "in_response_to": "esc-1",
+      "at_ms": 42
+    }
+  },
+  {
+    "name": "missing_in_response_to",
+    "fault": "single fault: required key absent",
+    "expect": "reject",
+    "reason_substring": "field set invalid",
+    "receipt": {
+      "token_id": "tok-1",
+      "decision": "completed",
+      "action": "quarantine_producer",
+      "result": "acked",
+      "directive_id": "dir-1",
+      "at_ms": 42
+    }
+  }
+]

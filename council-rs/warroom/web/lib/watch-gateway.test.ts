@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { deriveCooldownState, parseWatchSnapshot } from "./watch-gateway";
 
@@ -12,6 +15,39 @@ const snapshot = {
   budget: { spend_today_usd: 0, spend_cap_usd: 25 },
   degradation: {},
 };
+
+/** Shared execute-receipt corpus (seam fixture). Path pinned via import.meta.url. */
+type CorpusExpect = "accept" | "reject";
+type CorpusCase = {
+  name: string;
+  fault: string;
+  expect: CorpusExpect;
+  reason_substring: string | null;
+  receipt: Record<string, unknown>;
+};
+
+const corpusPath = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "../../../../docs/seams/fixtures/execute_receipt_cases.json",
+);
+const executeReceiptCases: CorpusCase[] = (() => {
+  const raw: unknown = JSON.parse(readFileSync(corpusPath, "utf8"));
+  if (!Array.isArray(raw) || raw.length === 0) {
+    throw new Error(`execute-receipt corpus must be a non-empty array: ${corpusPath}`);
+  }
+  return raw.map((entry) => {
+    const kase = entry as CorpusCase;
+    if (kase.expect !== "accept" && kase.expect !== "reject") {
+      throw new Error(
+        `corpus case '${String(kase.name)}': expect must be accept|reject, got '${String(kase.expect)}'`,
+      );
+    }
+    if (kase.expect === "reject" && !kase.reason_substring) {
+      throw new Error(`corpus reject case '${kase.name}' must pin reason_substring`);
+    }
+    return kase;
+  });
+})();
 
 describe("parseWatchSnapshot", () => {
   it("uses configured canary truth from the BFF", () => {
@@ -35,91 +71,27 @@ describe("parseWatchSnapshot", () => {
     expect(() => parseWatchSnapshot(rest)).toThrow(/collection/);
   });
 
-  const validReceipt = {
-    token_id: "tok-1",
-    decision: "completed" as const,
-    action: "quarantine_producer" as const,
-    result: "acked",
-    directive_id: "dir-1",
-    in_response_to: "esc-1",
-    at_ms: 42,
-  };
+  describe("execute receipt corpus (shared with gateway gate4)", () => {
+    it("corpus is non-empty and reachable from this package", () => {
+      expect(executeReceiptCases.length).toBeGreaterThan(0);
+    });
 
-  it("accepts a well-formed redacted execute receipt", () => {
-    const withReceipt = {
-      ...snapshot,
-      recent_execute_receipts: [validReceipt],
-    };
-    expect(parseWatchSnapshot(withReceipt).recent_execute_receipts).toHaveLength(1);
-  });
-
-  it("accepts pending receipt with null result", () => {
-    const withReceipt = {
-      ...snapshot,
-      recent_execute_receipts: [
-        {
-          ...validReceipt,
-          decision: "pending",
-          result: null,
-        },
-      ],
-    };
-    expect(parseWatchSnapshot(withReceipt).recent_execute_receipts[0].result).toBeNull();
-  });
-
-  it("requires in_response_to key (null allowed)", () => {
-    const missing = { ...validReceipt } as Record<string, unknown>;
-    delete missing.in_response_to;
-    expect(() =>
-      parseWatchSnapshot({ ...snapshot, recent_execute_receipts: [missing] }),
-    ).toThrow(/missing in_response_to|field set invalid/);
-  });
-
-  it("rejects unknown fields including raw_token", () => {
-    expect(() =>
-      parseWatchSnapshot({
-        ...snapshot,
-        recent_execute_receipts: [{ ...validReceipt, raw_token: "LEAK" }],
-      }),
-    ).toThrow(/field set invalid|unknown field/);
-  });
-
-  it("rejects unrestricted decision values", () => {
-    expect(() =>
-      parseWatchSnapshot({
-        ...snapshot,
-        recent_execute_receipts: [{ ...validReceipt, decision: "maybe" }],
-      }),
-    ).toThrow(/decision invalid/);
-  });
-
-  it("rejects unrestricted action values", () => {
-    expect(() =>
-      parseWatchSnapshot({
-        ...snapshot,
-        recent_execute_receipts: [{ ...validReceipt, action: "shell_exec" }],
-      }),
-    ).toThrow(/action invalid/);
-  });
-
-  it("rejects lifecycle strings in result", () => {
-    expect(() =>
-      parseWatchSnapshot({
-        ...snapshot,
-        recent_execute_receipts: [
-          { ...validReceipt, decision: "pending", result: "staged" },
-        ],
-      }),
-    ).toThrow(/result only allowed/);
-  });
-
-  it("rejects completed without acked result", () => {
-    expect(() =>
-      parseWatchSnapshot({
-        ...snapshot,
-        recent_execute_receipts: [{ ...validReceipt, result: null }],
-      }),
-    ).toThrow(/result required/);
+    for (const c of executeReceiptCases) {
+      it(`${c.expect}: ${c.name}`, () => {
+        const body = {
+          ...snapshot,
+          recent_execute_receipts: [c.receipt],
+        };
+        if (c.expect === "accept") {
+          const parsed = parseWatchSnapshot(body);
+          expect(parsed.recent_execute_receipts).toHaveLength(1);
+          expect(parsed.recent_execute_receipts[0]).toMatchObject(c.receipt);
+        } else {
+          // Loader guarantees reject cases pin a reason — no catch-all fallback.
+          expect(() => parseWatchSnapshot(body)).toThrow(new RegExp(c.reason_substring as string));
+        }
+      });
+    }
   });
 });
 

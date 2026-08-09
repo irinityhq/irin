@@ -279,6 +279,143 @@ fn assert_no_denied_keys(value: &serde_json::Value) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Shared execute-receipt corpus (docs/seams/fixtures) — Rust ↔ TS pin
+// ---------------------------------------------------------------------------
+
+/// Seam-owned accept/reject cases for redacted execute receipts. NOT under
+/// sovereign-protocol vectors (those are Rust-only fence cases).
+const EXECUTE_RECEIPT_CORPUS_JSON: &str = include_str!(concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../../docs/seams/fixtures/execute_receipt_cases.json"
+));
+
+#[derive(Debug, serde::Deserialize)]
+struct ExecuteReceiptCorpusCase {
+    name: String,
+    #[allow(dead_code)]
+    fault: String,
+    expect: String,
+    #[allow(dead_code)]
+    reason_substring: Option<String>,
+    receipt: serde_json::Value,
+}
+
+fn execute_receipt_corpus_cases() -> Vec<ExecuteReceiptCorpusCase> {
+    let cases: Vec<ExecuteReceiptCorpusCase> = serde_json::from_str(EXECUTE_RECEIPT_CORPUS_JSON)
+        .expect("docs/seams/fixtures/execute_receipt_cases.json must parse");
+    assert!(
+        !cases.is_empty(),
+        "execute-receipt corpus must be non-empty (vacuous corpus would pass both suites)"
+    );
+    cases
+}
+
+/// Exact field allowlist taken from every accept case in the shared corpus.
+/// Live server projections must emit exactly these keys — adding a server field
+/// without a corpus update fails the gate4 consumer.
+fn execute_receipt_corpus_allowlist() -> Vec<String> {
+    let cases = execute_receipt_corpus_cases();
+    let first = cases
+        .iter()
+        .find(|c| c.expect == "accept")
+        .expect("corpus must include at least one accept case");
+    let keys = sorted_keys(&first.receipt);
+    for c in cases.iter().filter(|c| c.expect == "accept") {
+        assert_eq!(
+            sorted_keys(&c.receipt),
+            keys,
+            "accept case '{}' must share the exact field set with other accepts",
+            c.name
+        );
+    }
+    keys
+}
+
+/// Contract check for a corpus receipt against the server projection shape
+/// (exact allowlist + finite decision/action + result rules). Polarity must
+/// match the War Room parser for every corpus case.
+fn server_receipt_contract(
+    receipt: &serde_json::Value,
+    allowlist: &[String],
+) -> Result<(), String> {
+    const DECISIONS: &[&str] = &[
+        "completed",
+        "refused",
+        "pending",
+        "expired",
+        "dismissed",
+        "bound",
+    ];
+    const ACTIONS: &[&str] = &["quarantine_producer"];
+    if sorted_keys(receipt) != allowlist {
+        return Err(format!(
+            "field set invalid: got {:?}, want {allowlist:?}",
+            sorted_keys(receipt)
+        ));
+    }
+    let decision = receipt
+        .get("decision")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "decision invalid".to_string())?;
+    if !DECISIONS.contains(&decision) {
+        return Err("decision invalid".into());
+    }
+    let action = receipt
+        .get("action")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "action invalid".to_string())?;
+    if !ACTIONS.contains(&action) {
+        return Err("action invalid".into());
+    }
+    if receipt
+        .get("token_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        return Err("token_id invalid".into());
+    }
+    if receipt
+        .get("directive_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .is_none()
+    {
+        return Err("directive_id invalid".into());
+    }
+    let in_response_to = receipt
+        .get("in_response_to")
+        .ok_or_else(|| "missing in_response_to".to_string())?;
+    if !(in_response_to.is_null() || in_response_to.is_string()) {
+        return Err("in_response_to invalid".into());
+    }
+    if !receipt.get("at_ms").map(|v| v.is_number()).unwrap_or(false) {
+        return Err("at_ms invalid".into());
+    }
+    let result = receipt
+        .get("result")
+        .ok_or_else(|| "missing result".to_string())?;
+    if result.is_null() {
+        if matches!(decision, "completed" | "refused") {
+            return Err("result required".into());
+        }
+    } else {
+        let s = result
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| "result invalid".to_string())?;
+        if decision == "completed" && s != "acked" {
+            return Err("completed result must be acked".into());
+        }
+        if !matches!(decision, "completed" | "refused") {
+            return Err("result only allowed for completed/refused".into());
+        }
+    }
+    Ok(())
+}
+
 #[tokio::test]
 async fn gate4_ui_snapshot_has_exact_whitelist_and_no_raw_values() {
     let (_tmp, _path, state) = ui_snapshot_fixture().await;
@@ -424,18 +561,10 @@ async fn gate4_ui_snapshot_projects_redacted_execute_receipts() {
     assert_eq!(receipts[1]["token_id"], "tok-refused");
     assert_eq!(receipts[1]["decision"], "refused");
     assert_eq!(receipts[1]["result"], "invalid-capability-token");
-    assert_eq!(
-        sorted_keys(&receipts[0]),
-        vec![
-            "action",
-            "at_ms",
-            "decision",
-            "directive_id",
-            "in_response_to",
-            "result",
-            "token_id",
-        ]
-    );
+    // Field set is pinned by the shared seam corpus (Rust ↔ TS).
+    let allowlist = execute_receipt_corpus_allowlist();
+    assert_eq!(sorted_keys(&receipts[0]), allowlist);
+    assert_eq!(sorted_keys(&receipts[1]), allowlist);
     assert_no_denied_keys(&value);
 
     let body = String::from_utf8(bytes.to_vec()).unwrap();
@@ -464,6 +593,176 @@ async fn gate4_ui_snapshot_projects_redacted_execute_receipts() {
             );
         }
     }
+}
+
+/// Shared corpus polarity: every accept case matches the server projection
+/// contract; every reject case fails it. Mutating the corpus fails this suite
+/// and the War Room parser suite together.
+#[test]
+fn gate4_ui_snapshot_execute_receipt_corpus_accept_reject() {
+    let allowlist = execute_receipt_corpus_allowlist();
+    let cases = execute_receipt_corpus_cases();
+    for case in cases {
+        let result = server_receipt_contract(&case.receipt, &allowlist);
+        match case.expect.as_str() {
+            "accept" => assert!(
+                result.is_ok(),
+                "accept case '{}' must pass server contract: {:?}",
+                case.name,
+                result
+            ),
+            "reject" => assert!(
+                result.is_err(),
+                "reject case '{}' must fail server contract",
+                case.name
+            ),
+            other => panic!("case '{}': unknown expect {other}", case.name),
+        }
+    }
+}
+
+/// Every reachable projection arm of `project_execute_receipt` (outbox status
+/// × problem-title presence, plus a consumption whose outbox row is gone)
+/// flows through the LIVE `/watch/ui-snapshot` route and must satisfy the
+/// shared corpus contract. Catches drift such as a lifecycle value leaking
+/// into `result` for a status no single-fixture test covers.
+#[tokio::test]
+async fn gate4_ui_snapshot_every_projection_arm_passes_corpus_contract() {
+    let (_tmp, db_path, state) = ui_snapshot_fixture().await;
+    let problem = r#"{"title":"invalid-capability-token","detail":"SECRET_DETAIL_MUST_NOT_LEAK"}"#;
+    // (outbox status, last_error, expected decision, expected result)
+    // Storage CHECK pins status to staged|dismissed|expired|acked, so these
+    // are exactly the reachable outbox-backed arms; a problem title on a
+    // lifecycle status must be ignored, never surfaced as `result`.
+    let arms: &[(&str, Option<&str>, &str, Option<&str>)] = &[
+        ("acked", None, "completed", Some("acked")),
+        ("acked", Some(problem), "completed", Some("acked")),
+        ("expired", None, "expired", None),
+        ("expired", Some(problem), "expired", None),
+        ("dismissed", None, "dismissed", None),
+        ("dismissed", Some(problem), "dismissed", None),
+        (
+            "staged",
+            Some(problem),
+            "refused",
+            Some("invalid-capability-token"),
+        ),
+        ("staged", None, "pending", None),
+    ];
+    for (i, (status, last_error, _, _)) in arms.iter().enumerate() {
+        let token_id = format!("tok-arm-{i}");
+        let directive_id = format!("dir-arm-{i}");
+        let in_response_to = format!("esc-arm-{i}");
+        seed_execute_receipt_fixture(SeedExecuteReceipt {
+            db_path: &db_path,
+            tenant: "configured-canary",
+            token_id: &token_id,
+            directive_id: &directive_id,
+            in_response_to: &in_response_to,
+            status,
+            last_error: *last_error,
+            consumed_at_ms: 10_000 + i as i64,
+        });
+    }
+    // Consumption whose outbox row is gone: LEFT JOIN yields NULL status →
+    // decision "bound", null result, null in_response_to.
+    {
+        use rusqlite::Connection;
+        let conn = Connection::open(&db_path).unwrap();
+        conn.execute(
+            "INSERT INTO capability_token_consumptions
+                (tenant, token_id, directive_id, consumed_at_ms)
+             VALUES ('configured-canary', 'tok-arm-bound', 'dir-arm-bound', 9000)",
+            [],
+        )
+        .unwrap();
+    }
+
+    let response = ui_snapshot_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/watch/ui-snapshot/configured-canary")
+                .header("Authorization", "Bearer snapshot-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let receipts = value["recent_execute_receipts"]
+        .as_array()
+        .expect("recent_execute_receipts array");
+    assert_eq!(receipts.len(), arms.len() + 1, "all arms projected");
+
+    let allowlist = execute_receipt_corpus_allowlist();
+    let mut expected: std::collections::HashMap<String, (&str, Option<&str>)> = arms
+        .iter()
+        .enumerate()
+        .map(|(i, (_, _, decision, result))| (format!("tok-arm-{i}"), (*decision, *result)))
+        .collect();
+    expected.insert("tok-arm-bound".to_string(), ("bound", None));
+    for receipt in receipts {
+        let token_id = receipt["token_id"].as_str().expect("token_id");
+        let (want_decision, want_result) = expected
+            .remove(token_id)
+            .unwrap_or_else(|| panic!("unexpected receipt {token_id}"));
+        server_receipt_contract(receipt, &allowlist)
+            .unwrap_or_else(|e| panic!("live projection for {token_id} broke contract: {e}"));
+        assert_eq!(receipt["decision"], want_decision, "{token_id}");
+        match want_result {
+            Some(result) => assert_eq!(receipt["result"], result, "{token_id}"),
+            None => assert!(
+                receipt["result"].is_null(),
+                "{token_id} result must be null"
+            ),
+        }
+    }
+    assert!(expected.is_empty(), "missing receipts: {expected:?}");
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        !body.contains("SECRET_DETAIL_MUST_NOT_LEAK"),
+        "ProblemDetails detail leaked into snapshot"
+    );
+}
+
+/// Adding a server-side receipt field without updating the corpus fails here:
+/// live projection keys must equal the corpus allowlist.
+#[tokio::test]
+async fn gate4_ui_snapshot_projected_receipt_keys_match_corpus() {
+    let (_tmp, db_path, state) = ui_snapshot_fixture().await;
+    seed_execute_receipt_fixture(SeedExecuteReceipt {
+        db_path: &db_path,
+        tenant: "configured-canary",
+        token_id: "tok-completed",
+        directive_id: "dir-completed",
+        in_response_to: "esc-completed",
+        status: "acked",
+        last_error: None,
+        consumed_at_ms: 3_000,
+    });
+    let response = ui_snapshot_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/watch/ui-snapshot/configured-canary")
+                .header("Authorization", "Bearer snapshot-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let receipt = &value["recent_execute_receipts"][0];
+    let allowlist = execute_receipt_corpus_allowlist();
+    assert_eq!(
+        sorted_keys(receipt),
+        allowlist,
+        "projected receipt keys must match shared corpus allowlist"
+    );
+    server_receipt_contract(receipt, &allowlist).expect("projected receipt must pass contract");
 }
 
 #[tokio::test]
