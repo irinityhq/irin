@@ -23,8 +23,10 @@ hardware-backed ceremony arms the **Gateway Watch producer**, which is the seam
 that can promote a recorded fire toward the dispatcher, paid Council
 deliberation, and a signed Outbox directive.
 
-The canonical runtime loads one test Sentinel but leaves both the Gateway Watch
-dispatcher and producer disabled. These are separate controls:
+The canonical runtime loads no Sentinel profile by default — the sidecar boots
+healthy with zero Sentinels unless `SENTINELS_CONFIG_PATH` names one — and
+leaves both the Gateway Watch dispatcher and producer disabled. These are
+separate controls:
 
 - loading or enabling a Sentinel only permits observation and recording;
 - enabling the dispatcher can process an already-pending escalation and may

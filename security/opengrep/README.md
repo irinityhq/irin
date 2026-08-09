@@ -38,6 +38,14 @@ authoritative file location and fails if any finding lacks a path.
 | `irin.rust.uds-router-requires-global-rate-limit` | rust | `build_router` wires `global_rate_limit` (audit F-3) |
 | `irin.rust.tenant-policy-write-requires-admin` | rust | `watch_set_tenant_policy` calls `admin_token_matches` (audit F-6) |
 
+Cross-process boundary contracts (rule families, one rule per required element):
+
+| ID prefix | Lang | Intent |
+| --- | --- | --- |
+| `irin.lua.sidecar-path-allowlist`, `irin.lua.sidecar-*-key-*` | lua | Lua `sidecar_post` path allowlist plus the required body keys on `/auth/check`, `/guard/input`, and `/budget/check` |
+| `irin.rust.council-gateway-header-*` | rust | Required `X-Council-*`, `X-Sensitivity-Level`, and `Authorization` headers on the governed Council-to-Gateway POST |
+| `irin.rust.tauri-governed-reinject-requires-scrub`, `irin.rust.tauri-governed-requires-creds-param` | rust | Scrub-before-reinject and creds-param invariants on the Tauri Council spawn env |
+
 Prefer `subtle::ConstantTimeEq` and `admin_token_matches` /
 `ArmPrincipals::authenticate` over raw string equality for secrets.
 

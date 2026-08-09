@@ -117,7 +117,7 @@ Additional War Room state can include:
 - drift reports under `runs/`
 - weekly drift JSON under `runs/`
 - meta-review reports under `runs/`
-- research jobs persisted by `src/warroom/research_store.rs`
+- mapmaker briefs under `runs/maps/`
 - local Librarian chat JSON under `librarian_chats/`
 
 These are local operational assets. Back them up deliberately if they matter.

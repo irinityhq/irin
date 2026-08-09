@@ -100,7 +100,7 @@ radius.
 
 | | |
 | --- | --- |
-| Covers | Static lint of `gateway/lua` (14 OpenResty Lua files): undefined globals, style, unused bindings, with an IRIN OpenResty std for `ngx.*` used in-tree |
+| Covers | Static lint of `gateway/lua` (15 OpenResty Lua files, including `lua/lib/`): undefined globals, style, unused bindings, with an IRIN OpenResty std for `ngx.*` used in-tree |
 | Status | **Advisory** by default (`make lint-lua` exits 0 with findings) |
 | Run | `make tools` once, then `make lint-lua` or `scripts/run-selene.sh [PATH…]` |
 | Hard mode | `IRIN_SELENE_FAIL=1 make lint-lua` or `scripts/run-selene.sh --fail` |

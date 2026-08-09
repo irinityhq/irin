@@ -21,6 +21,7 @@ Optional, app-owned Gateway runtime for the installed Apple-silicon DMG.
 | Vertex / gcloud ADC | **Not supported** | Supported when host ADC is available | No host `~/.config/gcloud` mount; keep Vertex Direct-only |
 | Claude CLI / Codex CLI proxies | **Not supported** | Supported when CLIs are installed/authenticated | DMG does not install or authenticate those CLIs |
 | Watch producer / dispatcher | Off at boot; only the producer is armable, via the app's Touch ID ceremony | N/A | Producer and dispatcher are forced `false` at boot in every pack path. Enroll, rehearse, and arm run from Settings (see `gateway/docs/runbooks/arming-authorization.md`, "Desktop Touch ID bridge"); the completed ceremony arms the producer by writing the signed `active_arm` that spend requires. The dispatcher is a separate env gate the ceremony does not touch |
+| Watch sentinels (profile) | Supported: bundled default profile, toggled from the Watch view | N/A | Off until the operator flips **Watch sentinels** on. On installs the bundled template into app-owned state and recreates the pack under the lifecycle lock so the sidecar reads `SENTINELS_CONFIG_PATH`; off removes the file and recreates back to zero sentinels. Zero sentinels is the normal healthy quiet state. Registering sentinels does not arm the producer or dispatcher |
 
 ## Runtime assets (bundled)
 
@@ -31,6 +32,10 @@ build time (gitignored staging):
 - `nginx.conf`, `conf/`, `lua/` — runtime-only copies from `gateway/`
 - `image-manifest.json` — **production** must use exact `name@sha256:digest`
   refs for gateway, sidecar, and third-party base images
+- `default-sentinels.yaml` — bundled default watch profile template (one
+  `file-inbox-watch` sentinel on the `canary` tenant). Staging refuses a pack
+  whose template drops either pin. It is only a template: nothing is installed
+  until the operator turns the watch profile on
 
 Local non-publishing regression uses a separate **development builder** that
 writes a test-only local manifest under `packaging/build/gateway-pack/`. That
@@ -42,7 +47,9 @@ path does not weaken the production digest requirement.
 | --- | --- | --- |
 | `~/Library/Application Support/com.irinity.irin/gateway/` | Pack data root | `0700` |
 | `…/gateway/ledger_key` | Ledger signing seed (bind-mount only) | `0600` |
-| `…/gateway/runtime.env` | Non-renderer secrets for Compose | `0600` |
+| `…/gateway/compose.public.env` | Non-secret Compose pins only (image refs, app-owned paths, disarmed Watch values). A legacy secret-bearing `runtime.env` is deleted whenever it is found | `0600` |
+| `…/gateway/sentinels/sentinels.yaml` | Installed watch profile; its presence is the durable watch switch. Bind-mounted read-only | `0600` |
+| `…/gateway/inbox/` | Watch inbox for the file-inbox sentinel — the only writable operator bind mount | `0700` |
 | `private.json` | Non-secret: enabled flag, key id, pack version | `0600` |
 | macOS Keychain (generic password) | Raw Council client `GW_API_KEY` | device-local access class |
 
@@ -117,13 +124,18 @@ changes.
   ownership is proven in three layers: project name, our installed compose
   file, and containers created from the validated manifest's pinned image
   digests.
-- Uninstall must delete both Keychain accounts; if Keychain cleanup fails
-  after files are removed, the operation returns an error rather than
-  reporting a clean uninstall while secrets remain.
+- Uninstall must delete every Gateway Pack Keychain account — client key,
+  pepper, watch-admin read token, arm-principal token, and both host CLI
+  adapter tokens. Every account is attempted even when one fails, and if
+  Keychain cleanup fails after files are removed, the operation returns an
+  error rather than reporting a clean uninstall while secrets remain.
 - The app's Docker config is a managed minimal file (plugin hints only,
   0600). No operator registry credentials are read or copied.
-- Watch producer/dispatcher/admin are force-disarmed on every spawn; ambient
-  host tokens can never re-arm them.
+- The Watch producer, the dispatcher, and the Council-spend token are
+  force-disarmed on every spawn, applied last so no earlier layer can re-arm
+  them. The watch-admin read token is not disarmed there: it is a
+  Keychain-held secret admitted through the validated secret env, while any
+  ambient host copy is scrubbed first.
 
 ### Out of scope (the documented boundary)
 

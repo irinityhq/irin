@@ -1,10 +1,10 @@
 # Gateway Operator Runbook
 
-This runbook covers the canonical local Gateway started by the macOS root IRIN
-runtime controller. Ubuntu supports Gateway's Docker/component and verification
-paths, but not this `launchctl`-based managed controller. This runbook assumes
-a single operator and keeps all secrets and mutable state outside the
-repository.
+This runbook covers the canonical local Gateway: the Docker Compose stack
+started from this checkout, or the Gateway Pack the installed macOS app manages
+from Settings. Ubuntu supports Gateway's Docker/component and verification
+paths, but not the packaged macOS app. This runbook assumes a single operator
+and keeps all secrets and mutable state outside the repository.
 
 ## Local layout
 
@@ -31,9 +31,10 @@ make gateway-prepare-config
 # start Gateway compose from gateway/ as documented below
 ```
 
-The runtime controller builds Council, War Room Web, Gateway, and the Rust
-sidecar from the same checkout. It uses Docker Compose project `gateway` so an
-existing `gateway_sidecar_data` volume is reused.
+Compose builds the OpenResty edge and the Rust sidecar from this checkout;
+Council and War Room Web are not part of the Gateway stack. It uses Docker
+Compose project `gateway` so an existing `gateway_sidecar_data` volume is
+reused.
 
 Useful checks:
 

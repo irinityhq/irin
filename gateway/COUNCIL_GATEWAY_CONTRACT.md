@@ -486,7 +486,11 @@ Ed25519-signed. Key ceremony events and `fsck` own key lifecycle verification.
 writes a `key_introduce` ceremony event signed by the current active key
 (recording the new *public* key only), and stages the new key seed to
 `LEDGER_NEW_KEY_STAGING_PATH` (default `/run/sidecar/new_ledger_key.bin`,
-0600). The operator inspects, deploys, sets `LEDGER_OLD_SIGNING_KEY_PATH` to
+0600). When `ROOT_PUBKEY_HEX` is configured, that online route is refused with
+`409` before any staging write or ledger event — an online rotate can only emit
+an active-key-signed introduce, which is unauthorized under a configured root;
+sign the envelope offline with `gateway-ceremony introduce` instead.
+The operator inspects, deploys, sets `LEDGER_OLD_SIGNING_KEY_PATH` to
 the previous key, and restarts. Verification walks from genesis, so keep the
 prior seed available for as long as any retained row still signed by it remains
 — drop `--old-key` / `LEDGER_OLD_SIGNING_KEY_PATH` only after those rows are
@@ -553,7 +557,9 @@ schema break).
 The gateway enforces a **2MB hard cap** on request bodies via
 `client_max_body_size 2m` in `nginx.conf`. Oversize requests are rejected
 at the nginx layer with `413 Request Entity Too Large` before any Lua
-code runs. This bound is load-bearing for memory:
+code runs. `/v1/batches` is the single exception at `10m`, because Anthropic
+batch creation embeds the full `requests[]` array inline. This bound is
+load-bearing for memory:
 
 * `raw_body` is captured on `ngx.ctx.gw.record.raw_body` for the full
   request lifetime (cache_store + inbound-ledger sha256 closures both
@@ -601,7 +607,7 @@ do not bump the version.
 - Adds the `kind` enum (`leaf` | `council_wrapper` | `council_replay`) on terminator payloads, with §6.4 aggregation semantics specified.
 - Adds egress headers `X-Idempotency-Replay`, `X-Council-Session-Id`, `X-Total-Cost-Usd`, `X-Chair-Tokens`, `X-Batch-Op`.
 - `make -C gateway contract-check` now fails the build if any action name
-  appearing in a `ledger_record` / `ledger_schedule` call site in `lua/` is
-  missing from the terminator or open-end tables above.
+  appearing in a `ledger_schedule` call site in `lua/` is missing from the
+  terminator or open-end tables above.
 
 **v1:** Initial contract — single-tenant audit ledger + decontaminator + cache key prefix (canonical value in `sidecar-rs/src/cache.rs`; bumped on cache-shape change).

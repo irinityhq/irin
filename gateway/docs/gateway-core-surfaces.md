@@ -54,6 +54,13 @@ Council↔Gateway wire contract, and [`watch-api.md`](watch-api.md) for Watch.
 - `GET /ledger/verify` and `GET /ledger/export` require an **admin-tier**
   `X-Admin-Key` (401 missing/invalid, 403 non-admin). Loopback orientation is
   not a substitute for that gate.
+- `POST /ledger/record` is gated the same way, so the write path is not an
+  ungated sibling of the gated reads.
+- Chain verification is **pinned** to the configured signing keys: the trust set
+  starts as the active verifying key plus the optional
+  `LEDGER_OLD_SIGNING_KEY_PATH` rotation key, and expands only through
+  `key_introduce` rows that pass ceremony validation. A row whose
+  `signing_key_pubkey` is outside that set fails verification.
 
 ## Council helpers on the sidecar
 
@@ -66,6 +73,11 @@ Council↔Gateway wire contract, and [`watch-api.md`](watch-api.md) for Watch.
 
 - `gateway-ceremony` / ledger key tooling supports air-gapped key material
   paths distinct from online `POST /auth/rotate`.
+- The two paths are mutually exclusive: when `ROOT_PUBKEY_HEX` is configured,
+  `POST /auth/rotate` refuses with **409** and writes nothing (no staged key, no
+  ledger event), because an online rotate can only emit an active-key-signed
+  introduce envelope. Rotation then goes through the offline root-signed
+  ceremony instead.
 
 ## Operator rule of thumb
 

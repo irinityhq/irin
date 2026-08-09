@@ -84,8 +84,9 @@ surgery:
 2. Open War Room → **Watch**. Flip **Watch sentinels** On. The app installs the
    bundled default profile (file-inbox, tenant `canary`) into Application
    Support and recreates the pack once so the sidecar loads it.
-3. Use **Open inbox folder**, drop a `.txt`, and wait one polling cycle (~10s)
-   for a fire to appear. `action_production_armed` stays false; producer and
+3. Use **Open inbox folder**, drop a `.txt`, and wait one polling cycle — the
+   bundled profile's 30s cooldown — for a fire to appear; the Watch view itself
+   refreshes every 10s. `action_production_armed` stays false; producer and
    dispatcher remain hardcoded off in the pack compose.
 4. Quit and relaunch: resume keeps the profile loaded (no re-toggle). Off
    removes the profile file and returns to quiet-with-reason.
