@@ -54,8 +54,11 @@ Council↔Gateway wire contract, and [`watch-api.md`](watch-api.md) for Watch.
 - `GET /ledger/verify` and `GET /ledger/export` require an **admin-tier**
   `X-Admin-Key` (401 missing/invalid, 403 non-admin). Loopback orientation is
   not a substitute for that gate.
-- `POST /ledger/record` is gated the same way, so the write path is not an
-  ungated sibling of the gated reads.
+- `POST /ledger/record` is UDS-only (no nginx location) and requires the same
+  admin-tier `X-Admin-Key` (401/403 as above). Body `caller_key` is stored
+  audit identity, not authorization. Internal OpenResty writers must send that
+  header and treat any non-2xx status as failure — a decoded error JSON body
+  alone is not success.
 - Chain verification is **pinned** to the configured signing keys: the trust set
   starts as the active verifying key plus the optional
   `LEDGER_OLD_SIGNING_KEY_PATH` rotation key, and expands only through
