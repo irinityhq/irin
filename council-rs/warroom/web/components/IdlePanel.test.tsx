@@ -121,6 +121,6 @@ describe("IdlePanel convene gating follows the Discover inventory", () => {
 
     const html = renderIdle(cabinets, "standard");
 
-    expect(html).toContain("Provider availability is still being checked.");
+    expect(html).toContain("Council loading…");
   });
 });

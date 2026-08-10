@@ -2,13 +2,16 @@
  * Header health label for the War Room shell.
  *
  * While the readiness-driven cold-start poll is active (`bootRetryActive`),
- * the label stays CONNECTING. OFFLINE is reserved for exhausted connecting
- * budget or a confirmed backend failure (apiStatus error/online with no
- * health payload after retries). Slow recovery after offline does not set
- * bootRetryActive — permanent failure stays visible.
+ * the label stays "Council loading…". OFFLINE is reserved for exhausted
+ * connecting budget or a confirmed backend failure (apiStatus error/online
+ * with no health payload after retries). Slow recovery after offline does
+ * not set bootRetryActive — permanent failure stays visible.
  */
 
 export type WarroomApiStatus = "loading" | "online" | "error";
+
+/** Cold-start / boot-retry tone — not a permanent failure. */
+export const COUNCIL_LOADING_LABEL = "Council loading…";
 
 export function warroomHealthLabel(
   healthVersion: string | null,
@@ -20,7 +23,7 @@ export function warroomHealthLabel(
     return `gen ${healthVersion} · stream ${streamVersion}`;
   }
   if (apiStatus === "loading" || bootRetryActive) {
-    return "connecting";
+    return COUNCIL_LOADING_LABEL;
   }
   return "offline";
 }

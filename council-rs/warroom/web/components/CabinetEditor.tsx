@@ -64,11 +64,11 @@ export default function CabinetEditor({
   const dirty = draft && cab && JSON.stringify(draft) !== JSON.stringify(cab);
   const activeCabinet = draft ?? cab;
   const providerAvailabilityProblem = activeCabinet
-    ? discoverError
-      ? `Provider discovery failed: ${discoverError}. Rescan before saving or running.`
-      : !discoverData || discoverLoading
-        ? "Provider availability is still being checked. Wait for discovery before saving or running."
-        : unavailableProviderReason(providerOptions, [
+    ? discoverLoading || !discoverData
+      ? discoverLoading || discoverError === null
+        ? "Council loading…"
+        : `Provider discovery failed: ${discoverError}. Rescan before saving or running.`
+      : unavailableProviderReason(providerOptions, [
             ...activeCabinet.seats.map((seat) => seat.provider),
             activeCabinet.chair.provider,
           ])
