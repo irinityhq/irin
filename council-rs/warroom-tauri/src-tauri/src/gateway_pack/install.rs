@@ -93,7 +93,11 @@ pub fn install_pack_files() -> Result<PathBuf, String> {
 pub(crate) fn sha256_hex_file(path: &Path) -> Result<String, String> {
     use sha2::Digest;
     let bytes = fs::read(path).map_err(|e| format!("hash {}: {e}", path.display()))?;
-    Ok(format!("{:x}", sha2::Sha256::digest(&bytes)))
+    // sha2 0.11 Output no longer implements LowerHex; format bytes explicitly.
+    Ok(sha2::Sha256::digest(&bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 /// Recursive relpath → sha256 map over the installed pack tree (files only,

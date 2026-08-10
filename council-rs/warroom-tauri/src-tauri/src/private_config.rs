@@ -381,7 +381,11 @@ fn bundled_file_hashes(base: &Path) -> std::io::Result<BTreeMap<String, String>>
 
 fn file_sha256(path: &Path) -> std::io::Result<String> {
     let bytes = fs::read(path)?;
-    Ok(format!("{:x}", sha2::Sha256::digest(bytes)))
+    // sha2 0.11 Output no longer implements LowerHex; format bytes explicitly.
+    Ok(sha2::Sha256::digest(bytes)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect())
 }
 
 fn load_overlay_manifest(path: &Path) -> Result<Option<OverlayManifest>, String> {
