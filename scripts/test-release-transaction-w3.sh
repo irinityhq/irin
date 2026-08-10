@@ -918,7 +918,21 @@ fi
 
 make_live_candidate() {
   local label="$1"
-  local stage src_dir dmg_path bm_d dmg_d app_d cid dest sha
+  local pack_mode="${2:-production}"
+  local stage src_dir dmg_path bm_d dmg_d app_d cid dest sha stapled releasable
+  case "$pack_mode" in
+    production)
+      stapled=true
+      releasable=true
+      ;;
+    signed-rc|local-dev)
+      stapled=false
+      releasable=false
+      ;;
+    *)
+      fail "make_live_candidate: unknown pack_mode $pack_mode"
+      ;;
+  esac
   sha="$(sha40 "$label")"
   stage="$TEST_HOME/stage-live-$label"
   rm -rf "$stage"
@@ -937,10 +951,10 @@ make_live_candidate() {
   dmg_d="$(irin_sha256_file "$dmg_path")"
   app_d="$(irin_sha256_file "$stage/IRIN.app/Contents/MacOS/council-warroom-tauri")"
   cat >"$stage/HASHES.txt" <<EOF
-pack_mode=production
+pack_mode=$pack_mode
 release_version=0.1.2
-releasable=true
-stapled=true
+releasable=$releasable
+stapled=$stapled
 source_sha=$sha
 build_dirty=false
 arch=aarch64-apple-darwin
@@ -957,17 +971,17 @@ warroom_web_index_sha256=$(printf 'w' | irin_sha256_bytes)
 bundle_manifest_digest=$bm_d
 dmg_sha256=$dmg_d
 EOF
-  python3 - "$stage/candidate.json" "$sha" "$bm_d" "$dmg_d" <<'PY2'
+  python3 - "$stage/candidate.json" "$sha" "$bm_d" "$dmg_d" "$pack_mode" "$stapled" <<'PY2'
 import json, sys
-out, source_sha, bm_d, dmg_d = sys.argv[1:]
+out, source_sha, bm_d, dmg_d, pack_mode, stapled = sys.argv[1:]
 doc = {
   "schema_version": 1,
   "source_sha": source_sha,
   "semver": "0.1.2",
-  "pack_mode": "production",
+  "pack_mode": pack_mode,
   "bundle_manifest_digest": bm_d,
   "dmg_sha256": dmg_d,
-  "stapled": True,
+  "stapled": stapled == "true",
   "gateway_digest": "g" + ("0" * 63),
   "sidecar_digest": "s" + ("0" * 63),
 }
@@ -985,6 +999,114 @@ PY2
   }))')"
   printf '%s\n' "$dest"
 }
+
+# (a0) --live refuses local-dev (ad-hoc must not replace daily /Applications app)
+LOCALDEV_DEST="$(make_live_candidate localdev local-dev)"
+rm -rf "$LIVE_APP"
+mkdir -p "$LIVE_APP/Contents/MacOS"
+printf 'keep-daily' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+printf 'keep-side' >"$LIVE_APP/Contents/MacOS/council"
+rm -f "$LOCALDEV_DEST/proofs/install.json"
+set +e
+LOCALDEV_OUT="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  IRIN_STATE_ROOT="$IRIN_STATE_ROOT" \
+  "$INSTALL" --candidate "$LOCALDEV_DEST" --live 2>&1
+)"
+LOCALDEV_EC=$?
+set -e
+[[ $LOCALDEV_EC -ne 0 ]] || fail "--live must refuse pack_mode=local-dev: $LOCALDEV_OUT"
+[[ "$LOCALDEV_OUT" == *"pack_mode=local-dev"* || "$LOCALDEV_OUT" == *"refusing --live install of pack_mode=local-dev"* ]] \
+  || fail "expected local-dev refuse message: $LOCALDEV_OUT"
+[[ "$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")" == "keep-daily" ]] \
+  || fail "--live local-dev refuse must not mutate Applications"
+[[ ! -f "$LOCALDEV_DEST/proofs/install.json" ]] \
+  || fail "--live local-dev refuse must leave no install proof"
+# Default (no --live) still extracts local-dev candidates for candidate-local proof.
+set +e
+LOCALDEV_DEF_OUT="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  "$INSTALL" --candidate "$LOCALDEV_DEST" 2>&1
+)"
+LOCALDEV_DEF_EC=$?
+set -e
+[[ $LOCALDEV_DEF_EC -eq 0 ]] || fail "default install-verify must still accept local-dev: $LOCALDEV_DEF_OUT"
+[[ "$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")" == "keep-daily" ]] \
+  || fail "default local-dev path must not mutate Applications"
+[[ -f "$LOCALDEV_DEST/proofs/install.json" ]] || fail "default local-dev must write candidate-local install proof"
+pass "--live refuses pack_mode=local-dev; default extract still allowed"
+
+# (a0b) forged pack_mode: rewrite candidate.json under old path → id recompute refuses
+FORGE_DEST="$(make_live_candidate forge local-dev)"
+chmod u+w "$FORGE_DEST/candidate.json" "$FORGE_DEST/HASHES.txt" 2>/dev/null || true
+python3 - "$FORGE_DEST/candidate.json" <<'PY2' || fail "could not forge pack_mode in candidate.json"
+import json, sys
+path = sys.argv[1]
+doc = json.load(open(path, encoding="utf-8"))
+assert doc["pack_mode"] == "local-dev", doc["pack_mode"]
+doc["pack_mode"] = "signed-rc"  # same length as local-dev; would pass naive string gate
+open(path, "w", encoding="utf-8").write(
+  json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n"
+)
+PY2
+# Keep HASHES in sync so only the candidate-id recompute is under test.
+python3 - "$FORGE_DEST/HASHES.txt" <<'PY2'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+lines = []
+for line in p.read_text(encoding="utf-8").splitlines():
+    if line.startswith("pack_mode="):
+        lines.append("pack_mode=signed-rc")
+    else:
+        lines.append(line)
+p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY2
+rm -rf "$LIVE_APP"
+mkdir -p "$LIVE_APP/Contents/MacOS"
+printf 'keep-forge' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+set +e
+FORGE_OUT="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  IRIN_STATE_ROOT="$IRIN_STATE_ROOT" \
+  "$INSTALL" --candidate "$FORGE_DEST" --live 2>&1
+)"
+FORGE_EC=$?
+set -e
+[[ $FORGE_EC -ne 0 ]] || fail "forged pack_mode under old candidate-id must refuse: $FORGE_OUT"
+[[ "$FORGE_OUT" == *"does not recompute from candidate.json"* ]] \
+  || fail "expected candidate-id recompute refuse: $FORGE_OUT"
+[[ "$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")" == "keep-forge" ]] \
+  || fail "forged pack_mode refuse must not mutate Applications"
+pass "--live refuses forged pack_mode (candidate-id recompute)"
+
+# (a0c) claimed signed-rc/production is not enough: force Developer ID proof on
+# hermetic non-Mach-O fixture → refuse (real /Applications path always requires this).
+FORCE_DEST="$(make_live_candidate forceid production)"
+rm -rf "$LIVE_APP"
+mkdir -p "$LIVE_APP/Contents/MacOS"
+printf 'keep-forceid' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+set +e
+FORCE_OUT="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_REQUIRE_DEVELOPER_ID=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  IRIN_STATE_ROOT="$IRIN_STATE_ROOT" \
+  "$INSTALL" --candidate "$FORCE_DEST" --live 2>&1
+)"
+FORCE_EC=$?
+set -e
+[[ $FORCE_EC -ne 0 ]] || fail "forced Developer ID check must refuse fixture: $FORCE_OUT"
+[[ "$FORCE_OUT" == *"Developer ID"* || "$FORCE_OUT" == *"codesign"* ]] \
+  || fail "expected Developer ID / codesign refuse: $FORCE_OUT"
+[[ "$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")" == "keep-forceid" ]] \
+  || fail "Developer ID refuse must not mutate Applications"
+[[ ! -f "$FORCE_DEST/proofs/install.json" ]] \
+  || fail "Developer ID refuse must leave no install proof"
+pass "--live forced Developer ID proof refuses non-signed fixture"
 
 # (a) --live staged swap success + exact digest at hermetic Applications
 LIVE_DEST="$(make_live_candidate ok)"

@@ -74,7 +74,17 @@ verify_developer_id_signature() {
 #   local-dev  — ad-hoc sign; non-publishable (Phase A)
 #   signed-rc  — Developer ID + hardened runtime; no GHCR/notary/staple (Phase B)
 #   production — Developer ID + notarize + staple; publishable (Phase C)
-PACK_MODE="${IRIN_DMG_PACK_MODE:-local-dev}"
+#
+# Explicit IRIN_DMG_PACK_MODE always wins. When unset: pick signed-rc only if
+# APPLE_SIGNING_IDENTITY is present (operator daily-install path); otherwise
+# keep local-dev so CI/public/zero-secret builds need no private key.
+if [[ -n "${IRIN_DMG_PACK_MODE:-}" ]]; then
+  PACK_MODE="$IRIN_DMG_PACK_MODE"
+elif [[ -n "${APPLE_SIGNING_IDENTITY:-}" ]]; then
+  PACK_MODE="signed-rc"
+else
+  PACK_MODE="local-dev"
+fi
 case "$PACK_MODE" in
   local-dev|signed-rc|production) ;;
   *) die "IRIN_DMG_PACK_MODE must be local-dev, signed-rc, or production (got $PACK_MODE)" ;;

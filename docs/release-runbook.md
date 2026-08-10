@@ -108,11 +108,12 @@ digest. Prepare also records the checkout HEAD and whether `scripts/` or
 CANDIDATE=<absolute candidate_path from prepare>
 
 # Fresh-extract the candidate DMG, then staged-swap into /Applications/IRIN.app.
-# Refuses if IRIN.app is running. An existing live path (including a root
-# symlink) is displaced aside like any prior; the installer does not refuse
-# solely because the prior root is a symlink. On success writes
-# proofs/install.json with candidate-local digests plus live_installed_app_path
-# and live_installed_bundle_manifest_digest (point-in-time equality only). On
+# Refuses pack_mode=local-dev (ad-hoc must not replace the daily app) and if
+# IRIN.app is running. An existing live path (including a root symlink) is
+# displaced aside like any prior; the installer does not refuse solely because
+# the prior root is a symlink. On success writes proofs/install.json with
+# candidate-local digests plus live_installed_app_path and
+# live_installed_bundle_manifest_digest (point-in-time equality only). On
 # post-swap failure restores the prior app and writes no install proof.
 # Successful replacement archives the prior under
 # ~/.local/state/irin/displaced-apps/ and may retain a hidden sibling under
