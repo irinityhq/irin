@@ -75,24 +75,34 @@ func largestOnScreenWindow(for pid: pid_t) -> CGWindowID? {
 
 /// Accessibility can see a standard window when CoreGraphics cannot (common when
 /// the invoking host lacks Screen Recording). Used only for fail diagnostics.
+/// Requires both `AXWindow` role and `AXStandardWindow` subrole so dialogs,
+/// floating panels, and other AX chrome do not trigger a Screen Recording hint.
 func accessibilityHasStandardWindow(pid: pid_t) -> Bool {
     let app = AXUIElementCreateApplication(pid)
     var value: CFTypeRef?
     guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
-          let windows = value as? [AXUIElement],
-          !windows.isEmpty
+          let windows = value as? [AXUIElement]
     else {
         return false
     }
     for window in windows {
         var role: CFTypeRef?
-        if AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role) == .success,
-           let roleName = role as? String,
-           roleName == (kAXWindowRole as String) {
-            return true
+        guard AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role) == .success,
+              let roleName = role as? String,
+              roleName == (kAXWindowRole as String)
+        else {
+            continue
         }
+        var subrole: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &subrole) == .success,
+              let subroleName = subrole as? String,
+              subroleName == (kAXStandardWindowSubrole as String)
+        else {
+            continue
+        }
+        return true
     }
-    return true
+    return false
 }
 
 func processAlive(_ pid: pid_t) -> Bool {
