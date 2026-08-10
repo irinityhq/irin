@@ -66,7 +66,7 @@ pub use launch::{
     default_secret_store, governed_launch_after_watch_reconciliation, may_promote_to_governed,
     pack_auth_revalidated, pack_auth_revalidated_with_key, promote_may_call_resume,
     resume_installed_pack, resume_installed_pack_with_key, status_with_council_route,
-    watch_admin_surfaces_authenticated,
+    status_with_council_route_with_key, watch_admin_surfaces_authenticated,
 };
 
 #[cfg(test)]

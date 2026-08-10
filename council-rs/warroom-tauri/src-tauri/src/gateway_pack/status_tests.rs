@@ -806,6 +806,26 @@ fn cold_launch_absence_seed_makes_first_background_tick_keychain_free() {
 }
 
 #[test]
+fn early_then_late_seed_keeps_background_keychain_free() {
+    // Cold launch seeds immediately after the Keychain flight, then re-seeds
+    // after pack resume for live authenticated. Neither step may re-get GW.
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::with_gw_key();
+
+    seed_auth_observation_from_preloaded_key(Some("gw_deadbeef")); // early
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    seed_auth_observation_from_preloaded_key(Some("gw_deadbeef")); // late refresh
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+
+    assert_eq!(
+        store.get_count(),
+        0,
+        "early+late held-key seed must keep BackgroundCached Keychain-free"
+    );
+}
+
+#[test]
 fn auth_observation_stale_generation_rejected_at_commit() {
     let _lock = test_env_lock();
     invalidate_auth_observation();

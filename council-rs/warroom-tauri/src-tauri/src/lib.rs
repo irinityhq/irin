@@ -263,7 +263,17 @@ fn unix_kill_pid(_pid: u32, _sig: i32) {}
 /// `via_gateway_default` stayed true, retry pack resume + governed respawn
 /// without requiring a manual Enable click. Fail-closed: a failed promote
 /// restores Direct; never invents governed readiness.
-fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>) {
+///
+/// `held_gw_key` + `launch_secrets` are the cold-launch Keychain flight values.
+/// When present, promote revalidates/resumes/spawns without re-entering Keychain
+/// for those six accounts (each get can surface a macOS ACL dialog under ad-hoc
+/// signatures). Absent values fall back to the legacy load path.
+fn schedule_governed_promote_attempts(
+    app: AppHandle,
+    auth_token: Option<String>,
+    held_gw_key: Option<String>,
+    launch_secrets: Option<gateway_pack::LaunchSecrets>,
+) {
     const ATTEMPTS: u32 = 12;
     const INTERVAL: Duration = Duration::from_secs(5);
     /// Early window may call resume; resume is single-flight and wait-only when
@@ -282,9 +292,20 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
             if !persisted || owned == Some(true) || owned != Some(false) {
                 return;
             }
-            let revalidated = gateway_pack::pack_auth_revalidated(&store);
+            let revalidated = match held_gw_key.as_deref() {
+                Some(key) => gateway_pack::pack_auth_revalidated_with_key(key),
+                None => gateway_pack::pack_auth_revalidated(&store),
+            };
+            let resume = |store: &KeychainSecretStore| -> Result<(), String> {
+                match (held_gw_key.as_deref(), launch_secrets.as_ref()) {
+                    (Some(key), Some(secrets)) => {
+                        gateway_pack::resume_installed_pack_with_key(store, key, secrets)
+                    }
+                    _ => gateway_pack::resume_installed_pack(store),
+                }
+            };
             let pack_ok = if revalidated {
-                match gateway_pack::resume_installed_pack(&store) {
+                match resume(&store) {
                     Ok(()) => true,
                     Err(e) => {
                         let _ = app.emit(
@@ -302,7 +323,7 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
                 MAX_EARLY_RESUME_ATTEMPTS,
                 revalidated,
             ) {
-                match gateway_pack::resume_installed_pack(&store) {
+                match resume(&store) {
                     Ok(()) => true,
                     Err(e) => {
                         let _ = app.emit(
@@ -336,20 +357,40 @@ fn schedule_governed_promote_attempts(app: AppHandle, auth_token: Option<String>
                 .as_deref()
                 .or(config.auth_token.as_deref())
                 .map(str::to_string);
+            let preloaded_gateway_creds = match (held_gw_key.as_ref(), launch_secrets.as_ref()) {
+                (Some(api_key), Some(secrets)) => Some(GatewayChildCredentials {
+                    api_key: api_key.clone(),
+                    gateway_url: docker_cli::DESKTOP_GATEWAY_URL.to_string(),
+                    watch_admin_token: Some(secrets.watch_admin_token.clone()),
+                }),
+                _ => None,
+            };
             stop_tracked_council_server(&app);
             let _ =
                 wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
-            match try_start_council_server(
+            match try_start_council_server_with_credentials(
                 &app,
                 config.server_port,
                 token.as_deref(),
                 Some(true),
                 config.librarian_base.as_deref(),
+                preloaded_gateway_creds.as_ref(),
             ) {
                 Ok(msg) => {
                     let _ = app.emit("council-log", format!("[system] governed-promote: {msg}"));
-                    let _ = gateway_pack::status_with_council_route(&store, true, false);
-                    let _ = status_authority::recompute(&app, Freshness::Action);
+                    let _ = gateway_pack::status_with_council_route_with_key(
+                        &store,
+                        held_gw_key.as_deref(),
+                        true,
+                        false,
+                    );
+                    // Re-seed presentation cache from the held key (no Keychain
+                    // re-get). Use Background freshness: Action would re-load
+                    // GW_API_KEY via gateway_pack_status_fresh, undoing the
+                    // held-secret promote flight. status_with_council_route
+                    // already took a live authority sample above.
+                    gateway_pack::seed_auth_observation_from_preloaded_key(held_gw_key.as_deref());
+                    let _ = status_authority::recompute(&app, Freshness::Background);
                     return;
                 }
                 Err(e) => {
@@ -1759,11 +1800,21 @@ pub fn run() {
                                 seed_arm_principal_observation(
                                     secrets.arm_principal_token.is_some(),
                                 );
+                                // Seed presentation auth cache immediately so a
+                                // concurrent UI desktop_status_snapshot cannot
+                                // re-get GW_API_KEY while resume/spawn runs.
+                                // Re-seeded again after pack work for live auth.
+                                gateway_pack::seed_auth_observation_from_preloaded_key(
+                                    migrated.gw_api_key.as_deref(),
+                                );
                                 (migrated.gw_api_key, Some(secrets))
                             }
                             Err(error) => {
                                 eprintln!(
                                     "[council-runtime] cold-launch secret preload failed: {error}"
+                                );
+                                gateway_pack::seed_auth_observation_from_preloaded_key(
+                                    migrated.gw_api_key.as_deref(),
                                 );
                                 (migrated.gw_api_key, None)
                             }
@@ -1954,9 +2005,14 @@ pub fn run() {
                             schedule_governed_promote_attempts(
                                 auto_start_handle.clone(),
                                 auth_token.clone(),
+                                launch_key.clone(),
+                                launch_secrets.clone(),
                             );
                         }
                     }
+                    // Refresh live authenticated flag after resume/spawn; no
+                    // Keychain re-get (held key). Early seed already covered
+                    // the UI race window during pack bring-up.
                     gateway_pack::seed_auth_observation_from_preloaded_key(
                         launch_key.as_deref(),
                     );

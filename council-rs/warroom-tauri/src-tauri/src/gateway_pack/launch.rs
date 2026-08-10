@@ -20,7 +20,7 @@ use super::install::{
 };
 use super::keys::{ensure_arm_keys_file, ensure_ledger_key};
 use super::paths::ensure_watch_dirs;
-use super::status::gateway_pack_status_fresh;
+use super::status::{gateway_pack_status_fresh, gateway_pack_status_fresh_with_key};
 use super::types::{GatewayPackState, GatewayPackStatus};
 use crate::docker_cli::{probe_docker_daemon, DockerDaemonState, DESKTOP_GATEWAY_URL};
 use crate::keychain::{load_gw_api_key, KeychainSecretStore, SecretStore};
@@ -552,12 +552,28 @@ pub fn decide_launch_resume_outcome(
 /// Mark status after Council restart proof (called from lib.rs).
 ///
 /// Always takes a fresh sample: this is a post-lifecycle authority surface.
+/// Loads `GW_API_KEY` from Keychain unless the caller already holds it — use
+/// [`status_with_council_route_with_key`] on cold-launch/promote flights.
 pub fn status_with_council_route(
     store: &dyn SecretStore,
     council_governed: bool,
     council_direct: bool,
 ) -> GatewayPackStatus {
-    let mut st = gateway_pack_status_fresh(store);
+    status_with_council_route_with_key(store, None, council_governed, council_direct)
+}
+
+/// Same as [`status_with_council_route`] using a caller-held client key (no
+/// Keychain re-entry for `GW_API_KEY` on this call).
+pub fn status_with_council_route_with_key(
+    store: &dyn SecretStore,
+    held_key: Option<&str>,
+    council_governed: bool,
+    council_direct: bool,
+) -> GatewayPackStatus {
+    let mut st = match held_key {
+        Some(key) => gateway_pack_status_fresh_with_key(store, Some(key)),
+        None => gateway_pack_status_fresh(store),
+    };
     if council_governed && st.authenticated && st.enabled && gateway_health_ok() {
         st.state = GatewayPackState::AuthenticatedReady;
         st.council_governed = true;
