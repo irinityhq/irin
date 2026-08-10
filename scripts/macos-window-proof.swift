@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import Foundation
 import Vision
@@ -43,10 +44,16 @@ func parseOptions() throws -> Options {
     return Options(pid: resolvedPid, output: resolvedOutput, required: required)
 }
 
-func largestWindow(for pid: pid_t) -> CGWindowID? {
-    guard let list = CGWindowListCopyWindowInfo(
-        [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
-    ) as? [[String: Any]] else { return nil }
+/// Ranked CG windows owned by `pid`. On-screen-only matches capture; all surfaces
+/// are used only to diagnose "exists but not visible" vs "no window at all".
+func rankedWindows(for pid: pid_t, onScreenOnly: Bool) -> [(CGWindowID, Double)] {
+    var opts: CGWindowListOption = [.excludeDesktopElements]
+    if onScreenOnly {
+        opts.insert(.optionOnScreenOnly)
+    }
+    guard let list = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] else {
+        return []
+    }
 
     return list.compactMap { item -> (CGWindowID, Double)? in
         guard let owner = item[kCGWindowOwnerPID as String] as? Int,
@@ -55,8 +62,61 @@ func largestWindow(for pid: pid_t) -> CGWindowID? {
               let boundsDict = item[kCGWindowBounds as String] as? [String: Any],
               let bounds = CGRect(dictionaryRepresentation: boundsDict as CFDictionary)
         else { return nil }
-        return (number, Double(bounds.width * bounds.height))
-    }.max(by: { $0.1 < $1.1 })?.0
+        let area = Double(bounds.width * bounds.height)
+        // Ignore zero-size chrome that CG sometimes lists for app shells.
+        guard area > 1 else { return nil }
+        return (number, area)
+    }.sorted { $0.1 > $1.1 }
+}
+
+func largestOnScreenWindow(for pid: pid_t) -> CGWindowID? {
+    rankedWindows(for: pid, onScreenOnly: true).first?.0
+}
+
+/// Accessibility can see a standard window when CoreGraphics cannot (common when
+/// the invoking host lacks Screen Recording). Used only for fail diagnostics.
+func accessibilityHasStandardWindow(pid: pid_t) -> Bool {
+    let app = AXUIElementCreateApplication(pid)
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(app, kAXWindowsAttribute as CFString, &value) == .success,
+          let windows = value as? [AXUIElement],
+          !windows.isEmpty
+    else {
+        return false
+    }
+    for window in windows {
+        var role: CFTypeRef?
+        if AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &role) == .success,
+           let roleName = role as? String,
+           roleName == (kAXWindowRole as String) {
+            return true
+        }
+    }
+    return true
+}
+
+func processAlive(_ pid: pid_t) -> Bool {
+    kill(pid, 0) == 0
+}
+
+func diagnoseMissingOnScreenWindow(pid: pid_t) -> String {
+    if !processAlive(pid) {
+        return "no on-screen window for pid \(pid) (process is not running)"
+    }
+    let offScreen = rankedWindows(for: pid, onScreenOnly: false)
+    if !offScreen.isEmpty {
+        return "no on-screen window for pid \(pid) " +
+            "(CG sees \(offScreen.count) surface(s) but none on-screen — " +
+            "wake the display, un-minimize, or switch to the app's Space; " +
+            "see docs/troubleshooting.md native visual proof)"
+    }
+    if accessibilityHasStandardWindow(pid: pid) {
+        return "no on-screen window for pid \(pid) " +
+            "(Accessibility sees a standard window but CoreGraphics does not — " +
+            "grant Screen Recording to the host terminal that runs ship-check / " +
+            "smoke-macos-tauri-app.sh, then re-run)"
+    }
+    return "no on-screen window for pid \(pid)"
 }
 
 func capture(window: CGWindowID, output: String) throws -> CGImage {
@@ -88,9 +148,9 @@ func recognizedText(in image: CGImage) throws -> String {
 
 do {
     let options = try parseOptions()
-    guard let window = largestWindow(for: options.pid) else {
+    guard let window = largestOnScreenWindow(for: options.pid) else {
         throw NSError(domain: "window-proof", code: 5,
-                      userInfo: [NSLocalizedDescriptionKey: "no on-screen window for pid \(options.pid)"])
+                      userInfo: [NSLocalizedDescriptionKey: diagnoseMissingOnScreenWindow(pid: options.pid)])
     }
     let image = try capture(window: window, output: options.output)
     let text = try recognizedText(in: image).lowercased()
