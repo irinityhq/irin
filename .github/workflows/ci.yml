@@ -1050,11 +1050,14 @@ jobs:
             exit "$build_ec"
           fi
           out="$(cat "$outer_log")"
-          echo "$out" | grep -q '^verification=PASS$'
-          echo "$out" | grep -q '^shipping_tier_claim=none$'
-          echo "$out" | grep -q "^source_sha=${BRANCH_HEAD_SHA}$"
-          if echo "$out" | grep -Eiq \
-            '^(tier:[[:space:]]*Candidate verified|shipping_tier_claim=Candidate verified)'; then
+          # Prefer <<< over echo|grep under pipefail: early match closes the
+          # reader and SIGPIPEs the writer (Broken pipe on long multi-key logs).
+          grep -q '^verification=PASS$' <<<"$out"
+          grep -q '^shipping_tier_claim=none$' <<<"$out"
+          grep -q "^source_sha=${BRANCH_HEAD_SHA}$" <<<"$out"
+          if grep -Eiq \
+            '^(tier:[[:space:]]*Candidate verified|shipping_tier_claim=Candidate verified)' \
+            <<<"$out"; then
             echo "ERROR: isolation job must not claim Candidate verified" >&2
             exit 1
           fi
@@ -1067,9 +1070,10 @@ jobs:
             printf '%s\n' "$out"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-          # export + ad-hoc summary both print archive_path=; take one line only
+          # export + ad-hoc summary both print archive_path=; take first match only
           # so GITHUB_ENV stays KEY=value (multi-line values break the file command).
-          kv() { printf '%s\n' "$1" | sed -n "s/^${2}=//p" | head -n1; }
+          # awk+exit avoids sed|head SIGPIPE under pipefail.
+          kv() { awk -F= -v k="$2" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' <<<"$1"; }
           archive="$(kv "$out" archive_path)"
           [[ -n "$archive" && -f "$archive" ]] || { echo "ERROR: missing archive_path" >&2; exit 1; }
           {
@@ -1167,16 +1171,19 @@ jobs:
             exit "$build_ec"
           fi
           out="$(cat "$outer_log")"
-          echo "$out" | grep -q '^verification=PASS$'
+          # Prefer <<< over echo|grep under pipefail (early match → Broken pipe).
+          grep -q '^verification=PASS$' <<<"$out"
           # Do not print Candidate verified: CI required includes this job and
           # is not green yet. After aggregate + import, candidate-status owns tier.
-          if echo "$out" | grep -Eiq \
-            '^(tier:[[:space:]]*Candidate verified|shipping_tier_claim=Candidate verified)'; then
+          if grep -Eiq \
+            '^(tier:[[:space:]]*Candidate verified|shipping_tier_claim=Candidate verified)' \
+            <<<"$out"; then
             echo "ERROR: exact-merged job must not claim Candidate verified" >&2
             exit 1
           fi
-          # export + ad-hoc summary both print key= lines; take one line only.
-          kv() { printf '%s\n' "$1" | sed -n "s/^${2}=//p" | head -n1; }
+          # export + ad-hoc summary both print key= lines; take first match only.
+          # awk+exit avoids sed|head SIGPIPE under pipefail.
+          kv() { awk -F= -v k="$2" 'index($0, k "=") == 1 { print substr($0, length(k) + 2); exit }' <<<"$1"; }
           archive="$(kv "$out" archive_path)"
           manifest="$(kv "$out" export_manifest)"
           cid="$(kv "$out" candidate_id)"
