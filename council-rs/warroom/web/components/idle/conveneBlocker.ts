@@ -5,11 +5,18 @@ import {
   unsupportedGatewayTransportReason,
 } from "@/lib/use-discover";
 
+/** Cold-start / first-scan tone — not a permanent provider failure. */
+export const COUNCIL_LOADING_BLOCKER = "Council loading…";
+
 /**
  * Single blocking reason for the convene button, in precedence order:
- * discovery failure → still loading → no runnable cabinet → cabinet/validator
- * provider gaps → gateway transport gaps. Null means convene may proceed
- * (topic-length gating is separate).
+ * still loading / empty inventory → terminal discovery failure → no runnable
+ * cabinet → cabinet/validator provider gaps → gateway transport gaps.
+ * Null means convene may proceed (topic-length gating is separate).
+ *
+ * Cold-start races used to surface sticky "Provider discovery failed" while
+ * Council was still binding (adapter preflight + spawn). Prefer a loading
+ * tone until inventory exists or retries are clearly exhausted.
  */
 export function conveneBlocker({
   discoverData,
@@ -57,12 +64,25 @@ export function conveneBlocker({
     cabinets,
     availableIds,
   );
-  return discoverError
-    ? `Provider discovery failed: ${discoverError}`
-    : !discoverData || discoverLoading
-      ? "Provider availability is still being checked."
-      : noRunnableExplanation
-        ?? cabinetProviderProblem
-        ?? validatorProviderProblem
-        ?? gatewayProviderProblem;
+
+  // Loading / not-yet-scanned: never look like a permanent failure.
+  if (discoverLoading || !discoverData) {
+    if (discoverLoading || discoverError === null) {
+      return COUNCIL_LOADING_BLOCKER;
+    }
+    // Idle with no inventory after retries exhausted → honest failure.
+    return `Provider discovery failed: ${discoverError}`;
+  }
+
+  return (
+    noRunnableExplanation
+    ?? cabinetProviderProblem
+    ?? validatorProviderProblem
+    ?? gatewayProviderProblem
+  );
+}
+
+/** True when the convene blocker is cold-start loading tone (not danger). */
+export function isCouncilLoadingBlocker(message: string | null): boolean {
+  return message === COUNCIL_LOADING_BLOCKER;
 }

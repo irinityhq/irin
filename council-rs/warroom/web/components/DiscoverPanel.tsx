@@ -71,7 +71,7 @@ export default function DiscoverPanel() {
           {Array.from({ length: 4 }).map((_, i) => (
             <div key={i} className="h-8 animate-pulse bg-border/40 rounded" />
           ))}
-          <div className="text-center font-mono text-xs text-fg-dim pt-2">Scanning providers…</div>
+          <div className="text-center font-mono text-xs text-fg-dim pt-2">Council loading…</div>
         </div>
       ) : error ? (
         <div className="border border-border border-l-2 border-l-danger bg-bg-deep p-4 font-mono text-xs text-danger">

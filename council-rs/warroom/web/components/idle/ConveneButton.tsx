@@ -1,5 +1,6 @@
 import { Loader2, Play } from "lucide-react";
 import { cn } from "@/lib/cn";
+import { isCouncilLoadingBlocker } from "./conveneBlocker";
 
 export function ConveneButton({
   canStart,
@@ -34,7 +35,15 @@ export function ConveneButton({
         {submitting ? "Convening…" : "Convene the Council"}
       </button>
       {providerSelectionProblem && (
-        <div className="text-[10px] font-mono text-danger" data-testid="provider-selection-warning">
+        <div
+          className={cn(
+            "text-[10px] font-mono",
+            isCouncilLoadingBlocker(providerSelectionProblem)
+              ? "text-fg-dim"
+              : "text-danger",
+          )}
+          data-testid="provider-selection-warning"
+        >
           {providerSelectionProblem}
         </div>
       )}

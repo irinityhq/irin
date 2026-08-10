@@ -639,6 +639,10 @@ pub fn ensure_cli_adapters(store: &dyn SecretStore) -> CliAdaptersStatus {
 
 /// Same as [`ensure_cli_adapters`] but uses already-loaded proxy tokens so the
 /// Keychain is not re-entered for Claude/Codex accounts on this call.
+///
+/// Claude and Codex preflight/spawn run on parallel threads so cold launch pays
+/// roughly the slower CLI once (~version+auth), not the sum of both serial
+/// probes (each can take seconds under cold Node/Python starts).
 pub fn ensure_cli_adapters_with_tokens(claude_tok: &str, codex_tok: &str) -> CliAdaptersStatus {
     let mut status = CliAdaptersStatus::default();
     {
@@ -653,15 +657,35 @@ pub fn ensure_cli_adapters_with_tokens(claude_tok: &str, codex_tok: &str) -> Cli
         // Drop dead children before re-evaluating.
         reap_dead(&mut g);
 
-        let (c_health, c_reason) = ensure_one(&mut g.claude, AdapterKind::Claude, claude_tok);
+        // Disjoint field borrows: probe both adapters concurrently. Ports and
+        // CLI binaries are independent; serial preflight was the ~30s stall.
+        let AdapterState {
+            claude,
+            codex,
+            last_status,
+        } = &mut *g;
+        let (c_result, x_result) = thread::scope(|s| {
+            let claude_tok = claude_tok;
+            let codex_tok = codex_tok;
+            let c_handle =
+                s.spawn(move || ensure_one(claude, AdapterKind::Claude, claude_tok));
+            let x_handle = s.spawn(move || ensure_one(codex, AdapterKind::Codex, codex_tok));
+            (
+                c_handle
+                    .join()
+                    .unwrap_or((AdapterHealth::NotReady, AdapterNotReadyReason::StartFailed)),
+                x_handle
+                    .join()
+                    .unwrap_or((AdapterHealth::NotReady, AdapterNotReadyReason::StartFailed)),
+            )
+        });
+        let (c_health, c_reason) = c_result;
+        let (x_health, x_reason) = x_result;
         status.claude = c_health;
         status.claude_reason = c_reason;
-
-        let (x_health, x_reason) = ensure_one(&mut g.codex, AdapterKind::Codex, codex_tok);
         status.codex = x_health;
         status.codex_reason = x_reason;
-
-        g.last_status = status;
+        *last_status = status;
     }
     status
 }

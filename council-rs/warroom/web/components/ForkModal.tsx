@@ -51,11 +51,11 @@ export default function ForkModal({
   } = useDiscover();
 
   const providerAvailabilityProblem = resolved
-    ? discoverError
-      ? `Provider discovery failed: ${discoverError}. Rescan from Discover before launching.`
-      : !discoverData || discoverLoading
-        ? "Provider availability is still being checked. Wait for discovery before launching."
-        : unavailableProviderReason(providerOptions, [
+    ? discoverLoading || !discoverData
+      ? discoverLoading || discoverError === null
+        ? "Council loading…"
+        : `Provider discovery failed: ${discoverError}. Rescan from Discover before launching.`
+      : unavailableProviderReason(providerOptions, [
             ...resolved.cabinet.seats.map(
               (seat) => edits[seat.name]?.provider ?? seat.provider,
             ),

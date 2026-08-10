@@ -1,15 +1,24 @@
 import { describe, expect, it } from "vitest";
-import { warroomHealthLabel } from "./warroom-health-label";
+import {
+  COUNCIL_LOADING_LABEL,
+  warroomHealthLabel,
+} from "./warroom-health-label";
 
-describe("warroomHealthLabel — CONNECTING during boot retries", () => {
-  it("shows connecting while apiStatus is loading", () => {
-    expect(warroomHealthLabel(null, null, "loading", false)).toBe("connecting");
+describe("warroomHealthLabel — Council loading during boot retries", () => {
+  it("shows Council loading while apiStatus is loading", () => {
+    expect(warroomHealthLabel(null, null, "loading", false)).toBe(
+      COUNCIL_LOADING_LABEL,
+    );
   });
 
-  it("shows connecting while mount-time health retries are in progress", () => {
-    // First health poll failed (error) but 1.5/3/6s retries still run.
-    expect(warroomHealthLabel(null, null, "error", true)).toBe("connecting");
-    expect(warroomHealthLabel(null, null, "online", true)).toBe("connecting");
+  it("shows Council loading while mount-time health retries are in progress", () => {
+    // First health poll failed (error) but boot retries still run.
+    expect(warroomHealthLabel(null, null, "error", true)).toBe(
+      COUNCIL_LOADING_LABEL,
+    );
+    expect(warroomHealthLabel(null, null, "online", true)).toBe(
+      COUNCIL_LOADING_LABEL,
+    );
   });
 
   it("shows offline only after retries exhausted with no health", () => {

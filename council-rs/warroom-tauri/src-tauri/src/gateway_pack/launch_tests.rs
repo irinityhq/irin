@@ -1,6 +1,7 @@
 use super::super::cli_adapters::{
     ensure_cli_adapters, ensure_cli_adapters_with_tokens, ensure_proxy_tokens,
 };
+use super::super::status::{bump_pack_lifecycle_generation, pack_lifecycle_generation};
 use super::*;
 use crate::keychain::{
     load_gw_api_key, migrate_legacy_secrets_with_values, store_arm_principal_token,
@@ -172,6 +173,123 @@ fn buggy_full_start_sequence_repeats_gw_and_proxy_accounts() {
     assert!(
         store.get_count_for(CODEX_PROXY_TOKEN_ACCOUNT) >= 2,
         "buggy path re-gets Codex proxy token; sequence={gets:?}"
+    );
+}
+
+/// Cold flight + promote-style reuse of held key/secrets: still 6 gets total.
+fn promote_with_held_secrets_adds_zero_keychain_gets(
+    store: &dyn SecretStore,
+) -> Result<(), String> {
+    let migrated = migrate_legacy_secrets_with_values(store);
+    let key = migrated
+        .gw_api_key
+        .ok_or_else(|| "GW_API_KEY missing".to_string())?;
+    let launch_secrets = super::super::env::load_launch_secrets(store, migrated.auth_pepper)?;
+    let _ = pack_auth_revalidated_with_key(&key);
+    let _ = ensure_cli_adapters_with_tokens(
+        &launch_secrets.proxy_tokens.0,
+        &launch_secrets.proxy_tokens.1,
+    );
+    let _env =
+        super::super::env::build_compose_secret_env_with_launch_secrets(None, &launch_secrets)?;
+    // Promote retry: same held values (no Keychain re-entry).
+    let _ = pack_auth_revalidated_with_key(&key);
+    let _ = ensure_cli_adapters_with_tokens(
+        &launch_secrets.proxy_tokens.0,
+        &launch_secrets.proxy_tokens.1,
+    );
+    let _env2 =
+        super::super::env::build_compose_secret_env_with_launch_secrets(None, &launch_secrets)?;
+    let _ = pack_auth_revalidated_with_key(&key);
+    Ok(())
+}
+
+/// Bare promote (no held secrets) re-gets accounts the way schedule used to.
+fn buggy_promote_without_held_secrets_sequence(store: &dyn SecretStore) -> Result<(), String> {
+    let _ = pack_auth_revalidated(store); // GW
+    let _ = ensure_cli_adapters(store); // proxies
+    let _ = super::super::env::build_compose_secret_env(store, None, None)?; // pepper/arm/watch/proxies
+    Ok(())
+}
+
+#[test]
+fn promote_with_held_secrets_does_not_reenter_keychain() {
+    let store = CountingSecretStore::with_seeded_pack_secrets();
+    promote_with_held_secrets_adds_zero_keychain_gets(&store).unwrap();
+    let gets = store.get_accounts();
+    assert_eq!(
+        gets.len(),
+        6,
+        "cold+promote held secrets must stay at 6 gets, got {gets:?}"
+    );
+    for account in [
+        GW_API_KEY_ACCOUNT,
+        CLAUDE_PROXY_TOKEN_ACCOUNT,
+        CODEX_PROXY_TOKEN_ACCOUNT,
+        AUTH_PEPPER_ACCOUNT,
+        WATCH_ADMIN_TOKEN_ACCOUNT,
+        ARM_PRINCIPAL_TOKEN_ACCOUNT,
+    ] {
+        assert_eq!(
+            store.get_count_for(account),
+            1,
+            "account {account} re-entered on promote; sequence={gets:?}"
+        );
+    }
+}
+
+/// Orchestration path used by `schedule_governed_promote_attempts`: after a
+/// cold Keychain flight, the production promote helper + held-key status must
+/// perform zero additional store reads. If the scheduler stops forwarding
+/// held secrets, this fails (legacy dispatch re-gets accounts).
+#[test]
+fn promote_pack_ready_held_secret_path_does_not_reenter_keychain() {
+    let store = CountingSecretStore::with_seeded_pack_secrets();
+    let migrated = migrate_legacy_secrets_with_values(&store);
+    let key = migrated.gw_api_key.expect("seeded GW_API_KEY");
+    let launch_secrets =
+        super::super::env::load_launch_secrets(&store, migrated.auth_pepper).unwrap();
+    let after_cold = store.get_accounts().len();
+    assert_eq!(after_cold, 6, "cold flight should be exactly 6 gets");
+
+    // Same dispatch schedule_governed_promote_attempts uses per attempt.
+    let _step = promote_pack_ready_for_attempt(&store, Some(&key), Some(&launch_secrets), 0, 4);
+    // Post-success status sample on the held-key authority path.
+    let _ = status_with_council_route_with_key(&store, Some(&key), true, false);
+
+    let gets = store.get_accounts();
+    assert_eq!(
+        gets.len(),
+        after_cold,
+        "scheduler held-secret path must add zero Keychain gets; sequence={gets:?}"
+    );
+}
+
+#[test]
+fn promote_held_secrets_invalid_after_lifecycle_bump() {
+    let at = pack_lifecycle_generation();
+    assert!(promote_held_secrets_still_valid(at));
+    bump_pack_lifecycle_generation();
+    assert!(
+        !promote_held_secrets_still_valid(at),
+        "lifecycle bump must invalidate held cold-launch credentials"
+    );
+}
+
+#[test]
+fn buggy_promote_without_held_secrets_reenters_accounts() {
+    let store = CountingSecretStore::with_seeded_pack_secrets();
+    full_start_resume_keychain_sequence(&store).unwrap();
+    let after_cold = store.get_accounts().len();
+    buggy_promote_without_held_secrets_sequence(&store).unwrap();
+    let gets = store.get_accounts();
+    assert!(
+        gets.len() > after_cold,
+        "bare promote should add Keychain gets beyond cold flight; got {gets:?}"
+    );
+    assert!(
+        store.get_count_for(GW_API_KEY_ACCOUNT) >= 2,
+        "bare promote re-gets GW; sequence={gets:?}"
     );
 }
 

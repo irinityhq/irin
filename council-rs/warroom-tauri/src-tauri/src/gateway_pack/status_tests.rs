@@ -777,8 +777,9 @@ fn cold_launch_seed_makes_first_background_tick_keychain_free() {
     let _lock = test_env_lock();
     invalidate_auth_observation();
     let store = CountingKeychainStore::with_gw_key();
+    let gen = auth_observation_generation();
 
-    seed_auth_observation_from_preloaded_key(Some("gw_deadbeef"));
+    seed_auth_observation_from_preloaded_key(Some("gw_deadbeef"), gen);
     let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
 
     assert_eq!(
@@ -793,8 +794,9 @@ fn cold_launch_absence_seed_makes_first_background_tick_keychain_free() {
     let _lock = test_env_lock();
     invalidate_auth_observation();
     let store = CountingKeychainStore::new();
+    let gen = auth_observation_generation();
 
-    seed_auth_observation_from_preloaded_key(None);
+    seed_auth_observation_from_preloaded_key(None, gen);
     let (present, _) = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
 
     assert!(!present);
@@ -802,6 +804,63 @@ fn cold_launch_absence_seed_makes_first_background_tick_keychain_free() {
         store.get_count(),
         0,
         "known cold-launch absence must seed the first background tick"
+    );
+}
+
+#[test]
+fn early_then_late_seed_keeps_background_keychain_free() {
+    // Cold launch seeds immediately after the Keychain flight, then re-seeds
+    // after pack resume for live authenticated. Neither step may re-get GW.
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::with_gw_key();
+    let gen = auth_observation_generation();
+
+    seed_auth_observation_from_preloaded_key(Some("gw_deadbeef"), gen); // early
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    seed_auth_observation_from_preloaded_key(Some("gw_deadbeef"), gen); // late refresh
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+
+    assert_eq!(
+        store.get_count(),
+        0,
+        "early+late held-key seed must keep BackgroundCached Keychain-free"
+    );
+}
+
+#[test]
+fn seed_rejects_stale_preload_generation() {
+    // Late seed after Enable/invalidate must not commit the old launch key
+    // under the new generation.
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let stale_gen = auth_observation_generation();
+    invalidate_auth_observation();
+    assert_ne!(stale_gen, auth_observation_generation());
+
+    seed_auth_observation_from_preloaded_key(Some("gw_deadbeef"), stale_gen);
+    assert!(
+        !auth_observation_present_for_test(),
+        "stale preload generation must not populate the cache"
+    );
+}
+
+#[test]
+fn seed_commits_provisional_presence_before_live_probe() {
+    // Presence is committed even when the live /v1/models probe fails (no
+    // Gateway). Concurrent Background ticks must not re-get Keychain.
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::with_gw_key();
+    let gen = auth_observation_generation();
+
+    seed_auth_observation_from_preloaded_key(Some("gw_deadbeef"), gen);
+    let (present, _) = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    assert!(present, "provisional seed must record key presence");
+    assert_eq!(
+        store.get_count(),
+        0,
+        "provisional+final seed must keep BackgroundCached Keychain-free"
     );
 }
 

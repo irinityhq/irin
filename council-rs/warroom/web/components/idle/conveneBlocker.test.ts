@@ -65,12 +65,25 @@ describe("conveneBlocker", () => {
     expect(conveneBlocker(baseArgs())).toBeNull();
   });
 
-  it("prefers discovery failure over loading or inventory gaps", () => {
+  it("prefers Council loading over sticky errors while still loading", () => {
     expect(
       conveneBlocker(
         baseArgs({
           discoverError: "timeout",
           discoverLoading: true,
+          discoverData: null,
+          availableIds: null,
+        }),
+      ),
+    ).toBe("Council loading…");
+  });
+
+  it("surfaces discovery failure only after retries idle with no inventory", () => {
+    expect(
+      conveneBlocker(
+        baseArgs({
+          discoverError: "timeout",
+          discoverLoading: false,
           discoverData: null,
           availableIds: null,
         }),
@@ -86,7 +99,7 @@ describe("conveneBlocker", () => {
           discoverLoading: true,
         }),
       ),
-    ).toBe("Provider availability is still being checked.");
+    ).toBe("Council loading…");
 
     expect(
       conveneBlocker(
@@ -95,7 +108,7 @@ describe("conveneBlocker", () => {
           discoverLoading: false,
         }),
       ),
-    ).toBe("Provider availability is still being checked.");
+    ).toBe("Council loading…");
   });
 
   it("explains when no cabinet is runnable under the Discover inventory", () => {

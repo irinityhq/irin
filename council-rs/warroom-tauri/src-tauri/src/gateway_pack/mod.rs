@@ -30,9 +30,10 @@ pub(crate) use status::seed_auth_observation_from_preloaded_key;
 #[cfg(test)]
 pub use status::status_cache_generation_for_test;
 pub use status::{
-    bump_pack_lifecycle_generation, gateway_pack_status, gateway_pack_status_fresh,
-    gateway_pack_status_fresh_with_key, invalidate_auth_observation, invalidate_status_cache,
-    owned_council_route, pack_lifecycle_generation, record_owned_council_route,
+    auth_observation_generation, bump_pack_lifecycle_generation, gateway_pack_status,
+    gateway_pack_status_fresh, gateway_pack_status_fresh_with_key, invalidate_auth_observation,
+    invalidate_status_cache, owned_council_route, pack_lifecycle_generation,
+    record_owned_council_route,
 };
 
 pub use paths::{
@@ -64,9 +65,10 @@ pub use launch::{
 };
 pub use launch::{
     default_secret_store, governed_launch_after_watch_reconciliation, may_promote_to_governed,
-    pack_auth_revalidated, pack_auth_revalidated_with_key, promote_may_call_resume,
-    resume_installed_pack, resume_installed_pack_with_key, status_with_council_route,
-    watch_admin_surfaces_authenticated,
+    pack_auth_revalidated, pack_auth_revalidated_with_key, promote_held_secrets_still_valid,
+    promote_may_call_resume, promote_pack_ready_for_attempt, resume_installed_pack,
+    resume_installed_pack_with_key, status_with_council_route, status_with_council_route_with_key,
+    watch_admin_surfaces_authenticated, PromotePackAttempt,
 };
 
 #[cfg(test)]
