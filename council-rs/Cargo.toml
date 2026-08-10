@@ -59,6 +59,7 @@ ed25519-dalek = "2"
 tower = { version = "0.5", features = ["util"] }
 # WebSocket client for /ws/librarian integration tests (R20). Pinned to the
 # version already in the lockfile (transitive via axum) so no new dep weight.
+# Keep in lockstep with axum's transitive tungstenite when possible.
 tokio-tungstenite = "0.29"
 
 [[bin]]

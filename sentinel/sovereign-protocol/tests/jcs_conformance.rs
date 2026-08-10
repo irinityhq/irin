@@ -65,8 +65,10 @@ fn parse_vectors(raw: &str) -> Vec<(&str, &str)> {
 #[test]
 fn vendored_vectors_content_hash_pinned() {
     use sha2::{Digest, Sha256};
-    let b = format!("{:x}", Sha256::digest(BOUNDARY_VECTORS.as_bytes()));
-    let s = format!("{:x}", Sha256::digest(SAMPLED_VECTORS.as_bytes()));
+    // sha2 0.11 Output no longer implements LowerHex.
+    let hex = |bytes: &[u8]| -> String { bytes.iter().map(|b| format!("{b:02x}")).collect() };
+    let b = hex(Sha256::digest(BOUNDARY_VECTORS.as_bytes()).as_slice());
+    let s = hex(Sha256::digest(SAMPLED_VECTORS.as_bytes()).as_slice());
     assert_eq!(
         b, BOUNDARY_SHA256,
         "es6_boundary.txt was edited; re-pin or revert"

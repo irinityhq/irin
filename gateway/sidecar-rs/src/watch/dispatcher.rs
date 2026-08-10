@@ -65,7 +65,8 @@ pub fn safe_tenant_token(tenant: &str) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(trimmed.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+        // hex::encode: sha2 0.11 Output no longer implements LowerHex.
+        let hash = hex::encode(hasher.finalize());
         format!("t-{}", &hash[..12])
     }
 }
@@ -99,7 +100,8 @@ pub fn safe_escalation_id_segment(raw: &str) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(trimmed.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+        // hex::encode: sha2 0.11 Output no longer implements LowerHex.
+        let hash = hex::encode(hasher.finalize());
         format!("e-{}", &hash[..12])
     }
 }
