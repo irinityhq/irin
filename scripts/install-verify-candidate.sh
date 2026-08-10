@@ -17,6 +17,7 @@
 #   - path outside IRIN_CANDIDATE_ROOT
 #   - missing DMG / candidate.json
 #   - installed vs candidate bundle-manifest digest divergence
+#   - --live with pack_mode=local-dev (ad-hoc must not replace daily app)
 #   - --live while IRIN.app is running
 #   - --live post-swap digest mismatch (restores prior app; no install proof)
 set -euo pipefail
@@ -114,9 +115,10 @@ Without --live: writes proofs/install.json for the candidate-local extract.
 With --live: after extract verify, staged-swaps the verified extract into
 /Applications/IRIN.app (hermetic tests may set IRIN_LIVE_APPLICATIONS_ROOT
 only when IRIN_CANDIDATE_STATUS_HERMETIC=1 and the candidate root is a
-temp-store path). Refuses if IRIN.app is running. On success, writes
-install proof with live_installed_app_path + live_installed_bundle_manifest_digest.
-On post-displacement failure, restores the prior app and writes no install proof.
+temp-store path). Refuses pack_mode=local-dev (ad-hoc) and if IRIN.app is
+running. On success, writes install proof with live_installed_app_path +
+live_installed_bundle_manifest_digest. On post-displacement failure,
+restores the prior app and writes no install proof.
 EOF
       exit 0
       ;;
@@ -141,6 +143,9 @@ DMG="$(find "$CANDIDATE" -maxdepth 1 -type f -name '*.dmg' | head -1 || true)"
 IDENTITY="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_sha"])' \
   "$CANDIDATE/candidate.json")" \
   || die "could not read candidate.json source_sha"
+CANDIDATE_PACK_MODE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("pack_mode",""))' \
+  "$CANDIDATE/candidate.json")" \
+  || die "could not read candidate.json pack_mode"
 CANDIDATE_ID="$(basename "$CANDIDATE")"
 [[ "$CANDIDATE_ID" =~ ^[0-9a-f]{64}$ ]] || die "candidate path basename is not a candidate-id: $CANDIDATE_ID"
 
@@ -152,8 +157,20 @@ IDENTITY_BM="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["
 [[ "$CAND_BM_DIGEST" == "$IDENTITY_BM" ]] \
   || die "candidate bundle-manifest digest does not match identity"
 
-# --live: do not leave a partial install proof if live swap fails later.
+# --live: only stable-identity apps may replace the daily installed app.
+# local-dev is ad-hoc and re-prompts Keychain on every rebuild; keep it for
+# extract/verify/smoke only.
 if [[ "$LIVE_MODE" == "1" ]]; then
+  case "$CANDIDATE_PACK_MODE" in
+    signed-rc|production) ;;
+    local-dev)
+      die "refusing --live install of pack_mode=local-dev (ad-hoc); rebuild with signed-rc or production for /Applications"
+      ;;
+    *)
+      die "refusing --live install: pack_mode must be signed-rc or production (got ${CANDIDATE_PACK_MODE:-empty})"
+      ;;
+  esac
+  # Do not leave a partial install proof if live swap fails later.
   rm -f "$CANDIDATE/proofs/install.json"
 fi
 

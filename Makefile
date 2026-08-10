@@ -62,7 +62,7 @@ warroom: ## macOS/Ubuntu: run Council + War Room Web in the foreground
 	COUNCIL_PORT="$${IRIN_COUNCIL_PORT:-8765}" WARROOM_WEB_PORT="$${IRIN_WEB_PORT:-3010}" \
 		$(MAKE) -C council-rs warroom-browser
 
-dmg-build: ## Build IRIN candidate into IRIN_CANDIDATE_ROOT (prints candidate_path=)
+dmg-build: ## Build IRIN candidate (signed-rc if APPLE_SIGNING_IDENTITY set; else local-dev)
 	bash packaging/build-dmg.sh
 
 dmg-verify: ## Verify named candidate (requires IRIN_CANDIDATE_PATH; never re-signs)
