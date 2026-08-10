@@ -1,6 +1,7 @@
 use super::super::cli_adapters::{
     ensure_cli_adapters, ensure_cli_adapters_with_tokens, ensure_proxy_tokens,
 };
+use super::super::status::{bump_pack_lifecycle_generation, pack_lifecycle_generation};
 use super::*;
 use crate::keychain::{
     load_gw_api_key, migrate_legacy_secrets_with_values, store_arm_principal_token,
@@ -235,6 +236,44 @@ fn promote_with_held_secrets_does_not_reenter_keychain() {
             "account {account} re-entered on promote; sequence={gets:?}"
         );
     }
+}
+
+/// Orchestration path used by `schedule_governed_promote_attempts`: after a
+/// cold Keychain flight, the production promote helper + held-key status must
+/// perform zero additional store reads. If the scheduler stops forwarding
+/// held secrets, this fails (legacy dispatch re-gets accounts).
+#[test]
+fn promote_pack_ready_held_secret_path_does_not_reenter_keychain() {
+    let store = CountingSecretStore::with_seeded_pack_secrets();
+    let migrated = migrate_legacy_secrets_with_values(&store);
+    let key = migrated.gw_api_key.expect("seeded GW_API_KEY");
+    let launch_secrets =
+        super::super::env::load_launch_secrets(&store, migrated.auth_pepper).unwrap();
+    let after_cold = store.get_accounts().len();
+    assert_eq!(after_cold, 6, "cold flight should be exactly 6 gets");
+
+    // Same dispatch schedule_governed_promote_attempts uses per attempt.
+    let _step = promote_pack_ready_for_attempt(&store, Some(&key), Some(&launch_secrets), 0, 4);
+    // Post-success status sample on the held-key authority path.
+    let _ = status_with_council_route_with_key(&store, Some(&key), true, false);
+
+    let gets = store.get_accounts();
+    assert_eq!(
+        gets.len(),
+        after_cold,
+        "scheduler held-secret path must add zero Keychain gets; sequence={gets:?}"
+    );
+}
+
+#[test]
+fn promote_held_secrets_invalid_after_lifecycle_bump() {
+    let at = pack_lifecycle_generation();
+    assert!(promote_held_secrets_still_valid(at));
+    bump_pack_lifecycle_generation();
+    assert!(
+        !promote_held_secrets_still_valid(at),
+        "lifecycle bump must invalidate held cold-launch credentials"
+    );
 }
 
 #[test]

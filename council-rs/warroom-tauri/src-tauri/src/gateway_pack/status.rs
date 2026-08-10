@@ -152,13 +152,36 @@ fn commit_auth_observation(generation: u64, key_present: bool, authenticated: bo
     }
 }
 
+/// Current auth-observation generation (non-secret, process-local).
+///
+/// Capture this at the same time as a cold-launch Keychain flight and pass it
+/// into [`seed_auth_observation_from_preloaded_key`] so a concurrent
+/// enable/disable/uninstall invalidation cannot commit the old key under a
+/// newer generation.
+pub fn auth_observation_generation() -> u64 {
+    AUTH_OBSERVATION_GENERATION.load(Ordering::SeqCst)
+}
+
 /// Seed the background presentation cache from the GW key already owned by a
-/// cold-launch flight. This performs a live Gateway probe but never re-enters
-/// Keychain.
-pub(crate) fn seed_auth_observation_from_preloaded_key(key: Option<&str>) {
-    let generation = AUTH_OBSERVATION_GENERATION.load(Ordering::SeqCst);
+/// cold-launch flight. Never re-enters Keychain.
+///
+/// `preload_generation` must be the generation captured when the key was
+/// loaded. If lifecycle invalidation advanced generation since then, this is a
+/// no-op (stale key must not overwrite a fresher cache).
+///
+/// Commits a **provisional** observation (key presence, `authenticated=false`)
+/// before the live `/v1/models` probe so a concurrent Background tick cannot
+/// re-get `GW_API_KEY` while the HTTP probe is in flight. The provisional is
+/// then upgraded to the live result under the same generation.
+pub(crate) fn seed_auth_observation_from_preloaded_key(key: Option<&str>, preload_generation: u64) {
+    if AUTH_OBSERVATION_GENERATION.load(Ordering::SeqCst) != preload_generation {
+        return;
+    }
+    let key_present = key.is_some();
+    // Provisional: presence alone closes the Keychain race during the probe.
+    let _ = commit_auth_observation(preload_generation, key_present, false);
     let authenticated = key.map(models_authenticated).unwrap_or(false);
-    let _ = commit_auth_observation(generation, key.is_some(), authenticated);
+    let _ = commit_auth_observation(preload_generation, key_present, authenticated);
 }
 
 #[cfg(test)]

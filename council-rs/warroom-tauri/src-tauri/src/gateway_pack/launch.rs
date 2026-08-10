@@ -145,6 +145,73 @@ pub fn promote_may_call_resume(
     !pack_auth_ok && attempt < max_early_resume_attempts
 }
 
+/// Outcome of one promote attempt's secret-dependent pack steps.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromotePackAttempt {
+    /// Pack is authenticated-ready (resume not needed or already succeeded).
+    Ready,
+    /// Quiet not-ready (outside early resume window; revalidation-only poll).
+    NotReady,
+    /// Resume was attempted and failed (caller should log `reason`).
+    Failed { reason: String },
+}
+
+impl PromotePackAttempt {
+    pub fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready)
+    }
+}
+
+/// One promote attempt's secret-dependent pack steps (revalidate + optional
+/// resume). Production `schedule_governed_promote_attempts` calls this so the
+/// held-secret vs legacy dispatch lives in one place; tests exercise this
+/// path directly and assert held secrets perform no Keychain re-entry.
+///
+/// When both `held_gw_key` and `launch_secrets` are present, every Keychain
+/// get for the six cold-launch accounts is skipped. Either missing falls
+/// through to the legacy load path.
+pub fn promote_pack_ready_for_attempt(
+    store: &dyn SecretStore,
+    held_gw_key: Option<&str>,
+    launch_secrets: Option<&LaunchSecrets>,
+    attempt: u32,
+    max_early_resume_attempts: u32,
+) -> PromotePackAttempt {
+    let revalidated = match held_gw_key {
+        Some(key) => pack_auth_revalidated_with_key(key),
+        None => pack_auth_revalidated(store),
+    };
+    let resume = || -> Result<(), String> {
+        match (held_gw_key, launch_secrets) {
+            (Some(key), Some(secrets)) => resume_installed_pack_with_key(store, key, secrets),
+            _ => resume_installed_pack(store),
+        }
+    };
+    if revalidated {
+        // Revalidated means auth+health OK; still run resume for Watch/Outbox
+        // reconciliation (held-secret path is a no-op on Keychain).
+        return match resume() {
+            Ok(()) => PromotePackAttempt::Ready,
+            Err(reason) => PromotePackAttempt::Failed { reason },
+        };
+    }
+    if promote_may_call_resume(attempt, max_early_resume_attempts, revalidated) {
+        return match resume() {
+            Ok(()) => PromotePackAttempt::Ready,
+            Err(reason) => PromotePackAttempt::Failed { reason },
+        };
+    }
+    PromotePackAttempt::NotReady
+}
+
+/// Held cold-launch credentials remain valid only while the pack lifecycle
+/// generation is unchanged. Enable/disable/uninstall advances generation and
+/// may rotate the GW key; a later promote attempt must not resume/spawn with
+/// the stale snapshot.
+pub fn promote_held_secrets_still_valid(lifecycle_at_capture: u64) -> bool {
+    super::status::pack_lifecycle_generation() == lifecycle_at_capture
+}
+
 fn resume_flight_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

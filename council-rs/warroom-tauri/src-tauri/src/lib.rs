@@ -268,6 +268,10 @@ fn unix_kill_pid(_pid: u32, _sig: i32) {}
 /// When present, promote revalidates/resumes/spawns without re-entering Keychain
 /// for those six accounts (each get can surface a macOS ACL dialog under ad-hoc
 /// signatures). Absent values fall back to the legacy load path.
+///
+/// Credentials are tied to `pack_lifecycle_generation` at schedule time: if
+/// Enable/disable/uninstall advances generation (and may rotate the GW key),
+/// later attempts abort rather than resume/spawn with a stale snapshot.
 fn schedule_governed_promote_attempts(
     app: AppHandle,
     auth_token: Option<String>,
@@ -279,9 +283,18 @@ fn schedule_governed_promote_attempts(
     /// Early window may call resume; resume is single-flight and wait-only when
     /// the pack project is already up (no repeated force-recreate/Keychain rebuild).
     const MAX_EARLY_RESUME_ATTEMPTS: u32 = 4;
+    let lifecycle_at_schedule = gateway_pack::pack_lifecycle_generation();
+    let auth_gen_at_schedule = gateway_pack::auth_observation_generation();
     tauri::async_runtime::spawn_blocking(move || {
         for attempt in 0..ATTEMPTS {
             std::thread::sleep(INTERVAL);
+            if !gateway_pack::promote_held_secrets_still_valid(lifecycle_at_schedule) {
+                let _ = app.emit(
+                    "council-log",
+                    "[system] governed-promote: pack lifecycle changed; aborting held-secret promote",
+                );
+                return;
+            }
             let store = KeychainSecretStore;
             let persisted = match load_or_create_private_config() {
                 Ok(cfg) => cfg.via_gateway_default,
@@ -292,54 +305,23 @@ fn schedule_governed_promote_attempts(
             if !persisted || owned == Some(true) || owned != Some(false) {
                 return;
             }
-            let revalidated = match held_gw_key.as_deref() {
-                Some(key) => gateway_pack::pack_auth_revalidated_with_key(key),
-                None => gateway_pack::pack_auth_revalidated(&store),
-            };
-            let resume = |store: &KeychainSecretStore| -> Result<(), String> {
-                match (held_gw_key.as_deref(), launch_secrets.as_ref()) {
-                    (Some(key), Some(secrets)) => {
-                        gateway_pack::resume_installed_pack_with_key(store, key, secrets)
-                    }
-                    _ => gateway_pack::resume_installed_pack(store),
-                }
-            };
-            let pack_ok = if revalidated {
-                match resume(&store) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        let _ = app.emit(
-                            "council-log",
-                            format!(
-                                "[system] governed-promote attempt {}: Watch/Outbox auth not ready ({e})",
-                                attempt + 1
-                            ),
-                        );
-                        false
-                    }
-                }
-            } else if gateway_pack::promote_may_call_resume(
+            let pack_step = gateway_pack::promote_pack_ready_for_attempt(
+                &store,
+                held_gw_key.as_deref(),
+                launch_secrets.as_ref(),
                 attempt,
                 MAX_EARLY_RESUME_ATTEMPTS,
-                revalidated,
-            ) {
-                match resume(&store) {
-                    Ok(()) => true,
-                    Err(e) => {
-                        let _ = app.emit(
-                            "council-log",
-                            format!(
-                                "[system] governed-promote attempt {}: pack not ready ({e})",
-                                attempt + 1
-                            ),
-                        );
-                        false
-                    }
-                }
-            } else {
-                // After early window: revalidation-only polls (first branch).
-                false
-            };
+            );
+            if let gateway_pack::PromotePackAttempt::Failed { reason } = &pack_step {
+                let _ = app.emit(
+                    "council-log",
+                    format!(
+                        "[system] governed-promote attempt {}: pack not ready ({reason})",
+                        attempt + 1
+                    ),
+                );
+            }
+            let pack_ok = pack_step.is_ready();
             if !gateway_pack::may_promote_to_governed(persisted, owned, pack_ok) {
                 continue;
             }
@@ -384,13 +366,21 @@ fn schedule_governed_promote_attempts(
                         true,
                         false,
                     );
-                    // Re-seed presentation cache from the held key (no Keychain
-                    // re-get). Use Background freshness: Action would re-load
-                    // GW_API_KEY via gateway_pack_status_fresh, undoing the
-                    // held-secret promote flight. status_with_council_route
-                    // already took a live authority sample above.
-                    gateway_pack::seed_auth_observation_from_preloaded_key(held_gw_key.as_deref());
-                    let _ = status_authority::recompute(&app, Freshness::Background);
+                    // Held-key path: re-seed presentation from the snapshot
+                    // (no Keychain re-get) + Background recompute.
+                    // Legacy fallback (no held key): status above may have
+                    // loaded a key via Keychain; never seed None (that would
+                    // cache false unauthenticated). Action recompute owns
+                    // presentation after a successful unheld promote.
+                    if held_gw_key.is_some() {
+                        gateway_pack::seed_auth_observation_from_preloaded_key(
+                            held_gw_key.as_deref(),
+                            auth_gen_at_schedule,
+                        );
+                        let _ = status_authority::recompute(&app, Freshness::Background);
+                    } else {
+                        let _ = status_authority::recompute(&app, Freshness::Action);
+                    }
                     return;
                 }
                 Err(e) => {
@@ -1791,10 +1781,14 @@ pub fn run() {
                     // the GW/pepper values it already read; the remaining four
                     // accounts are loaded once here and threaded through resume
                     // and governed Council spawn.
-                    let (launch_key, launch_secrets) = if packaged {
+                    let (launch_key, launch_secrets, preload_auth_generation) = if packaged {
                         let store = KeychainSecretStore;
                         let migrated = migrate_legacy_secrets_with_values(&store);
                         gateway_pack::invalidate_auth_observation();
+                        // Capture generation with the flight so a concurrent
+                        // Enable cannot commit this key under a newer gen.
+                        let preload_auth_generation =
+                            gateway_pack::auth_observation_generation();
                         match gateway_pack::load_launch_secrets(&store, migrated.auth_pepper) {
                             Ok(secrets) => {
                                 seed_arm_principal_observation(
@@ -1806,8 +1800,9 @@ pub fn run() {
                                 // Re-seeded again after pack work for live auth.
                                 gateway_pack::seed_auth_observation_from_preloaded_key(
                                     migrated.gw_api_key.as_deref(),
+                                    preload_auth_generation,
                                 );
-                                (migrated.gw_api_key, Some(secrets))
+                                (migrated.gw_api_key, Some(secrets), preload_auth_generation)
                             }
                             Err(error) => {
                                 eprintln!(
@@ -1815,12 +1810,13 @@ pub fn run() {
                                 );
                                 gateway_pack::seed_auth_observation_from_preloaded_key(
                                     migrated.gw_api_key.as_deref(),
+                                    preload_auth_generation,
                                 );
-                                (migrated.gw_api_key, None)
+                                (migrated.gw_api_key, None, preload_auth_generation)
                             }
                         }
                     } else {
-                        (None, None)
+                        (None, None, gateway_pack::auth_observation_generation())
                     };
                     let mut persisted_via_gateway = false;
                     let auth_token = if packaged {
@@ -2012,9 +2008,11 @@ pub fn run() {
                     }
                     // Refresh live authenticated flag after resume/spawn; no
                     // Keychain re-get (held key). Early seed already covered
-                    // the UI race window during pack bring-up.
+                    // the UI race window during pack bring-up. Rejects if
+                    // generation advanced since the preload flight.
                     gateway_pack::seed_auth_observation_from_preloaded_key(
                         launch_key.as_deref(),
+                        preload_auth_generation,
                     );
                     // Start presentation polling only after cold launch has
                     // seeded both presence caches. Background ticks perform
