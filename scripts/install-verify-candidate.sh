@@ -18,6 +18,10 @@
 #   - missing DMG / candidate.json
 #   - installed vs candidate bundle-manifest digest divergence
 #   - --live with pack_mode=local-dev (ad-hoc must not replace daily app)
+#   - candidate-id that does not recompute from candidate.json
+#   - HASHES pack_mode that does not match candidate.json
+#   - --live extract without Developer ID (real installs; hermetic fixtures skip
+#     unless IRIN_LIVE_REQUIRE_DEVELOPER_ID=1)
 #   - --live while IRIN.app is running
 #   - --live post-swap digest mismatch (restores prior app; no install proof)
 set -euo pipefail
@@ -140,6 +144,9 @@ DEST_APP="$INSTALL_ROOT/$APP_NAME"
 DMG="$(find "$CANDIDATE" -maxdepth 1 -type f -name '*.dmg' | head -1 || true)"
 [[ -n "$DMG" && -f "$DMG" ]] || die "candidate DMG missing under $CANDIDATE"
 
+[[ -f "$CANDIDATE/candidate.json" ]] || die "candidate.json missing: $CANDIDATE/candidate.json"
+[[ -f "$CANDIDATE/HASHES.txt" ]] || die "HASHES.txt missing: $CANDIDATE/HASHES.txt"
+
 IDENTITY="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_sha"])' \
   "$CANDIDATE/candidate.json")" \
   || die "could not read candidate.json source_sha"
@@ -148,6 +155,17 @@ CANDIDATE_PACK_MODE="$(python3 -c 'import json,sys; print(json.load(open(sys.arg
   || die "could not read candidate.json pack_mode"
 CANDIDATE_ID="$(basename "$CANDIDATE")"
 [[ "$CANDIDATE_ID" =~ ^[0-9a-f]{64}$ ]] || die "candidate path basename is not a candidate-id: $CANDIDATE_ID"
+
+# Candidate-id is sha256(candidate.json). Recompute so an in-place pack_mode
+# (or any identity field) rewrite cannot keep the old store path.
+RECOMPUTED_ID="$(irin_sha256_file "$CANDIDATE/candidate.json")"
+[[ "$RECOMPUTED_ID" == "$CANDIDATE_ID" ]] \
+  || die "candidate-id does not recompute from candidate.json (store=$CANDIDATE_ID recomputed=$RECOMPUTED_ID)"
+
+HASHES_PACK_MODE="$(awk -F= '$1 == "pack_mode" { print $2; exit }' "$CANDIDATE/HASHES.txt")"
+[[ -n "$HASHES_PACK_MODE" ]] || die "HASHES.txt missing pack_mode"
+[[ "$HASHES_PACK_MODE" == "$CANDIDATE_PACK_MODE" ]] \
+  || die "HASHES pack_mode=$HASHES_PACK_MODE does not match candidate.json pack_mode=$CANDIDATE_PACK_MODE"
 
 CAND_BM="$CANDIDATE/bundle-manifest.txt"
 [[ -f "$CAND_BM" ]] || die "bundle-manifest.txt missing: $CAND_BM"
@@ -159,7 +177,8 @@ IDENTITY_BM="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["
 
 # --live: only stable-identity apps may replace the daily installed app.
 # local-dev is ad-hoc and re-prompts Keychain on every rebuild; keep it for
-# extract/verify/smoke only.
+# extract/verify/smoke only. pack_mode alone is not enough — see post-extract
+# Developer ID proof for non-hermetic live installs.
 if [[ "$LIVE_MODE" == "1" ]]; then
   case "$CANDIDATE_PACK_MODE" in
     signed-rc|production) ;;
@@ -197,6 +216,29 @@ INST_BM_DIGEST="$(irin_sha256_file "$INSTALL_ROOT/bundle-manifest.txt")"
 
 [[ "$INST_BM_DIGEST" == "$CAND_BM_DIGEST" ]] \
   || die "installed bundle-manifest digest diverges from candidate (installed=$INST_BM_DIGEST candidate=$CAND_BM_DIGEST)"
+
+# --live requires a real Developer ID code signature, not only a claimed
+# pack_mode. Hermetic W3 fixtures are not Mach-O bundles and skip this proof;
+# force with IRIN_LIVE_REQUIRE_DEVELOPER_ID=1 to regression-test the refuse.
+if [[ "$LIVE_MODE" == "1" ]]; then
+  require_dev_id=0
+  if hermetic_overrides_allowed; then
+    if [[ "${IRIN_LIVE_REQUIRE_DEVELOPER_ID:-}" == "1" ]]; then
+      require_dev_id=1
+    fi
+  else
+    require_dev_id=1
+  fi
+  if [[ "$require_dev_id" == "1" ]]; then
+    note "prove Developer ID code identity on extract (not pack_mode claim alone)"
+    codesign --verify --deep --strict "$DEST_APP" \
+      || die "refusing --live: codesign verification failed on extract (not Developer ID-stable)"
+    LIVE_SIG_DETAILS="$(codesign -dv --verbose=4 "$DEST_APP" 2>&1)" \
+      || die "refusing --live: could not inspect extract signature"
+    [[ "$LIVE_SIG_DETAILS" == *"Authority=Developer ID Application"* ]] \
+      || die "refusing --live: extract is not Developer ID-signed (claimed pack_mode=$CANDIDATE_PACK_MODE)"
+  fi
+fi
 
 # Content-identity equality (path/kind/payload + freeze-normalized mode) is
 # enforced by candidate-status; we still refuse obvious path/kind/payload diffs.

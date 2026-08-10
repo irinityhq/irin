@@ -1038,6 +1038,76 @@ set -e
 [[ -f "$LOCALDEV_DEST/proofs/install.json" ]] || fail "default local-dev must write candidate-local install proof"
 pass "--live refuses pack_mode=local-dev; default extract still allowed"
 
+# (a0b) forged pack_mode: rewrite candidate.json under old path → id recompute refuses
+FORGE_DEST="$(make_live_candidate forge local-dev)"
+chmod u+w "$FORGE_DEST/candidate.json" "$FORGE_DEST/HASHES.txt" 2>/dev/null || true
+python3 - "$FORGE_DEST/candidate.json" <<'PY2' || fail "could not forge pack_mode in candidate.json"
+import json, sys
+path = sys.argv[1]
+doc = json.load(open(path, encoding="utf-8"))
+assert doc["pack_mode"] == "local-dev", doc["pack_mode"]
+doc["pack_mode"] = "signed-rc"  # same length as local-dev; would pass naive string gate
+open(path, "w", encoding="utf-8").write(
+  json.dumps(doc, sort_keys=True, separators=(",", ":")) + "\n"
+)
+PY2
+# Keep HASHES in sync so only the candidate-id recompute is under test.
+python3 - "$FORGE_DEST/HASHES.txt" <<'PY2'
+from pathlib import Path
+import sys
+p = Path(sys.argv[1])
+lines = []
+for line in p.read_text(encoding="utf-8").splitlines():
+    if line.startswith("pack_mode="):
+        lines.append("pack_mode=signed-rc")
+    else:
+        lines.append(line)
+p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY2
+rm -rf "$LIVE_APP"
+mkdir -p "$LIVE_APP/Contents/MacOS"
+printf 'keep-forge' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+set +e
+FORGE_OUT="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  IRIN_STATE_ROOT="$IRIN_STATE_ROOT" \
+  "$INSTALL" --candidate "$FORGE_DEST" --live 2>&1
+)"
+FORGE_EC=$?
+set -e
+[[ $FORGE_EC -ne 0 ]] || fail "forged pack_mode under old candidate-id must refuse: $FORGE_OUT"
+[[ "$FORGE_OUT" == *"does not recompute from candidate.json"* ]] \
+  || fail "expected candidate-id recompute refuse: $FORGE_OUT"
+[[ "$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")" == "keep-forge" ]] \
+  || fail "forged pack_mode refuse must not mutate Applications"
+pass "--live refuses forged pack_mode (candidate-id recompute)"
+
+# (a0c) claimed signed-rc/production is not enough: force Developer ID proof on
+# hermetic non-Mach-O fixture → refuse (real /Applications path always requires this).
+FORCE_DEST="$(make_live_candidate forceid production)"
+rm -rf "$LIVE_APP"
+mkdir -p "$LIVE_APP/Contents/MacOS"
+printf 'keep-forceid' >"$LIVE_APP/Contents/MacOS/council-warroom-tauri"
+set +e
+FORCE_OUT="$(
+  IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+  IRIN_LIVE_REQUIRE_DEVELOPER_ID=1 \
+  IRIN_LIVE_APPLICATIONS_ROOT="$IRIN_LIVE_APPLICATIONS_ROOT" \
+  IRIN_STATE_ROOT="$IRIN_STATE_ROOT" \
+  "$INSTALL" --candidate "$FORCE_DEST" --live 2>&1
+)"
+FORCE_EC=$?
+set -e
+[[ $FORCE_EC -ne 0 ]] || fail "forced Developer ID check must refuse fixture: $FORCE_OUT"
+[[ "$FORCE_OUT" == *"Developer ID"* || "$FORCE_OUT" == *"codesign"* ]] \
+  || fail "expected Developer ID / codesign refuse: $FORCE_OUT"
+[[ "$(cat "$LIVE_APP/Contents/MacOS/council-warroom-tauri")" == "keep-forceid" ]] \
+  || fail "Developer ID refuse must not mutate Applications"
+[[ ! -f "$FORCE_DEST/proofs/install.json" ]] \
+  || fail "Developer ID refuse must leave no install proof"
+pass "--live forced Developer ID proof refuses non-signed fixture"
+
 # (a) --live staged swap success + exact digest at hermetic Applications
 LIVE_DEST="$(make_live_candidate ok)"
 LIVE_CID="$(basename "$LIVE_DEST")"
