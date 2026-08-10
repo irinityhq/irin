@@ -23,8 +23,10 @@ preferences, and speculative redesigns.
 - Bind conclusions to the pull request head and actual diff. Verify
   documentation and pull-request claims against source and runnable checks.
 - Keep proof boundaries exact: source, tests, build, package, install, operator
-  acceptance, and publication are separate states. `make check` and
-  `make ship-check` prove source only.
+  acceptance, and publication are separate states. `make check` is the fast
+  diff-selected loop only — not a source-proof claim. Only a current
+  `make ship-check` receipt supports source proof for that tip; neither command
+  means installed, accepted, or published.
 - Prefer the smallest durable fix at the shared root cause. Ask for broader
   work only when the demonstrated defect requires it.
 
