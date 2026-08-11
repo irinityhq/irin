@@ -351,6 +351,11 @@ jobs:
       - name: Bootstrap pinned scanners
         run: scripts/bootstrap-dev-tools.sh
 
+      # Fixture contracts reuse the bootstrap above (no second network install;
+      # keep detect-changes offline/fast). Command-position step for reachability.
+      - name: Opengrep boundary fixtures
+        run: |
+          scripts/test-opengrep-fixtures.sh
 
       - name: Opengrep (advisory findings)
         run: scripts/run-opengrep.sh
