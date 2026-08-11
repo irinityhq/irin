@@ -7,6 +7,7 @@ async function flushMicrotasks() {
 }
 
 describe("createBootHealthPoller restart", () => {
+  // Force-only re-arm keeps cold-start markOnline races sticky-online.
   it("does not re-arm from online without force (cold-start race)", async () => {
     const phases: string[] = [];
     const probe = vi
