@@ -7,5 +7,6 @@ fn compose_governed_literal_key(
     upsert_env(&mut env, "COUNCIL_VIA_GATEWAY", "1");
     if let Some(creds) = gateway_creds {
         upsert_env(&mut env, "GW_API_KEY", "literal-not-from-creds");
+        upsert_env(&mut env, "GATEWAY_URL", &creds.gateway_url);
     }
 }

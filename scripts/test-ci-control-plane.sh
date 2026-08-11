@@ -1424,22 +1424,28 @@ sites = {
     },
 }
 
+
+def site_marker_errors(block: str, job: str, meta: dict) -> list[str]:
+    """Shared site-B/isolation marker contract used for live + mutant text."""
+    errs: list[str] = []
+    if not re.search(r"grep -q '\^verification=PASS\$'\s*<<<\"\$out\"", block):
+        errs.append(f"{job}: missing anchored verification=PASS check")
+    if not re.search(r"grep -q '\^shipping_tier_claim=none\$'\s*<<<\"\$out\"", block):
+        errs.append(f"{job}: missing anchored shipping_tier_claim=none check")
+    if not re.search(meta["sha_pat"], block):
+        errs.append(
+            f"{job}: missing anchored source_sha=${{{meta['sha_var']}}} check"
+        )
+    if re.search(r"echo\s+\"\$out\"\s*\|\s*grep", block):
+        errs.append(f"{job}: must not use echo|grep for marker checks")
+    return errs
+
+
 for job, meta in sites.items():
     block = job_block(job)
     if not block:
         continue
-    # Prefer line-anchored here-string greps (no echo|grep SIGPIPE shape).
-    if not re.search(r"grep -q '\^verification=PASS\$'\s*<<<\"\$out\"", block):
-        errors.append(f"{job}: missing anchored verification=PASS check")
-    if not re.search(r"grep -q '\^shipping_tier_claim=none\$'\s*<<<\"\$out\"", block):
-        errors.append(f"{job}: missing anchored shipping_tier_claim=none check")
-    if not re.search(meta["sha_pat"], block):
-        errors.append(
-            f"{job}: missing anchored source_sha=${{{meta['sha_var']}}} check"
-        )
-    # Reject reintroduction of echo|grep pipelines on the marker path.
-    if re.search(r"echo\s+\"\$out\"\s*\|\s*grep", block):
-        errors.append(f"{job}: must not use echo|grep for marker checks")
+    errors.extend(site_marker_errors(block, job, meta))
 
 # Behavioral: large multi-key log with all three markers → greps succeed.
 # Missing each marker in turn → refuse.
@@ -1470,9 +1476,10 @@ for drop in ("verification=PASS", "shipping_tier_claim=none", f"source_sha={sha}
     elif drop not in miss and not any(drop in m for m in miss):
         errors.append(f"missing-marker expected {drop} in {miss}")
 
-# Mutation: stripping site B source_sha check from the workflow text must
-# be rejected by the same site-B contract above.
+# Mutation: stripping site B checks from the workflow text must be
+# rejected by the same site_marker_errors validator (not a no-op pass).
 exact = job_block("exact-merged-candidate")
+site_b_meta = sites["exact-merged-candidate"]
 if exact:
     stripped = re.sub(
         r'^\s*grep -q "\^source_sha=\$\{MERGED_SHA\}\$"\s*<<<"\$out"\s*\n',
@@ -1482,18 +1489,22 @@ if exact:
         flags=re.M,
     )
     # If production already lacks the check, stripped == exact and the
-    # static site loop already reported it. When present, confirm the
-    # mutant would fail the same assertion.
+    # static site loop already reported it. When present, the mutant must
+    # fail the shared site validator on source_sha.
     if stripped != exact:
         if re.search(
             r'grep -q "\^source_sha=\$\{MERGED_SHA\}\$"\s*<<<"\$out"', stripped
         ):
             errors.append("mutation: failed to strip exact-merged source_sha check")
-        # Contract tooth: mutant must not satisfy the site-B requirement.
-        if re.search(
-            r'grep -q "\^source_sha=\$\{MERGED_SHA\}\$"\s*<<<"\$out"', stripped
-        ) is None:
-            pass  # expected failure mode of the static contract
+        miss = site_marker_errors(stripped, "exact-merged-candidate", site_b_meta)
+        if not miss:
+            errors.append(
+                "mutation: stripped source_sha still passes site-B validator"
+            )
+        elif not any("source_sha" in m for m in miss):
+            errors.append(
+                f"mutation: site-B validator miss list lacks source_sha: {miss}"
+            )
     # Also mutate shipping_tier_claim if present.
     stripped_tier = re.sub(
         r"^\s*grep -q '\^shipping_tier_claim=none\$'\s*<<<\"\$out\"\s*\n",
@@ -1502,10 +1513,26 @@ if exact:
         count=1,
         flags=re.M,
     )
-    if stripped_tier != exact and re.search(
-        r"grep -q '\^shipping_tier_claim=none\$'\s*<<<\"\$out\"", stripped_tier
-    ):
-        errors.append("mutation: failed to strip exact-merged shipping_tier check")
+    if stripped_tier != exact:
+        if re.search(
+            r"grep -q '\^shipping_tier_claim=none\$'\s*<<<\"\$out\"", stripped_tier
+        ):
+            errors.append(
+                "mutation: failed to strip exact-merged shipping_tier check"
+            )
+        miss_tier = site_marker_errors(
+            stripped_tier, "exact-merged-candidate", site_b_meta
+        )
+        if not miss_tier:
+            errors.append(
+                "mutation: stripped shipping_tier still passes site-B validator"
+            )
+        elif not any("shipping_tier_claim" in m for m in miss_tier):
+            errors.append(
+                "mutation: site-B validator miss list lacks shipping_tier: "
+                f"{miss_tier}"
+            )
+
 
 if errors:
     print("\n".join(errors), file=sys.stderr)

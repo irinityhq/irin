@@ -1,4 +1,4 @@
-// Positive fixture: gateway_creds parameter is consumed after inject.
+// Positive fixture: gateway_creds parameter is consumed for both key and URL.
 fn compose_governed_param_used(
     mut env: Vec<(String, String)>,
     gateway_creds: Option<GatewayChildCredentials>,
@@ -6,5 +6,6 @@ fn compose_governed_param_used(
     upsert_env(&mut env, "COUNCIL_VIA_GATEWAY", "1");
     if let Some(creds) = gateway_creds {
         upsert_env(&mut env, "GW_API_KEY", &creds.api_key);
+        upsert_env(&mut env, "GATEWAY_URL", &creds.gateway_url);
     }
 }

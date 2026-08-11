@@ -63,10 +63,12 @@ rules:
   - id: irin.rust.tauri-governed-requires-creds-param
     message: >-
       Setting COUNCIL_VIA_GATEWAY=1 requires gateway_creds to be bound and
-      the reinjected GW_API_KEY / GATEWAY_URL value to derive from that
-      binding ($C.api_key / $C.gateway_url, possibly via a let $K =
-      $C.api_key.trim() temporary). Parameter spelling, drop($C), or a
-      literal upsert_env value is not enough.
+      both reinjected GW_API_KEY and GATEWAY_URL values to derive from that
+      binding ($C.api_key / $C.gateway_url, possibly via let $K =
+      $C.api_key.trim() / let $U = $C.gateway_url.trim() temporaries). A
+      derived URL alone must not exempt a literal key (or the reverse).
+      Parameter spelling, drop($C), or a literal upsert_env value is not
+      enough.
     severity: WARNING
     languages: [rust]
     metadata:
@@ -75,7 +77,7 @@ rules:
       irin.boundary: B4
     patterns:
       - pattern: upsert_env(&mut $ENV, "COUNCIL_VIA_GATEWAY", "1")
-      # Flat: direct field borrow.
+      # Flat: both fields direct borrow.
       - pattern-not-inside: |
           fn $F(..., gateway_creds: $T, ...) {
             ...
@@ -85,10 +87,12 @@ rules:
               ...
               upsert_env(&mut $E2, "GW_API_KEY", &$C.api_key);
               ...
+              upsert_env(&mut $E3, "GATEWAY_URL", &$C.gateway_url);
+              ...
             }
             ...
           }
-      # Flat: trimmed field into temporary then reinject (production shape).
+      # Flat: both fields trimmed into temporaries then reinject.
       - pattern-not-inside: |
           fn $F(..., gateway_creds: $T, ...) {
             ...
@@ -100,9 +104,14 @@ rules:
               ...
               upsert_env(&mut $E2, "GW_API_KEY", $K);
               ...
+              let $U = $C.gateway_url.trim();
+              ...
+              upsert_env(&mut $E3, "GATEWAY_URL", $U);
+              ...
             }
             ...
           }
+      # Flat: key via trim temporary, URL via direct field borrow.
       - pattern-not-inside: |
           fn $F(..., gateway_creds: $T, ...) {
             ...
@@ -110,14 +119,17 @@ rules:
             ...
             if let Some($C) = gateway_creds {
               ...
-              let $U = $C.gateway_url.trim();
+              let $K = $C.api_key.trim();
               ...
-              upsert_env(&mut $E2, "GATEWAY_URL", $U);
+              upsert_env(&mut $E2, "GW_API_KEY", $K);
+              ...
+              upsert_env(&mut $E3, "GATEWAY_URL", &$C.gateway_url);
               ...
             }
             ...
           }
-      # Production: match via_gateway { Some(true) => ... } with $C-derived value.
+      # Production: match via_gateway { Some(true) => ... } with both
+      # $C-derived key and URL (trimmed).
       - pattern-not-inside: |
           fn $F(..., gateway_creds: $T, ...) {
             ...
@@ -132,27 +144,9 @@ rules:
                   ...
                   upsert_env(&mut $E2, "GW_API_KEY", $K);
                   ...
-                }
-                ...
-              }
-              Some(false) => { ... }
-              None => {}
-            }
-            ...
-          }
-      - pattern-not-inside: |
-          fn $F(..., gateway_creds: $T, ...) {
-            ...
-            match $M {
-              Some(true) => {
-                ...
-                upsert_env(&mut $ENV, "COUNCIL_VIA_GATEWAY", "1");
-                ...
-                if let Some($C) = gateway_creds {
-                  ...
                   let $U = $C.gateway_url.trim();
                   ...
-                  upsert_env(&mut $E2, "GATEWAY_URL", $U);
+                  upsert_env(&mut $E3, "GATEWAY_URL", $U);
                   ...
                 }
                 ...
@@ -162,6 +156,7 @@ rules:
             }
             ...
           }
+      # Match shape: both fields direct borrow (no trim temps).
       - pattern-not-inside: |
           fn $F(..., gateway_creds: $T, ...) {
             ...
@@ -173,6 +168,8 @@ rules:
                 if let Some($C) = gateway_creds {
                   ...
                   upsert_env(&mut $E2, "GW_API_KEY", &$C.api_key);
+                  ...
+                  upsert_env(&mut $E3, "GATEWAY_URL", &$C.gateway_url);
                   ...
                 }
                 ...

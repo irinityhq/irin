@@ -14,6 +14,11 @@
 #                                      then exit 1
 #   any other evaluator exit code   -> propagate immediately (2 is
 #                                      usage/transport/schema/truncated)
+#   probe wall-clock timeout        -> treated as exit 1 (deadline path)
+#
+# Each probe is hard-bounded by the remaining wait window so a hung
+# `gh api` cannot run past the advertised deadline. Window 0 still gets
+# one unbounded first probe (deadline_exhausted contract).
 #
 # Env knobs (deterministic contract tests override these):
 #   SETTLEMENT_POLL_INTERVAL_SECONDS  seconds between probes (default 30)
@@ -25,6 +30,47 @@
 #   --self-test   run deterministic poll-contract fixtures and exit
 #   <args...>     passed through verbatim to the evaluator each probe
 set -euo pipefail
+
+# Run evaluator under a remaining-window budget. Maps timeout → exit 1.
+# budget<=0: run unbounded (zero-window first probe only).
+run_probe() {
+  local budget=$1
+  shift
+  local rc=0
+  if (( budget <= 0 )); then
+    "$@" || rc=$?
+    return "$rc"
+  fi
+  if command -v timeout >/dev/null 2>&1; then
+    # GNU coreutils: 124 = timed out. Prefer --kill-after so a stuck child
+    # of the evaluator (e.g. gh) cannot outlive the budget by much.
+    timeout --kill-after=2 "${budget}s" "$@" || rc=$?
+    if (( rc == 124 )); then
+      return 1
+    fi
+    return "$rc"
+  fi
+  # Portable fallback: background evaluator + watchdog kill.
+  "$@" &
+  local pid=$!
+  (
+    sleep "$budget"
+    if kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      sleep 1
+      kill -9 "$pid" 2>/dev/null || true
+    fi
+  ) &
+  local wd=$!
+  wait "$pid" || rc=$?
+  kill "$wd" 2>/dev/null || true
+  wait "$wd" 2>/dev/null || true
+  # Signal death (128+N) → deadline path, not hard-fail.
+  if (( rc >= 128 )); then
+    return 1
+  fi
+  return "$rc"
+}
 
 poll() {
   local interval="${SETTLEMENT_POLL_INTERVAL_SECONDS:-30}"
@@ -40,8 +86,11 @@ poll() {
         "$window" >&2
       return 1
     fi
+    remaining=$((deadline - SECONDS))
     rc=0
-    "$evaluator" "$@" || rc=$?
+    # Bound every positive-remainder probe by the residual window so the
+    # evaluator cannot overrun the advertised deadline.
+    run_probe "$remaining" "$evaluator" "$@" || rc=$?
     probed=1
     case "$rc" in
       0)
@@ -190,6 +239,41 @@ EOF
       printf \
         'FAIL: remainder_after_probe_latency want rc=1 calls=1 elapsed<=%ss; got rc=%s calls=%s elapsed=%ss\n' \
         "$((window + 1))" "$rc" "$calls" "$elapsed" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # Probe wall-clock budget: a hung evaluator must not outrun the window.
+  # Probe sleeps 5s; window=2. Without a hard budget this hangs ~5s; with
+  # it, elapsed must land near the window and still return 1.
+  cat >"$tmp/hangs-past-window.sh" <<EOF
+#!/usr/bin/env bash
+echo probe >>"$tmp/calls"
+sleep 5
+exit 1
+EOF
+  chmod +x "$tmp/hangs-past-window.sh"
+  {
+    local window=2 interval=10 rc=0 calls elapsed
+    local start=$SECONDS
+    : >"$tmp/calls"
+    set +e
+    SETTLEMENT_EVALUATOR="$tmp/hangs-past-window.sh" \
+      SETTLEMENT_POLL_INTERVAL_SECONDS="$interval" \
+      SETTLEMENT_POLL_DEADLINE_SECONDS="$window" \
+      poll >/dev/null 2>&1
+    rc=$?
+    set -e
+    elapsed=$((SECONDS - start))
+    calls="$(wc -l <"$tmp/calls" | tr -d ' ')"
+    # Allow 2s slack for timeout kill-after; must beat the full 5s sleep.
+    if [[ "$rc" == "1" && "$calls" == "1" && "$elapsed" -le $((window + 2)) ]]; then
+      printf 'PASS: probe_bounded_by_remaining (rc=%s calls=%s elapsed=%ss)\n' \
+        "$rc" "$calls" "$elapsed"
+    else
+      printf \
+        'FAIL: probe_bounded_by_remaining want rc=1 calls=1 elapsed<=%ss; got rc=%s calls=%s elapsed=%ss\n' \
+        "$((window + 2))" "$rc" "$calls" "$elapsed" >&2
       failures=$((failures + 1))
     fi
   }

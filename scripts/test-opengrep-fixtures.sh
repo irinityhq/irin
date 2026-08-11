@@ -3,26 +3,25 @@
 #   - nested Lua body keys must not silence top-level key rules
 #   - Tauri governed spawn must consume gateway_creds, not only spell it
 #
-# Requires scripts/bootstrap-dev-tools.sh opengrep binary. No network.
+# Network-free: requires a pre-installed opengrep at .irin-tools/bin/opengrep
+# (install once via `bash scripts/bootstrap-dev-tools.sh`; this suite never
+# downloads). Fail closed with setup instructions when the binary is absent.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/.irin-tools/bin/opengrep"
 RULES="$ROOT/security/opengrep/rules"
 FIX="$ROOT/security/opengrep/fixtures"
-BOOTSTRAP="$ROOT/scripts/bootstrap-dev-tools.sh"
 failures=0
 
 pass() { printf 'PASS: %s\n' "$1"; }
 fail() { printf 'FAIL: %s\n' "$1" >&2; failures=$((failures + 1)); }
 
 if [[ ! -x "$BIN" ]]; then
-  bash "$BOOTSTRAP" >/dev/null
-fi
-[[ -x "$BIN" ]] || {
   printf 'test-opengrep-fixtures: opengrep missing at %s\n' "$BIN" >&2
+  printf 'Install once (network): bash scripts/bootstrap-dev-tools.sh\n' >&2
   exit 1
-}
+fi
 [[ -d "$RULES" && -d "$FIX" ]] || {
   printf 'test-opengrep-fixtures: rules/fixtures missing\n' >&2
   exit 1
@@ -89,15 +88,17 @@ else
   fail "lua string-only raw_key false-green: expected missing-field finding"
 fi
 
-# Param-only / drop / literal reinject must fire; $C-derived reinject must not.
+# Param-only / drop / literal / mixed reinject must fire; both $C-derived must not.
 param_only="$FIX/rust-spawn-param-only.rs"
 param_used="$FIX/rust-spawn-param-used.rs"
 drop_only="$FIX/rust-spawn-drop-creds.rs"
 literal_key="$FIX/rust-spawn-literal-key.rs"
+mixed_key="$FIX/rust-spawn-mixed-literal-key.rs"
 n_only="$(count_rule "$param_only" "irin.rust.tauri-governed-requires-creds-param")"
 n_used="$(count_rule "$param_used" "irin.rust.tauri-governed-requires-creds-param")"
 n_drop="$(count_rule "$drop_only" "irin.rust.tauri-governed-requires-creds-param")"
 n_lit="$(count_rule "$literal_key" "irin.rust.tauri-governed-requires-creds-param")"
+n_mix="$(count_rule "$mixed_key" "irin.rust.tauri-governed-requires-creds-param")"
 if [[ "$n_only" -ge 1 ]]; then
   pass "rust spawn param-only fires creds-use rule (count=$n_only)"
 else
@@ -112,6 +113,11 @@ if [[ "$n_lit" -ge 1 ]]; then
   pass "rust spawn literal GW_API_KEY fires reinject rule (count=$n_lit)"
 else
   fail "rust spawn literal GW_API_KEY false-green: expected reinject finding"
+fi
+if [[ "$n_mix" -ge 1 ]]; then
+  pass "rust spawn mixed literal-key/derived-URL fires reinject rule (count=$n_mix)"
+else
+  fail "rust spawn mixed literal-key/derived-URL false-green: expected reinject finding"
 fi
 if [[ "$n_used" == "0" ]]; then
   pass "rust spawn param-used is clean"
