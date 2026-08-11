@@ -759,6 +759,9 @@ pub fn check_providers_with_gateway(gw: bool) -> Vec<(&'static str, bool)> {
         ("fireworks", gw || env_nonempty("FIREWORKS_API_KEY")),
         ("perplexity", gw || env_nonempty("PERPLEXITY_API_KEY")),
         ("cohere", gw || env_nonempty("COHERE_API_KEY")),
+        // Deterministic no-spend fixture for direct (non-governed) characterization.
+        // Gateway has no mock adapter — never publish mock as available under gw.
+        ("mock", !gw),
     ];
 
     // Local probes
