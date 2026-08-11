@@ -7,7 +7,40 @@ async function flushMicrotasks() {
 }
 
 describe("createBootHealthPoller restart", () => {
-  it("re-arms polling when startConnecting is called while online", async () => {
+  it("does not re-arm from online without force (cold-start race)", async () => {
+    const phases: string[] = [];
+    const probe = vi
+      .fn<Parameters<typeof createBootHealthPoller>[0]["probe"]>()
+      .mockResolvedValue("ready");
+
+    const poller = createBootHealthPoller({
+      baseDelayMs: 1,
+      maxDelayMs: 1,
+      connectingBudgetMs: 100,
+      recoveryIntervalMs: 1,
+      now: () => 0,
+      probe,
+      onPhaseChange: (phase) => phases.push(phase),
+      setTimeoutFn: (() => 1) as unknown as typeof setTimeout,
+      clearTimeoutFn: () => undefined,
+    });
+
+    poller.startConnecting();
+    await flushMicrotasks();
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(phases.at(-1)).toBe("online");
+
+    // Plain schedule after markOnline / first ready must stay a no-op.
+    poller.startConnecting();
+    await flushMicrotasks();
+    expect(probe).toHaveBeenCalledTimes(1);
+    expect(phases.at(-1)).toBe("online");
+    expect(poller.isRetryActive()).toBe(false);
+
+    poller.stop();
+  });
+
+  it("re-arms polling when startConnecting is forced while online", async () => {
     const phases: string[] = [];
     const timers: Array<() => void> = [];
     const probe = vi
@@ -39,7 +72,7 @@ describe("createBootHealthPoller restart", () => {
     expect(probe).toHaveBeenCalledTimes(1);
     expect(phases.at(-1)).toBe("online");
 
-    poller.startConnecting();
+    poller.startConnecting({ force: true });
     await flushMicrotasks();
     expect(probe).toHaveBeenCalledTimes(2);
     expect(phases.at(-1)).toBe("connecting");
@@ -48,5 +81,7 @@ describe("createBootHealthPoller restart", () => {
     await flushMicrotasks();
     expect(probe).toHaveBeenCalledTimes(3);
     expect(phases.at(-1)).toBe("online");
+
+    poller.stop();
   });
 });

@@ -49,9 +49,21 @@ export type BootHealthPollHooks = {
   maxDelayMs?: number;
 };
 
+export type BootHealthStartConnectingOpts = {
+  /**
+   * Re-arm CONNECTING from the online phase (Gateway Pack / config change that
+   * restarts Council). Cold-start callers omit this so markOnline + a later
+   * scheduleBootHealthRetries stays a no-op.
+   */
+  force?: boolean;
+};
+
 export type BootHealthPollHandle = {
-  /** Begin cold-start polling (immediate probe + retries). Idempotent. */
-  startConnecting: () => void;
+  /**
+   * Begin cold-start polling (immediate probe + retries). Idempotent while
+   * connecting. Online is a no-op unless `{ force: true }`.
+   */
+  startConnecting: (opts?: BootHealthStartConnectingOpts) => void;
   /** Begin slow recovery after offline. Idempotent. */
   startRecovery: () => void;
   /** Mark online without probing (e.g. parallel initial load already succeeded). */
@@ -205,9 +217,12 @@ export function createBootHealthPoller(
   };
 
   return {
-    startConnecting: () => {
+    startConnecting: (opts?: BootHealthStartConnectingOpts) => {
       if (stopped) return;
       if (phase === "connecting") return;
+      // Online stays sticky for cold-start races (markOnline then schedule).
+      // Post-action reconcile passes force after a failed readiness probe.
+      if (phase === "online" && !opts?.force) return;
 
       generation += 1;
       clearTimer();

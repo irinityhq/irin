@@ -254,8 +254,9 @@ export default function WarRoom() {
         if (ready) {
           poller.markOnline();
         } else if (isTauri()) {
-          // Transient backend loss after a config change: re-enter readiness poll.
-          scheduleBootHealthRetries();
+          // Gateway Pack / config may restart Council after spawn returns.
+          // Force re-arm from online so the readiness poll is not a no-op.
+          poller.startConnecting({ force: true });
         }
       });
     };
@@ -346,7 +347,7 @@ export default function WarRoom() {
                 if (ready) {
                   bootPollerRef.current?.markOnline();
                 } else {
-                  bootPollerRef.current?.startConnecting();
+                  bootPollerRef.current?.startConnecting({ force: true });
                 }
               });
             }}
