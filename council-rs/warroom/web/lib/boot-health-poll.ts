@@ -249,7 +249,9 @@ export function createBootHealthPoller(
   return {
     startConnecting: (opts?: BootHealthStartConnectingOpts) => {
       if (stopped) return;
-      if (phase === "connecting") return;
+      // Force restarts an in-flight connecting cycle (config changed): the
+      // generation bump below invalidates any stale-config probe in flight.
+      if (phase === "connecting" && !opts?.force) return;
       // Online stays sticky for cold-start races (markOnline then schedule).
       // Post-action reconcile passes force after a failed readiness probe.
       if (phase === "online" && !opts?.force) return;

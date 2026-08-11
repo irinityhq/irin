@@ -371,7 +371,65 @@ describe("production startWarRoomBackendReady — Pack → event → probe → r
 
     handle.stop();
   });
-});
+
+  it("stale mount ready does not markOnline after config-change force-rearm", async () => {
+    const timers: Array<() => void> = [];
+    const setTimeoutFn = ((callback: () => void) => {
+      timers.push(callback);
+      return timers.length;
+    }) as unknown as typeof setTimeout;
+
+    // Independent mount + config-change probes; resolve config first so a late
+    // mount `ready` must be ignored by the reconciliation generation guard.
+    const resolvers: Array<(ready: boolean) => void> = [];
+    const loadInitialState = vi.fn(
+      () =>
+        new Promise<boolean>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+
+    const handle = startWarRoomBackendReady({
+      loadInitialState,
+      isTauri: () => true,
+      // Leave startup branch pending — isolate mount vs config-change race.
+      nativeOwnsCouncilStartup: () => new Promise(() => undefined),
+      startCouncilServer: async () => undefined,
+      getConfigForStartup: () => new Promise(() => undefined),
+      initRuntimeConfig: () => undefined,
+      pollerOptions: {
+        baseDelayMs: 1,
+        maxDelayMs: 1,
+        connectingBudgetMs: 100,
+        recoveryIntervalMs: 1,
+        now: () => 0,
+        setTimeoutFn,
+        clearTimeoutFn: () => undefined,
+      },
+    });
+
+    await flushMicrotasks();
+    // Mount probe held open; poller still idle.
+    expect(resolvers).toHaveLength(1);
+    expect(handle.poller().phase()).toBe("idle");
+
+    emitWarroomConfigChanged();
+    await flushMicrotasks();
+    // Config-change probe is the second loadInitialState call.
+    expect(resolvers.length).toBeGreaterThanOrEqual(2);
+
+    // Config-change not_ready → Tauri force re-arm → connecting.
+    resolvers[1](false);
+    await flushMicrotasks();
+    expect(handle.poller().phase()).toBe("connecting");
+
+    // Stale mount ready must not invalidate the newer generation / markOnline.
+    resolvers[0](true);
+    await flushMicrotasks();
+    expect(handle.poller().phase()).toBe("connecting");
+
+    handle.stop();
+  });});
 
 describe("production startWarRoomBackendReady — packaged cold-launch ownership", () => {
   beforeEach(() => {

@@ -63,6 +63,12 @@ export function startWarRoomBackendReady(
   deps.initRuntimeConfig();
   let aborted = false;
   let sidecarAutoStarted = false;
+  /**
+   * Monotonic generation for mount + config-change reconciliations.
+   * A newer reconciliation supersedes in-flight older probes so a late
+   * mount `ready` cannot markOnline after a config-change force-rearm.
+   */
+  let reconcileGen = 0;
 
   const poller = createBootHealthPoller({
     ...deps.pollerOptions,
@@ -87,8 +93,9 @@ export function startWarRoomBackendReady(
 
   // Browser / fast path: one immediate probe. Packaged Tauri continues via
   // scheduleBootHealthRetries while native owns Council startup.
+  const mountGen = ++reconcileGen;
   void deps.loadInitialState().then((ready) => {
-    if (aborted) return;
+    if (aborted || mountGen !== reconcileGen) return;
     if (ready) {
       poller.markOnline();
     }
@@ -143,8 +150,9 @@ export function startWarRoomBackendReady(
 
   // Only War Room owns backend readiness re-arm on config change.
   const unsubConfig = subscribeWarroomConfigChanged(() => {
+    const gen = ++reconcileGen;
     void deps.loadInitialState().then((ready) => {
-      if (aborted) return;
+      if (aborted || gen !== reconcileGen) return;
       reconcileBootHealthAfterConfigChange(poller, ready, {
         forceRearmOnFailure: deps.isTauri(),
       });
@@ -154,6 +162,8 @@ export function startWarRoomBackendReady(
   return {
     stop: () => {
       aborted = true;
+      // Bump generation so any in-flight mount/config probes are ignored.
+      reconcileGen += 1;
       poller.stop();
       unsubConfig();
     },
