@@ -369,4 +369,23 @@ set -e
   || fail "worktree receipt must remain after symlink-root refuse"
 pass "ship receipt harvest: symlinked destination root refuses"
 
+# 5) Non-directory destination .irin-receipts root → refuse. Reuses the
+# disposable invoker and its intact worktree from the symlink case.
+rm -f "$INVOKER/.irin-receipts"
+printf 'not a directory\n' >"$INVOKER/.irin-receipts"
+set +e
+out="$(
+  cd "$INVOKER" \
+    && IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT" \
+      "$REMOVE" "$IWT" 2>&1
+)"
+ec=$?
+set -e
+[[ $ec -eq 1 ]] || fail "non-directory ship receipt root must exit 1 (got $ec): $out"
+[[ "$out" == *"non-directory"* || "$out" == *"refus"* ]] \
+  || fail "expected non-directory receipt-root refuse message: $out"
+[[ -f "$IWT/.irin-receipts/$SHIP_SYMLINK" ]] \
+  || fail "worktree receipt must remain after non-directory-root refuse"
+pass "ship receipt harvest: non-directory destination root refuses"
+
 printf '\nAll remove-worktree evidence contracts passed.\n'

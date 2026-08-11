@@ -484,6 +484,12 @@ if [[ -d "$src_receipts" ]]; then
         # Exclusive create failed: dest now exists (or cannot be linked). Accept
         # only when the existing file is a regular file with identical bytes.
         rm -f "$stage"
+        if [[ ! -e "$dest" && ! -L "$dest" ]]; then
+          # Link failed with no destination present (permissions, hard links
+          # unavailable): that is a publication failure, not a collision.
+          printf 'ERROR: failed to publish ship receipt exclusively: %s\n' "$shown" >&2
+          exit 1
+        fi
         if [[ -f "$dest" && ! -L "$dest" ]] && cmp -s "$src" "$dest"; then
           printf 'Ship receipt already present (identical): %s\n' "$shown"
           continue
