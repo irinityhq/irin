@@ -5,12 +5,37 @@ import {
   type GatewayPackStatus,
   type TouchIdStatus,
 } from "@/lib/tauri";
+import { emitWarroomConfigChanged } from "@/lib/runtime-config";
 import type { ToastType } from "@/components/Toast";
 
 export type GatewayPackAction = (
   action: () => Promise<DesktopStatusSnapshot>,
   onSuccess: (status: GatewayPackStatus) => void,
 ) => Promise<void>;
+
+/**
+ * Pack success path: update snapshot, then emit exactly one config-change
+ * signal so War Room re-probes Council. Failure emits zero signals.
+ * Extracted for unit characterization without a React renderer.
+ */
+export async function runGatewayPackActionOnce(
+  action: () => Promise<DesktopStatusSnapshot>,
+  applySnapshot: (next: DesktopStatusSnapshot) => void,
+  onSuccess: (status: GatewayPackStatus) => void,
+  onError: (message: string) => void,
+  emit: () => void = emitWarroomConfigChanged,
+): Promise<"ok" | "error"> {
+  try {
+    const snap = await action();
+    applySnapshot(snap);
+    emit();
+    onSuccess(snap.pack);
+    return "ok";
+  } catch (error) {
+    onError(error instanceof Error ? error.message : String(error));
+    return "error";
+  }
+}
 
 export function useDesktopActions(
   applySnapshot: (next: DesktopStatusSnapshot) => void,
@@ -27,12 +52,12 @@ export function useDesktopActions(
     ) => {
       setPackBusy(true);
       try {
-        const snap = await action();
-        applySnapshot(snap);
-        window.dispatchEvent(new Event("warroom-config-changed"));
-        onSuccess(snap.pack);
-      } catch (error) {
-        toast("error", error instanceof Error ? error.message : String(error));
+        await runGatewayPackActionOnce(
+          action,
+          applySnapshot,
+          onSuccess,
+          (message) => toast("error", message),
+        );
       } finally {
         setPackBusy(false);
       }
