@@ -31,21 +31,36 @@ poll() {
   local window="${SETTLEMENT_POLL_DEADLINE_SECONDS:-600}"
   local evaluator="${SETTLEMENT_EVALUATOR:-scripts/check-review-settlement.sh}"
   local deadline=$((SECONDS + window))
-  local rc
+  local rc remaining sleep_for probed=0
   while :; do
+    # After the first probe, refuse to launch at/after the advertised deadline.
+    # Window 0 still gets one probe (deadline_exhausted contract).
+    if (( probed > 0 && SECONDS >= deadline )); then
+      printf 'review-settlement: not settled within %ss wait window\n' \
+        "$window" >&2
+      return 1
+    fi
     rc=0
     "$evaluator" "$@" || rc=$?
+    probed=1
     case "$rc" in
       0)
         return 0
         ;;
       1)
-        if (( SECONDS >= deadline )); then
+        remaining=$((deadline - SECONDS))
+        if (( remaining <= 0 )); then
           printf 'review-settlement: not settled within %ss wait window\n' \
             "$window" >&2
           return 1
         fi
-        sleep "$interval"
+        # Sleep at most the remainder so a near-deadline not-settled cannot
+        # push the next probe past the advertised window.
+        sleep_for=$interval
+        if (( sleep_for > remaining )); then
+          sleep_for=$remaining
+        fi
+        sleep "$sleep_for"
         ;;
       *)
         # Usage/transport/schema/truncated: never retried, never softened.
