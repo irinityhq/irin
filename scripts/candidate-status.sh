@@ -194,8 +194,10 @@ check_ci_required_green() {
     printf 'unavailable'
     return 0
   fi
-  if api_out="$(gh api "repos/${owner_repo}/commits/${sha}/check-runs" \
-      --jq '[.check_runs[] | select(.name == "CI required")] | if length==0 then empty else .[0] | {status, conclusion} end' \
+  # Accept both the nested workflow name ("ci / CI required") and any bare
+  # "CI required" context so merge-queue tips and older PR commits both resolve.
+  if api_out="$(gh api "repos/${owner_repo}/commits/${sha}/check-runs?per_page=100" \
+      --jq '[.check_runs[] | select(.name == "CI required" or .name == "ci / CI required")] | if length == 0 then empty else (map(select(.conclusion == "success")) + .)[0] | {status, conclusion} end' \
       2>/dev/null)"; then
     if [[ -z "$api_out" || "$api_out" == "null" ]]; then
       printf 'unavailable'
