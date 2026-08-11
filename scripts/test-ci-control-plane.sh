@@ -178,12 +178,15 @@ fi
 # ---------------------------------------------------------------------------
 REVIEW_SETTLEMENT_YML="$ROOT/.github/workflows/review-settlement.yml"
 REVIEW_SETTLEMENT_SH="$ROOT/scripts/check-review-settlement.sh"
+REVIEW_SETTLEMENT_POLL_SH="$ROOT/scripts/poll-review-settlement.sh"
 if [[ ! -f "$REVIEW_SETTLEMENT_YML" ]]; then
   fail "review-settlement.yml missing"
 elif [[ ! -f "$REVIEW_SETTLEMENT_SH" ]]; then
   fail "scripts/check-review-settlement.sh missing"
+elif [[ ! -f "$REVIEW_SETTLEMENT_POLL_SH" ]]; then
+  fail "scripts/poll-review-settlement.sh missing"
 else
-  pass "review settlement workflow + evaluator present"
+  pass "review settlement workflow + evaluator + poll wrapper present"
 fi
 if ! on_has_merge_group "$REVIEW_SETTLEMENT_YML"; then
   fail "review-settlement.yml must trigger on merge_group (required-check producer)"
@@ -215,10 +218,18 @@ if ! file_has_fixed 'pull-requests: read' "$REVIEW_SETTLEMENT_YML"; then
 else
   pass "review-settlement.yml has pull-requests: read"
 fi
-if ! file_has_fixed 'scripts/check-review-settlement.sh' "$REVIEW_SETTLEMENT_YML"; then
-  fail "review-settlement.yml must invoke scripts/check-review-settlement.sh"
+# The workflow invokes the poll wrapper; the wrapper invokes the evaluator
+# single-shot per probe. Both links of the chain are asserted so neither the
+# poller nor the evaluator can be silently dropped from the producer.
+if ! file_has_fixed 'scripts/poll-review-settlement.sh' "$REVIEW_SETTLEMENT_YML"; then
+  fail "review-settlement.yml must invoke scripts/poll-review-settlement.sh"
 else
-  pass "review-settlement.yml invokes the settlement evaluator"
+  pass "review-settlement.yml invokes the settlement poll wrapper"
+fi
+if ! file_has_fixed 'scripts/check-review-settlement.sh' "$REVIEW_SETTLEMENT_POLL_SH"; then
+  fail "poll-review-settlement.sh must invoke scripts/check-review-settlement.sh"
+else
+  pass "poll-review-settlement.sh invokes the settlement evaluator"
 fi
 # Concurrency split mirrors dependency-review: PR cancels, merge_group does not.
 if ! python3 - "$REVIEW_SETTLEMENT_YML" <<'PY'
@@ -341,6 +352,13 @@ if ! bash "$REVIEW_SETTLEMENT_SH" --self-test; then
 else
   pass "check-review-settlement.sh --self-test"
 fi
+# Deterministic poll contracts: retry through not-settled to settled,
+# immediate propagation of exit 2, deadline exhaustion returns 1.
+if ! bash "$REVIEW_SETTLEMENT_POLL_SH" --self-test; then
+  fail "poll-review-settlement.sh --self-test"
+else
+  pass "poll-review-settlement.sh --self-test"
+fi
 # Force-full policy must include the settlement evaluator so a rewrite cannot
 # land under a light matrix only.
 if ! file_has_fixed 'scripts/check-review-settlement.sh' "$CLASSIFIER"; then
@@ -352,6 +370,16 @@ if ! file_has_fixed 'scripts/check-review-settlement.sh' "$CI_YML"; then
   fail "ci.yml path_forces_full must include scripts/check-review-settlement.sh"
 else
   pass "ci.yml force-full includes check-review-settlement.sh"
+fi
+if ! file_has_fixed 'scripts/poll-review-settlement.sh' "$CLASSIFIER"; then
+  fail "classifier must force-full on scripts/poll-review-settlement.sh"
+else
+  pass "classifier force-full includes poll-review-settlement.sh"
+fi
+if ! file_has_fixed 'scripts/poll-review-settlement.sh' "$CI_YML"; then
+  fail "ci.yml path_forces_full must include scripts/poll-review-settlement.sh"
+else
+  pass "ci.yml force-full includes poll-review-settlement.sh"
 fi
 
 # ---------------------------------------------------------------------------

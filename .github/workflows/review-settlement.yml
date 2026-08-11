@@ -54,7 +54,7 @@ jobs:
   review-settlement:
     name: Review settlement
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 15
     steps:
       - name: Checkout repository
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -107,4 +107,12 @@ jobs:
           OWNER: ${{ github.repository_owner }}
           REPO_NAME: ${{ github.event.repository.name }}
           PR_NUMBER: ${{ steps.pr.outputs.number }}
-        run: scripts/check-review-settlement.sh --owner "$OWNER" --repo "$REPO_NAME" --pr "$PR_NUMBER"
+        # The Copilot auto-review ruleset (review_on_push) re-requests a
+        # review on every push, so settlement is structurally unsettled for
+        # the Copilot latency window after each commit. The poll wrapper
+        # retries not-settled (exit 1) until its deadline; exit 2
+        # (usage/transport/schema/truncated) stays an immediate hard fail.
+        # A newer push or a submitted review cancels this run via the
+        # concurrency group and re-evaluates fresh. The wrapper invokes
+        # scripts/check-review-settlement.sh single-shot per probe.
+        run: scripts/poll-review-settlement.sh --owner "$OWNER" --repo "$REPO_NAME" --pr "$PR_NUMBER"

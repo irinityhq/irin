@@ -241,6 +241,20 @@ resolve the PR number from `github.event.pull_request.number` (the review
 object does not nest the PR). Draft PRs are treated as not-ready (the check
 passes with a note); `ready_for_review` re-evaluates.
 
+The producer polls: the Copilot auto-review ruleset (`review_on_push`)
+re-requests a review on every push, so settlement is structurally unsettled
+during the Copilot latency window. The job runs
+`scripts/poll-review-settlement.sh`, which retries not-settled (exit 1) every
+30s for up to 10 minutes instead of failing the first probe; schema/transport
+failures (exit 2) fail immediately. The evaluator itself stays single-shot
+(snapshot purity); the wrapper carries its own deterministic `--self-test`
+(retry-to-settled, exit-2 propagation, deadline exhaustion) run by
+`scripts/test-ci-control-plane.sh`. A newer push or submitted review cancels
+the in-flight poller via the concurrency group and re-evaluates fresh. Do not
+"fix" the producer back to single-shot. Merge-queue tradeoff: an unsettled
+entry can hold the single build slot for the poll window rather than going
+hard-red mid-queue.
+
 Register `Review settlement` as a required context only after the job has
 appeared on a real pull request. Do not rename the job lightly.
 
