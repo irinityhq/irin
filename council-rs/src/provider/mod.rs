@@ -759,6 +759,9 @@ pub fn check_providers_with_gateway(gw: bool) -> Vec<(&'static str, bool)> {
         ("fireworks", gw || env_nonempty("FIREWORKS_API_KEY")),
         ("perplexity", gw || env_nonempty("PERPLEXITY_API_KEY")),
         ("cohere", gw || env_nonempty("COHERE_API_KEY")),
+        // Deterministic no-spend fixture for direct (non-governed) characterization.
+        // Gateway has no mock adapter — never publish mock as available under gw.
+        ("mock", !gw),
     ];
 
     // Local probes
@@ -821,6 +824,20 @@ mod tests {
         for provider in ["grok_build", "grok_hermes", "gemini_agy"] {
             assert_eq!(governed.get(provider), direct.get(provider), "{provider}");
         }
+    }
+
+    #[test]
+    fn mock_provider_availability_flips_with_gateway_mode() {
+        let direct: std::collections::HashMap<_, _> =
+            check_providers_with_gateway(false).into_iter().collect();
+        let governed: std::collections::HashMap<_, _> =
+            check_providers_with_gateway(true).into_iter().collect();
+        assert_eq!(direct.get("mock"), Some(&true), "direct mode exposes mock");
+        assert_eq!(
+            governed.get("mock"),
+            Some(&false),
+            "governed mode hides mock"
+        );
     }
 
     #[test]

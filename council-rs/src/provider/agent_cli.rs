@@ -374,6 +374,64 @@ pub fn is_agy_cli_available() -> bool {
     })
 }
 
+/// T15 read-back gate: trust temp-file CLI output only when mode is exactly 0o600.
+///
+/// Returns `Some(trimmed text)` when the mode is safe and content is non-empty;
+/// `None` means keep the existing response text (world-readable / empty / unreadable).
+#[cfg(unix)]
+fn codex_temp_output_if_trusted(mode_bits: u32, file_text: &str) -> Option<String> {
+    let mode = mode_bits & 0o777;
+    if mode != 0o600 {
+        return None;
+    }
+    let trimmed = file_text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.to_string())
+}
+
+/// Apply T15 gate from an on-disk temp file: only overwrite `resp.text` at 0o600.
+///
+/// **Mode before read:** stat the open handle first; only `read_to_string` when
+/// `mode & 0o777 == 0o600` (pre-refactor `ask_codex` order — never open/read
+/// untrusted modes for content promotion).
+#[cfg(unix)]
+fn apply_codex_temp_output_gate(file: &std::fs::File, resp: &mut ProviderResponse) {
+    apply_codex_temp_output_gate_with_read(file, resp, |mut f: &std::fs::File| {
+        use std::io::{Read, Seek, SeekFrom};
+        f.seek(SeekFrom::Start(0))?;
+        let mut text = String::new();
+        f.read_to_string(&mut text)?;
+        Ok(text)
+    });
+}
+
+/// Testable core: `read_file` is invoked only after the 0o600 mode check passes,
+/// and receives the **same handle** that was stat'd — validation and content
+/// read bind to one inode, so a path swap after the mode check cannot promote
+/// content from a different file.
+#[cfg(unix)]
+fn apply_codex_temp_output_gate_with_read(
+    file: &std::fs::File,
+    resp: &mut ProviderResponse,
+    read_file: impl FnOnce(&std::fs::File) -> std::io::Result<String>,
+) {
+    let Ok(meta) = file.metadata() else {
+        return;
+    };
+    let mode = meta.permissions().mode();
+    // Stat first — refuse before any content read on non-0o600.
+    if (mode & 0o777) != 0o600 {
+        return;
+    }
+    if let Ok(text) = read_file(file)
+        && let Some(trusted) = codex_temp_output_if_trusted(mode, &text)
+    {
+        resp.text = trusted;
+    }
+}
+
 pub async fn ask_codex(prompt: &str, system: &str, model: &str) -> ProviderResponse {
     let full_prompt = full_prompt(prompt, system);
     // T15: NamedTempFile 0o600 + drop-guard + provenance check on read-back (mode/owner sanity before trusting codex output content).
@@ -385,7 +443,6 @@ pub async fn ask_codex(prompt: &str, system: &str, model: &str) -> ProviderRespo
         }
     };
     {
-        use std::os::unix::fs::PermissionsExt;
         if let Err(e) = tmp
             .as_file_mut()
             .set_permissions(std::fs::Permissions::from_mode(0o600))
@@ -430,20 +487,8 @@ pub async fn ask_codex(prompt: &str, system: &str, model: &str) -> ProviderRespo
     )
     .await;
     // provenance gate (Issue 1): only trust/assign if exactly 0o600 (do not overwrite resp.text on bad mode)
-    // allow(clippy::collapsible_if): explicit nesting for T15 security gate readability (per review B; required clippy gate).
-    #[allow(clippy::collapsible_if)]
-    if let Ok(meta) = tmp.as_file().metadata() {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = meta.permissions().mode() & 0o777;
-        if mode == 0o600 {
-            if let Ok(text) = std::fs::read_to_string(tmp.path())
-                && !text.trim().is_empty()
-            {
-                resp.text = text.trim().to_string();
-            }
-        }
-        // else: degrade, keep original resp (no trust from potentially world-readable temp)
-    }
+    #[cfg(unix)]
+    apply_codex_temp_output_gate(tmp.as_file(), &mut resp);
     drop(tmp); // guard delete
     resp
 }
@@ -781,11 +826,115 @@ mod tests {
         );
     }
 
-    // T15 hot-path ask_* drive (L): call the prod async fns (Named 0o600 + set + provenance gate execute before external CLI spawn)
-    #[tokio::test]
-    async fn t15_hot_path_ask_calls() {
-        // the gate: set_permissions (prop if err), mode check + if ==0o600 only then read/overwrite text (before the bin error)
-        let _resp = ask_codex("p", "", "").await; // drives prod hot path (temp gate before expected bin-not-found err in env w/o cli); _resp.error or empty text signals the bin case after gate
-        // ask_grok similar (sync temp inside async wrapper)
+    // T15 gate is pure + filesystem-local — never spawn real `codex exec`.
+    #[cfg(unix)]
+    #[test]
+    fn t15_temp_output_gate_only_trusts_0o600() {
+        assert_eq!(
+            codex_temp_output_if_trusted(0o600, "  trusted-cli-output\n"),
+            Some("trusted-cli-output".into())
+        );
+        assert_eq!(
+            codex_temp_output_if_trusted(0o600, "   \n"),
+            None,
+            "empty trusted file must not overwrite"
+        );
+        // World/group readable modes must never promote file content.
+        for mode in [0o644, 0o666, 0o777, 0o640, 0o604, 0o000] {
+            assert_eq!(
+                codex_temp_output_if_trusted(mode, "leak"),
+                None,
+                "mode {mode:#o} must refuse file text"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn t15_apply_gate_reads_file_only_at_0o600() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex-out.txt");
+        std::fs::write(&path, "  from-temp-file  \n").unwrap();
+
+        // Unsafe mode: must not invoke the content reader at all (not merely
+        // leave resp.text unchanged after a discarded read).
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let reads = AtomicUsize::new(0);
+        let mut resp = ProviderResponse {
+            text: "stdout-fallback".into(),
+            model: "codex-cli-default".into(),
+            ..Default::default()
+        };
+        apply_codex_temp_output_gate_with_read(&file, &mut resp, |f| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut { f }, &mut s)?;
+            Ok(s)
+        });
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            0,
+            "0o644 must never call the content reader"
+        );
+        assert_eq!(
+            resp.text, "stdout-fallback",
+            "0o644 must not promote temp-file content"
+        );
+        drop(file);
+
+        // Exact 0o600: one content read, promote non-empty temp text.
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+        let reads = AtomicUsize::new(0);
+        let mut resp = ProviderResponse {
+            text: "stdout-fallback".into(),
+            model: "codex-cli-default".into(),
+            ..Default::default()
+        };
+        apply_codex_temp_output_gate_with_read(&file, &mut resp, |f| {
+            reads.fetch_add(1, Ordering::SeqCst);
+            let mut s = String::new();
+            std::io::Read::read_to_string(&mut { f }, &mut s)?;
+            Ok(s)
+        });
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            1,
+            "0o600 must read temp content exactly once"
+        );
+        assert_eq!(resp.text, "from-temp-file");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn t15_gate_binds_content_to_statted_inode() {
+        // Swapping the path after the mode check must not promote content from
+        // a different inode: the production reader goes through the same handle
+        // that was stat'd.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("codex-out.txt");
+        std::fs::write(&path, "original-inode\n").unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let file = std::fs::File::open(&path).unwrap();
+
+        // Replace the path with a different file (different inode, 0o600).
+        let other = dir.path().join("attacker.txt");
+        std::fs::write(&other, "swapped-inode\n").unwrap();
+        std::fs::set_permissions(&other, std::fs::Permissions::from_mode(0o600)).unwrap();
+        std::fs::rename(&other, &path).unwrap();
+
+        let mut resp = ProviderResponse {
+            text: "stdout-fallback".into(),
+            model: "codex-cli-default".into(),
+            ..Default::default()
+        };
+        apply_codex_temp_output_gate(&file, &mut resp);
+        assert_eq!(
+            resp.text, "original-inode",
+            "content must come from the stat'd inode, not the swapped path"
+        );
     }
 }

@@ -8,7 +8,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, timeout};
 
 /// Client intervention actions — mirrors council_stream.py protocol.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 pub enum Intervention {
     Continue,
@@ -110,5 +110,70 @@ impl InterventionQueue {
             Ok(None) => Intervention::Continue, // Channel closed
             Err(_) => Intervention::Continue,   // Timeout
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::time::Instant;
+
+    #[tokio::test]
+    async fn wait_timeout_defaults_to_continue() {
+        let mut q = InterventionQueue::new();
+        let started = Instant::now();
+        let action = q.wait(1).await;
+        assert!(
+            matches!(action, Intervention::Continue),
+            "timeout must yield Continue, got {action:?}"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "must actually wait ~timeout_secs"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_returns_pushed_action() {
+        let mut q = InterventionQueue::new();
+        let tx = q.sender();
+        tokio::spawn(async move {
+            tx.send(Intervention::EndEarly).await.unwrap();
+        });
+        let action = q.wait(5).await;
+        assert!(
+            matches!(action, Intervention::EndEarly),
+            "must surface EndEarly, got {action:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_channel_defaults_to_continue() {
+        // Defensive-branch pin: `new()` keeps a live sender inside the queue,
+        // so recv never observes a closed channel through the public
+        // constructor. Construct the state directly to characterize the
+        // `Ok(None) => Continue` fallback (Python parity).
+        let (tx, rx) = mpsc::channel::<Intervention>(1);
+        drop(tx);
+        let (spare_tx, _spare_rx) = mpsc::channel(1);
+        let mut closed = InterventionQueue { tx: spare_tx, rx };
+        let action = closed.wait(5).await;
+        assert_eq!(action, Intervention::Continue);
+    }
+
+    #[test]
+    fn action_name_and_escalation_helpers() {
+        assert_eq!(Intervention::Continue.action_name(), "continue");
+        assert_eq!(Intervention::EndEarly.action_name(), "end_early");
+        assert!(!Intervention::Continue.is_escalation());
+        assert!(Intervention::EscalateSpecops.is_escalation());
+        assert_eq!(
+            Intervention::EscalateMunger.escalation_mode(),
+            Some("munger")
+        );
+        assert_eq!(
+            Intervention::from_value(&serde_json::json!({"action": "continue"})),
+            Some(Intervention::Continue)
+        );
     }
 }

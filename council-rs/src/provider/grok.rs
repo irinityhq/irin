@@ -204,3 +204,101 @@ pub fn parse_v1_response(data: Value, model: &str, latency_ms: u64) -> ProviderR
         provider_provenance: None,
     }
 }
+
+#[cfg(test)]
+mod parse_v1_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn valid_output_text_and_usage() {
+        let data = json!({
+            "output_text": "hello council",
+            "model": "grok-returned",
+            "usage": {
+                "input_tokens": 11,
+                "output_tokens": 7,
+                "input_tokens_details": { "cached_tokens": 3 }
+            },
+            "error": null
+        });
+        let resp = parse_v1_response(data, "fallback-model", 42);
+        assert!(resp.error.is_none());
+        assert_eq!(resp.text, "hello council");
+        assert_eq!(resp.model, "grok-returned");
+        assert_eq!(resp.tokens_in, 11);
+        assert_eq!(resp.tokens_out, 7);
+        assert_eq!(resp.cached_in, 3);
+        assert_eq!(resp.latency_ms, 42);
+    }
+
+    #[test]
+    fn valid_nested_output_array_message() {
+        let data = json!({
+            "output": [{
+                "type": "message",
+                "content": [
+                    { "type": "output_text", "text": "part-a " },
+                    { "type": "output_text", "text": "part-b" }
+                ]
+            }],
+            "usage": {
+                "prompt_tokens": 5,
+                "completion_tokens": 9,
+                "cached_input_tokens": 1
+            }
+        });
+        let resp = parse_v1_response(data, "fallback-model", 9);
+        assert!(resp.error.is_none());
+        assert_eq!(resp.text, "part-a part-b");
+        assert_eq!(resp.tokens_in, 5);
+        assert_eq!(resp.tokens_out, 9);
+        assert_eq!(resp.cached_in, 1);
+        assert_eq!(resp.model, "fallback-model");
+    }
+
+    #[test]
+    fn empty_object_yields_empty_text_no_error() {
+        let resp = parse_v1_response(json!({}), "m", 1);
+        assert!(resp.error.is_none());
+        assert_eq!(resp.text, "");
+        assert_eq!(resp.tokens_in, 0);
+        assert_eq!(resp.tokens_out, 0);
+        assert_eq!(resp.model, "m");
+        assert_eq!(resp.latency_ms, 1);
+    }
+
+    #[test]
+    fn error_payload_surfaces_api_error() {
+        let data = json!({
+            "error": { "message": "rate limited", "type": "rate_limit" }
+        });
+        let resp = parse_v1_response(data, "m", 3);
+        assert!(
+            resp.error
+                .as_deref()
+                .is_some_and(|e| e.contains("API error") && e.contains("rate limited")),
+            "got {:?}",
+            resp.error
+        );
+        assert_eq!(resp.text, "");
+        assert_eq!(resp.latency_ms, 3);
+    }
+
+    #[test]
+    fn malformed_usage_types_default_to_zero() {
+        // Non-numeric usage fields must not panic; fall back to zero.
+        let data = json!({
+            "output_text": "ok",
+            "usage": {
+                "input_tokens": "nope",
+                "output_tokens": true
+            }
+        });
+        let resp = parse_v1_response(data, "m", 2);
+        assert!(resp.error.is_none());
+        assert_eq!(resp.text, "ok");
+        assert_eq!(resp.tokens_in, 0);
+        assert_eq!(resp.tokens_out, 0);
+    }
+}
