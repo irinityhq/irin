@@ -208,7 +208,6 @@ export function createBootHealthPoller(
     startConnecting: () => {
       if (stopped) return;
       if (phase === "connecting") return;
-      if (phase === "online") return;
 
       generation += 1;
       clearTimer();
