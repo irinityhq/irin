@@ -21,7 +21,10 @@ import {
 import { createBootHealthPoller } from "@/lib/boot-health-poll";
 import { gatewayHeaderTruth } from "@/lib/gateway-pack";
 import { notifyDiscoverBackendReady } from "@/lib/use-discover";
-import { warroomHealthLabel } from "@/lib/warroom-health-label";
+import {
+  COUNCIL_LOADING_LABEL,
+  warroomHealthLabel,
+} from "@/lib/warroom-health-label";
 import { cn } from "@/lib/cn";
 import type { Cabinet, HealthResponse } from "@/lib/types";
 import type { StartPayload } from "@/lib/ws";
@@ -251,8 +254,9 @@ export default function WarRoom() {
         if (ready) {
           poller.markOnline();
         } else if (isTauri()) {
-          // Transient backend loss after a config change: re-enter readiness poll.
-          scheduleBootHealthRetries();
+          // Gateway Pack / config may restart Council after spawn returns.
+          // Force re-arm from online so the readiness poll is not a no-op.
+          poller.startConnecting({ force: true });
         }
       });
     };
@@ -302,25 +306,34 @@ export default function WarRoom() {
             : "px-6 py-8",
         )}
       >
-        {view === "deliberate" && (
-          <DeliberateWorkspace
-            state={state}
-            cabinets={cabinets}
-            onStart={start}
-            onIntervene={intervene}
-            onReset={reset}
-            onReconnect={reconnect}
-            canReconnect={canReconnect}
-            onViewDriftReport={navigateToDriftReport}
-            onViewOutbox={(tenant) => {
-              setOutboxTenant(tenant);
-              setView("outbox");
-            }}
-            onViewHistory={navigateToHistory}
-            initialCabinet={pendingCabinet}
-            onConsumeInitialCabinet={() => setPendingCabinet(null)}
-          />
-        )}
+        {view === "deliberate" &&
+          (apiStatus === "loading" || bootRetryActive ? (
+            <div
+              role="status"
+              data-testid="deliberate-backend-loading"
+              className="panel p-5 font-mono text-sm text-fg-muted"
+            >
+              {COUNCIL_LOADING_LABEL}
+            </div>
+          ) : (
+            <DeliberateWorkspace
+              state={state}
+              cabinets={cabinets}
+              onStart={start}
+              onIntervene={intervene}
+              onReset={reset}
+              onReconnect={reconnect}
+              canReconnect={canReconnect}
+              onViewDriftReport={navigateToDriftReport}
+              onViewOutbox={(tenant) => {
+                setOutboxTenant(tenant);
+                setView("outbox");
+              }}
+              onViewHistory={navigateToHistory}
+              initialCabinet={pendingCabinet}
+              onConsumeInitialCabinet={() => setPendingCabinet(null)}
+            />
+          ))}
 
         {view === "direct-fire" && <DirectFirePanel />}
         {view === "history" && (
@@ -334,7 +347,7 @@ export default function WarRoom() {
                 if (ready) {
                   bootPollerRef.current?.markOnline();
                 } else {
-                  bootPollerRef.current?.startConnecting();
+                  bootPollerRef.current?.startConnecting({ force: true });
                 }
               });
             }}

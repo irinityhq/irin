@@ -157,6 +157,31 @@ test.describe("War Room smoke", () => {
     expect(await page.getByTestId("cabinet-chip").count()).toBeGreaterThan(0);
   });
 
+  test("keeps cold-start failures neutral while backend readiness is pending", async ({
+    page,
+  }) => {
+    let releaseBackend!: () => void;
+    const backendReady = new Promise<void>((resolve) => {
+      releaseBackend = resolve;
+    });
+    await page.route(/\/api\/(health|cabinets)$/, async (route) => {
+      await backendReady;
+      await route.continue();
+    });
+
+    await page.goto("/", { waitUntil: "domcontentloaded" });
+    await expect(page.getByTestId("deliberate-backend-loading")).toBeVisible();
+    await expect(
+      page.getByText("Cabinet list unavailable. Check the backend connection above."),
+    ).toHaveCount(0);
+    await expect(page.getByText(/Provider discovery failed:/)).toHaveCount(0);
+
+    releaseBackend();
+    await expect(page.getByTestId("cabinet-chip").first()).toBeVisible({
+      timeout: 10_000,
+    });
+  });
+
   test("topic input enables Convene button", async ({ page }) => {
     await installAvailableProviderHealth(page);
     await page.goto("/");

@@ -29,6 +29,7 @@ export function useDesktopActions(
       try {
         const snap = await action();
         applySnapshot(snap);
+        window.dispatchEvent(new Event("warroom-config-changed"));
         onSuccess(snap.pack);
       } catch (error) {
         toast("error", error instanceof Error ? error.message : String(error));
