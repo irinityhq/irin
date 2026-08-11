@@ -63,11 +63,12 @@ run_self_test() {
 
   expect() {
     local name="$1" evaluator="$2" window="$3" want_rc="$4" want_calls="$5"
+    local interval="${6:-0}"
     local rc=0
     : >"$tmp/calls"
     set +e
     SETTLEMENT_EVALUATOR="$evaluator" \
-      SETTLEMENT_POLL_INTERVAL_SECONDS=0 \
+      SETTLEMENT_POLL_INTERVAL_SECONDS="$interval" \
       SETTLEMENT_POLL_DEADLINE_SECONDS="$window" \
       poll >/dev/null 2>&1
     rc=$?
@@ -113,6 +114,70 @@ EOF
   expect retry_then_settled "$tmp/settles-third-probe.sh" 60 0 3
   expect hard_fail_immediate "$tmp/hard-fail.sh" 60 2 1
   expect deadline_exhausted "$tmp/never-settles.sh" 0 1 1
+
+  # Near-deadline overrun: non-zero interval longer than remaining window.
+  # After the first not-settled probe, poll must sleep at most the remainder
+  # and must not launch another probe past the advertised deadline.
+  # Wall-clock bound: must finish well under a full interval sleep.
+  {
+    local window=1 interval=5 rc=0 calls elapsed
+    local start=$SECONDS
+    : >"$tmp/calls"
+    set +e
+    SETTLEMENT_EVALUATOR="$tmp/never-settles.sh" \
+      SETTLEMENT_POLL_INTERVAL_SECONDS="$interval" \
+      SETTLEMENT_POLL_DEADLINE_SECONDS="$window" \
+      poll >/dev/null 2>&1
+    rc=$?
+    set -e
+    elapsed=$((SECONDS - start))
+    calls="$(wc -l <"$tmp/calls" | tr -d ' ')"
+    if [[ "$rc" == "1" && "$calls" == "1" && "$elapsed" -le $((window + 1)) ]]; then
+      printf 'PASS: near_deadline_no_overrun (rc=%s calls=%s elapsed=%ss)\n' \
+        "$rc" "$calls" "$elapsed"
+    else
+      printf \
+        'FAIL: near_deadline_no_overrun want rc=1 calls=1 elapsed<=%ss; got rc=%s calls=%s elapsed=%ss\n' \
+        "$((window + 1))" "$rc" "$calls" "$elapsed" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # Window-consuming probe: remainder must be recomputed AFTER probe latency.
+  # A stale pre-probe remainder of `window` would sleep ~window after a probe
+  # that already burned most of the budget, pushing elapsed well past window.
+  # Probe sleeps 2s; window=3; interval=10. Correct clamp → ~3s total, 1 call.
+  cat >"$tmp/slow-never-settles.sh" <<EOF
+#!/usr/bin/env bash
+echo probe >>"$tmp/calls"
+sleep 2
+exit 1
+EOF
+  chmod +x "$tmp/slow-never-settles.sh"
+  {
+    local window=3 interval=10 rc=0 calls elapsed
+    local start=$SECONDS
+    : >"$tmp/calls"
+    set +e
+    SETTLEMENT_EVALUATOR="$tmp/slow-never-settles.sh" \
+      SETTLEMENT_POLL_INTERVAL_SECONDS="$interval" \
+      SETTLEMENT_POLL_DEADLINE_SECONDS="$window" \
+      poll >/dev/null 2>&1
+    rc=$?
+    set -e
+    elapsed=$((SECONDS - start))
+    calls="$(wc -l <"$tmp/calls" | tr -d ' ')"
+    # window+1 allows integer-second slack; stale pre-probe sleep lands ~5s+.
+    if [[ "$rc" == "1" && "$calls" == "1" && "$elapsed" -le $((window + 1)) ]]; then
+      printf 'PASS: remainder_after_probe_latency (rc=%s calls=%s elapsed=%ss)\n' \
+        "$rc" "$calls" "$elapsed"
+    else
+      printf \
+        'FAIL: remainder_after_probe_latency want rc=1 calls=1 elapsed<=%ss; got rc=%s calls=%s elapsed=%ss\n' \
+        "$((window + 1))" "$rc" "$calls" "$elapsed" >&2
+      failures=$((failures + 1))
+    fi
+  }
 
   if (( failures > 0 )); then
     printf 'poll-review-settlement self-test: FAILED (%d)\n' "$failures" >&2
