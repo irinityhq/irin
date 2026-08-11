@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# W5 hermetic: remove-worktree harvest + incomplete-evidence refuse.
+# W5 hermetic: remove-worktree harvest + incomplete-evidence refuse +
+# ship-*.txt receipt retention / collision outcomes.
 # Zero network. Uses a real temporary git worktree under this monorepo.
 set -euo pipefail
 
@@ -12,18 +13,46 @@ fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 TEST_HOME="$(mktemp -d "/tmp/irin-w5-harvest.XXXXXX")"
 BRANCH="test/w5-harvest-$$"
 WT=""
+# Unique ship receipt basenames so hermetic runs never collide with operator history.
+SHIP_ABSENT="ship-w5-absent-$$.txt"
+SHIP_IDENT="ship-w5-ident-$$.txt"
+SHIP_DIFF="ship-w5-diff-$$.txt"
+SHIP_SYMLINK="ship-w5-symlink-$$.txt"
+CANON_RECEIPTS="$ROOT/.irin-receipts"
+# No test may relocate or replace the real receipt root; symlink cases run
+# from a disposable invoking checkout under $TEST_HOME instead.
 cleanup() {
   if [[ -n "$WT" && -d "$WT" ]]; then
     # Best-effort: force-remove residual worktree registration.
     git -C "$ROOT" worktree remove --force "$WT" 2>/dev/null || true
   fi
   git -C "$ROOT" branch -D "$BRANCH" 2>/dev/null || true
+  # Drop only this run's synthetic receipts from the invoking checkout.
+  if [[ -d "$CANON_RECEIPTS" && ! -L "$CANON_RECEIPTS" ]]; then
+    rm -f "$CANON_RECEIPTS/$SHIP_ABSENT" \
+      "$CANON_RECEIPTS/$SHIP_IDENT" \
+      "$CANON_RECEIPTS/$SHIP_DIFF" \
+      "$CANON_RECEIPTS/$SHIP_SYMLINK" 2>/dev/null || true
+  fi
   if [[ -d "$TEST_HOME" ]]; then
     chmod -R u+w "$TEST_HOME" 2>/dev/null || true
     rm -rf "$TEST_HOME"
   fi
 }
 trap cleanup EXIT
+
+# Recreate a clean linked worktree on the disposable branch (branch retained after remove).
+recreate_wt() {
+  if [[ -n "${WT:-}" && -d "$WT" ]]; then
+    git -C "$ROOT" worktree remove --force "$WT" 2>/dev/null || true
+  fi
+  WT="$TEST_HOME/wt"
+  rm -rf "$WT"
+  git -C "$ROOT" worktree add -q "$WT" "$BRANCH" \
+    || fail "could not recreate temp worktree"
+  [[ -z "$(git -C "$WT" status --porcelain --untracked-files=normal)" ]] \
+    || fail "recreated worktree dirty: $(git -C "$WT" status --porcelain)"
+}
 
 export IRIN_CANDIDATE_ROOT="$TEST_HOME/candidates"
 # shellcheck source=/dev/null
@@ -220,5 +249,143 @@ out="$(
 # Mark WT empty so cleanup does not double-remove.
 WT=""
 pass "complete ignored evidence harvests into store; direct store survives"
+
+# --- ship-*.txt receipt harvest: three collision outcomes --------------------
+# Harvest destination is the invoking checkout's .irin-receipts/ (SOURCE_ROOT
+# of remove-worktree.sh; operator path is the canonical checkout).
+
+# 1) Destination absent → exact-byte copy, then worktree removed.
+recreate_wt
+mkdir -p "$WT/.irin-receipts"
+# Keep a source fixture outside the worktree for post-remove byte compare.
+printf 'IRIN SHIP RECEIPT\nstatus=PASS\nmarker=absent-%s-body\n' "$$" \
+  >"$TEST_HOME/$SHIP_ABSENT"
+cp -a "$TEST_HOME/$SHIP_ABSENT" "$WT/.irin-receipts/$SHIP_ABSENT"
+# Ensure gitignored so remove does not dirty-refuse.
+git -C "$WT" check-ignore -q ".irin-receipts/$SHIP_ABSENT" \
+  || fail "ship receipt must be gitignored under .irin-receipts/"
+[[ ! -e "$CANON_RECEIPTS/$SHIP_ABSENT" ]] \
+  || fail "canonical absent receipt must not pre-exist: $CANON_RECEIPTS/$SHIP_ABSENT"
+[[ -z "$(git -C "$WT" status --porcelain --untracked-files=normal)" ]] \
+  || fail "worktree dirty before absent-receipt remove: $(git -C "$WT" status --porcelain)"
+out="$(
+  IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT" \
+  "$REMOVE" "$WT" 2>&1
+)" || fail "remove with absent ship receipt dest should succeed: $out"
+[[ ! -d "$WT" ]] || fail "worktree should be gone after absent-receipt harvest"
+WT=""
+[[ -f "$CANON_RECEIPTS/$SHIP_ABSENT" ]] \
+  || fail "harvested ship receipt missing at $CANON_RECEIPTS/$SHIP_ABSENT"
+cmp -s "$TEST_HOME/$SHIP_ABSENT" "$CANON_RECEIPTS/$SHIP_ABSENT" \
+  || fail "harvested receipt bytes differ from source (absent dest)"
+pass "ship receipt harvest: destination absent preserves exact bytes"
+
+# 2) Destination identical → continue (no overwrite error), remove succeeds.
+recreate_wt
+mkdir -p "$WT/.irin-receipts" "$CANON_RECEIPTS"
+printf 'IRIN SHIP RECEIPT\nstatus=PASS\nmarker=ident-%s-body\n' "$$" \
+  >"$TEST_HOME/$SHIP_IDENT"
+cp -a "$TEST_HOME/$SHIP_IDENT" "$WT/.irin-receipts/$SHIP_IDENT"
+cp -a "$TEST_HOME/$SHIP_IDENT" "$CANON_RECEIPTS/$SHIP_IDENT"
+[[ -z "$(git -C "$WT" status --porcelain --untracked-files=normal)" ]] \
+  || fail "worktree dirty before ident-receipt remove: $(git -C "$WT" status --porcelain)"
+out="$(
+  IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT" \
+  "$REMOVE" "$WT" 2>&1
+)" || fail "remove with identical ship receipt dest should succeed: $out"
+[[ ! -d "$WT" ]] || fail "worktree should be gone after identical-receipt continue"
+WT=""
+cmp -s "$TEST_HOME/$SHIP_IDENT" "$CANON_RECEIPTS/$SHIP_IDENT" \
+  || fail "identical destination receipt bytes must remain unchanged"
+pass "ship receipt harvest: identical destination continues"
+
+# 3) Same name, different bytes → refuse (no overwrite, no second hierarchy).
+recreate_wt
+mkdir -p "$WT/.irin-receipts" "$CANON_RECEIPTS"
+printf 'IRIN SHIP RECEIPT\nstatus=PASS\nmarker=wt-diff-%s-body\n' "$$" \
+  >"$WT/.irin-receipts/$SHIP_DIFF"
+printf 'IRIN SHIP RECEIPT\nstatus=PASS\nmarker=canon-diff-%s-body\n' "$$" \
+  >"$TEST_HOME/$SHIP_DIFF"
+cp -a "$TEST_HOME/$SHIP_DIFF" "$CANON_RECEIPTS/$SHIP_DIFF"
+[[ -z "$(git -C "$WT" status --porcelain --untracked-files=normal)" ]] \
+  || fail "worktree dirty before diff-receipt remove: $(git -C "$WT" status --porcelain)"
+set +e
+out="$(
+  IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT" \
+  "$REMOVE" "$WT" 2>&1
+)"
+ec=$?
+set -e
+[[ $ec -eq 1 ]] || fail "different-content ship receipt must exit 1 (got $ec): $out"
+[[ "$out" == *"refus"* || "$out" == *"different"* || "$out" == *"overwrite"* || "$out" == *"collision"* ]] \
+  || fail "expected different-content refuse message: $out"
+[[ -d "$WT" ]] || fail "worktree must still exist after receipt collision refuse"
+# Canonical bytes must be untouched; no alternate hierarchy (e.g. ship-*-wt or subdir).
+cmp -s "$TEST_HOME/$SHIP_DIFF" "$CANON_RECEIPTS/$SHIP_DIFF" \
+  || fail "canonical receipt must not be overwritten on collision"
+# No second-hierarchy spill under .irin-receipts for this basename.
+spill_count="$(
+  find "$CANON_RECEIPTS" -name "${SHIP_DIFF}*" 2>/dev/null | wc -l | tr -d ' '
+)"
+[[ "$spill_count" == "1" ]] \
+  || fail "expected exactly one path for colliding basename, found $spill_count"
+# Worktree source still present (not destroyed mid-refuse).
+[[ -f "$WT/.irin-receipts/$SHIP_DIFF" ]] \
+  || fail "worktree receipt must remain after refuse"
+pass "ship receipt harvest: different-content destination refuses overwrite"
+
+# 4) Symlinked destination .irin-receipts root → refuse (no write-through).
+# Run from a disposable invoking checkout so the real receipt root is never
+# mutated: concurrent receipts cannot be redirected, and a hard kill strands
+# nothing outside $TEST_HOME.
+INVOKER="$TEST_HOME/symlink-invoker"
+git clone --quiet --local --no-hardlinks -- "$ROOT" "$INVOKER" \
+  || fail "could not create disposable invoking checkout"
+mkdir -p "$TEST_HOME/receipt-spill"
+ln -s "$TEST_HOME/receipt-spill" "$INVOKER/.irin-receipts"
+IWT="$TEST_HOME/symlink-invoker-wt"
+git -C "$INVOKER" worktree add -q -b "test/w5-symlink-$$" "$IWT" \
+  || fail "could not create disposable invoker worktree"
+mkdir -p "$IWT/.irin-receipts"
+printf 'IRIN SHIP RECEIPT\nstatus=PASS\nmarker=symlink-%s-body\n' "$$" \
+  >"$IWT/.irin-receipts/$SHIP_SYMLINK"
+[[ -z "$(git -C "$IWT" status --porcelain --untracked-files=normal)" ]] \
+  || fail "invoker worktree dirty before symlink-root remove: $(git -C "$IWT" status --porcelain)"
+set +e
+out="$(
+  cd "$INVOKER" \
+    && IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT" \
+      "$REMOVE" "$IWT" 2>&1
+)"
+ec=$?
+set -e
+[[ $ec -eq 1 ]] || fail "symlinked ship receipt root must exit 1 (got $ec): $out"
+[[ "$out" == *"symlink"* || "$out" == *"refus"* ]] \
+  || fail "expected symlinked receipt-root refuse message: $out"
+[[ -d "$IWT" ]] || fail "worktree must still exist after symlink-root refuse"
+[[ ! -e "$TEST_HOME/receipt-spill/$SHIP_SYMLINK" ]] \
+  || fail "must not write ship receipt through symlinked root"
+[[ -f "$IWT/.irin-receipts/$SHIP_SYMLINK" ]] \
+  || fail "worktree receipt must remain after symlink-root refuse"
+pass "ship receipt harvest: symlinked destination root refuses"
+
+# 5) Non-directory destination .irin-receipts root → refuse. Reuses the
+# disposable invoker and its intact worktree from the symlink case.
+rm -f "$INVOKER/.irin-receipts"
+printf 'not a directory\n' >"$INVOKER/.irin-receipts"
+set +e
+out="$(
+  cd "$INVOKER" \
+    && IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT" \
+      "$REMOVE" "$IWT" 2>&1
+)"
+ec=$?
+set -e
+[[ $ec -eq 1 ]] || fail "non-directory ship receipt root must exit 1 (got $ec): $out"
+[[ "$out" == *"non-directory"* || "$out" == *"refus"* ]] \
+  || fail "expected non-directory receipt-root refuse message: $out"
+[[ -f "$IWT/.irin-receipts/$SHIP_SYMLINK" ]] \
+  || fail "worktree receipt must remain after non-directory-root refuse"
+pass "ship receipt harvest: non-directory destination root refuses"
 
 printf '\nAll remove-worktree evidence contracts passed.\n'
