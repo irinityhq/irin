@@ -5,7 +5,52 @@ import type {
   PhoneAccessStatus,
   TouchIdStatus,
 } from "@/lib/tauri";
+import { subscribeWarroomConfigChanged } from "@/lib/runtime-config";
 import { runGatewayPackActionOnce } from "./useDesktopActions";
+
+function installEventTargetWindow() {
+  const target = new EventTarget();
+  const durable = new Map<string, string>();
+  const session = new Map<string, string>();
+  const localStorage = {
+    getItem: (k: string) => durable.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      durable.set(k, v);
+    },
+    removeItem: (k: string) => {
+      durable.delete(k);
+    },
+  };
+  const sessionStorage = {
+    getItem: (k: string) => session.get(k) ?? null,
+    setItem: (k: string, v: string) => {
+      session.set(k, v);
+    },
+    removeItem: (k: string) => {
+      session.delete(k);
+    },
+  };
+  const w = {
+    dispatchEvent: (ev: Event) => target.dispatchEvent(ev),
+    addEventListener: (
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | AddEventListenerOptions,
+    ) => target.addEventListener(type, listener, options),
+    removeEventListener: (
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | EventListenerOptions,
+    ) => target.removeEventListener(type, listener, options),
+    localStorage,
+    sessionStorage,
+    location: { href: "http://127.0.0.1:3010/" },
+  };
+  vi.stubGlobal("window", w);
+  vi.stubGlobal("localStorage", localStorage);
+  vi.stubGlobal("sessionStorage", sessionStorage);
+  return w;
+}
 
 function pack(over: Partial<GatewayPackStatus> = {}): GatewayPackStatus {
   return {
@@ -137,5 +182,36 @@ describe("runGatewayPackActionOnce (success updates then emits once; error zero)
     expect(onSuccess).not.toHaveBeenCalled();
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith("Touch ID cancelled");
+  });
+
+  it("default emitter is emitWarroomConfigChanged (shared runtime-config signal)", async () => {
+    installEventTargetWindow();
+    try {
+      const seen: string[] = [];
+      const unsub = subscribeWarroomConfigChanged(() => {
+        seen.push("changed");
+      });
+      const next = snap({ seq: 9 });
+      const applySnapshot = vi.fn();
+      const onSuccess = vi.fn();
+      const onError = vi.fn();
+
+      // Omit emit injection — production default must fire the shared event.
+      const result = await runGatewayPackActionOnce(
+        async () => next,
+        applySnapshot,
+        onSuccess,
+        onError,
+      );
+
+      expect(result).toBe("ok");
+      expect(applySnapshot).toHaveBeenCalledTimes(1);
+      expect(onSuccess).toHaveBeenCalledTimes(1);
+      expect(onError).not.toHaveBeenCalled();
+      expect(seen).toEqual(["changed"]);
+      unsub();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
