@@ -81,7 +81,7 @@ for path in "${paths[@]}"; do
       set_full_matrix
       ;;
 
-    __*__|.github/workflows/*|.github/actions/*|*/.github/workflows/*|*/.github/actions/*|scripts/classify-ci-paths.sh|scripts/test-classify-ci-paths.sh|scripts/test-ci-control-plane.sh|scripts/test-ci-candidate-observability.sh|scripts/check-review-settlement.sh|scripts/run-actionlint.sh|scripts/bootstrap-actionlint.sh)
+    __*__|.github/workflows/*|.github/actions/*|*/.github/workflows/*|*/.github/actions/*|scripts/classify-ci-paths.sh|scripts/test-classify-ci-paths.sh|scripts/test-ci-control-plane.sh|scripts/test-ci-candidate-observability.sh|scripts/check-review-settlement.sh|scripts/poll-review-settlement.sh|scripts/run-actionlint.sh|scripts/bootstrap-actionlint.sh)
       # CI control-plane surface: full non-SBOM matrix + exact (bootstrap wrapper
       # included so queue:max schema allowance stays covered when the pin changes).
       # check-review-settlement.sh is the pre-queue review settlement evaluator.

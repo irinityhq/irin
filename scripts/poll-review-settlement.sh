@@ -1,0 +1,129 @@
+#!/usr/bin/env bash
+# Poll wrapper for the review settlement evaluator.
+#
+# The Copilot auto-review ruleset (review_on_push) re-requests a review on
+# every push, so settlement is structurally unsettled during the Copilot
+# latency window after each commit. This wrapper retries not-settled instead
+# of failing the first probe. Wait logic lives here, NOT in
+# scripts/check-review-settlement.sh, so the evaluator's snapshot purity and
+# self-test semantics stay single-shot.
+#
+# Exit semantics:
+#   evaluator exit 0 (settled)      -> exit 0 immediately
+#   evaluator exit 1 (not settled)  -> retry every INTERVAL until DEADLINE,
+#                                      then exit 1
+#   any other evaluator exit code   -> propagate immediately (2 is
+#                                      usage/transport/schema/truncated)
+#
+# Env knobs (deterministic contract tests override these):
+#   SETTLEMENT_POLL_INTERVAL_SECONDS  seconds between probes (default 30)
+#   SETTLEMENT_POLL_DEADLINE_SECONDS  total wait window (default 600)
+#   SETTLEMENT_EVALUATOR              evaluator command (default
+#                                     scripts/check-review-settlement.sh)
+#
+# Modes:
+#   --self-test   run deterministic poll-contract fixtures and exit
+#   <args...>     passed through verbatim to the evaluator each probe
+set -euo pipefail
+
+poll() {
+  local interval="${SETTLEMENT_POLL_INTERVAL_SECONDS:-30}"
+  local window="${SETTLEMENT_POLL_DEADLINE_SECONDS:-600}"
+  local evaluator="${SETTLEMENT_EVALUATOR:-scripts/check-review-settlement.sh}"
+  local deadline=$((SECONDS + window))
+  local rc
+  while :; do
+    rc=0
+    "$evaluator" "$@" || rc=$?
+    case "$rc" in
+      0)
+        return 0
+        ;;
+      1)
+        if (( SECONDS >= deadline )); then
+          printf 'review-settlement: not settled within %ss wait window\n' \
+            "$window" >&2
+          return 1
+        fi
+        sleep "$interval"
+        ;;
+      *)
+        # Usage/transport/schema/truncated: never retried, never softened.
+        return "$rc"
+        ;;
+    esac
+  done
+}
+
+run_self_test() {
+  local tmp failures=0
+  tmp="$(mktemp -d "${TMPDIR:-/tmp}/irin-settlement-poll.XXXXXX")"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT
+
+  expect() {
+    local name="$1" evaluator="$2" window="$3" want_rc="$4" want_calls="$5"
+    local rc=0
+    : >"$tmp/calls"
+    set +e
+    SETTLEMENT_EVALUATOR="$evaluator" \
+      SETTLEMENT_POLL_INTERVAL_SECONDS=0 \
+      SETTLEMENT_POLL_DEADLINE_SECONDS="$window" \
+      poll >/dev/null 2>&1
+    rc=$?
+    set -e
+    local calls
+    calls="$(wc -l <"$tmp/calls" | tr -d ' ')"
+    if [[ "$rc" == "$want_rc" && "$calls" == "$want_calls" ]]; then
+      printf 'PASS: %s (rc=%s calls=%s)\n' "$name" "$rc" "$calls"
+    else
+      printf 'FAIL: %s want rc=%s calls=%s got rc=%s calls=%s\n' \
+        "$name" "$want_rc" "$want_calls" "$rc" "$calls" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # Evaluator that is not-settled twice, then settled: poll must retry
+  # through exit 1 and return 0.
+  cat >"$tmp/settles-third-probe.sh" <<EOF
+#!/usr/bin/env bash
+echo probe >>"$tmp/calls"
+(( \$(wc -l <"$tmp/calls") >= 3 )) && exit 0
+exit 1
+EOF
+
+  # Evaluator that hard-fails: poll must propagate exit 2 on the first
+  # probe, never retry it.
+  cat >"$tmp/hard-fail.sh" <<EOF
+#!/usr/bin/env bash
+echo probe >>"$tmp/calls"
+exit 2
+EOF
+
+  # Evaluator that never settles: a zero-length window exhausts after the
+  # first probe and returns 1.
+  cat >"$tmp/never-settles.sh" <<EOF
+#!/usr/bin/env bash
+echo probe >>"$tmp/calls"
+exit 1
+EOF
+
+  chmod +x "$tmp"/*.sh
+
+  expect retry_then_settled "$tmp/settles-third-probe.sh" 60 0 3
+  expect hard_fail_immediate "$tmp/hard-fail.sh" 60 2 1
+  expect deadline_exhausted "$tmp/never-settles.sh" 0 1 1
+
+  if (( failures > 0 )); then
+    printf 'poll-review-settlement self-test: FAILED (%d)\n' "$failures" >&2
+    exit 1
+  fi
+  printf 'poll-review-settlement self-test: OK\n'
+}
+
+if [[ "${1:-}" == "--self-test" ]]; then
+  run_self_test
+  exit 0
+fi
+
+poll "$@"
