@@ -288,42 +288,45 @@ fn schedule_governed_promote_attempts(
     tauri::async_runtime::spawn_blocking(move || {
         for attempt in 0..ATTEMPTS {
             std::thread::sleep(INTERVAL);
-            if !gateway_pack::promote_held_secrets_still_valid(lifecycle_at_schedule) {
-                let _ = app.emit(
-                    "council-log",
-                    "[system] governed-promote: pack lifecycle changed; aborting held-secret promote",
-                );
-                return;
-            }
             let store = KeychainSecretStore;
             let persisted = match load_or_create_private_config() {
                 Ok(cfg) => cfg.via_gateway_default,
                 Err(_) => return,
             };
-            // Operator disabled, already governed, or no Direct-owned child → stop.
             let owned = gateway_pack::owned_council_route();
-            if !persisted || owned == Some(true) || owned != Some(false) {
-                return;
-            }
-            let pack_step = gateway_pack::promote_pack_ready_for_attempt(
+            // Launch-owned flight decision (lifecycle fence + pack readiness +
+            // post-pack recheck). Shell only acts on ReadyToPromote.
+            match gateway_pack::evaluate_promote_flight_attempt(
                 &store,
+                lifecycle_at_schedule,
                 held_gw_key.as_deref(),
                 launch_secrets.as_ref(),
                 attempt,
                 MAX_EARLY_RESUME_ATTEMPTS,
-            );
-            if let gateway_pack::PromotePackAttempt::Failed { reason } = &pack_step {
-                let _ = app.emit(
-                    "council-log",
-                    format!(
-                        "[system] governed-promote attempt {}: pack not ready ({reason})",
-                        attempt + 1
-                    ),
-                );
-            }
-            let pack_ok = pack_step.is_ready();
-            if !gateway_pack::may_promote_to_governed(persisted, owned, pack_ok) {
-                continue;
+                persisted,
+                owned,
+            ) {
+                gateway_pack::PromoteFlightDecision::AbortLifecycleChanged => {
+                    let _ = app.emit(
+                        "council-log",
+                        "[system] governed-promote: pack lifecycle changed; aborting held-secret promote",
+                    );
+                    return;
+                }
+                gateway_pack::PromoteFlightDecision::StopNotEligible => return,
+                gateway_pack::PromoteFlightDecision::WaitNotReady { reason } => {
+                    if let Some(reason) = reason {
+                        let _ = app.emit(
+                            "council-log",
+                            format!(
+                                "[system] governed-promote attempt {}: pack not ready ({reason})",
+                                attempt + 1
+                            ),
+                        );
+                    }
+                    continue;
+                }
+                gateway_pack::PromoteFlightDecision::ReadyToPromote => {}
             }
             let config = {
                 let state = app.state::<SpawnConfigCache>();
@@ -347,16 +350,38 @@ fn schedule_governed_promote_attempts(
                 }),
                 _ => None,
             };
-            stop_tracked_council_server(&app);
-            let _ =
-                wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
-            match try_start_council_server_with_credentials(
-                &app,
-                config.server_port,
-                token.as_deref(),
-                Some(true),
-                config.librarian_base.as_deref(),
-                preloaded_gateway_creds.as_ref(),
+            // Commit boundary: stop + port wait + generation recheck + spawn
+            // are one helper so enable/disable cannot advance generation in the
+            // gap between fence and governed start (Codex residual).
+            let app_for_stop = app.clone();
+            let app_for_start = app.clone();
+            let port = config.server_port;
+            let token_owned = token.clone();
+            let creds = preloaded_gateway_creds.clone();
+            let librarian = config.librarian_base.clone();
+            // Wait on the same port the restart will bind (`config.server_port`),
+            // not only the build-time default — otherwise a non-default-port app
+            // skips the real wait and reintroduces the bind race.
+            let wait_port = gateway_pack::promote_port_release_target(
+                port,
+                default_serve_port().unwrap_or(8765),
+            );
+            match gateway_pack::promote_commit_after_stop_wait_detailed(
+                lifecycle_at_schedule,
+                || stop_tracked_council_server(&app_for_stop),
+                || {
+                    let _ = wait_for_port_release(wait_port, Duration::from_secs(5));
+                },
+                || {
+                    try_start_council_server_with_credentials(
+                        &app_for_start,
+                        port,
+                        token_owned.as_deref(),
+                        Some(true),
+                        librarian.as_deref(),
+                        creds.as_ref(),
+                    )
+                },
             ) {
                 Ok(msg) => {
                     let _ = app.emit("council-log", format!("[system] governed-promote: {msg}"));
@@ -383,7 +408,137 @@ fn schedule_governed_promote_attempts(
                     }
                     return;
                 }
-                Err(e) => {
+                Err(gateway_pack::PromoteCommitError::LifecycleChangedBeforeStop) => {
+                    // Stop never ran — leave the pre-flight child alone and end
+                    // this held-secret flight (generation advanced elsewhere).
+                    let _ = app.emit(
+                        "council-log",
+                        "[system] governed-promote: pack lifecycle changed before stop; aborting held-secret flight",
+                    );
+                    return;
+                }
+                Err(gateway_pack::PromoteCommitError::LifecycleChangedAfterStop) => {
+                    // Stop already ran. Concurrent Enable may have seen
+                    // had_child==false and skipped governed restart. If the
+                    // pack is still enabled, attempt governed with fresh
+                    // Keychain secrets rather than pinning Direct forever.
+                    //
+                    // Re-read enablement NOW — do not use attempt-start
+                    // `persisted` (always true to have reached ReadyToPromote).
+                    // Disable/Stop/Uninstall during stop/wait must yield
+                    // RestoreDirect, not a governed restart against intent.
+                    let current_enabled = load_or_create_private_config()
+                        .map(|cfg| cfg.via_gateway_default)
+                        .unwrap_or(false);
+                    let recovery = gateway_pack::promote_after_stop_lifecycle_recovery(
+                        current_enabled,
+                    );
+                    match recovery {
+                        gateway_pack::AfterStopLifecycleRecovery::AttemptGovernedFresh => {
+                            let _ = app.emit(
+                                "council-log",
+                                "[system] governed-promote: lifecycle changed after stop; attempting fresh governed start (no held secrets)",
+                            );
+                            match try_start_council_server(
+                                &app,
+                                config.server_port,
+                                token.as_deref(),
+                                Some(true),
+                                config.librarian_base.as_deref(),
+                            ) {
+                                Ok(msg) => {
+                                    let _ = app.emit(
+                                        "council-log",
+                                        format!(
+                                            "[system] governed-promote: fresh governed start ok: {msg}"
+                                        ),
+                                    );
+                                    let _ = gateway_pack::status_with_council_route(
+                                        &store, true, false,
+                                    );
+                                    let _ =
+                                        status_authority::recompute(&app, Freshness::Action);
+                                    return;
+                                }
+                                Err(ge) => {
+                                    let _ = app.emit(
+                                        "council-log",
+                                        format!(
+                                            "[system] governed-promote: fresh governed start failed ({ge}); restoring Direct"
+                                        ),
+                                    );
+                                    match try_start_council_server(
+                                        &app,
+                                        config.server_port,
+                                        token.as_deref(),
+                                        Some(false),
+                                        config.librarian_base.as_deref(),
+                                    ) {
+                                        Ok(msg) => {
+                                            let _ = app.emit(
+                                                "council-log",
+                                                format!(
+                                                    "[system] governed-promote: Council restored in Direct mode: {msg}"
+                                                ),
+                                            );
+                                        }
+                                        Err(re) => {
+                                            let _ = app.emit(
+                                                "council-log",
+                                                format!(
+                                                    "[system] governed-promote: Direct restart failed after lifecycle abort: {re}. Core War Room is down; start Council manually."
+                                                ),
+                                            );
+                                        }
+                                    }
+                                    // Re-schedule without held secrets so recovery can continue.
+                                    schedule_governed_promote_attempts(
+                                        app.clone(),
+                                        auth_token.clone(),
+                                        None,
+                                        None,
+                                    );
+                                    let _ =
+                                        status_authority::recompute(&app, Freshness::Action);
+                                    return;
+                                }
+                            }
+                        }
+                        gateway_pack::AfterStopLifecycleRecovery::RestoreDirect => {
+                            let _ = app.emit(
+                                "council-log",
+                                "[system] governed-promote: pack no longer enabled after stop; restoring Direct",
+                            );
+                            match try_start_council_server(
+                                &app,
+                                config.server_port,
+                                token.as_deref(),
+                                Some(false),
+                                config.librarian_base.as_deref(),
+                            ) {
+                                Ok(msg) => {
+                                    let _ = app.emit(
+                                        "council-log",
+                                        format!(
+                                            "[system] governed-promote: Council restored in Direct mode: {msg}"
+                                        ),
+                                    );
+                                }
+                                Err(re) => {
+                                    let _ = app.emit(
+                                        "council-log",
+                                        format!(
+                                            "[system] governed-promote: Direct restart failed after lifecycle abort: {re}. Core War Room is down; start Council manually."
+                                        ),
+                                    );
+                                }
+                            }
+                            let _ = status_authority::recompute(&app, Freshness::Action);
+                            return;
+                        }
+                    }
+                }
+                Err(gateway_pack::PromoteCommitError::SpawnFailed(e)) => {
                     let _ = app.emit(
                         "council-log",
                         format!(
@@ -391,13 +546,30 @@ fn schedule_governed_promote_attempts(
                             attempt + 1
                         ),
                     );
-                    let _ = try_start_council_server(
+                    match try_start_council_server(
                         &app,
                         config.server_port,
                         token.as_deref(),
                         Some(false),
                         config.librarian_base.as_deref(),
-                    );
+                    ) {
+                        Ok(msg) => {
+                            let _ = app.emit(
+                                "council-log",
+                                format!(
+                                    "[system] governed-promote: Council restored in Direct mode: {msg}"
+                                ),
+                            );
+                        }
+                        Err(re) => {
+                            let _ = app.emit(
+                                "council-log",
+                                format!(
+                                    "[system] governed-promote: Direct restart failed after governed spawn failure: {re}. Core War Room is down; start Council manually."
+                                ),
+                            );
+                        }
+                    }
                     let _ = status_authority::recompute(&app, Freshness::Action);
                 }
             }
@@ -1312,76 +1484,20 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<DesktopStatusSnapshot,
 // launch.
 // ---------------------------------------------------------------------------
 
-/// Presentation-only sticky boundary for Gateway readiness on status polls.
-///
-/// Law:
-/// - **Status path** ([`gateway_ready_for_status`]): may hold the last true
-///   `governed_ready` sample across soft probe flakes (auth/health), using a
-///   monotonic clock. `hard_down` (disabled, Docker gap, stopped/not-running)
-///   demotes immediately.
-/// - **Action path** ([`gateway_ready_for_arm`]): always a fresh uncached
-///   sample; never consults this sticky or the presentation cache.
-static GATEWAY_READY_STATUS_STICKY: std::sync::Mutex<touch_id::GatewayReadySticky> =
-    std::sync::Mutex::new(touch_id::GatewayReadySticky::new());
-
-/// Monotonic milliseconds since process start. Sticky expiry must not use wall
-/// time: an NTP step backward would otherwise extend the 20s hold indefinitely.
-fn monotonic_ms() -> i64 {
-    use std::sync::OnceLock;
-    use std::time::Instant;
-    static ORIGIN: OnceLock<Instant> = OnceLock::new();
-    ORIGIN
-        .get_or_init(Instant::now)
-        .elapsed()
-        .as_millis()
-        .min(i64::MAX as u128) as i64
-}
-
-/// Fresh pack readiness sample. Used by enroll/arm action paths so a ceremony
-/// never proceeds on sticky or cached presentation state.
+/// Fresh pack readiness for enroll/arm ceremonies — never uses presentation
+/// sticky. Presentation readiness lives in `status_authority` (single sticky).
 fn gateway_ready_for_arm() -> bool {
-    gateway_ready_sample_fresh().0
-}
-
-/// `(governed_ready, hard_down)` from one uncached pack-status sample.
-fn gateway_ready_sample_fresh() -> (bool, bool) {
     let store = KeychainSecretStore;
-    let st = gateway_pack::gateway_pack_status_fresh(&store);
-    (st.governed_ready, st.hard_down)
-}
-
-/// `(governed_ready, hard_down)` from the presentation cache path.
-fn gateway_ready_sample_cached() -> (bool, bool) {
-    let store = KeychainSecretStore;
-    let st = gateway_pack::gateway_pack_status(&store);
-    (st.governed_ready, st.hard_down)
-}
-
-/// Status-path readiness: soft probe failures hold the last true sample so the
-/// Re-enroll / Set up button does not grey on an 8s background poll flake.
-/// Action paths must call [`gateway_ready_for_arm`] instead.
-fn gateway_ready_for_status() -> bool {
-    let (sample, hard_down) = gateway_ready_sample_cached();
-    let now_ms = monotonic_ms();
-    match GATEWAY_READY_STATUS_STICKY.lock() {
-        Ok(mut guard) => guard.project(
-            sample,
-            hard_down,
-            now_ms,
-            touch_id::GatewayReadySticky::DEFAULT_HOLD_MS,
-        ),
-        Err(_) => sample,
-    }
+    gateway_pack::gateway_pack_status_fresh(&store).governed_ready
 }
 
 #[tauri::command]
-async fn touch_id_status() -> Result<touch_id::TouchIdStatus, String> {
-    tauri::async_runtime::spawn_blocking(|| {
-        let store = KeychainSecretStore;
-        Ok(touch_id::touch_id_status(
-            &store,
-            gateway_ready_for_status(),
-        ))
+async fn touch_id_status(app: AppHandle) -> Result<touch_id::TouchIdStatus, String> {
+    // Presentation path: consume status_authority snapshot (single sticky),
+    // not a parallel GATEWAY_READY sticky recomputed here.
+    tauri::async_runtime::spawn_blocking(move || {
+        let snap = status_authority::recompute(&app, Freshness::Background);
+        Ok(snap.touch_id)
     })
     .await
     .map_err(|e| e.to_string())?

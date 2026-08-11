@@ -212,6 +212,57 @@ pub fn promote_held_secrets_still_valid(lifecycle_at_capture: u64) -> bool {
     super::status::pack_lifecycle_generation() == lifecycle_at_capture
 }
 
+/// Same commit boundary with spawn error preserved (production path).
+///
+/// Distinguishes lifecycle abort **before** stop (Council still the pre-flight
+/// child) from abort **after** stop (Council torn down; concurrent Enable may
+/// have seen `had_child == false` and skipped governed restart).
+pub fn promote_commit_after_stop_wait_detailed(
+    lifecycle_at_schedule: u64,
+    stop: impl FnOnce(),
+    wait_port: impl FnOnce(),
+    start_governed: impl FnOnce() -> Result<String, String>,
+) -> Result<String, PromoteCommitError> {
+    if !promote_held_secrets_still_valid(lifecycle_at_schedule) {
+        return Err(PromoteCommitError::LifecycleChangedBeforeStop);
+    }
+    stop();
+    wait_port();
+    if !promote_held_secrets_still_valid(lifecycle_at_schedule) {
+        return Err(PromoteCommitError::LifecycleChangedAfterStop);
+    }
+    start_governed().map_err(PromoteCommitError::SpawnFailed)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromoteCommitError {
+    /// Generation advanced before Council was stopped — leave the running child alone.
+    LifecycleChangedBeforeStop,
+    /// Generation advanced after stop/wait — Council is down; shell must not pin
+    /// Direct forever if the pack is still enabled (concurrent Enable may have
+    /// skipped governed restart when `had_child` was false).
+    LifecycleChangedAfterStop,
+    SpawnFailed(String),
+}
+
+/// Pure recovery choice after a post-stop lifecycle abort.
+/// When the pack is still operator-enabled, prefer a fresh governed start over
+/// pinning Direct (which ends automatic promote recovery).
+pub fn promote_after_stop_lifecycle_recovery(persisted_via_gateway: bool) -> AfterStopLifecycleRecovery {
+    if persisted_via_gateway {
+        AfterStopLifecycleRecovery::AttemptGovernedFresh
+    } else {
+        AfterStopLifecycleRecovery::RestoreDirect
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AfterStopLifecycleRecovery {
+    /// Pack still enabled — start governed without held (possibly rotated) secrets.
+    AttemptGovernedFresh,
+    /// Pack no longer enabled — restore Direct only.
+    RestoreDirect,
+}
 
 /// Decision for one promote-flight attempt. Tauri shell (`lib.rs`) only sleeps,
 /// emits logs, and performs Council restart — pack readiness + lifecycle fence
@@ -295,6 +346,13 @@ pub fn classify_post_pack_promote_decision(
     PromoteFlightDecision::ReadyToPromote
 }
 
+/// Port the promote commit-boundary must wait on: same bind as the restart.
+pub fn promote_port_release_target(
+    config_server_port: Option<u16>,
+    default_port: u16,
+) -> u16 {
+    config_server_port.unwrap_or(default_port)
+}
 
 fn resume_flight_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -661,7 +719,6 @@ pub fn cold_launch_owned_via_gateway(
         }
     }
 }
-
 
 /// Pure: after pack readiness work, promotion may commit only while the pack
 /// lifecycle generation is unchanged. Catches Enable/disable/uninstall that
