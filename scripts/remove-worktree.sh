@@ -401,78 +401,100 @@ if [[ -d "$src_receipts" ]]; then
       exit 1
     fi
 
-    # Physical containment: only harvest regular files under the worktree tree.
-    dest_phys="$(cd "$destination" && pwd -P)"
-    for src in "${ship_sources[@]}"; do
-      [[ -f "$src" && ! -L "$src" ]] || {
-        printf 'ERROR: refusing non-regular ship receipt: %s\n' "$src" >&2
+    # Pin the destination root: enter it once (a held cwd is a kernel handle),
+    # verify the physical path, then stage/link with cwd-relative names so a
+    # later symlink swap of the path cannot redirect staging or publication.
+    source_root_phys="$(cd "$SOURCE_ROOT" && pwd -P)"
+    (
+      cd "$dest_receipts" || {
+        printf 'ERROR: cannot enter ship receipt root: %s\n' "$dest_receipts" >&2
         exit 1
       }
-      src_phys="$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")"
-      case "$src_phys" in
-        "$dest_phys"/*) ;;
-        *)
-          printf 'ERROR: ship receipt escaped target worktree: %s\n' "$src" >&2
+      [[ "$(pwd -P)" == "$source_root_phys/.irin-receipts" ]] || {
+        printf 'ERROR: ship receipt root resolved outside the invoking checkout: %s\n' "$(pwd -P)" >&2
+        exit 1
+      }
+      # Physical containment: only harvest regular files under the worktree tree.
+      wt_phys="$(cd "$destination" && pwd -P)"
+      for src in "${ship_sources[@]}"; do
+        [[ -f "$src" && ! -L "$src" ]] || {
+          printf 'ERROR: refusing non-regular ship receipt: %s\n' "$src" >&2
           exit 1
-          ;;
-      esac
-      base="$(basename "$src")"
-      # Basename must stay ship-*.txt (no path separators / traversal).
-      [[ "$base" == ship-*.txt && "$base" != *'/'* && "$base" != *'\\'* ]] || {
-        printf 'ERROR: unexpected ship receipt name: %s\n' "$base" >&2
-        exit 1
-      }
-      dest="$dest_receipts/$base"
-      # Fast path: existing identical → continue; different/non-file → refuse.
-      if [[ -e "$dest" || -L "$dest" ]]; then
+        }
+        src_phys="$(cd "$(dirname "$src")" && pwd -P)/$(basename "$src")"
+        case "$src_phys" in
+          "$wt_phys"/*) ;;
+          *)
+            printf 'ERROR: ship receipt escaped target worktree: %s\n' "$src" >&2
+            exit 1
+            ;;
+        esac
+        base="$(basename "$src")"
+        # Basename must stay ship-*.txt (no path separators / traversal).
+        [[ "$base" == ship-*.txt && "$base" != *'/'* && "$base" != *'\\'* ]] || {
+          printf 'ERROR: unexpected ship receipt name: %s\n' "$base" >&2
+          exit 1
+        }
+        dest="./$base"
+        shown="$dest_receipts/$base"
+        # Fast path: existing identical → continue; different/non-file → refuse.
+        if [[ -e "$dest" || -L "$dest" ]]; then
+          if [[ -f "$dest" && ! -L "$dest" ]] && cmp -s "$src" "$dest"; then
+            printf 'Ship receipt already present (identical): %s\n' "$shown"
+            continue
+          fi
+          printf 'ERROR: refusing ship receipt overwrite (same name, different content):\n' >&2
+          printf '  worktree: %s\n' "$src" >&2
+          printf '  existing: %s\n' "$shown" >&2
+          printf 'Move or reconcile deliberately; remove will not overwrite or create a second hierarchy.\n' >&2
+          exit 1
+        fi
+        # Exclusive publish: stage in the held dest root, hard-link into place
+        # (fails if dest appears between check and ln), then drop the temp name.
+        stage="$(mktemp "./.ship-harvest.XXXXXX")" || {
+          printf 'ERROR: failed to stage ship receipt: %s\n' "$src" >&2
+          exit 1
+        }
+        if ! cp -a "$src" "$stage"; then
+          rm -f "$stage"
+          printf 'ERROR: failed to harvest ship receipt: %s\n' "$src" >&2
+          exit 1
+        fi
+        # A source swapped to a symlink after its check stages as a symlink;
+        # the staged object must still be a regular file.
+        [[ -f "$stage" && ! -L "$stage" ]] || {
+          rm -f "$stage"
+          printf 'ERROR: staged ship receipt is not a regular file: %s\n' "$src" >&2
+          exit 1
+        }
+        if ! cmp -s "$src" "$stage"; then
+          rm -f "$stage"
+          printf 'ERROR: staged ship receipt bytes mismatch: %s\n' "$src" >&2
+          exit 1
+        fi
+        if ln "$stage" "$dest" 2>/dev/null; then
+          rm -f "$stage"
+          if [[ ! -f "$dest" || -L "$dest" ]] || ! cmp -s "$src" "$dest"; then
+            printf 'ERROR: harvested ship receipt bytes mismatch: %s\n' "$shown" >&2
+            exit 1
+          fi
+          printf 'Harvested ship receipt → %s\n' "$shown"
+          continue
+        fi
+        # Exclusive create failed: dest now exists (or cannot be linked). Accept
+        # only when the existing file is a regular file with identical bytes.
+        rm -f "$stage"
         if [[ -f "$dest" && ! -L "$dest" ]] && cmp -s "$src" "$dest"; then
-          printf 'Ship receipt already present (identical): %s\n' "$dest"
+          printf 'Ship receipt already present (identical): %s\n' "$shown"
           continue
         fi
         printf 'ERROR: refusing ship receipt overwrite (same name, different content):\n' >&2
         printf '  worktree: %s\n' "$src" >&2
-        printf '  existing: %s\n' "$dest" >&2
+        printf '  existing: %s\n' "$shown" >&2
         printf 'Move or reconcile deliberately; remove will not overwrite or create a second hierarchy.\n' >&2
         exit 1
-      fi
-      # Exclusive publish: stage in dest root, hard-link into place (fails if
-      # dest appears between check and ln), then drop the temp name.
-      stage="$(mktemp "${dest_receipts}/.ship-harvest.XXXXXX")" || {
-        printf 'ERROR: failed to stage ship receipt: %s\n' "$src" >&2
-        exit 1
-      }
-      if ! cp -a "$src" "$stage"; then
-        rm -f "$stage"
-        printf 'ERROR: failed to harvest ship receipt: %s\n' "$src" >&2
-        exit 1
-      fi
-      if ! cmp -s "$src" "$stage"; then
-        rm -f "$stage"
-        printf 'ERROR: staged ship receipt bytes mismatch: %s\n' "$src" >&2
-        exit 1
-      fi
-      if ln "$stage" "$dest" 2>/dev/null; then
-        rm -f "$stage"
-        if ! cmp -s "$src" "$dest"; then
-          printf 'ERROR: harvested ship receipt bytes mismatch: %s\n' "$dest" >&2
-          exit 1
-        fi
-        printf 'Harvested ship receipt → %s\n' "$dest"
-        continue
-      fi
-      # Exclusive create failed: dest now exists (or cannot be linked). Accept
-      # only when the existing file is a regular file with identical bytes.
-      rm -f "$stage"
-      if [[ -f "$dest" && ! -L "$dest" ]] && cmp -s "$src" "$dest"; then
-        printf 'Ship receipt already present (identical): %s\n' "$dest"
-        continue
-      fi
-      printf 'ERROR: refusing ship receipt overwrite (same name, different content):\n' >&2
-      printf '  worktree: %s\n' "$src" >&2
-      printf '  existing: %s\n' "$dest" >&2
-      printf 'Move or reconcile deliberately; remove will not overwrite or create a second hierarchy.\n' >&2
-      exit 1
-    done
+      done
+    )
   fi
 fi
 

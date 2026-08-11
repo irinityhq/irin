@@ -19,26 +19,14 @@ SHIP_IDENT="ship-w5-ident-$$.txt"
 SHIP_DIFF="ship-w5-diff-$$.txt"
 SHIP_SYMLINK="ship-w5-symlink-$$.txt"
 CANON_RECEIPTS="$ROOT/.irin-receipts"
-# If a test relocates/replaces the invoking checkout's .irin-receipts, restore it.
-CANON_RECEIPTS_ASIDE=""
+# No test may relocate or replace the real receipt root; symlink cases run
+# from a disposable invoking checkout under $TEST_HOME instead.
 cleanup() {
   if [[ -n "$WT" && -d "$WT" ]]; then
     # Best-effort: force-remove residual worktree registration.
     git -C "$ROOT" worktree remove --force "$WT" 2>/dev/null || true
   fi
   git -C "$ROOT" branch -D "$BRANCH" 2>/dev/null || true
-  # Restore real .irin-receipts if a test replaced it with a symlink/aside.
-  if [[ -n "$CANON_RECEIPTS_ASIDE" ]]; then
-    if [[ -L "$CANON_RECEIPTS" ]]; then
-      rm -f "$CANON_RECEIPTS"
-    elif [[ -e "$CANON_RECEIPTS" && ! -d "$CANON_RECEIPTS" ]]; then
-      rm -f "$CANON_RECEIPTS"
-    fi
-    if [[ ! -e "$CANON_RECEIPTS" && -d "$CANON_RECEIPTS_ASIDE" ]]; then
-      mv "$CANON_RECEIPTS_ASIDE" "$CANON_RECEIPTS"
-    fi
-    CANON_RECEIPTS_ASIDE=""
-  fi
   # Drop only this run's synthetic receipts from the invoking checkout.
   if [[ -d "$CANON_RECEIPTS" && ! -L "$CANON_RECEIPTS" ]]; then
     rm -f "$CANON_RECEIPTS/$SHIP_ABSENT" \
@@ -347,44 +335,38 @@ spill_count="$(
 pass "ship receipt harvest: different-content destination refuses overwrite"
 
 # 4) Symlinked destination .irin-receipts root → refuse (no write-through).
-recreate_wt
-mkdir -p "$WT/.irin-receipts" "$TEST_HOME/receipt-spill"
+# Run from a disposable invoking checkout so the real receipt root is never
+# mutated: concurrent receipts cannot be redirected, and a hard kill strands
+# nothing outside $TEST_HOME.
+INVOKER="$TEST_HOME/symlink-invoker"
+git clone --quiet --local --no-hardlinks -- "$ROOT" "$INVOKER" \
+  || fail "could not create disposable invoking checkout"
+mkdir -p "$TEST_HOME/receipt-spill"
+ln -s "$TEST_HOME/receipt-spill" "$INVOKER/.irin-receipts"
+IWT="$TEST_HOME/symlink-invoker-wt"
+git -C "$INVOKER" worktree add -q -b "test/w5-symlink-$$" "$IWT" \
+  || fail "could not create disposable invoker worktree"
+mkdir -p "$IWT/.irin-receipts"
 printf 'IRIN SHIP RECEIPT\nstatus=PASS\nmarker=symlink-%s-body\n' "$$" \
-  >"$WT/.irin-receipts/$SHIP_SYMLINK"
-[[ -z "$(git -C "$WT" status --porcelain --untracked-files=normal)" ]] \
-  || fail "worktree dirty before symlink-root remove: $(git -C "$WT" status --porcelain)"
-# Relocate real receipt root aside and plant a symlink (restore in cleanup).
-if [[ -L "$CANON_RECEIPTS" ]]; then
-  fail "test precondition: $CANON_RECEIPTS is already a symlink"
-fi
-if [[ -d "$CANON_RECEIPTS" ]]; then
-  CANON_RECEIPTS_ASIDE="$TEST_HOME/canon-receipts-aside"
-  mv "$CANON_RECEIPTS" "$CANON_RECEIPTS_ASIDE"
-elif [[ -e "$CANON_RECEIPTS" ]]; then
-  fail "test precondition: $CANON_RECEIPTS exists and is not a directory"
-fi
-ln -s "$TEST_HOME/receipt-spill" "$CANON_RECEIPTS"
+  >"$IWT/.irin-receipts/$SHIP_SYMLINK"
+[[ -z "$(git -C "$IWT" status --porcelain --untracked-files=normal)" ]] \
+  || fail "invoker worktree dirty before symlink-root remove: $(git -C "$IWT" status --porcelain)"
 set +e
 out="$(
-  IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT" \
-  "$REMOVE" "$WT" 2>&1
+  cd "$INVOKER" \
+    && IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT" \
+      "$REMOVE" "$IWT" 2>&1
 )"
 ec=$?
 set -e
 [[ $ec -eq 1 ]] || fail "symlinked ship receipt root must exit 1 (got $ec): $out"
 [[ "$out" == *"symlink"* || "$out" == *"refus"* ]] \
   || fail "expected symlinked receipt-root refuse message: $out"
-[[ -d "$WT" ]] || fail "worktree must still exist after symlink-root refuse"
+[[ -d "$IWT" ]] || fail "worktree must still exist after symlink-root refuse"
 [[ ! -e "$TEST_HOME/receipt-spill/$SHIP_SYMLINK" ]] \
   || fail "must not write ship receipt through symlinked root"
-[[ -f "$WT/.irin-receipts/$SHIP_SYMLINK" ]] \
+[[ -f "$IWT/.irin-receipts/$SHIP_SYMLINK" ]] \
   || fail "worktree receipt must remain after symlink-root refuse"
-# Restore real root before later cleanup/pass bookkeeping.
-rm -f "$CANON_RECEIPTS"
-if [[ -n "$CANON_RECEIPTS_ASIDE" && -d "$CANON_RECEIPTS_ASIDE" ]]; then
-  mv "$CANON_RECEIPTS_ASIDE" "$CANON_RECEIPTS"
-  CANON_RECEIPTS_ASIDE=""
-fi
 pass "ship receipt harvest: symlinked destination root refuses"
 
 printf '\nAll remove-worktree evidence contracts passed.\n'
