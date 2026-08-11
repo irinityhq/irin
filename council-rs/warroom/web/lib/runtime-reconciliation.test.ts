@@ -429,7 +429,8 @@ describe("production startWarRoomBackendReady — Pack → event → probe → r
     expect(handle.poller().phase()).toBe("connecting");
 
     handle.stop();
-  });});
+  });
+});
 
 describe("production startWarRoomBackendReady — packaged cold-launch ownership", () => {
   beforeEach(() => {
@@ -517,5 +518,57 @@ describe("production startWarRoomBackendReady — packaged cold-launch ownership
     await flushMicrotasks();
     expect(startCouncilServer).toHaveBeenCalledTimes(1);
     handle.stop();
+  });
+
+  it("does not invoke native ownership IPC after stop (Strict Mode unmount)", async () => {
+    let resolveConfig!: (cfg: {
+      apiBase: string;
+      authToken: string;
+      librarianBase: string;
+    }) => void;
+    const configPromise = new Promise<{
+      apiBase: string;
+      authToken: string;
+      librarianBase: string;
+    }>((resolve) => {
+      resolveConfig = resolve;
+    });
+
+    const nativeOwnsCouncilStartup = vi.fn(async () => true);
+    const startCouncilServer = vi.fn(async () => undefined);
+
+    const handle = startWarRoomBackendReady({
+      loadInitialState: async () => false,
+      isTauri: () => true,
+      nativeOwnsCouncilStartup,
+      startCouncilServer,
+      getConfigForStartup: () => configPromise,
+      initRuntimeConfig: () => undefined,
+      pollerOptions: {
+        baseDelayMs: 1,
+        maxDelayMs: 1,
+        connectingBudgetMs: 50,
+        recoveryIntervalMs: 1,
+        now: () => 0,
+        setTimeoutFn: ((cb: () => void) => {
+          void cb;
+          return 1;
+        }) as unknown as typeof setTimeout,
+        clearTimeoutFn: () => undefined,
+      },
+    });
+
+    // Unmount before startup config resolves (Strict Mode double-mount).
+    handle.stop();
+    resolveConfig({
+      apiBase: "http://127.0.0.1:8765",
+      authToken: "tok",
+      librarianBase: "",
+    });
+    await flushMicrotasks();
+    await flushMicrotasks();
+
+    expect(nativeOwnsCouncilStartup).not.toHaveBeenCalled();
+    expect(startCouncilServer).not.toHaveBeenCalled();
   });
 });

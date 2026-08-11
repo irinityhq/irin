@@ -102,6 +102,8 @@ export function startWarRoomBackendReady(
   });
 
   void deps.getConfigForStartup().then((cfg) => {
+    // Strict Mode / unmount may resolve after stop() — do not touch native IPC.
+    if (aborted) return;
     if (!deps.isTauri() || sidecarAutoStarted) return;
     sidecarAutoStarted = true;
 
