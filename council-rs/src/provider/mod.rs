@@ -827,6 +827,20 @@ mod tests {
     }
 
     #[test]
+    fn mock_provider_availability_flips_with_gateway_mode() {
+        let direct: std::collections::HashMap<_, _> =
+            check_providers_with_gateway(false).into_iter().collect();
+        let governed: std::collections::HashMap<_, _> =
+            check_providers_with_gateway(true).into_iter().collect();
+        assert_eq!(direct.get("mock"), Some(&true), "direct mode exposes mock");
+        assert_eq!(
+            governed.get("mock"),
+            Some(&false),
+            "governed mode hides mock"
+        );
+    }
+
+    #[test]
     fn liveness_provider_check_is_env_only_and_retains_documented_slugs() {
         // Must not depend on host CLI install state. `gateway` may be true when
         // the process env already has GW_API_KEY; host-only CLI seats must stay
