@@ -10,6 +10,7 @@ import {
   type OutboxSummary,
   type WorkerProvenance,
 } from "@/lib/governance";
+import { subscribeWarroomConfigChanged } from "@/lib/runtime-config";
 
 export default function OutboxView(
   { initialTenant: _initialTenant }: { initialTenant?: string } = {},
@@ -37,9 +38,13 @@ export default function OutboxView(
 
   useEffect(() => {
     void load();
-    const onConfig = () => void load();
-    window.addEventListener("warroom-config-changed", onConfig);
-    return () => window.removeEventListener("warroom-config-changed", onConfig);
+    // Reload only — backend readiness re-arm is War Room owned.
+    const unsubConfig = subscribeWarroomConfigChanged(() => {
+      void load();
+    });
+    return () => {
+      unsubConfig();
+    };
   }, [load]);
 
   const select = useCallback(async (id: string) => {

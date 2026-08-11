@@ -6,7 +6,6 @@ import { useDeliberation } from "@/hooks/useDeliberation";
 import { api, apiBase } from "@/lib/api";
 import {
   councilPortFromApiBase,
-  configReady,
   initRuntimeConfig,
   loadRuntimeConfig,
 } from "@/lib/runtime-config";
@@ -18,7 +17,8 @@ import {
   startCouncilServer,
   type GatewayPackStatus,
 } from "@/lib/tauri";
-import { createBootHealthPoller } from "@/lib/boot-health-poll";
+import { startWarRoomBackendReady } from "@/lib/warroom-backend-ready";
+import type { BootHealthPollHandle } from "@/lib/boot-health-poll";
 import { gatewayHeaderTruth } from "@/lib/gateway-pack";
 import { notifyDiscoverBackendReady } from "@/lib/use-discover";
 import {
@@ -60,7 +60,6 @@ export default function WarRoom() {
   const [lastSessionId, setLastSessionId] = useState<string | null>(null);
   const [outboxTenant, setOutboxTenant] = useState("system");
   const lastStartRef = useRef<StartPayload | null>(null);
-  const sidecarAutoStartRef = useRef(false);
   const [hasLastStart, setHasLastStart] = useState(false);
   /**
    * Cold-start CONNECTING flag from the readiness-driven boot poller.
@@ -68,9 +67,7 @@ export default function WarRoom() {
    * in flight; false once online or the connecting budget is exhausted.
    */
   const [bootRetryActive, setBootRetryActive] = useState(false);
-  const bootPollerRef = useRef<ReturnType<typeof createBootHealthPoller> | null>(
-    null,
-  );
+  const bootPollerRef = useRef<BootHealthPollHandle | null>(null);
 
   const start = useCallback(
     (p: StartPayload) => {
@@ -167,106 +164,21 @@ export default function WarRoom() {
   }, []);
 
   useEffect(() => {
-    initRuntimeConfig();
-    let aborted = false;
-
-    const poller = createBootHealthPoller({
-      probe: async () => {
-        const ready = await loadInitialState();
-        return ready ? "ready" : "not_ready";
-      },
-      onRetryActiveChange: (active) => {
-        if (!aborted) setBootRetryActive(active);
-      },
-      onPhaseChange: (phase) => {
-        // Own discover recovery off the same readiness transition that clears
-        // the offline header — late Council bind after DISCOVER_RETRY exhausted.
-        if (!aborted && phase === "online") {
-          notifyDiscoverBackendReady();
-        }
-      },
+    // Production backend-readiness effect (poll + native gate + config re-arm).
+    const ready = startWarRoomBackendReady({
+      loadInitialState,
+      isTauri,
+      nativeOwnsCouncilStartup,
+      startCouncilServer,
+      getConfigForStartup: () => loadRuntimeConfig(),
+      initRuntimeConfig,
+      onRetryActiveChange: setBootRetryActive,
+      onDiscoverBackendReady: notifyDiscoverBackendReady,
     });
-    bootPollerRef.current = poller;
-
-    /** Readiness-driven boot poll (replaces fixed 1.5/3/6s one-shots). */
-    const scheduleBootHealthRetries = () => {
-      if (aborted) return;
-      poller.startConnecting();
-    };
-
-    void loadRuntimeConfig();
-    // Browser / fast path: one immediate probe. Packaged Tauri continues via
-    // scheduleBootHealthRetries while native owns Council startup.
-    void loadInitialState().then((ready) => {
-      if (aborted) return;
-      if (ready) {
-        poller.markOnline();
-      }
-    });
-
-    void configReady.then((cfg) => {
-      if (!isTauri() || sidecarAutoStartRef.current) return;
-      sidecarAutoStartRef.current = true;
-
-      // Packaged install: native setup is the sole Council startup owner.
-      // Frontend only polls/retries health — never startCouncilServer (would
-      // force Direct via_gateway=None and race the governed restore).
-      void nativeOwnsCouncilStartup()
-        .then((nativeOwns) => {
-          if (aborted) return;
-          if (nativeOwns) {
-            scheduleBootHealthRetries();
-            return;
-          }
-          void startCouncilServer(
-            councilPortFromApiBase(cfg.apiBase),
-            cfg.authToken,
-            cfg.librarianBase || undefined,
-          )
-            .then(() => {
-              if (!aborted) scheduleBootHealthRetries();
-            })
-            .catch(() => {
-              // Still poll health; source-dev start can fail transiently.
-              if (!aborted) scheduleBootHealthRetries();
-            });
-        })
-        .catch(() => {
-          // Command missing on older shells: keep source-dev start path.
-          if (aborted) return;
-          void startCouncilServer(
-            councilPortFromApiBase(cfg.apiBase),
-            cfg.authToken,
-            cfg.librarianBase || undefined,
-          )
-            .then(() => {
-              if (!aborted) scheduleBootHealthRetries();
-            })
-            .catch(() => {
-              if (!aborted) scheduleBootHealthRetries();
-            });
-        });
-    });
-
-    const onConfig = () => {
-      void loadInitialState().then((ready) => {
-        if (aborted) return;
-        if (ready) {
-          poller.markOnline();
-        } else if (isTauri()) {
-          // Gateway Pack / config may restart Council after spawn returns.
-          // Force re-arm from online so the readiness poll is not a no-op.
-          poller.startConnecting({ force: true });
-        }
-      });
-    };
-    window.addEventListener("warroom-config-changed", onConfig);
-
+    bootPollerRef.current = ready.poller();
     return () => {
-      aborted = true;
-      poller.stop();
+      ready.stop();
       bootPollerRef.current = null;
-      window.removeEventListener("warroom-config-changed", onConfig);
     };
   }, [loadInitialState]);
 

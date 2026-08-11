@@ -85,4 +85,46 @@ describe("createBootHealthPoller restart", () => {
 
     poller.stop();
   });
+
+  it("force while connecting invalidates the in-flight probe (config change)", async () => {
+    const resolvers: Array<(v: "ready" | "not_ready") => void> = [];
+    const probe = vi
+      .fn<Parameters<typeof createBootHealthPoller>[0]["probe"]>()
+      .mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            resolvers.push(resolve);
+          }),
+      );
+
+    const poller = createBootHealthPoller({
+      baseDelayMs: 1,
+      maxDelayMs: 1,
+      connectingBudgetMs: 100,
+      recoveryIntervalMs: 1,
+      now: () => 0,
+      probe,
+      setTimeoutFn: (() => 1) as unknown as typeof setTimeout,
+      clearTimeoutFn: () => undefined,
+    });
+
+    poller.startConnecting();
+    expect(probe).toHaveBeenCalledTimes(1);
+
+    // Config change re-arms while the first probe is still in flight.
+    poller.startConnecting({ force: true });
+    expect(probe).toHaveBeenCalledTimes(2);
+
+    // The superseded probe resolving ready must not mark the app online.
+    resolvers[0]?.("ready");
+    await flushMicrotasks();
+    expect(poller.phase()).toBe("connecting");
+
+    // The fresh-generation probe still governs.
+    resolvers[1]?.("ready");
+    await flushMicrotasks();
+    expect(poller.phase()).toBe("online");
+
+    poller.stop();
+  });
 });

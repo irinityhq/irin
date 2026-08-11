@@ -17,6 +17,7 @@ import {
   openWatchInbox,
   setWatchSentinelsEnabled,
 } from "@/lib/tauri";
+import { subscribeWarroomConfigChanged } from "@/lib/runtime-config";
 import {
   deriveCooldownState,
   fetchWatchSnapshot,
@@ -80,18 +81,18 @@ export default function WatchView(
   useEffect(() => {
     void load();
     void refreshProfileFlag();
-    const onConfig = () => {
+    // Reload only — backend readiness re-arm is War Room owned.
+    const unsubConfig = subscribeWarroomConfigChanged(() => {
       void load();
       void refreshProfileFlag();
-    };
-    window.addEventListener("warroom-config-changed", onConfig);
+    });
     const id = setInterval(() => {
       void load();
       void refreshProfileFlag();
     }, POLL_MS);
     return () => {
       clearInterval(id);
-      window.removeEventListener("warroom-config-changed", onConfig);
+      unsubConfig();
     };
   }, [load, refreshProfileFlag]);
 

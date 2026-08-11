@@ -10,24 +10,9 @@ import {
 } from "./gateway-pack";
 import { gatewayPackAllowsGoverned } from "./tauri";
 
-describe("packaged cold-launch single owner (source contract)", () => {
-  it("WarRoom defers startCouncilServer when native owns startup", () => {
-    const src = readFileSync(
-      path.join(__dirname, "../components/WarRoom.tsx"),
-      "utf8",
-    );
-    expect(src).toContain("nativeOwnsCouncilStartup");
-    expect(src).toContain("scheduleBootHealthRetries");
-    expect(src).toContain("createBootHealthPoller");
-    // Discover recovery is owned by the same online readiness transition.
-    expect(src).toContain("notifyDiscoverBackendReady");
-    // Frontend must check native ownership before starting Council.
-    const ownsIdx = src.indexOf("nativeOwnsCouncilStartup");
-    const startIdx = src.indexOf("startCouncilServer(");
-    expect(ownsIdx).toBeGreaterThan(-1);
-    expect(startIdx).toBeGreaterThan(ownsIdx);
-  });
-});
+// Packaged cold-launch ownership (nativeOwnsCouncilStartup must not call
+// startCouncilServer) and post-Pack config-change re-arm are characterized by
+// startWarRoomBackendReady tests in runtime-reconciliation.test.ts.
 
 function status(
   partial: Partial<GatewayPackStatus> & Pick<GatewayPackStatus, "state">,

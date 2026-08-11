@@ -74,6 +74,36 @@ export type BootHealthPollHandle = {
   isRetryActive: () => boolean;
 };
 
+export type ConfigChangeRearmPolicy = {
+  /**
+   * When a post-config-change readiness probe fails, force-rearm CONNECTING
+   * from online. Tauri desktop does (Council may restart after Pack actions);
+   * hosted browser does not.
+   */
+  forceRearmOnFailure: boolean;
+};
+
+/**
+ * Own the runtime-change re-arm policy for boot health.
+ *
+ * - ready → mark online (clears retry UI)
+ * - not ready + forceRearmOnFailure → startConnecting({ force: true })
+ * - not ready without force → leave poller phase unchanged (hosted path)
+ */
+export function reconcileBootHealthAfterConfigChange(
+  poller: Pick<BootHealthPollHandle, "markOnline" | "startConnecting">,
+  ready: boolean,
+  policy: ConfigChangeRearmPolicy,
+): void {
+  if (ready) {
+    poller.markOnline();
+    return;
+  }
+  if (policy.forceRearmOnFailure) {
+    poller.startConnecting({ force: true });
+  }
+}
+
 /** Delay before connecting-phase attempt `attemptIndex` (0 = first retry). */
 export function bootHealthRetryDelayMs(
   attemptIndex: number,
@@ -219,7 +249,9 @@ export function createBootHealthPoller(
   return {
     startConnecting: (opts?: BootHealthStartConnectingOpts) => {
       if (stopped) return;
-      if (phase === "connecting") return;
+      // Force restarts an in-flight connecting cycle (config changed): the
+      // generation bump below invalidates any stale-config probe in flight.
+      if (phase === "connecting" && !opts?.force) return;
       // Online stays sticky for cold-start races (markOnline then schedule).
       // Post-action reconcile passes force after a failed readiness probe.
       if (phase === "online" && !opts?.force) return;

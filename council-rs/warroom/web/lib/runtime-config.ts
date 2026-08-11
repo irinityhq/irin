@@ -21,6 +21,13 @@ declare global {
 const STORAGE_KEY = "warroom.runtime-config.v1";
 const SESSION_AUTH_KEY = "warroom.runtime-auth.v1";
 
+/**
+ * Single in-app signal that runtime or desktop configuration changed.
+ * Emitters: saveRuntimeConfig, Gateway Pack success path, cross-tab storage.
+ * Subscribers: War Room (backend readiness), WatchView, OutboxView (reload).
+ */
+export const WARROOM_CONFIG_CHANGED_EVENT = "warroom-config-changed";
+
 const DEFAULT_GATEWAY = "http://127.0.0.1:18080";
 
 const BUILD_DEFAULTS: RuntimeConfig = {
@@ -311,6 +318,27 @@ export function councilPortFromApiBase(apiBase: string): number {
   }
 }
 
+/** Emit one config-change signal (browser only). No-op on server. */
+export function emitWarroomConfigChanged(): void {
+  if (!isBrowser()) return;
+  window.dispatchEvent(new CustomEvent(WARROOM_CONFIG_CHANGED_EVENT));
+}
+
+/**
+ * Subscribe to config-change signals. Returns an unsubscribe function.
+ * No-op (empty unsub) when not in a browser.
+ */
+export function subscribeWarroomConfigChanged(handler: () => void): () => void {
+  if (!isBrowser()) return () => {};
+  const listener = () => {
+    handler();
+  };
+  window.addEventListener(WARROOM_CONFIG_CHANGED_EVENT, listener);
+  return () => {
+    window.removeEventListener(WARROOM_CONFIG_CHANGED_EVENT, listener);
+  };
+}
+
 /** Persist non-secret overrides, retain auth for this tab, and refresh cache. */
 export async function saveRuntimeConfig(
   partial: Partial<RuntimeConfig>,
@@ -320,9 +348,7 @@ export async function saveRuntimeConfig(
   cache = mergedRuntimeConfig();
   loadPromise = Promise.resolve(cache);
   markReady(cache);
-  if (isBrowser()) {
-    window.dispatchEvent(new CustomEvent("warroom-config-changed"));
-  }
+  emitWarroomConfigChanged();
   return cache;
 }
 
@@ -330,7 +356,7 @@ function invalidateCacheFromStorage(): void {
   if (!isBrowser()) return;
   cache = mergedRuntimeConfig();
   loadPromise = Promise.resolve(cache);
-  window.dispatchEvent(new CustomEvent("warroom-config-changed"));
+  emitWarroomConfigChanged();
 }
 
 let storageListenerInstalled = false;
