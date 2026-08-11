@@ -210,6 +210,7 @@ snapshot_checkout_control() {
     die "git status failed for packaging/: $status_out"
   fi
   [[ -n "$status_out" ]] && PACKAGING_DIRTY=true
+  return 0
 }
 
 # ---------------------------------------------------------------------------

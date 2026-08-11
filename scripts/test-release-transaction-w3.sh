@@ -463,6 +463,28 @@ grep -q 'reserve_production_cycle' "$TX" \
   || fail "must exclusive-reserve production cycle before external effects"
 grep -q 'snapshot_checkout_control' "$TX" \
   || fail "must snapshot checkout HEAD + scripts/packaging dirtiness"
+# #0114: empty packaging porcelain makes last [[ -n ]] fail; under set -e the
+# function must still return 0 or prepare-production exits silently after preflight.
+python3 - "$TX" <<'PY' || fail "snapshot_checkout_control must end with return 0 (set -e empty status)"
+from pathlib import Path
+import re
+import sys
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+m = re.search(r"^snapshot_checkout_control\(\) \{.*?^\}", text, re.M | re.S)
+if not m:
+    raise SystemExit(1)
+inner = m.group(0)
+inner = inner[inner.find("{") + 1 : inner.rfind("}")]
+lines = [
+    line.strip()
+    for line in inner.splitlines()
+    if line.strip() and not line.strip().startswith("#")
+]
+if not lines or lines[-1] != "return 0":
+    raise SystemExit(1)
+sys.exit(0)
+PY
 grep -q 'checkout_head' "$TX" || fail "attempt receipt must record checkout_head"
 grep -q 'scripts_dirty' "$TX" || fail "attempt receipt must record scripts_dirty"
 grep -q 'packaging_dirty' "$TX" || fail "attempt receipt must record packaging_dirty"
