@@ -1,3 +1,4 @@
+use super::super::status::lifecycle_gen_test_lock;
 use super::*;
 use crate::docker_cli::DESKTOP_COMPOSE_PROJECT;
 use crate::gateway_pack::paths::gateway_data_dir;
@@ -79,6 +80,7 @@ fn stop_without_installed_pack_emits_ordered_lifecycle_contract() {
     std::env::set_var("HOME", &tmp);
     std::env::remove_var("IRIN_APP_SUPPORT_ROOT");
 
+    let _g = lifecycle_gen_test_lock();
     let store = MemorySecretStore::default();
     stop_gateway_pack(&store).unwrap();
 
@@ -168,6 +170,7 @@ fn enable_refuses_foreign_port_before_any_keychain_read() {
         inner: MemorySecretStore::default(),
         gets: Mutex::new(Vec::new()),
     };
+    let _g = lifecycle_gen_test_lock();
     let result = enable_gateway_pack_with_probes(
         &store,
         || Ok(true),

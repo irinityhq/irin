@@ -212,6 +212,90 @@ pub fn promote_held_secrets_still_valid(lifecycle_at_capture: u64) -> bool {
     super::status::pack_lifecycle_generation() == lifecycle_at_capture
 }
 
+
+/// Decision for one promote-flight attempt. Tauri shell (`lib.rs`) only sleeps,
+/// emits logs, and performs Council restart — pack readiness + lifecycle fence
+/// live here so concurrent adapter preflight cannot commit past a generation bump.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PromoteFlightDecision {
+    /// Pack lifecycle generation advanced; abort the whole flight.
+    AbortLifecycleChanged,
+    /// Operator disabled, already governed, or no Direct-owned child.
+    StopNotEligible,
+    /// Pack not ready yet; wait and retry.
+    WaitNotReady { reason: Option<String> },
+    /// Pack ready and lifecycle still matches — shell may restart Council governed.
+    ReadyToPromote,
+}
+
+/// One promote-flight attempt: lifecycle fence → pack step → lifecycle recheck
+/// before any promotion commit is allowed.
+pub fn evaluate_promote_flight_attempt(
+    store: &dyn SecretStore,
+    lifecycle_at_schedule: u64,
+    held_gw_key: Option<&str>,
+    launch_secrets: Option<&LaunchSecrets>,
+    attempt: u32,
+    max_early_resume_attempts: u32,
+    persisted_via_gateway: bool,
+    owned_route: Option<bool>,
+) -> PromoteFlightDecision {
+    if !promote_held_secrets_still_valid(lifecycle_at_schedule) {
+        return PromoteFlightDecision::AbortLifecycleChanged;
+    }
+    if !persisted_via_gateway || owned_route == Some(true) || owned_route != Some(false) {
+        return PromoteFlightDecision::StopNotEligible;
+    }
+    let pack_step = promote_pack_ready_for_attempt(
+        store,
+        held_gw_key,
+        launch_secrets,
+        attempt,
+        max_early_resume_attempts,
+    );
+    // Fence again after adapter/resume work — generation can advance mid-step.
+    if !promote_held_secrets_still_valid(lifecycle_at_schedule) {
+        return PromoteFlightDecision::AbortLifecycleChanged;
+    }
+    let pack_ok = pack_step.is_ready();
+    let reason = match &pack_step {
+        PromotePackAttempt::Failed { reason } => Some(reason.clone()),
+        _ => None,
+    };
+    classify_post_pack_promote_decision(
+        lifecycle_at_schedule,
+        super::status::pack_lifecycle_generation(),
+        pack_ok,
+        may_promote_to_governed(persisted_via_gateway, owned_route, pack_ok),
+        reason,
+    )
+}
+
+/// Post-pack promote classification. Lifecycle generation mismatch is always
+/// [`PromoteFlightDecision::AbortLifecycleChanged`] (not transient WaitNotReady).
+pub fn classify_post_pack_promote_decision(
+    lifecycle_at_schedule: u64,
+    lifecycle_now: u64,
+    pack_ok: bool,
+    may_promote: bool,
+    reason: Option<String>,
+) -> PromoteFlightDecision {
+    // A bump after the pack step must Abort — held secrets may have rotated.
+    if lifecycle_at_schedule != lifecycle_now {
+        return PromoteFlightDecision::AbortLifecycleChanged;
+    }
+    if !promote_may_commit_after_pack_ready(
+        lifecycle_at_schedule,
+        lifecycle_now,
+        pack_ok,
+        may_promote,
+    ) {
+        return PromoteFlightDecision::WaitNotReady { reason };
+    }
+    PromoteFlightDecision::ReadyToPromote
+}
+
+
 fn resume_flight_lock() -> &'static Mutex<()> {
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))
@@ -576,6 +660,19 @@ pub fn cold_launch_owned_via_gateway(
             }
         }
     }
+}
+
+
+/// Pure: after pack readiness work, promotion may commit only while the pack
+/// lifecycle generation is unchanged. Catches Enable/disable/uninstall that
+/// races between pack-ready proof and Council restart (PR #76 residual class).
+pub fn promote_may_commit_after_pack_ready(
+    lifecycle_at_schedule: u64,
+    lifecycle_now: u64,
+    pack_ready: bool,
+    may_promote: bool,
+) -> bool {
+    pack_ready && may_promote && lifecycle_at_schedule == lifecycle_now
 }
 
 /// Pure: after a fail-closed Direct spawn with pack still enabled, a later

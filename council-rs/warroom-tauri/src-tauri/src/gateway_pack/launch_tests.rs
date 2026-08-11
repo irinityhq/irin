@@ -1,7 +1,7 @@
 use super::super::cli_adapters::{
     ensure_cli_adapters, ensure_cli_adapters_with_tokens, ensure_proxy_tokens,
 };
-use super::super::status::{bump_pack_lifecycle_generation, pack_lifecycle_generation};
+use super::super::status::{bump_pack_lifecycle_generation, lifecycle_gen_test_lock, pack_lifecycle_generation};
 use super::*;
 use crate::keychain::{
     load_gw_api_key, migrate_legacy_secrets_with_values, store_arm_principal_token,
@@ -12,6 +12,7 @@ use crate::keychain::{
 };
 use std::collections::HashMap;
 use std::sync::Mutex;
+
 
 /// Records Keychain get order without logging secret values.
 struct CountingSecretStore {
@@ -481,4 +482,121 @@ fn promote_early_window_bounds_resume_calls() {
     assert!(!promote_may_call_resume(11, 4, false));
     // Ready pack never re-enters resume.
     assert!(!promote_may_call_resume(0, 4, true));
+}
+
+
+// --- PR4 characterization: launch outcomes (secret snapshot, lifecycle fence, Direct) ---
+
+/// One LaunchSecrets snapshot per flight is reused for adapters + compose secret
+/// env without re-entering Keychain for proxy/watch/pepper accounts.
+#[test]
+fn one_secret_snapshot_per_flight_reused_for_adapters_and_compose() {
+    let store = CountingSecretStore::with_seeded_pack_secrets();
+    full_start_resume_keychain_sequence(&store).expect("flight");
+    // GW once (via migration), each other pack secret at most once.
+    assert_eq!(store.get_count_for(GW_API_KEY_ACCOUNT), 1);
+    assert_eq!(store.get_count_for(AUTH_PEPPER_ACCOUNT), 1);
+    assert_eq!(store.get_count_for(CLAUDE_PROXY_TOKEN_ACCOUNT), 1);
+    assert_eq!(store.get_count_for(CODEX_PROXY_TOKEN_ACCOUNT), 1);
+    assert_eq!(store.get_count_for(WATCH_ADMIN_TOKEN_ACCOUNT), 1);
+    assert_eq!(store.get_count_for(ARM_PRINCIPAL_TOKEN_ACCOUNT), 1);
+}
+
+/// Lifecycle generation change after pack-ready proof must refuse promote commit.
+#[test]
+fn lifecycle_generation_change_aborts_before_promote_commit() {
+    let at = pack_lifecycle_generation();
+    assert!(promote_may_commit_after_pack_ready(
+        at, at, true, true
+    ));
+    // Simulate Enable/disable advancing generation after adapters finished.
+    assert!(!promote_may_commit_after_pack_ready(
+        at,
+        at.wrapping_add(1),
+        true,
+        true
+    ));
+    // Pack not ready never commits even if generation matches.
+    assert!(!promote_may_commit_after_pack_ready(at, at, false, true));
+    // may_promote false never commits.
+    assert!(!promote_may_commit_after_pack_ready(at, at, true, false));
+}
+
+/// Failed authenticated readiness (pack auth false) leaves launch Direct.
+#[test]
+fn failed_authenticated_readiness_leaves_council_direct() {
+    assert_eq!(
+        decide_launch_resume_outcome(true, false, false, false),
+        LaunchResumeOutcome::DirectFailClosed
+    );
+    // Governed spawn only when pack ready.
+    assert_eq!(
+        decide_launch_via_gateway(true, false),
+        false,
+        "no pack auth → not governed"
+    );
+    assert_eq!(
+        decide_launch_via_gateway(true, true),
+        true,
+        "pack auth + persisted → governed allowed"
+    );
+    // Pure promote eligibility: Direct-owned child + pack ok required.
+    assert!(!may_promote_to_governed(true, Some(false), false));
+    assert!(may_promote_to_governed(true, Some(false), true));
+}
+
+/// evaluate_promote_flight_attempt aborts when lifecycle advances mid-flight.
+#[test]
+fn evaluate_promote_flight_aborts_on_lifecycle_bump() {
+    let store = CountingSecretStore::with_seeded_pack_secrets();
+    let at = pack_lifecycle_generation();
+    // Force generation change so entry fence aborts without resume work.
+    bump_pack_lifecycle_generation();
+    let decision = evaluate_promote_flight_attempt(
+        &store,
+        at,
+        None,
+        None,
+        0,
+        4,
+        true,
+        Some(false),
+    );
+    assert_eq!(decision, PromoteFlightDecision::AbortLifecycleChanged);
+    // No Keychain work after abort.
+    assert!(
+        store.get_accounts().is_empty(),
+        "abort before pack step must not touch Keychain, got {:?}",
+        store.get_accounts()
+    );
+}
+
+
+/// Post-pack generation mismatch is AbortLifecycleChanged, never WaitNotReady
+/// (Copilot: treat lifecycle bump as hard abort, not transient readiness).
+#[test]
+fn post_pack_gen_mismatch_classifies_as_abort_not_wait() {
+    let decision = classify_post_pack_promote_decision(
+        1,
+        2, // generation advanced after pack step
+        true,
+        true,
+        Some("would look like pack not ready".into()),
+    );
+    assert_eq!(decision, PromoteFlightDecision::AbortLifecycleChanged);
+
+    // Same gen, pack not ready → WaitNotReady (transient).
+    let wait = classify_post_pack_promote_decision(5, 5, false, true, Some("pack cold".into()));
+    assert_eq!(
+        wait,
+        PromoteFlightDecision::WaitNotReady {
+            reason: Some("pack cold".into())
+        }
+    );
+
+    // Same gen, ready → ReadyToPromote.
+    assert_eq!(
+        classify_post_pack_promote_decision(5, 5, true, true, None),
+        PromoteFlightDecision::ReadyToPromote
+    );
 }
