@@ -92,6 +92,17 @@ pass "static guards (pre-run; no Apple/prepare/clobber in driver+children)"
 run "W1 candidate-store contracts" \
   bash packaging/test-candidate-store.sh
 
+# T4 orphan packaging self-tests (named runner; was zero-callers under packaging/).
+run "T4 packaging provider-env filter" \
+  bash packaging/test-provider-env-filter.sh
+
+if [[ "$(uname -s)" == "Darwin" ]]; then
+  run "T4 packaging webview-evidence selftest" \
+    bash packaging/test-webview-evidence.sh
+else
+  printf 'SKIP: T4 webview-evidence (Darwin only)\n'
+fi
+
 run "W2 candidate-status contracts" \
   bash scripts/test-candidate-status.sh
 
