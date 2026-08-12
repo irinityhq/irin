@@ -187,10 +187,14 @@ async fn run_stream_phases(ready: StreamRunReady, interventions: &mut Interventi
         if ready.cancel.is_cancelled() {
             return;
         }
-        if ready
-            .stream_config
-            .budget_max_usd
-            .is_some_and(|max| accum.cumulative_spend >= max)
+        // Later phases only: phase 0 must match engine run_with_cancel
+        // (run round 1, then should_pause_for_budget). A zero starting
+        // spend would otherwise skip every round and emit bare `done`.
+        if phase_idx > 0
+            && ready
+                .stream_config
+                .budget_max_usd
+                .is_some_and(|max| accum.cumulative_spend >= max)
         {
             break 'phases;
         }
