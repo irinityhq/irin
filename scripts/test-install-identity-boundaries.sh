@@ -100,7 +100,11 @@ fi
 
 # Symlink override + poisoned TMPDIR must not accept physical /Applications
 # (Copilot #87: IRIN_DMG_TMPDIR/TMPDIR=/Applications reclassifies via temp arm).
-apps_link="$(mktemp -u /tmp/irin-id-appslink.XXXXXX)"
+# Use a unique link path (not mktemp -d) and remove any leftover from a prior
+# aborted run; resolve must refuse on phys path without requiring /Applications
+# to exist (Linux CI).
+apps_link="/tmp/irin-id-appslink.$$.$RANDOM"
+rm -f "$apps_link"
 ln -s /Applications "$apps_link"
 CLEANUP_DIRS+=("$apps_link")
 export IRIN_LIVE_APPLICATIONS_ROOT="$apps_link"
@@ -111,7 +115,7 @@ out="$(resolve_live_applications_root 2>&1)"
 ec=$?
 set -e
 if [[ -n "$_saved_tmpdir" ]]; then export TMPDIR="$_saved_tmpdir"; else unset TMPDIR; fi
-if [[ $ec -ne 0 ]] && [[ "$out" == *"/Applications"* || "$out" == *"physical"* || "$out" == *"temp root"* ]]; then
+if [[ $ec -ne 0 ]] && [[ "$out" == *"/Applications"* ]]; then
   pass "hermetic refuses symlink override into /Applications even with TMPDIR=/Applications"
 else
   fail "hermetic must refuse phys /Applications via symlink+poisoned TMPDIR (ec=$ec out=$out)"

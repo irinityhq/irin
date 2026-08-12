@@ -116,11 +116,23 @@ resolve_live_applications_root() {
         die "hermetic --live refuses IRIN_LIVE_APPLICATIONS_ROOT under real /Applications: $override"
         ;;
     esac
-    mkdir -p "$override" || die "could not create hermetic Applications root: $override"
-    phys="$(cd "$override" && pwd -P)" \
-      || die "could not resolve hermetic Applications root: $override"
-    # Re-check after pwd -P: a raw path like /tmp/apps-link can resolve into
-    # real /Applications while still matching a poisoned TMPDIR temp-root arm.
+    # Resolve existing paths (including symlinks) before mkdir: on Linux a
+    # symlink to missing /Applications makes mkdir -p fail with "File exists"
+    # and would hide the physical Applications refuse. Also blocks the
+    # /tmp/apps-link → /Applications attack before any create.
+    if [[ -e "$override" || -L "$override" ]]; then
+      if [[ -d "$override" ]]; then
+        phys="$(cd "$override" && pwd -P)" \
+          || die "could not resolve hermetic Applications root: $override"
+      else
+        phys="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$override" 2>/dev/null)" \
+          || die "could not resolve hermetic Applications root: $override"
+      fi
+    else
+      mkdir -p "$override" || die "could not create hermetic Applications root: $override"
+      phys="$(cd "$override" && pwd -P)" \
+        || die "could not resolve hermetic Applications root: $override"
+    fi
     if is_real_applications_path "$phys"; then
       die "hermetic --live refuses physical Applications root under real /Applications: $phys"
     fi
