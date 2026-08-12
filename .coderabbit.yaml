@@ -21,7 +21,7 @@ reviews:
   suggested_labels: false
   suggested_reviewers: false
   in_progress_fortune: false
-  enable_prompt_for_ai_agents: false
+  enable_prompt_for_ai_agents: true
   slop_detection:
     enabled: false
 
