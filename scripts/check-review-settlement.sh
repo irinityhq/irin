@@ -2,8 +2,15 @@
 # Fail-closed pre-queue review settlement evaluator for IRIN.
 #
 # Settlement (this check) means: no pending review requests, every
-# non-dismissed latest review is bound to the current headRefOid (a new commit
-# invalidates prior settlement), and no CHANGES_REQUESTED on head.
+# non-dismissed opinionated review (APPROVED / CHANGES_REQUESTED) is bound to
+# the current headRefOid (a new commit invalidates prior settlement), and no
+# CHANGES_REQUESTED is active.
+#
+# COMMENTED reviews are advisory and never gate. Bots (Copilot, Cursor) do not
+# re-review every push, so head-binding COMMENTED deadlocks: a stale COMMENTED
+# review with no pending re-request holds the check red until an artificial
+# nudge commit (PR #73–#87 batch incident). The pending-request gate still
+# blocks whenever a re-review is actually in flight.
 #
 # Both latestReviews AND latestOpinionatedReviews are evaluated.
 # latestReviews keeps only each user's most recent review of ANY state, so a
@@ -132,6 +139,13 @@ def evaluate_reviews(name, reviews):
             continue
         if state == "PENDING":
             add_reason(f"pending_review:{author}")
+            continue
+        if state == "COMMENTED":
+            # COMMENTED is advisory and never gates: bots do not re-review
+            # every push, so a stale COMMENTED review with no pending
+            # re-request would hold the check red forever (#73–#87 batch).
+            # An active CHANGES_REQUESTED by the same author still blocks
+            # via latestOpinionatedReviews.
             continue
         if not commit:
             add_reason(f"review_missing_commit:{author}:{state or 'UNKNOWN'}")
@@ -436,12 +450,22 @@ EOF
 )"
   expect threads_ignored_settle settled
 
-  # New commit invalidates prior review (not on headRefOid).
-  write_case stale_review_after_push "$(cat <<EOF
+  # A stale COMMENTED review with no pending re-request must settle: bots do
+  # not re-review every push, so head-binding COMMENTED deadlocks the check
+  # (PR #73–#87 batch incident). Opinionated staleness still blocks below.
+  write_case stale_commented_after_push "$(cat <<EOF
 {"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"copilot-pull-request-reviewer","state":"COMMENTED","commitOid":"$old"}],"latestOpinionatedReviews":[],"truncatedConnections":[]}
 EOF
 )"
-  expect stale_review_after_push unsettled
+  expect stale_commented_after_push settled
+
+  # A later stale COMMENTED must not mask the same reviewer's still-active
+  # CHANGES_REQUESTED carried by latestOpinionatedReviews.
+  write_case stale_commented_masks_changes_requested "$(cat <<EOF
+{"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"reviewer","state":"COMMENTED","commitOid":"$old"}],"latestOpinionatedReviews":[{"author":"reviewer","state":"CHANGES_REQUESTED","commitOid":"$old"}],"truncatedConnections":[]}
+EOF
+)"
+  expect stale_commented_masks_changes_requested unsettled
 
   write_case stale_approval "$(cat <<EOF
 {"headRefOid":"$head","isDraft":false,"reviewRequests":[],"latestReviews":[{"author":"reviewer","state":"APPROVED","commitOid":"$old"}],"latestOpinionatedReviews":[{"author":"reviewer","state":"APPROVED","commitOid":"$old"}],"truncatedConnections":[]}
