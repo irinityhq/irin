@@ -99,7 +99,7 @@ else
 fi
 
 # Symlink override + poisoned TMPDIR must not accept physical /Applications
-# (Copilot #87: IRIN_DMG_TMPDIR/TMPDIR=/Applications reclassifies via temp arm).
+# (Copilot #87: IRIN_DMG_TMPDIR/TMPDIR=/Applications reclassifies via temp arm; phys refuse after pwd -P).
 # Use a unique link path (not mktemp -d) and remove any leftover from a prior
 # aborted run; resolve must refuse on phys path without requiring /Applications
 # to exist (Linux CI).
