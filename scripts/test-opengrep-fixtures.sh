@@ -88,17 +88,23 @@ else
   fail "lua string-only raw_key false-green: expected missing-field finding"
 fi
 
-# Param-only / drop / literal / mixed reinject must fire; both $C-derived must not.
+# Param-only / drop / literal / mixed / derived-then-literal must fire;
+# both $C-derived (no later overwrite) must not.
 param_only="$FIX/rust-spawn-param-only.rs"
 param_used="$FIX/rust-spawn-param-used.rs"
 drop_only="$FIX/rust-spawn-drop-creds.rs"
 literal_key="$FIX/rust-spawn-literal-key.rs"
 mixed_key="$FIX/rust-spawn-mixed-literal-key.rs"
+overwrite="$FIX/rust-spawn-derived-then-literal-overwrite.rs"
 n_only="$(count_rule "$param_only" "irin.rust.tauri-governed-requires-creds-param")"
 n_used="$(count_rule "$param_used" "irin.rust.tauri-governed-requires-creds-param")"
 n_drop="$(count_rule "$drop_only" "irin.rust.tauri-governed-requires-creds-param")"
 n_lit="$(count_rule "$literal_key" "irin.rust.tauri-governed-requires-creds-param")"
 n_mix="$(count_rule "$mixed_key" "irin.rust.tauri-governed-requires-creds-param")"
+# Overwrite is a false green for requires-creds alone; the literal-final-write
+# companion must fire (count either rule id containing rejects-literal).
+n_over="$(count_rule "$overwrite" "irin.rust.tauri-governed-rejects-literal-gateway-env")"
+n_used_lit="$(count_rule "$param_used" "irin.rust.tauri-governed-rejects-literal-gateway-env")"
 if [[ "$n_only" -ge 1 ]]; then
   pass "rust spawn param-only fires creds-use rule (count=$n_only)"
 else
@@ -119,10 +125,20 @@ if [[ "$n_mix" -ge 1 ]]; then
 else
   fail "rust spawn mixed literal-key/derived-URL false-green: expected reinject finding"
 fi
-if [[ "$n_used" == "0" ]]; then
-  pass "rust spawn param-used is clean"
+if [[ "$n_over" -ge 1 ]]; then
+  pass "rust spawn derived-then-literal overwrite fires literal rule (count=$n_over)"
 else
-  fail "rust spawn param-used unexpected findings count=$n_used"
+  fail "rust spawn derived-then-literal overwrite false-green: expected literal-final-write finding"
+fi
+if [[ "$n_used" == "0" ]]; then
+  pass "rust spawn param-used is clean under requires-creds"
+else
+  fail "rust spawn param-used unexpected requires-creds findings count=$n_used"
+fi
+if [[ "$n_used_lit" == "0" ]]; then
+  pass "rust spawn param-used is clean under rejects-literal"
+else
+  fail "rust spawn param-used unexpected rejects-literal findings count=$n_used_lit"
 fi
 
 # Production surfaces must stay clean under the strengthened rules.
