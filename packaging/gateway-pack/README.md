@@ -136,7 +136,9 @@ changes.
 - The app's Docker config is a managed minimal file (plugin hints only,
   0600). No operator registry credentials are read or copied.
 - The Claude/Codex CLI adapters bind `0.0.0.0` so the pack container can reach
-  them through `host.docker.internal`. Every request requires the adapter's
+  them through `host.docker.internal`. Keep ports 9090 and 9091 on a trusted
+  private host. Do not forward them. The request token does not make a
+  host-wide listener local. Every request requires the adapter's
   Keychain-held token, and an adapter refuses to listen without one.
 - The Watch producer, the dispatcher, and the Council-spend token are
   force-disarmed on every spawn, applied last so no earlier layer can re-arm
