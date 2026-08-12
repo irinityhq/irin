@@ -1,9 +1,71 @@
-# CodeRabbit configuration — automatic baseline reviewer.
-# Reviews on open/ready only; no per-push re-review. Request a final-tip
-# re-review with `@coderabbitai review`. Advisory (COMMENTED-only).
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+# Automatic, advisory review only. CodeRabbit does not own merge or mutation.
+tone_instructions: >
+  Be terse and defect-focused. Prioritize correctness, security, contract
+  preservation, production-path behavior, and honest proof boundaries. Skip
+  praise and style-only comments. Never request credentials or machine-local
+  configuration.
+
 reviews:
+  profile: chill
   request_changes_workflow: false
+  fail_commit_status: false
+  high_level_summary_in_walkthrough: true
+  high_level_summary_instructions: >
+    Summarize changed product behavior only. Mention verification only when the
+    PR provides evidence. Never infer package, install, acceptance, publication,
+    or deployment success from source review or tests.
+  review_details: true
+  sequence_diagrams: false
+  estimate_code_review_effort: false
+  suggested_labels: false
+  suggested_reviewers: false
+  in_progress_fortune: false
+  enable_prompt_for_ai_agents: true
+  slop_detection:
+    enabled: false
+
   auto_review:
     enabled: true
     drafts: false
     auto_incremental_review: false
+
+  finishing_touches:
+    docstrings:
+      enabled: false
+    unit_tests:
+      enabled: false
+    simplify:
+      enabled: false
+    autofix:
+      enabled: false
+    fix_ci:
+      enabled: false
+    resolve_merge_conflict:
+      enabled: false
+
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
+    title:
+      mode: "off"
+    description:
+      mode: "off"
+    issue_assessment:
+      mode: "off"
+
+chat:
+  art: false
+  allow_non_org_members: false
+  auto_reply: false
+
+knowledge_base:
+  learnings:
+    scope: local
+    approval_delay: 7
+  mcp:
+    usage: disabled
+
+issue_enrichment:
+  planning:
+    enabled: false
