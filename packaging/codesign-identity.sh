@@ -11,12 +11,38 @@ if ! declare -F log >/dev/null 2>&1; then
 fi
 
 irin_macho_inventory() {
-  local app="$1" candidate
+  local app="$1" candidate list_file file_out
+  [[ -d "$app/Contents" ]] || die "app Contents missing for Mach-O inventory: $app"
+  # Materialize find output so its exit status is not lost to process
+  # substitution, and never suppress traversal errors: an unreadable subtree
+  # that hid an extra Mach-O would otherwise let the expected-inventory
+  # assertion pass fail-open.
+  list_file="$(mktemp "${TMPDIR:-/tmp}/irin-macho-inv.XXXXXX")" \
+    || die "could not create temp for Mach-O inventory"
+  if ! find "$app/Contents" -type f -print0 >"$list_file"; then
+    rm -f "$list_file"
+    die "could not traverse app Contents for Mach-O inventory: $app"
+  fi
   while IFS= read -r -d '' candidate; do
-    if file -b "$candidate" 2>/dev/null | grep -q '^Mach-O'; then
+    # macOS file(1) often exits 0 with "cannot open" on unreadable paths;
+    # require readability and a successful classification before skipping.
+    if [[ ! -r "$candidate" ]]; then
+      rm -f "$list_file"
+      die "unreadable file in app Contents for Mach-O inventory: $candidate"
+    fi
+    if ! file_out="$(file -b "$candidate" 2>&1)"; then
+      rm -f "$list_file"
+      die "could not classify file for Mach-O inventory: $candidate"
+    fi
+    if [[ "$file_out" == *"cannot open"* ]]; then
+      rm -f "$list_file"
+      die "could not classify file for Mach-O inventory: $candidate ($file_out)"
+    fi
+    if grep -q '^Mach-O' <<<"$file_out"; then
       printf '%s\n' "${candidate#"$app"/}"
     fi
-  done < <(find "$app/Contents" -type f -print0 2>/dev/null)
+  done <"$list_file"
+  rm -f "$list_file"
 }
 
 irin_assert_expected_macho_inventory() {

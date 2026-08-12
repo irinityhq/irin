@@ -98,6 +98,36 @@ else
   fail "hermetic temp fixture dest failed (ec=$ec apps=$apps)"
 fi
 
+# Symlink override + poisoned TMPDIR must not accept physical /Applications
+# (Copilot #87: IRIN_DMG_TMPDIR/TMPDIR=/Applications reclassifies via temp arm).
+apps_link="$(mktemp -u /tmp/irin-id-appslink.XXXXXX)"
+ln -s /Applications "$apps_link"
+CLEANUP_DIRS+=("$apps_link")
+export IRIN_LIVE_APPLICATIONS_ROOT="$apps_link"
+_saved_tmpdir="${TMPDIR:-}"
+export TMPDIR=/Applications
+set +e
+out="$(resolve_live_applications_root 2>&1)"
+ec=$?
+set -e
+if [[ -n "$_saved_tmpdir" ]]; then export TMPDIR="$_saved_tmpdir"; else unset TMPDIR; fi
+if [[ $ec -ne 0 ]] && [[ "$out" == *"/Applications"* || "$out" == *"physical"* || "$out" == *"temp root"* ]]; then
+  pass "hermetic refuses symlink override into /Applications even with TMPDIR=/Applications"
+else
+  fail "hermetic must refuse phys /Applications via symlink+poisoned TMPDIR (ec=$ec out=$out)"
+fi
+# path_under_temp_root must also refuse Applications phys under poisoned TMPDIR
+export TMPDIR=/Applications
+if path_under_temp_root /Applications || path_under_temp_root /Applications/Utilities; then
+  fail "path_under_temp_root must refuse real /Applications when TMPDIR=/Applications"
+else
+  pass "path_under_temp_root refuses real /Applications under poisoned TMPDIR"
+fi
+if [[ -n "$_saved_tmpdir" ]]; then export TMPDIR="$_saved_tmpdir"; else unset TMPDIR; fi
+export IRIN_LIVE_APPLICATIONS_ROOT
+tmpdir /tmp/irin-id-apps2.XXXXXX
+IRIN_LIVE_APPLICATIONS_ROOT="$TMPDIR_LAST"
+
 # Invalid hermetic config must refuse, never fall through to /Applications:
 # flag set with a NON-temp candidate root...
 export IRIN_CANDIDATE_ROOT="$ROOT"
@@ -161,6 +191,41 @@ if [[ $inv_ec -ne 0 ]]; then
   pass "incomplete Mach-O inventory refuses (shared helper)"
 else
   fail "incomplete Mach-O inventory must refuse: $inv_out"
+fi
+
+# Unreadable subtree must fail closed (not omit paths and accept inventory).
+tmpdir /tmp/irin-id-find.XXXXXX
+find_app="$TMPDIR_LAST/IRIN.app"
+mkdir -p "$find_app/Contents/MacOS" "$find_app/Contents/secret"
+printf 'x' >"$find_app/Contents/MacOS/host"
+printf 'hidden' >"$find_app/Contents/secret/extra"
+chmod 000 "$find_app/Contents/secret"
+set +e
+find_out="$(irin_macho_inventory "$find_app" 2>&1)"
+find_ec=$?
+set -e
+chmod -R u+rwx "$find_app" 2>/dev/null || true
+if [[ $find_ec -ne 0 ]] && [[ "$find_out" == *"traverse"* || "$find_out" == *"inventory"* ]]; then
+  pass "unreadable Contents subtree fails closed in Mach-O inventory"
+else
+  fail "unreadable subtree must refuse inventory (ec=$find_ec out=$find_out)"
+fi
+
+# Unreadable file must fail closed (macOS file(1) often exits 0 with cannot open).
+tmpdir /tmp/irin-id-file.XXXXXX
+file_app="$TMPDIR_LAST/IRIN.app"
+mkdir -p "$file_app/Contents/MacOS"
+printf 'x' >"$file_app/Contents/MacOS/host"
+chmod 000 "$file_app/Contents/MacOS/host"
+set +e
+file_out="$(irin_macho_inventory "$file_app" 2>&1)"
+file_ec=$?
+set -e
+chmod -R u+rwx "$file_app" 2>/dev/null || true
+if [[ $file_ec -ne 0 ]] && [[ "$file_out" == *"unreadable"* || "$file_out" == *"classify"* || "$file_out" == *"inventory"* ]]; then
+  pass "unreadable Contents file fails closed in Mach-O inventory"
+else
+  fail "unreadable file must refuse inventory (ec=$file_ec out=$file_out)"
 fi
 
 # Library mode is sourced-only: direct execution must refuse, not exit 0.

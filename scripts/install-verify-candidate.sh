@@ -39,6 +39,17 @@ note() { printf '=== %s ===\n' "$*"; }
 # shellcheck source=/dev/null
 source "$ROOT/packaging/codesign-identity.sh"
 
+# True when phys path is under real /Applications (including firmlink target).
+is_real_applications_path() {
+  case "$1" in
+    /Applications|/Applications/*|\
+    /System/Volumes/Data/Applications|/System/Volumes/Data/Applications/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
 # True when path is under an allowed hermetic/temp root (not real /Applications).
 path_under_temp_root() {
   local path="$1" tmp_base phys
@@ -51,6 +62,21 @@ path_under_temp_root() {
   else
     phys="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path" 2>/dev/null)" \
       || phys="$path"
+  fi
+  # Never treat real Applications as temp, even if TMPDIR/IRIN_DMG_TMPDIR is
+  # poisoned to /Applications (env.sh maps IRIN_DMG_TMPDIR → TMPDIR).
+  if is_real_applications_path "$phys"; then
+    return 1
+  fi
+  # A poisoned TMPDIR under Applications must not reclassify arbitrary paths
+  # via the "$tmp_base"/* arm — only the fixed temp roots remain acceptable.
+  if is_real_applications_path "$tmp_base"; then
+    case "$phys" in
+      /tmp/*|/private/tmp/*|/var/folders/*)
+        return 0
+        ;;
+    esac
+    return 1
   fi
   case "$phys" in
     /tmp/*|/private/tmp/*|"$tmp_base"/*|/var/folders/*)
@@ -93,6 +119,11 @@ resolve_live_applications_root() {
     mkdir -p "$override" || die "could not create hermetic Applications root: $override"
     phys="$(cd "$override" && pwd -P)" \
       || die "could not resolve hermetic Applications root: $override"
+    # Re-check after pwd -P: a raw path like /tmp/apps-link can resolve into
+    # real /Applications while still matching a poisoned TMPDIR temp-root arm.
+    if is_real_applications_path "$phys"; then
+      die "hermetic --live refuses physical Applications root under real /Applications: $phys"
+    fi
     path_under_temp_root "$phys" \
       || die "hermetic IRIN_LIVE_APPLICATIONS_ROOT must resolve under a temp root (got $phys)"
     printf '%s' "$phys"
