@@ -1,0 +1,9 @@
+# CodeRabbit configuration — automatic baseline reviewer.
+# Reviews on open/ready only; no per-push re-review. Request a final-tip
+# re-review with `@coderabbitai review`. Advisory (COMMENTED-only).
+reviews:
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    drafts: false
+    auto_incremental_review: false
