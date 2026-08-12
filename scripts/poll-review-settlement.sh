@@ -6,7 +6,8 @@
 # latency window after each commit. This wrapper retries not-settled instead
 # of failing the first probe. Wait logic lives here, NOT in
 # scripts/check-review-settlement.sh, so the evaluator's snapshot purity and
-# self-test semantics stay single-shot.
+# self-test semantics stay single-shot. Reviews are head-bound: a reviewer's
+# latest review must sit on the current head commit to count as settled.
 #
 # Exit semantics:
 #   evaluator exit 0 (settled)      -> exit 0 immediately
