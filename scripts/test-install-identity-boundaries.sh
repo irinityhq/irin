@@ -342,8 +342,12 @@ if [[ "$canon_out" == *"canonical identity form"* ]]; then
   fail "canonical candidate.json must not hit non-canonical refuse: $canon_out"
 elif [[ "$canon_out" == *"does not recompute from candidate.json"* ]]; then
   fail "canonical candidate-id must match store path: $canon_out"
+elif [[ "$canon_out" != *"fresh-extract DMG into install/"* ]]; then
+  # The gate passes silently; the fresh-extract note is the first post-gate
+  # output, so its presence proves the identity gate actually cleared.
+  fail "canonical candidate.json must clear the identity gate to fresh-extract (ec=$canon_ec): $canon_out"
 else
-  pass "canonical candidate.json passes identity gate (ec=$canon_ec)"
+  pass "canonical candidate.json clears identity gate (ec=$canon_ec)"
 fi
 
 # ---------------------------------------------------------------------------
