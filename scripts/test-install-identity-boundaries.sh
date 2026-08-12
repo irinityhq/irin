@@ -230,6 +230,34 @@ else
   fail "TeamIdentifier mismatch must refuse"
 fi
 
+# Entitlement inspection failure must refuse, not read as "no entitlements".
+run_identity_stub_ent_fail() {
+  (
+    die() { exit 70; }
+    log() { :; }
+    # shellcheck source=/dev/null
+    source "$ROOT/packaging/codesign-identity.sh"
+    codesign() {
+      case "$1" in
+        --verify) return 0 ;;
+        -dv) printf '%s\n' "$good_details" ;;
+        -d) return 1 ;;
+        *) return 1 ;;
+      esac
+    }
+    verify_developer_id_signature "/dev/null" "TEAM123" "stub artifact" >/dev/null 2>&1
+  )
+}
+set +e
+run_identity_stub_ent_fail
+ent_ec=$?
+set -e
+if [[ $ent_ec -ne 0 ]]; then
+  pass "entitlements inspection failure refused (fail closed)"
+else
+  fail "entitlements inspection failure must refuse"
+fi
+
 # ---------------------------------------------------------------------------
 # 3) Non-canonical candidate.json refused; canonical form accepted for id match
 # ---------------------------------------------------------------------------

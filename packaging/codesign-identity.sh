@@ -61,7 +61,10 @@ verify_developer_id_signature() {
   team="$(awk -F= '$1 == "TeamIdentifier" { print $2; exit }' <<<"$details")"
   [[ -n "$team" && "$team" == "$expected_team" ]] \
     || die "$label TeamIdentifier does not match the outer app"
-  entitlements="$(codesign -d --entitlements :- "$artifact" 2>/dev/null || true)"
+  # Fail closed: a signed artifact with no entitlements still exits 0 with
+  # empty output, so a non-zero exit is a real inspection failure, not "none".
+  entitlements="$(codesign -d --entitlements :- "$artifact" 2>/dev/null)" \
+    || die "could not inspect $label entitlements"
   if grep -q '<key>' <<<"$entitlements"; then
     die "$label contains entitlements, but IRIN declares none; review and document before shipping"
   fi
