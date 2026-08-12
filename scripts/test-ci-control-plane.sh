@@ -1393,6 +1393,699 @@ else
   pass "ci-pr.yml retains @main pin"
 fi
 
+# ---------------------------------------------------------------------------
+# Candidate proof markers: both sites require verification=PASS,
+# shipping_tier_claim=none, and exact source_sha. Large-log PASS + each
+# missing-marker FAIL; mutation of a guarded check must fail closed.
+# ---------------------------------------------------------------------------
+if python3 - "$CI_YML" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+errors = []
+
+def job_block(name: str) -> str:
+    m = re.search(rf"(?m)^  {re.escape(name)}:\n((?:    .*\n|      .*\n|\n)*)", text)
+    if not m:
+        errors.append(f"ci.yml missing {name} job")
+        return ""
+    return m.group(0)
+
+sites = {
+    "candidate-isolation-proof": {
+        "sha_var": "BRANCH_HEAD_SHA",
+        "sha_pat": r'grep -q "\^source_sha=\$\{BRANCH_HEAD_SHA\}\$"\s*<<<"\$out"',
+    },
+    "exact-merged-candidate": {
+        "sha_var": "MERGED_SHA",
+        "sha_pat": r'grep -q "\^source_sha=\$\{MERGED_SHA\}\$"\s*<<<"\$out"',
+    },
+}
+
+
+def site_marker_errors(block: str, job: str, meta: dict) -> list[str]:
+    """Shared site-B/isolation marker contract used for live + mutant text."""
+    errs: list[str] = []
+    if not re.search(r"grep -q '\^verification=PASS\$'\s*<<<\"\$out\"", block):
+        errs.append(f"{job}: missing anchored verification=PASS check")
+    if not re.search(r"grep -q '\^shipping_tier_claim=none\$'\s*<<<\"\$out\"", block):
+        errs.append(f"{job}: missing anchored shipping_tier_claim=none check")
+    if not re.search(meta["sha_pat"], block):
+        errs.append(
+            f"{job}: missing anchored source_sha=${{{meta['sha_var']}}} check"
+        )
+    if re.search(r"echo\s+\"\$out\"\s*\|\s*grep", block):
+        errs.append(f"{job}: must not use echo|grep for marker checks")
+    return errs
+
+
+for job, meta in sites.items():
+    block = job_block(job)
+    if not block:
+        continue
+    errors.extend(site_marker_errors(block, job, meta))
+
+# Behavioral: large multi-key log with all three markers → greps succeed.
+# Missing each marker in turn → refuse.
+def check_markers(log: str, sha: str) -> list[str]:
+    missing = []
+    if not re.search(r"(?m)^verification=PASS$", log):
+        missing.append("verification=PASS")
+    if not re.search(r"(?m)^shipping_tier_claim=none$", log):
+        missing.append("shipping_tier_claim=none")
+    if not re.search(rf"(?m)^source_sha={re.escape(sha)}$", log):
+        missing.append(f"source_sha={sha}")
+    return missing
+
+sha = "abc123def456"
+pad = "\n".join(f"noise_key_{i}=value_{i}" for i in range(400))
+full = (
+    f"{pad}\nverification=PASS\nshipping_tier_claim=none\n"
+    f"source_sha={sha}\narchive_path=/tmp/x\n{pad}\n"
+)
+if check_markers(full, sha):
+    errors.append(f"large-log PASS unexpectedly missing: {check_markers(full, sha)}")
+
+for drop in ("verification=PASS", "shipping_tier_claim=none", f"source_sha={sha}"):
+    mutant = "\n".join(line for line in full.splitlines() if line != drop)
+    miss = check_markers(mutant, sha)
+    if not miss:
+        errors.append(f"missing-marker FAIL did not fire when dropping {drop}")
+    elif drop not in miss and not any(drop in m for m in miss):
+        errors.append(f"missing-marker expected {drop} in {miss}")
+
+# Mutation: stripping site B checks from the workflow text must be
+# rejected by the same site_marker_errors validator (not a no-op pass).
+exact = job_block("exact-merged-candidate")
+site_b_meta = sites["exact-merged-candidate"]
+if exact:
+    stripped = re.sub(
+        r'^\s*grep -q "\^source_sha=\$\{MERGED_SHA\}\$"\s*<<<"\$out"\s*\n',
+        "",
+        exact,
+        count=1,
+        flags=re.M,
+    )
+    # If production already lacks the check, stripped == exact and the
+    # static site loop already reported it. When present, the mutant must
+    # fail the shared site validator on source_sha.
+    if stripped != exact:
+        if re.search(
+            r'grep -q "\^source_sha=\$\{MERGED_SHA\}\$"\s*<<<"\$out"', stripped
+        ):
+            errors.append("mutation: failed to strip exact-merged source_sha check")
+        miss = site_marker_errors(stripped, "exact-merged-candidate", site_b_meta)
+        if not miss:
+            errors.append(
+                "mutation: stripped source_sha still passes site-B validator"
+            )
+        elif not any("source_sha" in m for m in miss):
+            errors.append(
+                f"mutation: site-B validator miss list lacks source_sha: {miss}"
+            )
+    # Also mutate shipping_tier_claim if present.
+    stripped_tier = re.sub(
+        r"^\s*grep -q '\^shipping_tier_claim=none\$'\s*<<<\"\$out\"\s*\n",
+        "",
+        exact,
+        count=1,
+        flags=re.M,
+    )
+    if stripped_tier != exact:
+        if re.search(
+            r"grep -q '\^shipping_tier_claim=none\$'\s*<<<\"\$out\"", stripped_tier
+        ):
+            errors.append(
+                "mutation: failed to strip exact-merged shipping_tier check"
+            )
+        miss_tier = site_marker_errors(
+            stripped_tier, "exact-merged-candidate", site_b_meta
+        )
+        if not miss_tier:
+            errors.append(
+                "mutation: stripped shipping_tier still passes site-B validator"
+            )
+        elif not any("shipping_tier_claim" in m for m in miss_tier):
+            errors.append(
+                "mutation: site-B validator miss list lacks shipping_tier: "
+                f"{miss_tier}"
+            )
+
+
+if errors:
+    print("\n".join(errors), file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+  pass "candidate markers: both sites + large-log PASS + missing-marker FAIL"
+else
+  fail "candidate marker contracts"
+fi
+
+# ---------------------------------------------------------------------------
+# ci-required: intentional path skips remain allowed; selected lanes cannot
+# skip green. Evaluate the live aggregator logic against synthetic needs JSON.
+# ---------------------------------------------------------------------------
+if python3 - "$CI_YML" <<'PY'
+import json
+import re
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+errors = []
+
+# Extract the ci-required step run block.
+m = re.search(
+    r"(?m)^  ci-required:\n((?:    .*\n|      .*\n|\n)*)",
+    text,
+)
+if not m:
+    errors.append("ci.yml missing ci-required job")
+    print("\n".join(errors), file=sys.stderr)
+    sys.exit(1)
+block = m.group(0)
+
+# Locate the run script body of the require step (executable body only —
+# env: lane variables must not count as a selected-lane filter).
+run_m = re.search(
+    r"(?ms)name:\s*Require[^\n]*\n.*?run:\s*\|\n((?:          .*\n)+)",
+    block,
+)
+if not run_m:
+    # Single-line run: form
+    run_m = re.search(r"(?ms)name:\s*Require[^\n]*\n.*?run:\s*(.+)", block)
+if not run_m:
+    errors.append("ci-required missing Require step run body")
+    print("\n".join(errors), file=sys.stderr)
+    sys.exit(1)
+
+run_body_raw = run_m.group(1)
+# Dedent for body-only inspection (10-space YAML indent under run: |).
+body_lines = run_body_raw.splitlines(True)
+if body_lines and all(
+    (not ln.strip()) or ln.startswith("          ") for ln in body_lines
+):
+    run_body_for_check = "".join(
+        ln[10:] if ln.startswith("          ") else ln for ln in body_lines
+    )
+else:
+    run_body_for_check = run_body_raw
+
+# Blanket success|skipped jq is never acceptable in the executable body,
+# even when the step env still lists lane output variables.
+blanket = re.search(
+    r"""jq -e 'all\(\.\[\]\s*;\s*\.result == "success" or \.result == "skipped"\)'""",
+    run_body_for_check,
+)
+if blanket:
+    errors.append(
+        "ci-required executable body still uses blanket success|skipped jq "
+        "(selected-lane policy required)"
+    )
+
+# Behavioral contract via a small pure evaluator that mirrors the intended
+# policy (must match ci.yml after fix). When ci.yml embeds equivalent logic,
+# we also execute that snippet against fixtures.
+def evaluate(needs: dict, selected: set[str]) -> int:
+    """Return 0 if green under selected-lane policy, else 1."""
+    for name, info in needs.items():
+        result = info.get("result")
+        if name in selected:
+            if result != "success":
+                return 1
+        else:
+            if result not in ("success", "skipped"):
+                return 1
+    return 0
+
+always = {
+    "actionlint",
+    "detect-changes",
+    "gitleaks",
+    "security-scanners",
+    "public-tree",
+    "public-pr-language",
+}
+# Path-scoped PR: only gateway_rust selected among product lanes.
+selected_gw = always | {"gateway-rust"}
+needs_ok = {
+    "actionlint": {"result": "success"},
+    "detect-changes": {"result": "success"},
+    "gitleaks": {"result": "success"},
+    "security-scanners": {"result": "success"},
+    "public-tree": {"result": "success"},
+    "public-pr-language": {"result": "success"},
+    "gateway-rust": {"result": "success"},
+    "council-rust": {"result": "skipped"},
+    "warroom-web": {"result": "skipped"},
+    "warroom-tauri": {"result": "skipped"},
+    "sentinel-rust": {"result": "skipped"},
+    "workspace-supply-chain": {"result": "skipped"},
+    "tauri-supply-chain": {"result": "skipped"},
+    "sbom": {"result": "skipped"},
+    "gateway-smoke": {"result": "skipped"},
+    "candidate-isolation-proof": {"result": "skipped"},
+    "exact-merged-candidate": {"result": "skipped"},
+}
+if evaluate(needs_ok, selected_gw) != 0:
+    errors.append("intentional path skips must remain allowed when unselected")
+
+needs_bad = dict(needs_ok)
+needs_bad["gateway-rust"] = {"result": "skipped"}
+if evaluate(needs_bad, selected_gw) == 0:
+    errors.append("selected lane gateway-rust must not skip green")
+
+# Mutation: selected lane failure must also refuse (not only skip).
+needs_fail = dict(needs_ok)
+needs_fail["gateway-rust"] = {"result": "failure"}
+if evaluate(needs_fail, selected_gw) == 0:
+    errors.append("selected lane failure must refuse aggregate green")
+
+# Prefer executing the live ci-required script when it is a multi-line policy
+# body (post-fix). Pre-fix single-line jq cannot express selected lanes.
+script = run_body_for_check
+
+# If the live script still is the blanket jq one-liner, the static check above
+# already failed. When it is a real policy script, exercise fixtures through it.
+if "all(.[];" not in script and ("NEEDS" in script or "needs" in script):
+    def run_live(needs_obj, env_extra):
+        with tempfile.TemporaryDirectory() as td:
+            script_path = Path(td) / "check.sh"
+            script_path.write_text(
+                "#!/usr/bin/env bash\nset -euo pipefail\n" + script,
+                encoding="utf-8",
+            )
+            env = {
+                "NEEDS": json.dumps(needs_obj),
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            }
+            env.update(env_extra)
+            r = subprocess.run(
+                ["bash", str(script_path)],
+                capture_output=True,
+                text=True,
+                env=env,
+            )
+            return r.returncode
+
+    def all_false_env(**overrides):
+        env = {
+            "GATEWAY_RUST": "false",
+            "COUNCIL_RUST": "false",
+            "SENTINEL_RUST": "false",
+            "WARROOM_WEB": "false",
+            "WARROOM_TAURI": "false",
+            "WORKSPACE_SUPPLY_CHAIN": "false",
+            "TAURI_SUPPLY_CHAIN": "false",
+            "SBOM": "false",
+            "EXACT_CANDIDATE": "false",
+            "EVENT_NAME": "pull_request",
+            "GITHUB_REF": "refs/pull/1/merge",
+            "GITHUB_REPOSITORY": "irinityhq/irin",
+            "REPO_PRIVATE": "true",
+            "RUN_GATEWAY_SMOKE": "false",
+            "PR_LABELS": "[]",
+        }
+        env.update(overrides)
+        return env
+
+    # Intentional path skips: only gateway_rust selected among product lanes.
+    base_env = all_false_env(GATEWAY_RUST="true")
+    if run_live(needs_ok, base_env) != 0:
+        errors.append("live ci-required rejected intentional path skips")
+    if run_live(needs_bad, base_env) == 0:
+        errors.append("live ci-required accepted skipped selected lane")
+
+    # Table-drive every conditional lane/event: force that selected job to
+    # skipped and require the live aggregator to refuse green.
+    lane_cases = [
+        ("gateway-rust", all_false_env(GATEWAY_RUST="true")),
+        ("council-rust", all_false_env(COUNCIL_RUST="true")),
+        ("sentinel-rust", all_false_env(SENTINEL_RUST="true")),
+        ("warroom-web", all_false_env(WARROOM_WEB="true")),
+        ("warroom-tauri", all_false_env(WARROOM_TAURI="true")),
+        (
+            "workspace-supply-chain",
+            all_false_env(WORKSPACE_SUPPLY_CHAIN="true"),
+        ),
+        ("tauri-supply-chain", all_false_env(TAURI_SUPPLY_CHAIN="true")),
+        ("sbom", all_false_env(SBOM="true")),
+        (
+            "candidate-isolation-proof",
+            all_false_env(
+                EXACT_CANDIDATE="true",
+                EVENT_NAME="pull_request",
+                GITHUB_REF="refs/pull/1/merge",
+            ),
+        ),
+        (
+            "exact-merged-candidate",
+            all_false_env(
+                EXACT_CANDIDATE="true",
+                EVENT_NAME="push",
+                GITHUB_REF="refs/heads/main",
+            ),
+        ),
+        (
+            "gateway-smoke",
+            all_false_env(
+                GATEWAY_RUST="true",
+                EVENT_NAME="schedule",
+                GITHUB_REF="refs/heads/main",
+                GITHUB_REPOSITORY="irinityhq/irin",
+                REPO_PRIVATE="true",
+            ),
+        ),
+        (
+            "gateway-smoke",
+            all_false_env(
+                GATEWAY_RUST="true",
+                EVENT_NAME="workflow_dispatch",
+                RUN_GATEWAY_SMOKE="true",
+                GITHUB_REF="refs/heads/main",
+            ),
+        ),
+        (
+            "gateway-smoke",
+            all_false_env(
+                GATEWAY_RUST="true",
+                EVENT_NAME="pull_request",
+                PR_LABELS='["run-smoke"]',
+            ),
+        ),
+        (
+            "gateway-smoke",
+            all_false_env(
+                GATEWAY_RUST="true",
+                EVENT_NAME="pull_request",
+                PR_LABELS='["run-provenance"]',
+            ),
+        ),
+    ]
+    for job_id, env in lane_cases:
+        needs_skip = dict(needs_ok)
+        # Always-on stay success; every conditional job starts skipped, then
+        # the selected job is also skipped (the regression under test).
+        for j in (
+            "gateway-rust",
+            "council-rust",
+            "sentinel-rust",
+            "warroom-web",
+            "warroom-tauri",
+            "workspace-supply-chain",
+            "tauri-supply-chain",
+            "sbom",
+            "gateway-smoke",
+            "candidate-isolation-proof",
+            "exact-merged-candidate",
+        ):
+            needs_skip[j] = {"result": "skipped"}
+        needs_skip[job_id] = {"result": "skipped"}
+        label = f"{job_id}/{env.get('EVENT_NAME', '?')}"
+        if run_live(needs_skip, env) == 0:
+            errors.append(
+                f"live ci-required accepted skipped selected lane ({label})"
+            )
+        # Positive control: same selection with success must pass.
+        needs_pass = dict(needs_skip)
+        needs_pass[job_id] = {"result": "success"}
+        # gateway-smoke selection also requires gateway-rust success when
+        # GATEWAY_RUST is true.
+        if env.get("GATEWAY_RUST") == "true" and job_id != "gateway-rust":
+            needs_pass["gateway-rust"] = {"result": "success"}
+        if run_live(needs_pass, env) != 0:
+            errors.append(
+                f"live ci-required rejected success for selected lane ({label})"
+            )
+
+    # Excluded schedule contexts: smoke intentionally skipped stays green
+    # (mirrors job if: non-canonical / public / non-main must not require smoke).
+    excluded_schedule_envs = [
+        all_false_env(
+            GATEWAY_RUST="true",
+            EVENT_NAME="schedule",
+            GITHUB_REF="refs/heads/main",
+            GITHUB_REPOSITORY="evil/fork",
+            REPO_PRIVATE="true",
+        ),
+        all_false_env(
+            GATEWAY_RUST="true",
+            EVENT_NAME="schedule",
+            GITHUB_REF="refs/heads/main",
+            GITHUB_REPOSITORY="irinityhq/irin",
+            REPO_PRIVATE="false",
+        ),
+        all_false_env(
+            GATEWAY_RUST="true",
+            EVENT_NAME="schedule",
+            GITHUB_REF="refs/heads/develop",
+            GITHUB_REPOSITORY="irinityhq/irin",
+            REPO_PRIVATE="true",
+        ),
+    ]
+    for env in excluded_schedule_envs:
+        needs_excl = dict(needs_ok)
+        for j in (
+            "council-rust",
+            "sentinel-rust",
+            "warroom-web",
+            "warroom-tauri",
+            "workspace-supply-chain",
+            "tauri-supply-chain",
+            "sbom",
+            "candidate-isolation-proof",
+            "exact-merged-candidate",
+        ):
+            needs_excl[j] = {"result": "skipped"}
+        needs_excl["gateway-rust"] = {"result": "success"}
+        needs_excl["gateway-smoke"] = {"result": "skipped"}
+        label = (
+            f"excluded-schedule repo={env.get('GITHUB_REPOSITORY')} "
+            f"private={env.get('REPO_PRIVATE')} ref={env.get('GITHUB_REF')}"
+        )
+        if run_live(needs_excl, env) != 0:
+            errors.append(
+                f"live ci-required rejected off-canonical schedule skip ({label})"
+            )
+
+if errors:
+    print("\n".join(errors), file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+  pass "ci-required selected-lane policy (skips allowed; selected cannot skip)"
+else
+  fail "ci-required selected-lane contracts"
+fi
+
+# ---------------------------------------------------------------------------
+# Scheduled proof: schedule must reach gateway-smoke outer job AND inner
+# exact-source make verify plus both teardowns. Separately fail if only the
+# outer job, only the inner proof, or either teardown is omitted.
+# ---------------------------------------------------------------------------
+if python3 - "$CI_YML" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+text = Path(sys.argv[1]).read_text(encoding="utf-8")
+errors = []
+
+m = re.search(
+    r"(?m)^  gateway-smoke:\n((?:    .*\n|      .*\n|\n)*)",
+    text,
+)
+if not m:
+    errors.append("ci.yml missing gateway-smoke job")
+    print("\n".join(errors), file=sys.stderr)
+    sys.exit(1)
+job = m.group(0)
+
+# Outer job if: must include schedule (alongside existing dispatch/PR labels).
+# Extract the job-level if: expression (first if: after the job header, before steps).
+header = job.split("steps:", 1)[0]
+if not re.search(r"github\.event_name\s*==\s*'schedule'", header):
+    errors.append("gateway-smoke outer job if must include schedule")
+# Schedule entry must bind canonical repo + private + refs/heads/main
+# (private forks must not enter).
+if not re.search(
+    r"github\.event_name\s*==\s*'schedule'[\s\S]{0,240}?"
+    r"github\.repository\s*==\s*'irinityhq/irin'[\s\S]{0,240}?"
+    r"github\.event\.repository\.private\s*==\s*true[\s\S]{0,240}?"
+    r"github\.ref\s*==\s*'refs/heads/main'",
+    header,
+):
+    errors.append(
+        "gateway-smoke schedule arm must require canonical repository "
+        "irinityhq/irin, private, and refs/heads/main"
+    )
+
+# Inner exact-source proof step if must include schedule + canonical identity.
+proof_if = re.search(
+    r"name:\s*Run exact-source no-spend proof\n\s*if:\s*>\n((?:\s+.+\n)+)",
+    job,
+)
+if not proof_if or "schedule" not in proof_if.group(1):
+    errors.append("exact-source proof step if must include schedule")
+elif "irinityhq/irin" not in proof_if.group(1):
+    errors.append(
+        "exact-source proof step if must require github.repository "
+        "== 'irinityhq/irin'"
+    )
+
+# Inner exact-source teardown if must include schedule + canonical identity.
+teardown_if = re.search(
+    r"name:\s*Tear down exact-source proof\n\s*if:\s*>\n((?:\s+.+\n)+)",
+    job,
+)
+if not teardown_if or "schedule" not in teardown_if.group(1):
+    errors.append("exact-source teardown step if must include schedule")
+elif "irinityhq/irin" not in teardown_if.group(1):
+    errors.append(
+        "exact-source teardown step if must require github.repository "
+        "== 'irinityhq/irin'"
+    )
+
+# Compose stack teardown must remain always() so schedule and dispatch clean up.
+if not re.search(
+    r"name:\s*Tear down gateway stack\n\s*if:\s*always\(\)",
+    job,
+):
+    errors.append("gateway-smoke must keep always() compose teardown")
+
+# Exact-source step must still invoke make verify / verify-down.
+if not re.search(r"make verify\b", job):
+    errors.append("gateway-smoke exact-source step must run make verify")
+if not re.search(r"make verify-down\b", job):
+    errors.append("gateway-smoke exact-source teardown must run make verify-down")
+
+# Guards must remain: private repo, main ref, trusted self-hosted, exact HEAD.
+for needle, label in (
+    ("github.event.repository.private == true", "private repository"),
+    ("github.ref == 'refs/heads/main'", "refs/heads/main"),
+    ('runner.environment }}" = "self-hosted"', "self-hosted runner"),
+    ("git rev-parse HEAD", "exact-HEAD check"),
+):
+    if needle not in job and label == "self-hosted runner":
+        # tolerate spacing variants
+        if "self-hosted" not in job:
+            errors.append(f"exact-source proof missing guard: {label}")
+    elif needle not in job and label != "self-hosted runner":
+        if label == "exact-HEAD check" and "rev-parse HEAD" not in job:
+            errors.append(f"exact-source proof missing guard: {label}")
+        elif label != "exact-HEAD check" and needle not in job:
+            errors.append(f"exact-source proof missing guard: {label}")
+
+# Mutation teeth: each omission class must be detectable independently.
+def has_schedule_outer(src: str) -> bool:
+    hdr = src.split("steps:", 1)[0]
+    return bool(re.search(r"github\.event_name\s*==\s*'schedule'", hdr))
+
+def has_schedule_proof(src: str) -> bool:
+    mif = re.search(
+        r"name:\s*Run exact-source no-spend proof\n\s*if:\s*>\n((?:\s+.+\n)+)",
+        src,
+    )
+    return bool(mif and "schedule" in mif.group(1))
+
+def has_schedule_teardown(src: str) -> bool:
+    mif = re.search(
+        r"name:\s*Tear down exact-source proof\n\s*if:\s*>\n((?:\s+.+\n)+)",
+        src,
+    )
+    return bool(mif and "schedule" in mif.group(1))
+
+def has_compose_teardown(src: str) -> bool:
+    return bool(
+        re.search(r"name:\s*Tear down gateway stack\n\s*if:\s*always\(\)", src)
+    )
+
+# Only run mutation self-checks when the production job already satisfies
+# the full contract; otherwise the static errors above are the signal.
+if (
+    has_schedule_outer(job)
+    and has_schedule_proof(job)
+    and has_schedule_teardown(job)
+    and has_compose_teardown(job)
+):
+    # Outer-only: strip schedule from proof + exact teardown.
+    outer_only = re.sub(
+        r"(github\.event_name\s*==\s*'workflow_dispatch'[^\n]*\n(?:\s+&&[^\n]*\n)*)",
+        lambda m: m.group(0),  # keep dispatch arms
+        job,
+        count=0,
+    )
+    # Remove schedule lines from step-level if blocks only (not job header).
+    steps_part = job.split("steps:", 1)[1]
+    steps_no_sched = re.sub(
+        r"[^\n]*github\.event_name\s*==\s*'schedule'[^\n]*\n",
+        "",
+        steps_part,
+    )
+    outer_only = job.split("steps:", 1)[0] + "steps:" + steps_no_sched
+    if has_schedule_proof(outer_only) or has_schedule_teardown(outer_only):
+        errors.append("mutation: could not strip schedule from inner steps")
+    elif not (
+        has_schedule_outer(outer_only)
+        and not has_schedule_proof(outer_only)
+        and not has_schedule_teardown(outer_only)
+    ):
+        errors.append("mutation: outer-only schedule shape not detected")
+
+    # Inner-only: strip schedule from job-level if.
+    inner_only = re.sub(
+        r"[^\n]*github\.event_name\s*==\s*'schedule'[^\n]*\n",
+        "",
+        header,
+        count=1,
+    ) + "steps:" + job.split("steps:", 1)[1]
+    if has_schedule_outer(inner_only):
+        errors.append("mutation: could not strip schedule from outer job if")
+    elif not (
+        not has_schedule_outer(inner_only)
+        and has_schedule_proof(inner_only)
+        and has_schedule_teardown(inner_only)
+    ):
+        errors.append("mutation: inner-only schedule shape not detected")
+
+    # Omit compose teardown always().
+    no_compose = re.sub(
+        r"(name:\s*Tear down gateway stack\n\s*if:\s*)always\(\)",
+        r"\1failure()",
+        job,
+        count=1,
+    )
+    if has_compose_teardown(no_compose):
+        errors.append("mutation: could not strip compose always() teardown")
+
+    # Omit exact-source teardown schedule (or whole step condition).
+    no_exact_td = re.sub(
+        r"(name:\s*Tear down exact-source proof\n\s*if:\s*>\n)((?:\s+.+\n)+)",
+        r"\1          always() && false\n",
+        job,
+        count=1,
+    )
+    if has_schedule_teardown(no_exact_td):
+        errors.append("mutation: could not strip exact-source teardown schedule")
+
+if errors:
+    print("\n".join(errors), file=sys.stderr)
+    sys.exit(1)
+sys.exit(0)
+PY
+then
+  pass "schedule reaches gateway-smoke + exact-source verify + both teardowns"
+else
+  fail "scheduled gateway-smoke reachability contracts"
+fi
+
 if (( failures > 0 )); then
   printf 'ci-control-plane contracts: FAILED (%d)\n' "$failures" >&2
   exit 1

@@ -351,6 +351,12 @@ jobs:
       - name: Bootstrap pinned scanners
         run: scripts/bootstrap-dev-tools.sh
 
+      # Fixture contracts reuse the bootstrap above (no second network install;
+      # keep detect-changes offline/fast). Command-position step for reachability.
+      - name: Opengrep boundary fixtures
+        run: |
+          scripts/test-opengrep-fixtures.sh
+
       - name: Opengrep (advisory findings)
         run: scripts/run-opengrep.sh
 
@@ -795,6 +801,12 @@ jobs:
     if: >
       needs.detect-changes.outputs.gateway_rust == 'true' &&
       (
+        (
+          github.event_name == 'schedule' &&
+          github.repository == 'irinityhq/irin' &&
+          github.event.repository.private == true &&
+          github.ref == 'refs/heads/main'
+        ) ||
         (github.event_name == 'workflow_dispatch' && inputs.run_gateway_smoke) ||
         (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'run-smoke')) ||
         (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'run-provenance'))
@@ -921,10 +933,13 @@ jobs:
       - name: Run exact-source no-spend proof
         if: >
           !cancelled() &&
+          github.repository == 'irinityhq/irin' &&
           github.event.repository.private == true &&
           github.ref == 'refs/heads/main' &&
-          github.event_name == 'workflow_dispatch' &&
-          inputs.run_gateway_smoke
+          (
+            github.event_name == 'schedule' ||
+            (github.event_name == 'workflow_dispatch' && inputs.run_gateway_smoke)
+          )
         env:
           COMPOSE_PROJECT_NAME: irin-verify-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           DEMO_SIDECAR_IMAGE_NAME: irin-verify-sidecar-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -939,10 +954,13 @@ jobs:
       - name: Tear down exact-source proof
         if: >
           always() &&
+          github.repository == 'irinityhq/irin' &&
           github.event.repository.private == true &&
           github.ref == 'refs/heads/main' &&
-          github.event_name == 'workflow_dispatch' &&
-          inputs.run_gateway_smoke
+          (
+            github.event_name == 'schedule' ||
+            (github.event_name == 'workflow_dispatch' && inputs.run_gateway_smoke)
+          )
         env:
           COMPOSE_PROJECT_NAME: irin-verify-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           DEMO_SIDECAR_IMAGE_NAME: irin-verify-sidecar-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -1173,7 +1191,10 @@ jobs:
           fi
           out="$(cat "$outer_log")"
           # Prefer <<< over echo|grep under pipefail (early match → Broken pipe).
+          # Same three exact markers as candidate-isolation before export/upload.
           grep -q '^verification=PASS$' <<<"$out"
+          grep -q '^shipping_tier_claim=none$' <<<"$out"
+          grep -q "^source_sha=${MERGED_SHA}$" <<<"$out"
           # Do not print Candidate verified: CI required includes this job and
           # is not green yet. After aggregate + import, candidate-status owns tier.
           if grep -Eiq \
@@ -1265,7 +1286,122 @@ jobs:
       - candidate-isolation-proof
       - exact-merged-candidate
     steps:
-      - name: Require successful or skipped CI lanes
+      # Always-on lanes must succeed. Path/event-selected lanes must succeed.
+      # Unselected conditional lanes may skip. Never force every job green.
+      - name: Require successful selected CI lanes
         env:
           NEEDS: ${{ toJSON(needs) }}
-        run: jq -e 'all(.[]; .result == "success" or .result == "skipped")' <<<"$NEEDS"
+          GATEWAY_RUST: ${{ needs.detect-changes.outputs.gateway_rust }}
+          COUNCIL_RUST: ${{ needs.detect-changes.outputs.council_rust }}
+          SENTINEL_RUST: ${{ needs.detect-changes.outputs.sentinel_rust }}
+          WARROOM_WEB: ${{ needs.detect-changes.outputs.warroom_web }}
+          WARROOM_TAURI: ${{ needs.detect-changes.outputs.warroom_tauri }}
+          WORKSPACE_SUPPLY_CHAIN: ${{ needs.detect-changes.outputs.workspace_supply_chain }}
+          TAURI_SUPPLY_CHAIN: ${{ needs.detect-changes.outputs.tauri_supply_chain }}
+          SBOM: ${{ needs.detect-changes.outputs.sbom }}
+          EXACT_CANDIDATE: ${{ needs.detect-changes.outputs.exact_candidate }}
+          EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REF: ${{ github.ref }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          REPO_PRIVATE: ${{ github.event.repository.private }}
+          RUN_GATEWAY_SMOKE: ${{ inputs.run_gateway_smoke }}
+          PR_LABELS: ${{ toJSON(github.event.pull_request.labels.*.name) }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+
+          needs = json.loads(os.environ["NEEDS"])
+          event = os.environ.get("EVENT_NAME", "")
+          ref = os.environ.get("GITHUB_REF", "")
+          repo = os.environ.get("GITHUB_REPOSITORY", "")
+          private = os.environ.get("REPO_PRIVATE", "").lower() == "true"
+          run_smoke = os.environ.get("RUN_GATEWAY_SMOKE", "false").lower() == "true"
+          try:
+              labels = json.loads(os.environ.get("PR_LABELS") or "[]")
+          except json.JSONDecodeError:
+              labels = []
+          if not isinstance(labels, list):
+              labels = []
+          label_names = {str(x) for x in labels}
+
+          def selected(flag: str) -> bool:
+              return os.environ.get(flag, "") == "true"
+
+          required = {
+              "actionlint",
+              "detect-changes",
+              "gitleaks",
+              "security-scanners",
+              "public-tree",
+              "public-pr-language",
+          }
+          if selected("GATEWAY_RUST"):
+              required.add("gateway-rust")
+          if selected("COUNCIL_RUST"):
+              required.add("council-rust")
+          if selected("SENTINEL_RUST"):
+              required.add("sentinel-rust")
+          if selected("WARROOM_WEB"):
+              required.add("warroom-web")
+          if selected("WARROOM_TAURI"):
+              required.add("warroom-tauri")
+          if selected("WORKSPACE_SUPPLY_CHAIN"):
+              required.add("workspace-supply-chain")
+          if selected("TAURI_SUPPLY_CHAIN"):
+              required.add("tauri-supply-chain")
+          if selected("SBOM"):
+              required.add("sbom")
+
+          # gateway-smoke mirrors its job-level if (scope + event gate).
+          # Schedule requires canonical private main — same as the job if.
+          schedule_smoke = (
+              event == "schedule"
+              and repo == "irinityhq/irin"
+              and private
+              and ref == "refs/heads/main"
+          )
+          if selected("GATEWAY_RUST") and (
+              schedule_smoke
+              or (event == "workflow_dispatch" and run_smoke)
+              or (
+                  event == "pull_request"
+                  and (
+                      "run-smoke" in label_names
+                      or "run-provenance" in label_names
+                  )
+              )
+          ):
+              required.add("gateway-smoke")
+
+          if selected("EXACT_CANDIDATE") and event == "pull_request":
+              required.add("candidate-isolation-proof")
+          if (
+              selected("EXACT_CANDIDATE")
+              and event == "push"
+              and ref == "refs/heads/main"
+          ):
+              required.add("exact-merged-candidate")
+
+          errors = []
+          for name, info in sorted(needs.items()):
+              result = info.get("result")
+              if name in required:
+                  if result != "success":
+                      errors.append(f"{name}: required but result={result}")
+              else:
+                  if result not in ("success", "skipped"):
+                      errors.append(f"{name}: unexpected result={result}")
+
+          if errors:
+              print("ci-required: selected-lane policy failed:", file=sys.stderr)
+              for err in errors:
+                  print(f"  {err}", file=sys.stderr)
+              sys.exit(1)
+          print(
+              "ci-required: OK "
+              f"(required={len(required)} total={len(needs)})"
+          )
+          PY
