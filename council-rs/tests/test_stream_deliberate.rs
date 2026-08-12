@@ -560,8 +560,6 @@ async fn stream_budget_cap_ends_after_round_one_with_budget_paused() {
     let mut stream = base_stream(cabinet);
     // Cap below one priced mock seat call ($20) so round 1 spend trips the pause
     // while initial cumulative_spend (0) still lets the phase enter.
-    // Note: budget_max_usd=0.0 is a separate stream/engine disagreement (#0123):
-    // stream pre-phase gate skips all rounds without budget_paused.
     stream.budget_max_usd = Some(1.0);
 
     let events = tokio::time::timeout(
@@ -712,11 +710,9 @@ async fn stream_pause_resume_continue_runs_remaining_rounds() {
     dirs.cleanup();
 }
 
-/// Documents stream/engine disagreement #0123 — do not "fix" product here.
-/// Engine zero-budget runs round 1 then end_early; stream pre-phase gate
-/// (`cumulative_spend >= budget_max`) skips rounds and never emits budget_paused.
+/// Zero budget matches engine run_with_cancel: one round, then budget_paused.
 #[tokio::test]
-async fn stream_zero_budget_skips_rounds_without_budget_paused_disagreement() {
+async fn stream_zero_budget_ends_after_round_one_with_budget_paused() {
     let _guard = env_lock().await;
     let dirs = SessionDirs::install();
 
@@ -737,17 +733,40 @@ async fn stream_zero_budget_skips_rounds_without_budget_paused_disagreement() {
 
     let types = event_types(&events);
     assert!(
-        !events.iter().any(|e| e.event_type == "round_started"),
-        "zero budget currently skips rounds (stream pre-phase gate); events={types:?}"
+        events.iter().any(|e| e.event_type == "budget_paused"),
+        "zero budget must emit budget_paused; events={types:?}"
     );
+    assert_eq!(
+        count_type(&events, "round_started"),
+        1,
+        "zero budget runs exactly one round; events={types:?}"
+    );
+    assert_eq!(count_type(&events, "round_complete"), 1);
+
+    let budget = events
+        .iter()
+        .find(|e| e.event_type == "budget_paused")
+        .unwrap();
+    assert_eq!(budget.data["round_num"].as_u64(), Some(1));
+    assert_eq!(budget.data["action"].as_str(), Some("end_early"));
+    assert!((budget.data["max_usd"].as_f64().unwrap_or(-1.0) - 0.0).abs() < f64::EPSILON);
+
     assert!(
-        !events.iter().any(|e| e.event_type == "budget_paused"),
-        "zero budget currently does not emit budget_paused; events={types:?}"
+        events.iter().any(|e| e.event_type == "synthesis_complete"),
+        "zero-budget end still synthesizes; events={types:?}"
     );
+    let done = events.iter().find(|e| e.event_type == "done");
     assert!(
-        events.iter().any(|e| e.event_type == "done"),
-        "still emits terminal done; events={types:?}"
+        done.is_some(),
+        "zero-budget end still emits done; events={types:?}"
     );
+    assert_eq!(done.unwrap().data["rounds_run"].as_u64(), Some(1));
+
+    let bp = first_index(&events, "budget_paused").unwrap();
+    let synth = first_index(&events, "synthesis_started").unwrap();
+    let done_i = first_index(&events, "done").unwrap();
+    assert!(bp < synth, "budget_paused before synthesis: {types:?}");
+    assert!(synth < done_i, "synthesis before done: {types:?}");
 
     dirs.cleanup();
 }
