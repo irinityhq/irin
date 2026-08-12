@@ -28,6 +28,16 @@ pub fn bump_pack_lifecycle_generation() {
     PACK_LIFECYCLE_GENERATION.fetch_add(1, Ordering::SeqCst);
 }
 
+
+/// Serialize tests that observe or bump the process-global pack lifecycle
+/// generation. Shared by launch_tests and enable_tests in the same lib test binary.
+#[cfg(test)]
+pub fn lifecycle_gen_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(())).lock().unwrap()
+}
+
+
 /// Collapse concurrent pack-status probes (Settings pack card + Touch ID poll
 /// fire on the same interval). A multi-second Docker/HTTP sample is fail-closed
 /// but expensive; sharing one sample for a short window prevents probe storms

@@ -1,7 +1,7 @@
 use super::super::cli_adapters::{
     ensure_cli_adapters, ensure_cli_adapters_with_tokens, ensure_proxy_tokens,
 };
-use super::super::status::{bump_pack_lifecycle_generation, pack_lifecycle_generation};
+use super::super::status::{bump_pack_lifecycle_generation, lifecycle_gen_test_lock, pack_lifecycle_generation};
 use super::*;
 use crate::keychain::{
     load_gw_api_key, migrate_legacy_secrets_with_values, store_arm_principal_token,
@@ -267,13 +267,11 @@ fn promote_pack_ready_held_secret_path_does_not_reenter_keychain() {
 
 #[test]
 fn promote_held_secrets_invalid_after_lifecycle_bump() {
+    let _g = lifecycle_gen_test_lock();
     let at = pack_lifecycle_generation();
     assert!(promote_held_secrets_still_valid(at));
     bump_pack_lifecycle_generation();
-    assert!(
-        !promote_held_secrets_still_valid(at),
-        "lifecycle bump must invalidate held cold-launch credentials"
-    );
+    assert!(!promote_held_secrets_still_valid(at));
 }
 
 #[test]
@@ -481,4 +479,288 @@ fn promote_early_window_bounds_resume_calls() {
     assert!(!promote_may_call_resume(11, 4, false));
     // Ready pack never re-enters resume.
     assert!(!promote_may_call_resume(0, 4, true));
+}
+
+// --- PR4 characterization: launch outcomes (secret snapshot, lifecycle fence, Direct) ---
+
+/// One LaunchSecrets snapshot per flight is reused for adapters + compose secret
+/// env without re-entering Keychain for proxy/watch/pepper accounts.
+#[test]
+fn one_secret_snapshot_per_flight_reused_for_adapters_and_compose() {
+    let store = CountingSecretStore::with_seeded_pack_secrets();
+    full_start_resume_keychain_sequence(&store).expect("flight");
+    // GW once (via migration), each other pack secret at most once.
+    assert_eq!(store.get_count_for(GW_API_KEY_ACCOUNT), 1);
+    assert_eq!(store.get_count_for(AUTH_PEPPER_ACCOUNT), 1);
+    assert_eq!(store.get_count_for(CLAUDE_PROXY_TOKEN_ACCOUNT), 1);
+    assert_eq!(store.get_count_for(CODEX_PROXY_TOKEN_ACCOUNT), 1);
+    assert_eq!(store.get_count_for(WATCH_ADMIN_TOKEN_ACCOUNT), 1);
+    assert_eq!(store.get_count_for(ARM_PRINCIPAL_TOKEN_ACCOUNT), 1);
+}
+
+/// Lifecycle generation change after pack-ready proof must refuse promote commit.
+#[test]
+fn lifecycle_generation_change_aborts_before_promote_commit() {
+    let at = pack_lifecycle_generation();
+    assert!(promote_may_commit_after_pack_ready(
+        at, at, true, true
+    ));
+    // Simulate Enable/disable advancing generation after adapters finished.
+    assert!(!promote_may_commit_after_pack_ready(
+        at,
+        at.wrapping_add(1),
+        true,
+        true
+    ));
+    // Pack not ready never commits even if generation matches.
+    assert!(!promote_may_commit_after_pack_ready(at, at, false, true));
+    // may_promote false never commits.
+    assert!(!promote_may_commit_after_pack_ready(at, at, true, false));
+}
+
+/// Failed authenticated readiness (pack auth false) leaves launch Direct.
+#[test]
+fn failed_authenticated_readiness_leaves_council_direct() {
+    assert_eq!(
+        decide_launch_resume_outcome(true, false, false, false),
+        LaunchResumeOutcome::DirectFailClosed
+    );
+    // Governed spawn only when pack ready.
+    assert_eq!(
+        decide_launch_via_gateway(true, false),
+        false,
+        "no pack auth → not governed"
+    );
+    assert_eq!(
+        decide_launch_via_gateway(true, true),
+        true,
+        "pack auth + persisted → governed allowed"
+    );
+    // Pure promote eligibility: Direct-owned child + pack ok required.
+    assert!(!may_promote_to_governed(true, Some(false), false));
+    assert!(may_promote_to_governed(true, Some(false), true));
+}
+
+/// evaluate_promote_flight_attempt aborts when lifecycle advances mid-flight.
+#[test]
+fn evaluate_promote_flight_aborts_on_lifecycle_bump() {
+    let _g = lifecycle_gen_test_lock();
+    let store = CountingSecretStore::with_seeded_pack_secrets();
+    let at = pack_lifecycle_generation();
+    // Force generation change so entry fence aborts without resume work.
+    bump_pack_lifecycle_generation();
+    let decision = evaluate_promote_flight_attempt(
+        &store,
+        at,
+        None,
+        None,
+        0,
+        4,
+        true,
+        Some(false),
+    );
+    assert_eq!(decision, PromoteFlightDecision::AbortLifecycleChanged);
+    // No Keychain work after abort.
+    assert!(
+        store.get_accounts().is_empty(),
+        "abort before pack step must not touch Keychain, got {:?}",
+        store.get_accounts()
+    );
+}
+
+
+/// Scheduler commit boundary: generation bump during stop/port-wait must not
+/// invoke governed start (Codex residual — fence after wait, before spawn).
+#[test]
+fn promote_commit_aborts_if_generation_bumps_during_stop_wait() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let _g = lifecycle_gen_test_lock();
+
+    let at = pack_lifecycle_generation();
+    let started = AtomicBool::new(false);
+    let stop_calls = AtomicUsize::new(0);
+    let wait_calls = AtomicUsize::new(0);
+
+    let result = promote_commit_after_stop_wait_detailed(
+        at,
+        || {
+            stop_calls.fetch_add(1, Ordering::SeqCst);
+        },
+        || {
+            wait_calls.fetch_add(1, Ordering::SeqCst);
+            // Simulate Enable/disable/uninstall advancing generation while
+            // the shell waits for the Direct child port to release.
+            bump_pack_lifecycle_generation();
+        },
+        || {
+            started.store(true, Ordering::SeqCst);
+            Ok("must-not-run".into())
+        },
+    );
+
+    assert_eq!(result, Err(PromoteCommitError::LifecycleChangedAfterStop));
+    assert_eq!(stop_calls.load(Ordering::SeqCst), 1, "stop must run");
+    assert_eq!(wait_calls.load(Ordering::SeqCst), 1, "wait must run");
+    assert!(
+        !started.load(Ordering::SeqCst),
+        "governed start must not run after generation bump in stop/wait gap"
+    );
+}
+
+/// Happy commit path: matching generation after stop/wait allows spawn.
+#[test]
+fn promote_commit_proceeds_when_generation_stable() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let _g = lifecycle_gen_test_lock();
+
+    let at = pack_lifecycle_generation();
+    let started = AtomicBool::new(false);
+    let result = promote_commit_after_stop_wait_detailed(
+        at,
+        || {},
+        || {},
+        || {
+            started.store(true, Ordering::SeqCst);
+            Ok("governed-ok".into())
+        },
+    );
+    assert_eq!(result, Ok("governed-ok".into()));
+    assert!(started.load(Ordering::SeqCst));
+}
+
+/// Post-pack generation mismatch is AbortLifecycleChanged, never WaitNotReady
+/// (Copilot: treat lifecycle bump as hard abort, not transient readiness).
+#[test]
+fn post_pack_gen_mismatch_classifies_as_abort_not_wait() {
+    let decision = classify_post_pack_promote_decision(
+        1,
+        2, // generation advanced after pack step
+        true,
+        true,
+        Some("would look like pack not ready".into()),
+    );
+    assert_eq!(decision, PromoteFlightDecision::AbortLifecycleChanged);
+
+    // Same gen, pack not ready → WaitNotReady (transient).
+    let wait = classify_post_pack_promote_decision(5, 5, false, true, Some("pack cold".into()));
+    assert_eq!(
+        wait,
+        PromoteFlightDecision::WaitNotReady {
+            reason: Some("pack cold".into())
+        }
+    );
+
+    // Same gen, ready → ReadyToPromote.
+    assert_eq!(
+        classify_post_pack_promote_decision(5, 5, true, true, None),
+        PromoteFlightDecision::ReadyToPromote
+    );
+}
+
+/// Commit-boundary wait port must track config.server_port when set.
+#[test]
+fn promote_port_release_target_uses_configured_server_port() {
+    assert_eq!(promote_port_release_target(Some(9999), 8765), 9999);
+    assert_eq!(promote_port_release_target(None, 8765), 8765);
+    assert_eq!(promote_port_release_target(Some(18080), 8765), 18080);
+}
+
+/// Post-stop lifecycle abort recovery: pack still enabled → fresh governed, not pin Direct.
+#[test]
+fn after_stop_lifecycle_recovery_prefers_governed_when_pack_enabled() {
+    assert_eq!(
+        promote_after_stop_lifecycle_recovery(true),
+        AfterStopLifecycleRecovery::AttemptGovernedFresh
+    );
+    assert_eq!(
+        promote_after_stop_lifecycle_recovery(false),
+        AfterStopLifecycleRecovery::RestoreDirect
+    );
+}
+
+/// Disable/Stop/Uninstall during the stop/wait window clears enablement; recovery
+/// must use the **current** flag (false → RestoreDirect), not the attempt-start
+/// snapshot that was true when ReadyToPromote was decided (Bugbot triage 2).
+#[test]
+fn disable_during_stop_window_yields_restore_direct() {
+    // Attempt-start persisted was true (else we never commit). Concurrent
+    // disable rewrites via_gateway_default=false; shell re-reads that value.
+    let attempt_start_enabled = true;
+    let current_enabled_after_concurrent_disable = false;
+    assert_ne!(
+        attempt_start_enabled, current_enabled_after_concurrent_disable,
+        "scenario: enablement flipped during stop/wait"
+    );
+    assert_eq!(
+        promote_after_stop_lifecycle_recovery(current_enabled_after_concurrent_disable),
+        AfterStopLifecycleRecovery::RestoreDirect,
+        "current disablement must RestoreDirect, not AttemptGovernedFresh"
+    );
+    // Contrast: if shell wrongly used attempt-start true, recovery would be wrong.
+    assert_eq!(
+        promote_after_stop_lifecycle_recovery(attempt_start_enabled),
+        AfterStopLifecycleRecovery::AttemptGovernedFresh,
+        "stale true would incorrectly prefer governed — production must not pass this"
+    );
+}
+
+/// Pre-stop vs post-stop lifecycle errors are distinct (Bugbot: shell must know
+/// whether Council was already torn down).
+#[test]
+fn lifecycle_changed_error_distinguishes_pre_and_post_stop() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _g = lifecycle_gen_test_lock();
+    let at = pack_lifecycle_generation();
+
+    // Pre-stop: bump before stop runs.
+    bump_pack_lifecycle_generation();
+    let pre = promote_commit_after_stop_wait_detailed(
+        at,
+        || panic!("stop must not run on pre-stop lifecycle abort"),
+        || panic!("wait must not run on pre-stop lifecycle abort"),
+        || panic!("spawn must not run"),
+    );
+    assert_eq!(pre, Err(PromoteCommitError::LifecycleChangedBeforeStop));
+
+    // Post-stop: bump during wait after stop.
+    let at2 = pack_lifecycle_generation();
+    let stops = AtomicUsize::new(0);
+    let post = promote_commit_after_stop_wait_detailed(
+        at2,
+        || {
+            stops.fetch_add(1, Ordering::SeqCst);
+        },
+        || {
+            bump_pack_lifecycle_generation();
+        },
+        || panic!("spawn must not run on post-stop lifecycle abort"),
+    );
+    assert_eq!(post, Err(PromoteCommitError::LifecycleChangedAfterStop));
+    assert_eq!(stops.load(Ordering::SeqCst), 1);
+}
+
+/// Early abort: generation already stale before stop — no stop/wait/spawn.
+#[test]
+fn promote_commit_early_aborts_before_stop_when_generation_stale() {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    let _g = lifecycle_gen_test_lock();
+
+    let at = pack_lifecycle_generation();
+    bump_pack_lifecycle_generation();
+    let stop_calls = AtomicUsize::new(0);
+    let started = AtomicBool::new(false);
+    let result = promote_commit_after_stop_wait_detailed(
+        at,
+        || {
+            stop_calls.fetch_add(1, Ordering::SeqCst);
+        },
+        || {},
+        || {
+            started.store(true, Ordering::SeqCst);
+            Ok("no".into())
+        },
+    );
+    assert_eq!(result, Err(PromoteCommitError::LifecycleChangedBeforeStop));
+    assert_eq!(stop_calls.load(Ordering::SeqCst), 0);
+    assert!(!started.load(Ordering::SeqCst));
 }

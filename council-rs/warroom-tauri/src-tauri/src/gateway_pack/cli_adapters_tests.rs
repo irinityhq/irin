@@ -51,8 +51,20 @@ fn const_time_eq_and_proxy_auth() {
     assert!(check_proxy_auth(&tok, Some(&tok)));
     assert!(!check_proxy_auth(&tok, Some("Bearer wrong")));
     assert!(!check_proxy_auth(&tok, None));
-    // Empty expected → open (loopback-only policy mirrors Python tools).
-    assert!(check_proxy_auth("", None));
+    // Empty expected → fail closed (matches ensure_one / spawn refuse).
+    assert!(!check_proxy_auth("", None));
+    assert!(!check_proxy_auth("", Some("Bearer anything")));
+}
+
+#[test]
+fn check_proxy_auth_empty_expected_never_opens() {
+    // Shared helper must refuse empty expected tokens regardless of header shape.
+    for header in [None, Some(""), Some("Bearer "), Some("Bearer x")] {
+        assert!(
+            !check_proxy_auth("", header),
+            "empty expected must refuse header={header:?}"
+        );
+    }
 }
 
 /// F1: bind contract matches source-runtime `--bind 0.0.0.0` (not loopback).
