@@ -148,7 +148,7 @@ and schema version defaults.
 Before changing persistence:
 
 ```bash
-cargo test --all-targets
+cargo test -p council-rs --all-targets
 python3 tests/validate_session.py --strict
 python3 tests/validate_index.py --strict
 ```

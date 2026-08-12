@@ -28,8 +28,9 @@ Council calls. The armable surface is the **Watch producer**: the Gateway
 sidecar process that can promote a recorded Sentinel fire into the dispatcher,
 potentially causing paid Council work and a signed Outbox directive.
 
-The default runtime is deliberately inert: one test Sentinel is loaded, while
-the dispatcher and producer are both disabled. Loading a Sentinel definition,
+The default runtime is deliberately inert: it loads no Sentinel profile, and
+the dispatcher and producer stay disabled. Only the canary overlay pins a
+committed test profile. Loading a Sentinel definition,
 enabling the dispatcher, enabling the producer's boot gate, and completing the
 hardware-backed producer ceremony are distinct controls. Do not treat any one
 flag as permission to activate the complete lane:

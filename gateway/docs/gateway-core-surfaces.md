@@ -58,7 +58,8 @@ Council↔Gateway wire contract, and [`watch-api.md`](watch-api.md) for Watch.
   admin-tier `X-Admin-Key` (401/403 as above). Body `caller_key` is stored
   audit identity, not authorization. Internal OpenResty writers must send that
   header and treat any non-2xx status as failure — a decoded error JSON body
-  alone is not success.
+  alone is not success. The edge reads the key from `LEDGER_ADMIN_KEY`
+  (`ADMIN_KEY` is the accepted alias); an empty value fails every write closed.
 - Chain verification is **pinned** to the configured signing keys: the trust set
   starts as the active verifying key plus the optional
   `LEDGER_OLD_SIGNING_KEY_PATH` rotation key, and expands only through

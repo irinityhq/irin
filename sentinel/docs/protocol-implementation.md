@@ -81,9 +81,11 @@ The conformance tests cover these fail-closed edges as well as the nominal RFC
 
 - Golden cases embedded (`directive_fence_cases.json` / `fence_vectors`).
 - Shared by the **council-rs emitter** and **gateway receiver** fences.
-- Cases cover padded verbs that must not be trimmed, the Act tenant pin
-  (`scope.tenant` must match the expected tenant), and rejection classes for
-  `proposal.v1`.
+- Reject cases cover the verb allowlist, the closed top-level keyset, and the
+  closed scope keyset of `irin.directive.proposal.v1`. A whitespace-padded verb
+  stays a reject because neither fence trims. Every Act case sets `scope.tenant`
+  to the case `tenant`, so the gateway-only `scope.tenant == expected_tenant`
+  check is not exercised by this corpus.
 - The authoritative cases are
   [`fence_vectors.rs`](../sovereign-protocol/src/fence_vectors.rs); the
   [`fence_vectors_golden.rs`](../sovereign-protocol/tests/fence_vectors_golden.rs)

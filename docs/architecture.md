@@ -3,8 +3,8 @@
 IRIN is a local-first, single-operator product. This document maps how War
 Room, Council, Direct provider transport, Gateway, and the optional Sentinel
 lane fit together, and separates artifacts that are easy to conflate:
-source receipts, precedent `RetrievalReceipt`s, the signed Gateway audit
-ledger, Watch, and signed Outbox directives.
+precedent `RetrievalReceipt`s, the signed Gateway audit ledger, Watch, and
+signed Outbox directives.
 
 ## Product shape
 
@@ -111,16 +111,10 @@ Discover also reports, per transport, whether Gateway has an adapter for it.
 An installed transport can be available for Direct mode but marked "Direct
 only" if Gateway has no adapter for it.
 
-## Source receipts, RetrievalReceipts, audit ledger, Watch, and Outbox
+## RetrievalReceipts, audit ledger, Watch, and Outbox
 
-These five artifacts are easy to conflate and are architecturally distinct:
+These four artifacts are easy to conflate and are architecturally distinct:
 
-- **Source receipt.** Written by the runtime controller
-  (historical source-runtime path, retired) to a local state file
-  each time the canonical runtime starts. It records the exact Git origin,
-  branch, commit SHA, and tree cleanliness of the checkout that owns the
-  running services so operators can detect drift between the
-  checkout and what is actually running.
 - **Precedent `RetrievalReceipt`.** A frozen, in-process result of one
   precedent-index retrieval (`council-rs/src/precedent/mod.rs`), carrying
   the ranker identity (`hybrid-v1` or `keyword-v1`), the query, and each

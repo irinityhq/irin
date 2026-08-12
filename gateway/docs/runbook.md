@@ -65,7 +65,10 @@ curl -fsS -X POST http://127.0.0.1:18080/admin/keys \
   -d "{\"budget_key\":\"operator\",\"tier\":\"admin\",\"rpm\":1000,\"admin_key\":\"$BOOTSTRAP_TOKEN\"}"
 ```
 
-The raw key is returned once. Store it outside the repository. Before retiring
+The raw key is returned once. Store it outside the repository. Also set it as
+`LEDGER_ADMIN_KEY` in `~/.config/irin/gateway.env` so OpenResty can write
+governed-call audit rows; `make gateway-prepare-config` leaves that field empty
+because it needs a provisioned admin-tier key. Before retiring
 the one-time bootstrap credential, ensure the private runtime environment has a
 non-empty `WATCH_ADMIN_TOKEN`; `make gateway-prepare-config` generates this separate
 credential automatically. After at least two admin keys exist, remove

@@ -56,6 +56,7 @@ JSON, and validation types used by Council and Gateway.
 ## Documentation
 
 - [`COMMS_CONTRACT.md`](COMMS_CONTRACT.md)
+- [`docs/protocol-implementation.md`](docs/protocol-implementation.md)
 - [`docs/runbooks/arm-producer.md`](docs/runbooks/arm-producer.md)
 - [`docs/runbooks/disarm-producer.md`](docs/runbooks/disarm-producer.md)
 

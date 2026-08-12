@@ -52,7 +52,7 @@ IRIN_DYLINT_FAIL=1 ./scripts/run-dylint.sh
 Direct `cargo dylint` (after the package builds):
 
 ```bash
-cargo dylint --path tools/dylint/irin-crypto-lints -- --all-targets
+cargo dylint --path tools/dylint/irin-crypto-lints -- --workspace
 ```
 
 This package is **not** a member of the root Cargo workspace (`[workspace]` is empty here) so a missing dylint toolchain does not break `make build` / `make test`.
