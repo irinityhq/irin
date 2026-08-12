@@ -19,7 +19,7 @@ Optional, app-owned Gateway runtime for the installed Apple-silicon DMG.
 | --- | --- | --- | --- |
 | xAI / OpenAI / Anthropic / NVIDIA API keys | Supported when login-shell provider env is present | Supported | Keys injected only by native code into app-owned 0600 runtime files; never from the renderer |
 | Vertex / gcloud ADC | **Not supported** | Supported when host ADC is available | No host `~/.config/gcloud` mount; keep Vertex Direct-only |
-| Claude CLI / Codex CLI proxies | **Not supported** | Supported when CLIs are installed/authenticated | DMG does not install or authenticate those CLIs |
+| Claude CLI / Codex CLI proxies | Supported when the operator's `claude` / `codex` CLI is installed and authenticated | Supported when CLIs are installed/authenticated | Enable starts app-owned host adapters; disable/uninstall stops them. Adapter tokens stay in Keychain and ride the per-spawn Compose env only. DMG does not install or authenticate those CLIs; a missing or unauthenticated CLI leaves that route empty (Gateway stays fail-closed) and does not abort Enable |
 | Watch producer / dispatcher | Off at boot; only the producer is armable, via the app's Touch ID ceremony | N/A | Producer and dispatcher are forced `false` at boot in every pack path. Enroll, rehearse, and arm run from Settings (see `gateway/docs/runbooks/arming-authorization.md`, "Desktop Touch ID bridge"); the completed ceremony arms the producer by writing the signed `active_arm` that spend requires. The dispatcher is a separate env gate the ceremony does not touch |
 | Watch sentinels (profile) | Supported: bundled default profile, toggled from the Watch view | N/A | Off until the operator flips **Watch sentinels** on. On installs the bundled template into app-owned state and recreates the pack under the lifecycle lock so the sidecar reads `SENTINELS_CONFIG_PATH`; off removes the file and recreates back to zero sentinels. Zero sentinels is the normal healthy quiet state. Registering sentinels does not arm the producer or dispatcher |
 
@@ -31,7 +31,11 @@ build time (gitignored staging):
 - `docker-compose.yml` — no `build:` directives, no `${HOME}` mounts
 - `nginx.conf`, `conf/`, `lua/` — runtime-only copies from `gateway/`
 - `image-manifest.json` — **production** must use exact `name@sha256:digest`
-  refs for gateway, sidecar, and third-party base images
+  refs for gateway, sidecar, and third-party base images. The production
+  manifest is generated from published GHCR refs by
+  `scripts/generate-production-manifest.sh`;
+  `image-manifest.production.example.json` records its shape and is never
+  staged
 - `default-sentinels.yaml` — bundled default watch profile template (one
   `file-inbox-watch` sentinel on the `canary` tenant). Staging refuses a pack
   whose template drops either pin. It is only a template: nothing is installed
@@ -131,6 +135,11 @@ changes.
   error rather than reporting a clean uninstall while secrets remain.
 - The app's Docker config is a managed minimal file (plugin hints only,
   0600). No operator registry credentials are read or copied.
+- The Claude/Codex CLI adapters bind `0.0.0.0` so the pack container can reach
+  them through `host.docker.internal`. Keep ports 9090 and 9091 on a trusted
+  private host. Do not forward them. The request token does not make a
+  host-wide listener local. Every request requires the adapter's
+  Keychain-held token, and an adapter refuses to listen without one.
 - The Watch producer, the dispatcher, and the Council-spend token are
   force-disarmed on every spawn, applied last so no earlier layer can re-arm
   them. The watch-admin read token is not disarmed there: it is a

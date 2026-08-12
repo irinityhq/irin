@@ -184,12 +184,13 @@ detail, including the model pin and fallback order: [`council-rs/docs/providers.
 
 Gateway ships deterministic Sentinels (file inbox, silence, queue depth,
 watch health, ledger delta, anomaly, and more) that can escalate observed
-evidence toward Council. The canonical runtime loads one test Sentinel and
-keeps the watch producer and any action path disabled — ordinary
-deliberation never creates a signed Outbox directive, and enabling a
-Sentinel does not enable the producer or arm anything. Gateway itself does not
-need arming for normal governed calls: the hardware ceremony specifically arms
-the Watch producer, which may cause paid Council work and a signed directive.
+evidence toward Council. The canonical runtime loads no Sentinel profile —
+only the canary overlay pins a committed test profile — and keeps the watch
+producer and any action path disabled. Ordinary deliberation never creates a
+signed Outbox directive, and enabling a Sentinel does not enable the producer
+or arm anything. Gateway itself does not need arming for normal governed calls:
+the hardware ceremony specifically arms the Watch producer, which may cause paid
+Council work and a signed directive.
 Authenticated worker-management routes are mounted, but the built-in worker
 loop that uses them is disabled by default and is not presented as an
 operator-ready autonomous execution path. See
@@ -236,7 +237,9 @@ The worktree gets isolated ports and its own Docker project name. See
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) — War Room, Council,
-  Direct/Gateway, source receipts, precedent retrieval, Watch, and Outbox.
+  Direct/Gateway, precedent retrieval, Watch, and Outbox.
+- [`docs/surface-map.md`](docs/surface-map.md) — compact index of Watch,
+  Gateway core, and protocol surfaces, with their defaults and guards.
 - [`docs/cross-process-boundaries.md`](docs/cross-process-boundaries.md) —
   process/language boundary inventory (Lua↔sidecar, governed headers, spawn env).
 - [`docs/security-tooling.md`](docs/security-tooling.md) — local scanners,

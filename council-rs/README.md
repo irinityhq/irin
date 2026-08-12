@@ -28,14 +28,8 @@ Provider calls may incur cost. Use a deterministic smoke or the root
 
 ## War Room
 
-On macOS, the canonical local runtime starts Council on `127.0.0.1:8765` and
-War Room Web on `127.0.0.1:3010`:
-
-```bash
-make warroom
-```
-
-On macOS or Ubuntu, the foreground browser-only path is:
+On macOS or Ubuntu, `make warroom` runs the foreground browser path: Council on
+`127.0.0.1:8765` and War Room Web on `127.0.0.1:3010`.
 
 ```bash
 make warroom

@@ -29,6 +29,7 @@ env/spawn contracts that cannot consume Rust types.
 | **B3** | War Room web ↔ Council | `council-rs/warroom/web/` ↔ `council-rs/src/server/*` | REST JSON + WebSocket (defaults `http://127.0.0.1:8765` / `ws://…`) | [`architecture.md`](architecture.md); route inventory is code-first | Strongest auto-extracted contract surface (HTTP/WS); body shapes not validated by extraction | Client+server pairs for critical routes; body rules only if a concrete drift class appears |
 | **B4** | warroom-tauri ↔ council spawn | `council-rs/warroom-tauri/src-tauri/src/sidecar.rs` → `council --serve` | **Env contract** (not HTTP): CORS, auth token / dev no-auth, `COUNCIL_VIA_GATEWAY`, scrub/re-inject of gateway keys, optional `LIBRARIAN_BASE_URL` | Rustdoc on `sidecar.rs`; warroom-tauri README; `council-rs/warroom/docs/TAURI-AUTH.md` | Scrub-key list is stringly; structural invariants (scrub-before-reinject, governed requires a creds path) pinned by Opengrep `rust-tauri-spawn-env.yaml`; list completeness still relies on review + unit tests | Scrub list complete before governed re-inject; unit tests remain behavior SSOT |
 | **B5** | Outbox / Watch / envelopes | Gateway watch + outbox; types in **sovereign-protocol**; council also consumes the crate | Signed envelopes + `/watch/outbox/*` HTTP; Lua proxies many watch routes **opaquely** | [`COMMS_CONTRACT.md`](../sentinel/COMMS_CONTRACT.md), surface-map Watch section | Not “missing IDL” — non-Rust peers and HTTP surface drift | Keep sovereign-protocol tests + formal JCS checks; no new envelope IDL; HTTP allowlists at the Lua edge only if needed |
+| **B6** | Desktop app ↔ Gateway Pack containers | `council-rs/warroom-tauri/src-tauri/src/docker_cli.rs` and `src/gateway_pack/` ↔ `packaging/gateway-pack/docker-compose.yml` | **Docker CLI argv + env contract** (not HTTP): allow-listed `docker` binaries, fixed compose project `irin-desktop-gateway`, and an absolute `--env-file`. Each spawn scrubs ambient secrets first, then applies the validated env. Last, it forces the Watch producer, the dispatcher, and the Council-spend token off. `WATCH_ADMIN_TOKEN` is not disarmed: it is a Keychain-held read token admitted through the secret env after ambient copies are scrubbed. Keychain holds `GW_API_KEY`, `AUTH_PEPPER`, `WATCH_ADMIN_TOKEN`, the arm-principal token, and both CLI adapter tokens. Secrets never reach the public env file | [`packaging/gateway-pack/README.md`](../packaging/gateway-pack/README.md); rustdoc on `docker_cli.rs` and `gateway_pack/mod.rs` | Compose variable names are stringly; no static rule pins the compose interpolation set to its Rust writers. Behavior SSOT is the `gateway_pack` unit tests plus `scripts/test-gateway-pack-*.sh` | (1) Every interpolated compose variable has a Rust writer. (2) Ambient secrets scrubbed before each Docker call. (3) Producer, dispatcher, and Council-spend token forced off last |
 
 ## Static enforcement status
 
@@ -43,7 +44,9 @@ three priorities:
    Council→Gateway required headers in `gateway.rs`.
 
 B3 stays on e2e + extracted contracts unless a body-schema gap shows up. B5
-stays on sovereign-protocol + existing formal/scanner coverage.
+stays on sovereign-protocol + existing formal/scanner coverage. B6 stays on
+`gateway_pack` unit tests and the `scripts/test-gateway-pack-*.sh` suites; add a
+rule only if a compose-variable drift class actually appears.
 
 ## Covered vs not (sovereign-protocol)
 
@@ -53,7 +56,8 @@ stays on sovereign-protocol + existing formal/scanner coverage.
 | JCS + selective formal proofs | **B2** provider HTTP headers / OpenAI-shape bodies |
 | Fence golden vectors (council ↔ gateway) | **B3** War Room TS REST/WS JSON |
 | Provenance / CapabilityToken / ProblemDetails | **B4** Tauri→council env spawn |
-| Cargo consumers: `gateway-sidecar`, `council-rs` | Lua proxies that forward watch/outbox without parsing envelopes |
+| Cargo consumers: `gateway-sidecar`, `council-rs` | **B6** Desktop→Docker Compose argv and pack env |
+| | Lua proxies that forward watch/outbox without parsing envelopes |
 
 ## Related
 

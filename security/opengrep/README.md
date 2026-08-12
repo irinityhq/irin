@@ -6,7 +6,7 @@ auth compares, and Lua credential scrub paths.
 ## Run
 
 ```bash
-make tools            # cargo-deny + opengrep into .irin-tools/bin (gitignored)
+make tools            # cargo-deny, opengrep, selene, actionlint into .irin-tools/bin (gitignored)
 make lint-security    # advisory scan (exit 0 with findings)
 # or:
 scripts/run-opengrep.sh
@@ -44,7 +44,7 @@ Cross-process boundary contracts (rule families, one rule per required element):
 | --- | --- | --- |
 | `irin.lua.sidecar-path-allowlist`, `irin.lua.sidecar-*-key-*` | lua | Lua `sidecar_post` path allowlist plus the required body keys on `/auth/check`, `/guard/input`, and `/budget/check` |
 | `irin.rust.council-gateway-header-*` | rust | Required `X-Council-*`, `X-Sensitivity-Level`, and `Authorization` headers on the governed Council-to-Gateway POST |
-| `irin.rust.tauri-governed-reinject-requires-scrub`, `irin.rust.tauri-governed-requires-creds-param` | rust | Scrub-before-reinject and creds-param invariants on the Tauri Council spawn env |
+| `irin.rust.tauri-governed-*` | rust | Scrub-before-reinject, creds-param, and no-literal-gateway-env invariants on the Tauri Council spawn env |
 
 Prefer `subtle::ConstantTimeEq` and `admin_token_matches` /
 `ArmPrincipals::authenticate` over raw string equality for secrets.
@@ -55,3 +55,5 @@ Prefer `subtle::ConstantTimeEq` and `admin_token_matches` /
 - Noise is expected on intentional storage of **public** key/signature hex;
   tune rules rather than disabling the scan.
 - Binary is checksum-pinned in `scripts/bootstrap-dev-tools.sh` (v1.26.0).
+- `fixtures/` holds should-fire / should-not-fire cases for the boundary-contract
+  rule families. `scripts/test-opengrep-fixtures.sh` asserts them.

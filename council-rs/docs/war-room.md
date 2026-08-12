@@ -45,12 +45,13 @@ implementation layer; the sole production IRIN.app factory is
 make -C council-rs warroom-dev
 ```
 
-For browser-only development without the root launcher:
+For browser-only development without the root launcher, from the repository
+root:
 
 ```bash
-cargo build --release
-./target/release/council --base-dir . --serve --port 8765
-cd warroom/web
+cargo build --release -p council-rs --bin council
+./target/release/council --base-dir council-rs --serve --port 8765
+cd council-rs/warroom/web
 npm ci
 npm run dev:local
 ```
@@ -70,7 +71,11 @@ War Room exposes these primary workflows:
 - **Discover** scans exact provider transports. It shows unavailable paths for
   setup guidance while cabinet, fork, and validator selectors disable them.
 - **Cabinets** reads and edits local cabinet YAML.
+- **Patterns** reads the intervention log and convergence trends across saved
+  sessions.
 - **Drift** compares normal and blind reruns.
+- **Meta-review** reads and reruns the self-audit report over the drift and
+  intervention record.
 - **Librarian** proxies an optional separately configured local service.
 - **Settings** owns runtime endpoints, auth, and app controls.
 
@@ -89,7 +94,10 @@ include:
 - `POST /api/cabinets/save`
 - `POST /api/deliberate`
 - `GET /api/sessions`
+- `POST /api/sessions/{id}/fork`
 - `GET /api/precedent`
+- `GET /api/patterns`
+- `GET /api/interventions`
 - `/api/drift/*`
 - `/api/mapmaker/*`
 - `/api/meta-review/*`

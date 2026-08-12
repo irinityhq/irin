@@ -203,7 +203,7 @@ the caller's expected shape via the Rosetta layer).
 
 Streaming is gated by `GW_ENABLE_STREAMING=1` (default off). When enabled,
 Phase 2 supports SSE for all providers via a provider-aware SSE parser
-(`lib/sse.lua`). Anthropic and Vertex streams are translated chunk-by-chunk
+(`lua/lib/sse.lua`). Anthropic and Vertex streams are translated chunk-by-chunk
 to OpenAI SSE shape in `body_filter_by_lua_block`. `claude-cli` returns `501`
 (CLI pipe, not SSE). See the *Streaming (Phase 2)* section below for the
 full contract.
@@ -408,7 +408,7 @@ The `GUARD_DRY_RUN=1` env var overrides the file's `dry_run` field.
 
 ### Ledger verification CLI
 
-Standalone binary (`src/bin/gateway_ledger.rs`), three subcommands:
+Standalone binary (`sidecar-rs/src/bin/gateway_ledger.rs`), three subcommands:
 
 **`gateway-ledger verify <db-path> --key <path> [--old-key <path>]`** — hash
 chain + Ed25519 signature check against the configured trust set. `--key` is

@@ -92,8 +92,9 @@ Keychain, or a separate phone app.
 3. Confirm the app reports a healthy app-owned Council backend.
 4. Open Watch and Outbox; both load through the Council API without a browser
    Gateway credential.
-5. Tray **Convene** focuses Deliberate view; if Council is unavailable, recover
-   it from the installed app lifecycle or the IRIN checkout.
+5. Tray **Open War Room** shows and focuses the window; if Council is
+   unavailable, recover it from the installed app lifecycle or the IRIN
+   checkout.
 6. Run **Checklist Duo** (1 round) → synthesis → **Export PDF** → native OS save
    dialog; file lands where chosen.
 

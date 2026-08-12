@@ -26,10 +26,15 @@ does not claim that a credential is authenticated.
 | `openai_api` | OpenAI Responses API | `OPENAI_API_KEY` |
 | `gemini_agy` | Gemini through `agy` | Authenticated `agy` CLI |
 | `gemini_vertex` | Gemini through Vertex AI | Google ADC and Vertex routing settings |
-| `gemini_cli` | Legacy Gemini CLI | Authenticated `gemini` CLI |
+| `gemini_cli` | Gemini CLI — retired, no longer supported; use `gemini_agy` | Authenticated `gemini` CLI |
 | `nvidia`, `nim` | NVIDIA NIM API | `NVIDIA_API_KEY` |
 | `nous` | Nous OpenAI-compatible API | `NOUS_API_KEY` |
 | `deepseek` | Native or compatible API | `DEEPSEEK_API_KEY`, or a configured NIM/Nous model |
+
+Discovery also recognises additional OpenAI-compatible API seats from their
+keys alone: `mistral`, `groq`, `perplexity`, `together`, `cohere`, `fireworks`,
+`openrouter`, `kimi` (`MOONSHOT_API_KEY`), `sambanova`, and `cerebras`. Local
+`ollama`, `lmstudio`, and `localai` endpoints are detected without a key.
 
 One seat ID always means one transport. Selecting a model must not silently
 switch from a subscription CLI to a paid API or from Grok Build to Hermes.
@@ -119,16 +124,17 @@ export NOUS_API_KEY=<value>
 export DEEPSEEK_API_KEY=<value>
 
 # Vertex seats use your existing Google ADC login plus these routing settings.
+# GOOGLE_CLOUD_PROJECT and GOOGLE_CLOUD_LOCATION are accepted alternatives, and
+# the project also falls back to `gcloud config get-value project`.
 export VERTEX_PROJECT=<project-id>
 export VERTEX_LOCATION=global
-export VERTEX_GEMINI_MODEL=<model-id>
 ```
 
-Restart the canonical runtime after changing provider configuration:
+The Vertex model is not an environment variable: `gemini_routing.yaml` owns
+`default_model` and the per-model generation config.
 
-```bash
-relaunch `make warroom` or IRIN.app
-```
+Restart the canonical runtime after changing provider configuration — relaunch
+`make warroom` or IRIN.app.
 
 ## Smoke Calls
 

@@ -66,9 +66,10 @@ time. See the detailed [Watch HTTP API](../gateway/docs/watch-api.md).
 | Spend ceiling | Code day-cap ceiling is $50/day; `DAILY_SPEND_CAP_USD` may only lower it. Per-directive reservation code default is $5 (`WATCH_MAX_FANOUT_COST_USD`). The canonical pack compose sets $25/day and a $2.50 fanout reserve. These are ex-ante reservations with flagged overshoot on settle, not a post-hoc un-spend of accepted work. |
 | Signed spend window | Locked by the hardware ceremony and not extendable by an environment change after confirmation. |
 
-Host helpers include `gateway/bin/arm`, `disarm`, `arm-enroll`,
-`arm-enroll-fido2`, `arm-attest`, and `verify-attest-keyset-hash`. The complete
-operator procedure is [Arming and authorization](../gateway/docs/runbooks/arming-authorization.md).
+Host helpers include `gateway/bin/arm`, `disarm`, `arm-rehearse`, `arm-enroll`,
+`arm-enroll-fido2`, `arm-attest.swift`, and `verify-attest-keyset-hash`. The
+complete operator procedure is
+[Arming and authorization](../gateway/docs/runbooks/arming-authorization.md).
 
 ### Stock Sentinels
 
@@ -144,10 +145,11 @@ and frozen [`COMMS_CONTRACT.md`](../sentinel/COMMS_CONTRACT.md).
 
 - Watch route mounting: [`gateway/sidecar-rs/src/routes/mod.rs`](../gateway/sidecar-rs/src/routes/mod.rs)
 - Boot gates and sentinel-config policy: [`gateway/sidecar-rs/src/boot.rs`](../gateway/sidecar-rs/src/boot.rs)
-- Watch handlers and arm ceremony: [`gateway/sidecar-rs/src/watch/api.rs`](../gateway/sidecar-rs/src/watch/api.rs)
+- Watch handlers: [`gateway/sidecar-rs/src/watch/api/`](../gateway/sidecar-rs/src/watch/api) — list, temperature, and verify-chain in `status.rs`; audit, stats, and UI snapshot in `stats.rs`; Outbox admin in `outbox_admin.rs`
+- Arm ceremony: [`gateway/sidecar-rs/src/watch/api/arming.rs`](../gateway/sidecar-rs/src/watch/api/arming.rs)
 - Producer startup and writer lifecycle: [`gateway/sidecar-rs/src/watch/runner.rs`](../gateway/sidecar-rs/src/watch/runner.rs)
 - Built-in worker loop: [`gateway/sidecar-rs/src/watch/worker.rs`](../gateway/sidecar-rs/src/watch/worker.rs)
-- Spend authorization and Outbox storage: [`gateway/sidecar-rs/src/watch/db.rs`](../gateway/sidecar-rs/src/watch/db.rs)
+- Spend authorization and Outbox storage: [`gateway/sidecar-rs/src/watch/db/`](../gateway/sidecar-rs/src/watch/db) — claim/reserve/settle in `claims_spend.rs`, Outbox rows in `outbox_store.rs`, caps in `config.rs`
 - Quarantine state machine: [`gateway/sidecar-rs/src/watch/quarantine.rs`](../gateway/sidecar-rs/src/watch/quarantine.rs)
 - Shared protocol source and conformance tests: [`sentinel/sovereign-protocol`](../sentinel/sovereign-protocol)
 

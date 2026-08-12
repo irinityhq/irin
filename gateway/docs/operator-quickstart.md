@@ -56,10 +56,16 @@ The response displays the raw caller key once. Store it in a private operator
 credential store. Subsequent key creation should use an existing admin key.
 See [`runbook.md`](runbook.md) for rotation and recovery.
 
+Then set `LEDGER_ADMIN_KEY` in `~/.config/irin/gateway.env` to that raw key and
+restart the runtime. OpenResty sends it as `X-Admin-Key` on
+`POST /ledger/record`. While the value is empty the edge logs a warning at
+startup and governed-call ledger writes fail closed. `BOOTSTRAP_TOKEN` does not
+work here; the sidecar requires a provisioned admin-tier key.
+
 ## Sentinels
 
 The runtime loads Sentinel definitions from the file selected by
-`SENTINELS_CONFIG_PATH`. The canonical local profile mounts
+`SENTINELS_CONFIG_PATH`. The canary overlay mounts
 `test/fixtures/canary-sentinels.yaml`, which contains one deterministic
 file-inbox watch. Action production remains disabled by default.
 

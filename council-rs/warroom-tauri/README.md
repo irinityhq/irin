@@ -66,7 +66,7 @@ make -C council-rs warroom-export
 ```bash
 cargo build --release -p council-rs --bin council
 ./target/release/council --base-dir council-rs --serve --port 8765
-cd council-rs/warroom/web && npm run dev
+cd council-rs/warroom/web && npm run dev:local
 ```
 
 See `../docs/war-room.md`.
