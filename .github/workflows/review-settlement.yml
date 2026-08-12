@@ -1,9 +1,12 @@
 name: Review settlement
 
 # Pre-queue review settlement gate (issue #0101 / PR #70 class; #0104–#0106).
-# Fail closed while reviewRequests is nonempty, when a non-dismissed latest
-# review is not bound to the current headRefOid, or when CHANGES_REQUESTED is
-# on head. GraphQL connections are first:100 with pageInfo.hasNextPage; any
+# Fail closed while reviewRequests is nonempty, when a non-dismissed
+# opinionated review (APPROVED / CHANGES_REQUESTED) is not bound to the
+# current headRefOid, or when CHANGES_REQUESTED is active. COMMENTED reviews
+# are advisory and never gate: bots do not re-review every push, so
+# head-binding COMMENTED deadlocks until a nudge commit (PR #73–#87 batch).
+# GraphQL connections are first:100 with pageInfo.hasNextPage; any
 # truncated page fails closed (never SETTLED).
 #
 # Review threads are NOT evaluated here. GitHub emits no supported Actions

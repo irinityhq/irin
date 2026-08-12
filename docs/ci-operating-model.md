@@ -217,9 +217,18 @@ in `scripts/test-ci-control-plane.sh`.
 Fail closed when any of the following hold on the current pull-request head:
 
 - `reviewRequests` is nonempty;
-- a non-dismissed latest review is not bound to the current `headRefOid`
-  (a new commit invalidates prior settlement); or
-- `CHANGES_REQUESTED` is present on the current head.
+- a non-dismissed opinionated review (`APPROVED` / `CHANGES_REQUESTED`) is not
+  bound to the current `headRefOid` (a new commit invalidates prior
+  settlement); or
+- `CHANGES_REQUESTED` is active.
+
+`COMMENTED` reviews are advisory and never gate settlement. Bots do not
+re-review every push, so head-binding `COMMENTED` deadlocks: a stale
+`COMMENTED` review with no pending re-request holds the check red until an
+artificial nudge commit (the PR #73–#87 batch incident). The pending-request
+gate still blocks whenever a re-review is actually in flight, and an active
+`CHANGES_REQUESTED` masked by a later `COMMENTED` still blocks via
+`latestOpinionatedReviews`.
 
 GraphQL `reviewRequests` and `latestReviews` are fetched with `first: 100` and
 must include `pageInfo.hasNextPage`. Any truncated connection fails closed
