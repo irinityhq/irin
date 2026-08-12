@@ -35,6 +35,8 @@ pub use status::{
     invalidate_status_cache, owned_council_route, pack_lifecycle_generation,
     record_owned_council_route,
 };
+#[cfg(test)]
+pub use status::lifecycle_gen_test_lock;
 
 pub use paths::{
     arm_keys_path, bundled_pack_root, ensure_watch_dirs, gateway_data_dir, installed_marker_path,
@@ -64,11 +66,15 @@ pub use launch::{
     frontend_may_start_council, LaunchResumeOutcome,
 };
 pub use launch::{
-    default_secret_store, governed_launch_after_watch_reconciliation, may_promote_to_governed,
-    pack_auth_revalidated, pack_auth_revalidated_with_key, promote_held_secrets_still_valid,
-    promote_may_call_resume, promote_pack_ready_for_attempt, resume_installed_pack,
-    resume_installed_pack_with_key, status_with_council_route, status_with_council_route_with_key,
-    watch_admin_surfaces_authenticated, PromotePackAttempt,
+    classify_post_pack_promote_decision, default_secret_store, evaluate_promote_flight_attempt,
+    governed_launch_after_watch_reconciliation, may_promote_to_governed,
+    pack_auth_revalidated, pack_auth_revalidated_with_key, promote_after_stop_lifecycle_recovery,
+    promote_commit_after_stop_wait_detailed, promote_held_secrets_still_valid,
+    promote_may_call_resume, promote_may_commit_after_pack_ready, promote_pack_ready_for_attempt,
+    promote_port_release_target, resume_installed_pack, resume_installed_pack_with_key,
+    status_with_council_route, status_with_council_route_with_key,
+    watch_admin_surfaces_authenticated, AfterStopLifecycleRecovery, PromoteCommitError,
+    PromoteFlightDecision, PromotePackAttempt,
 };
 
 #[cfg(test)]

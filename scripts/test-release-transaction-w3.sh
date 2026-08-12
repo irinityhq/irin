@@ -466,32 +466,37 @@ grep -q 'snapshot_checkout_control' "$TX" \
 # #0114: empty packaging porcelain makes last [[ -n ]] fail; under set -e the
 # function must still return 0 or prepare-production exits silently after preflight.
 # Executable regression (not source spelling): real helper + clean mocked git status.
-(
-  set -euo pipefail
-  fake_bin="$(mktemp -d)"
-  cat >"$fake_bin/git" <<'GIT'
+# PR #79: do NOT put the subshell on the LHS of || — that disables errexit inside
+# the subshell and false-greens a missing return 0. Use an independent bash -e
+# process so the child keeps set -e while the parent captures status.
+if ! bash -euo pipefail <<EOF
+fake_bin="\$(mktemp -d)"
+cat >"\$fake_bin/git" <<'GIT'
 #!/usr/bin/env bash
 set -euo pipefail
-if [[ "${1:-}" == "rev-parse" && "${2:-}" == "HEAD" ]]; then
+if [[ "\${1:-}" == "rev-parse" && "\${2:-}" == "HEAD" ]]; then
   printf '%s\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
   exit 0
 fi
-if [[ "${1:-}" == "status" ]]; then
+if [[ "\${1:-}" == "status" ]]; then
   # clean porcelain for scripts/ and packaging/
   exit 0
 fi
-printf 'unexpected git invocation: %s\n' "$*" >&2
+printf 'unexpected git invocation: %s\n' "\$*" >&2
 exit 2
 GIT
-  chmod +x "$fake_bin/git"
-  export PATH="$fake_bin:$PATH"
-  # shellcheck disable=SC1090
-  IRIN_RELEASE_TX_LIB=1 source "$TX"
-  snapshot_checkout_control
-  [[ "$CHECKOUT_HEAD" == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]]
-  [[ "$SCRIPTS_DIRTY" == "false" ]]
-  [[ "$PACKAGING_DIRTY" == "false" ]]
-) || fail "snapshot_checkout_control must return 0 under set -e when packaging is clean (#0114)"
+chmod +x "\$fake_bin/git"
+export PATH="\$fake_bin:\$PATH"
+# shellcheck disable=SC1090
+IRIN_RELEASE_TX_LIB=1 source "$TX"
+snapshot_checkout_control
+[[ "\$CHECKOUT_HEAD" == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]]
+[[ "\$SCRIPTS_DIRTY" == "false" ]]
+[[ "\$PACKAGING_DIRTY" == "false" ]]
+EOF
+then
+  fail "snapshot_checkout_control must return 0 under set -e when packaging is clean (#0114)"
+fi
 pass "snapshot_checkout_control returns 0 under set -e with clean packaging (#0114)"
 grep -q 'checkout_head' "$TX" || fail "attempt receipt must record checkout_head"
 grep -q 'scripts_dirty' "$TX" || fail "attempt receipt must record scripts_dirty"

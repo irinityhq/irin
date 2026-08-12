@@ -386,10 +386,13 @@ pub fn const_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-/// Parse `X-Proxy-Auth` (optional `Bearer ` prefix). Empty expected token → allow.
+/// Parse `X-Proxy-Auth` (optional `Bearer ` prefix).
+/// Empty expected token → **refuse** (fail closed). Adapter startup already
+/// refuses empty tokens; this matches that gate so a misconfigured listener
+/// never treats "no token" as open auth.
 pub fn check_proxy_auth(expected_token: &str, header_value: Option<&str>) -> bool {
     if expected_token.is_empty() {
-        return true;
+        return false;
     }
     let presented = header_value.unwrap_or("").trim();
     let presented = presented
