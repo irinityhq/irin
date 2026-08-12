@@ -72,51 +72,9 @@ verify_sha256() {
   log "$label SHA-256: receipt match"
 }
 
-macho_inventory() {
-  local app="$1" candidate
-  while IFS= read -r -d '' candidate; do
-    if file -b "$candidate" 2>/dev/null | grep -q '^Mach-O'; then
-      printf '%s\n' "${candidate#"$app"/}"
-    fi
-  done < <(find "$app/Contents" -type f -print0)
-}
-
-assert_expected_macho_inventory() {
-  local app="$1" actual expected
-  actual="$(macho_inventory "$app" | LC_ALL=C sort)"
-  expected="$(printf '%s\n' \
-    'Contents/Helpers/arm-attest' \
-    'Contents/MacOS/council' \
-    'Contents/MacOS/council-warroom-tauri' | LC_ALL=C sort)"
-  [[ "$actual" == "$expected" ]] || {
-    printf 'Expected Mach-O inventory:\n%s\nActual Mach-O inventory:\n%s\n' "$expected" "$actual" >&2
-    die "unexpected Mach-O inventory in the untouched DMG copy"
-  }
-}
-
-verify_developer_id_signature() {
-  local artifact="$1" expected_team="$2" label="$3" details entitlements team
-  codesign --verify --strict "$artifact" \
-    || die "$label failed strict signature verification"
-  details="$(codesign -dv --verbose=4 "$artifact" 2>&1)" \
-    || die "could not inspect $label signature"
-  [[ "$details" == *"Authority=Developer ID Application"* ]] \
-    || die "$label is not signed with Developer ID Application"
-  grep -Eq '^CodeDirectory .*flags=.*runtime' <<<"$details" \
-    || die "$label is missing the Hardened Runtime signature flag"
-  grep -q '^Timestamp=' <<<"$details" \
-    || die "$label is missing a trusted signing timestamp"
-  ! grep -q '^Timestamp=none$' <<<"$details" \
-    || die "$label has no trusted signing timestamp"
-  team="$(awk -F= '$1 == "TeamIdentifier" { print $2; exit }' <<<"$details")"
-  [[ -n "$team" && "$team" == "$expected_team" ]] \
-    || die "$label TeamIdentifier does not match the outer app"
-  entitlements="$(codesign -d --entitlements :- "$artifact" 2>/dev/null || true)"
-  if grep -q '<key>' <<<"$entitlements"; then
-    die "$label contains entitlements, but IRIN declares none; review and document before shipping"
-  fi
-  log "$label signature: Developer ID, runtime, timestamp, TeamIdentifier, no entitlements"
-}
+# Nested DevID / Mach-O inventory (shared with install-verify).
+# shellcheck source=/dev/null
+source "$ROOT/packaging/codesign-identity.sh"
 
 verify_gateway_manifest() {
   local manifest="$1" mode="$2" version="$3" source_sha="$4"
@@ -257,13 +215,7 @@ log "effective_pack_mode=$VERIFY_PACK_MODE"
 
 if [[ "$VERIFY_PACK_MODE" == "production" || "$VERIFY_PACK_MODE" == "signed-rc" ]]; then
   log "=== Developer ID assertions: every Mach-O, identity, runtime ==="
-  assert_expected_macho_inventory "$DEST_APP"
-  OUTER_TEAM="$(awk -F= '$1 == "TeamIdentifier" { print $2; exit }' <<<"$SIGNATURE_DETAILS")"
-  [[ -n "$OUTER_TEAM" ]] || die "outer app signature has no TeamIdentifier"
-  verify_developer_id_signature "$DEST_APP" "$OUTER_TEAM" "outer app"
-  verify_developer_id_signature "$DEST_APP/Contents/Helpers/arm-attest" "$OUTER_TEAM" "Touch ID helper"
-  verify_developer_id_signature "$DEST_APP/Contents/MacOS/council" "$OUTER_TEAM" "Council sidecar"
-  verify_developer_id_signature "$DEST_APP/Contents/MacOS/council-warroom-tauri" "$OUTER_TEAM" "Tauri host"
+  irin_assert_nested_developer_id_identity "$DEST_APP"
 fi
 
 if [[ "$VERIFY_PACK_MODE" == "production" ]]; then

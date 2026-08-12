@@ -8,26 +8,25 @@ REPORT="$ROOT/packaging/receipts/PROVIDER_ENV_FILTER.txt"
 mkdir -p "$ROOT/packaging/receipts"
 : >"$REPORT"
 
+RS_SRC="$ROOT/council-rs/warroom-tauri/src-tauri/src/private_config.rs" \
 python3 - <<'PY' | tee -a "$REPORT"
-deny = {
-    "GW_API_KEY",
-    "WATCH_ADMIN_TOKEN",
-    "COUNCIL_GATEWAY_TOKEN",
-    "BOOTSTRAP_TOKEN",
-    "AUTH_PEPPER",
-    "CLAUDE_PROXY_TOKEN",
-    "CODEX_PROXY_TOKEN",
-    "CLOUDFLARE_API_TOKEN",
-    "CLOUDFLARE_API_KEY",
-}
-vertex = {
-    "VERTEX_PROJECT",
-    "VERTEX_LOCATION",
-    "VERTEX_GEMINI_MODEL",
-    "GOOGLE_CLOUD_PROJECT",
-    "GOOGLE_CLOUD_LOCATION",
-    "GOOGLE_APPLICATION_CREDENTIALS",
-}
+import os, re, sys
+
+# Single source: extract the deny/vertex sets and the suffix rule from the
+# authoritative Rust implementation so this mirror cannot drift silently.
+rust = open(os.environ["RS_SRC"], encoding="utf-8").read()
+m = re.search(r"pub fn is_council_provider_env_key\b.*?\n\}", rust, re.S)
+assert m, "is_council_provider_env_key not found in private_config.rs"
+fn = m.group(0)
+head, _, tail = fn.partition("return false")
+assert tail, "denylist arm not found"
+deny = set(re.findall(r'"([A-Z0-9_]+)"', head))
+vertex_src = fn.partition("matches!")[2]
+assert vertex_src, "vertex allow-list arm not found"
+vertex = set(re.findall(r'"([A-Z0-9_]+)"', vertex_src))
+assert 'ends_with("_API_KEY")' in fn and '"OPENAI_ADMIN_KEY"' in fn, \
+    "suffix/admin rule changed in Rust; update this mirror"
+assert deny and vertex, "extracted empty sets from private_config.rs"
 
 def is_council_provider_env_key(key: str) -> bool:
     if key in deny:

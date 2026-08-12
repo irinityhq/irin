@@ -21,7 +21,11 @@
 #   - candidate-id that does not recompute from candidate.json
 #   - HASHES pack_mode that does not match candidate.json
 #   - --live extract without Developer ID (real installs; hermetic fixtures skip
-#     unless IRIN_LIVE_REQUIRE_DEVELOPER_ID=1)
+#     only when an explicit temp fixture Applications root is set, unless
+#     IRIN_LIVE_REQUIRE_DEVELOPER_ID=1)
+#   - hermetic --live without IRIN_LIVE_APPLICATIONS_ROOT under a temp root
+#     (never resolves to real /Applications under hermetic)
+#   - non-canonical candidate.json (identity must match irin_canonical_identity_json)
 #   - --live while IRIN.app is running
 #   - --live post-swap digest mismatch (restores prior app; no install proof)
 set -euo pipefail
@@ -32,22 +36,49 @@ source "$ROOT/packaging/env.sh"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 note() { printf '=== %s ===\n' "$*"; }
+# shellcheck source=/dev/null
+source "$ROOT/packaging/codesign-identity.sh"
 
-# Mirror candidate-status.sh hermetic containment (do not edit that file).
-# Real candidate stores never honor test overrides.
-hermetic_overrides_allowed() {
-  [[ "${IRIN_CANDIDATE_STATUS_HERMETIC:-}" == "1" ]] || return 1
-  local tmp_base cand_root
+# True when phys path is under real /Applications (including firmlink target).
+is_real_applications_path() {
+  case "$1" in
+    /Applications|/Applications/*|\
+    /System/Volumes/Data/Applications|/System/Volumes/Data/Applications/*)
+      return 0
+      ;;
+  esac
+  return 1
+}
+
+# True when path is under an allowed hermetic/temp root (not real /Applications).
+path_under_temp_root() {
+  local path="$1" tmp_base phys
   tmp_base="${TMPDIR:-/tmp}"
   if [[ -d "$tmp_base" ]]; then
     tmp_base="$(cd "$tmp_base" && pwd -P)" || tmp_base="${TMPDIR:-/tmp}"
   fi
-  cand_root="${IRIN_CANDIDATE_ROOT:-}"
-  [[ -n "$cand_root" ]] || return 1
-  if [[ -d "$cand_root" ]]; then
-    cand_root="$(cd "$cand_root" && pwd -P)" || return 1
+  if [[ -d "$path" ]]; then
+    phys="$(cd "$path" && pwd -P)" || return 1
+  else
+    phys="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$path" 2>/dev/null)" \
+      || phys="$path"
   fi
-  case "$cand_root" in
+  # Never treat real Applications as temp, even if TMPDIR/IRIN_DMG_TMPDIR is
+  # poisoned to /Applications (env.sh maps IRIN_DMG_TMPDIR → TMPDIR).
+  if is_real_applications_path "$phys"; then
+    return 1
+  fi
+  # A poisoned TMPDIR under Applications must not reclassify arbitrary paths
+  # via the "$tmp_base"/* arm — only the fixed temp roots remain acceptable.
+  if is_real_applications_path "$tmp_base"; then
+    case "$phys" in
+      /tmp/*|/private/tmp/*|/var/folders/*)
+        return 0
+        ;;
+    esac
+    return 1
+  fi
+  case "$phys" in
     /tmp/*|/private/tmp/*|"$tmp_base"/*|/var/folders/*)
       return 0
       ;;
@@ -55,13 +86,59 @@ hermetic_overrides_allowed() {
   return 1
 }
 
+# Mirror candidate-status.sh hermetic containment (do not edit that file).
+# Real candidate stores never honor test overrides.
+hermetic_overrides_allowed() {
+  [[ "${IRIN_CANDIDATE_STATUS_HERMETIC:-}" == "1" ]] || return 1
+  local cand_root
+  cand_root="${IRIN_CANDIDATE_ROOT:-}"
+  [[ -n "$cand_root" ]] || return 1
+  path_under_temp_root "$cand_root"
+}
+
+# Hermetic live installs MUST set an explicit fixture Applications root under a
+# temp path. Hermetic mode never resolves to real /Applications (PR #77).
 resolve_live_applications_root() {
-  local override
-  override="${IRIN_LIVE_APPLICATIONS_ROOT:-}"
-  if [[ -n "$override" ]] && hermetic_overrides_allowed; then
+  local override phys
+  # Branch on the hermetic flag first: a hermetic run with a missing or
+  # non-temp candidate root is an invalid configuration and must refuse —
+  # it never falls through to a real /Applications install.
+  if [[ "${IRIN_CANDIDATE_STATUS_HERMETIC:-}" == "1" ]] && ! hermetic_overrides_allowed; then
+    die "IRIN_CANDIDATE_STATUS_HERMETIC=1 requires IRIN_CANDIDATE_ROOT under a temp root (refusing real /Applications)"
+  fi
+  if hermetic_overrides_allowed; then
+    override="${IRIN_LIVE_APPLICATIONS_ROOT:-}"
+    [[ -n "$override" ]] \
+      || die "hermetic --live requires IRIN_LIVE_APPLICATIONS_ROOT under a temp root (refusing real /Applications)"
     [[ "$override" == /* ]] || die "IRIN_LIVE_APPLICATIONS_ROOT must be absolute: $override"
-    mkdir -p "$override" || die "could not create hermetic Applications root: $override"
-    printf '%s' "$override"
+    case "$override" in
+      /Applications|/Applications/*)
+        die "hermetic --live refuses IRIN_LIVE_APPLICATIONS_ROOT under real /Applications: $override"
+        ;;
+    esac
+    # Resolve existing paths (including symlinks) before mkdir: on Linux a
+    # symlink to missing /Applications makes mkdir -p fail with "File exists"
+    # and would hide the physical Applications refuse. Also blocks the
+    # /tmp/apps-link → /Applications attack before any create.
+    if [[ -e "$override" || -L "$override" ]]; then
+      if [[ -d "$override" ]]; then
+        phys="$(cd "$override" && pwd -P)" \
+          || die "could not resolve hermetic Applications root: $override"
+      else
+        phys="$(python3 -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$override" 2>/dev/null)" \
+          || die "could not resolve hermetic Applications root: $override"
+      fi
+    else
+      mkdir -p "$override" || die "could not create hermetic Applications root: $override"
+      phys="$(cd "$override" && pwd -P)" \
+        || die "could not resolve hermetic Applications root: $override"
+    fi
+    if is_real_applications_path "$phys"; then
+      die "hermetic --live refuses physical Applications root under real /Applications: $phys"
+    fi
+    path_under_temp_root "$phys" \
+      || die "hermetic IRIN_LIVE_APPLICATIONS_ROOT must resolve under a temp root (got $phys)"
+    printf '%s' "$phys"
     return 0
   fi
   # Real stores / non-hermetic: ignore override entirely.
@@ -93,6 +170,23 @@ irin_app_is_running() {
   fi
   return 1
 }
+
+# Hermetic fixture Applications root is set and under a temp path (DevID skip ok).
+hermetic_fixture_applications_active() {
+  hermetic_overrides_allowed || return 1
+  [[ -n "${IRIN_LIVE_APPLICATIONS_ROOT:-}" ]] || return 1
+  path_under_temp_root "${IRIN_LIVE_APPLICATIONS_ROOT}"
+}
+
+# Load helpers only (unit tests). Sourced-only: direct execution must never
+# accept an env-driven success-return bypass of the install checks.
+if [[ "${IRIN_INSTALL_VERIFY_LIB:-}" == "1" ]]; then
+  if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+    return 0
+  fi
+  echo "ERROR: IRIN_INSTALL_VERIFY_LIB=1 is only valid when sourced (unit tests)" >&2
+  exit 64
+fi
 
 CANDIDATE_ARG=""
 LIVE_MODE=0
@@ -156,9 +250,17 @@ CANDIDATE_PACK_MODE="$(python3 -c 'import json,sys; print(json.load(open(sys.arg
 CANDIDATE_ID="$(basename "$CANDIDATE")"
 [[ "$CANDIDATE_ID" =~ ^[0-9a-f]{64}$ ]] || die "candidate path basename is not a candidate-id: $CANDIDATE_ID"
 
-# Candidate-id is sha256(candidate.json). Recompute so an in-place pack_mode
-# (or any identity field) rewrite cannot keep the old store path.
-RECOMPUTED_ID="$(irin_sha256_file "$CANDIDATE/candidate.json")"
+# Candidate-id is sha256 of canonical identity JSON (packaging/env.sh doctrine).
+# Refuse non-canonical on-disk serialization even if raw bytes hash to the path.
+CANON_TMP="$(mktemp)"
+irin_canonical_identity_json <"$CANDIDATE/candidate.json" >"$CANON_TMP" \
+  || { rm -f "$CANON_TMP"; die "could not canonicalize candidate.json"; }
+if ! cmp -s "$CANDIDATE/candidate.json" "$CANON_TMP"; then
+  rm -f "$CANON_TMP"
+  die "candidate.json is not in canonical identity form (use irin_canonical_identity_json)"
+fi
+RECOMPUTED_ID="$(irin_sha256_file "$CANON_TMP")"
+rm -f "$CANON_TMP"
 [[ "$RECOMPUTED_ID" == "$CANDIDATE_ID" ]] \
   || die "candidate-id does not recompute from candidate.json (store=$CANDIDATE_ID recomputed=$RECOMPUTED_ID)"
 
@@ -217,26 +319,22 @@ INST_BM_DIGEST="$(irin_sha256_file "$INSTALL_ROOT/bundle-manifest.txt")"
 [[ "$INST_BM_DIGEST" == "$CAND_BM_DIGEST" ]] \
   || die "installed bundle-manifest digest diverges from candidate (installed=$INST_BM_DIGEST candidate=$CAND_BM_DIGEST)"
 
-# --live requires a real Developer ID code signature, not only a claimed
-# pack_mode. Hermetic W3 fixtures are not Mach-O bundles and skip this proof;
-# force with IRIN_LIVE_REQUIRE_DEVELOPER_ID=1 to regression-test the refuse.
+# --live requires a real Developer ID code signature on the outer app and the
+# same nested Mach-O identity binding as packaging/verify-dmg.sh (TeamIdentifier
+# + per-binary DevID). Hermetic fixture destinations (temp Applications root)
+# may skip unless IRIN_LIVE_REQUIRE_DEVELOPER_ID=1.
 if [[ "$LIVE_MODE" == "1" ]]; then
-  require_dev_id=0
-  if hermetic_overrides_allowed; then
-    if [[ "${IRIN_LIVE_REQUIRE_DEVELOPER_ID:-}" == "1" ]]; then
-      require_dev_id=1
-    fi
-  else
-    require_dev_id=1
+  require_dev_id=1
+  if hermetic_fixture_applications_active \
+    && [[ "${IRIN_LIVE_REQUIRE_DEVELOPER_ID:-}" != "1" ]]; then
+    require_dev_id=0
   fi
   if [[ "$require_dev_id" == "1" ]]; then
-    note "prove Developer ID code identity on extract (not pack_mode claim alone)"
+    note "prove Developer ID + nested Mach-O identity on extract"
     codesign --verify --deep --strict "$DEST_APP" \
       || die "refusing --live: codesign verification failed on extract (not Developer ID-stable)"
-    LIVE_SIG_DETAILS="$(codesign -dv --verbose=4 "$DEST_APP" 2>&1)" \
-      || die "refusing --live: could not inspect extract signature"
-    [[ "$LIVE_SIG_DETAILS" == *"Authority=Developer ID Application"* ]] \
-      || die "refusing --live: extract is not Developer ID-signed (claimed pack_mode=$CANDIDATE_PACK_MODE)"
+    irin_assert_nested_developer_id_identity "$DEST_APP" \
+      || die "refusing --live: nested Mach-O Developer ID / TeamIdentifier binding failed"
   fi
 fi
 

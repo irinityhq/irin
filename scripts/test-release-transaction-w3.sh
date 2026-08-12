@@ -940,6 +940,11 @@ eval "$(
 )
 pass "local_tag_peeled_or_empty: absent empty, present peels SHA"
 
+# PR #77 identity boundaries (hermetic fixture dest, nested DevID wire, canonical id).
+# Single-line invocation so CI reachability counts the child (no path-filter \).
+bash "$ROOT/scripts/test-install-identity-boundaries.sh" || fail "install-identity-boundaries contracts"
+pass "install-identity-boundaries contracts (PR #77)"
+
 # --- live install (--live) staged swap + rollback + first-publish gate --------
 # These contracts require macOS UDIF, mount, and ditto primitives. The Linux CI
 # control-plane lane keeps all preceding W3 contracts and records this boundary.
