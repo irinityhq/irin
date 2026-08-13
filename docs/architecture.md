@@ -164,11 +164,11 @@ and boots with zero sentinels; only the canary overlay pins a committed test
 profile), and the watch producer and dispatcher are disabled by default
 (`WATCH_DISPATCHER_ENABLED=false`, `WATCH_PRODUCER_ENABLED=false`). Enabling
 a Sentinel definition does not enable the producer, and enabling the producer
-does not arm an action path — those are three independent gates. A capability
-may stop at observation, continue through Council, or take a governed action
-the operator enables later. Adding a Sentinel, board, or verb does not change
-the product's shape. Arming requires an explicit, hardware-backed operator
-ceremony; see
+does not arm an action path — those are three independent gates. A lane may
+stop at observation, continue through Council, or take a governed action the
+operator enables later. Adding a Sentinel, operator surface, or governed
+action does not change the product's shape. Arming requires an explicit,
+hardware-backed operator ceremony; see
 [`gateway/docs/runbooks/arming-authorization.md`](../gateway/docs/runbooks/arming-authorization.md).
 
 The current default operator path ends at a signed directive artifact.
