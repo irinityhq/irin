@@ -12,7 +12,7 @@ Sentinel observes evidence -> Gateway records and routes -> Council deliberates
 
 A Sentinel observes state and decides whether evidence is interesting without
 calling an LLM. Enabling a Sentinel does not enable the producer or authorize an
-action. The supported product path ends at a signed directive. Authenticated
+action. The current default operator path ends at a signed directive. Authenticated
 worker-management routes are mounted in Gateway, but the built-in worker loop
 is disabled by default and is not an operator-ready autonomous execution path.
 
@@ -39,7 +39,7 @@ separate controls:
 Do not “arm” by changing `WATCH_PRODUCER_ENABLED` alone. That boot-time gate is
 for recovery and testing; the operator path is the staged hardware ceremony in
 [`gateway/docs/runbooks/arming-authorization.md`](../gateway/docs/runbooks/arming-authorization.md).
-Even when armed, the supported operator path stops at a signed directive. The
+Even when armed, the current default operator path stops at a signed directive. The
 built-in worker loop remains a separate, default-off development path.
 
 The `sovereign-protocol` crate contains shared envelope, directive, canonical

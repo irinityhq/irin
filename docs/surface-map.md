@@ -162,7 +162,7 @@ and frozen [`COMMS_CONTRACT.md`](../sentinel/COMMS_CONTRACT.md).
   hardware ceremony creates the signed `active_arm` used by spend checks.
 - The built-in worker loop is a default-off development path, while its
   authenticated management APIs are mounted.
-- The supported operator path ends at a signed directive artifact.
+- The current default operator path ends at a signed directive artifact.
 
 For the process/language boundary inventory (Lua↔sidecar JSON, Council↔Gateway
 headers, tauri spawn env, envelope ownership), see
