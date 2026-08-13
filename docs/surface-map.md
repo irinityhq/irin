@@ -26,31 +26,41 @@ Many read routes have no admin header at the handler. Admin routes require the
 admin authentication. The arm ceremony uses principals from
 `GW_ARM_PRINCIPALS`, not the admin token alone.
 
-| Surface | Behavior |
-| --- | --- |
-| `GET /watch/list/{tenant}` | Registered Sentinels: tier, cooldown, enabled, hard-killed state, last fire, and recent fire count. |
-| `GET /watch/temperature/{tenant}` | Heat score from fire rates; levels are cold, warm, and hot. |
-| `GET /watch/audit/{tenant}` | Descending fire log, capped at 500 rows, including hash-chain fields. |
-| `GET /watch/stats` | Watch counters and gauges including spend, arm rejections, leases, duplicates, kill-switch latency, per-sentinel fires/ticks, temperature, and `action_production_armed`. Mirrored to Prometheus on gateway `GET /metrics` as `gw_watch_*` (including labeled `gw_watch_sentinel_*` and `gw_watch_temperature`). |
-| `GET /watch/ui-snapshot/{tenant}` | Admin- and canary-guarded sanitized UI projection, including `action_production_armed`. |
-| `POST /watch/force-wake/{sentinel}` | Admin-only manual fire; authentication is checked before existence, and quarantined or hard-killed Sentinels return 409. |
-| `DELETE /watch/quarantine/{sentinel}` | Admin clear of quarantine or hard kill, with optional probation reset. |
-| `GET /watch/verify-chain/{tenant}` | Hash-chain walk with a five-second budget; a broken chain returns 200 with `ok:false`. |
-| `GET /watch/outbox/pubkey` | Public Ed25519 verification key and key id. |
-| `GET /watch/outbox/{tenant}` and `/{id}` | Admin- and canary-guarded canonical envelope and signature for client verification. |
-| `POST /watch/outbox/claim` | Mounted admin API for claiming rows with bounded leases. |
-| `POST /watch/outbox/{id}/heartbeat` | Mounted admin API for extending a lease using its opaque handle. |
-| `POST /watch/outbox/{id}/ack` | Mounted admin API for acknowledgement; dismissed or expired rows return 409. |
-| `POST /watch/outbox/{id}/worker_ack` | Mounted admin completion API accepting `WorkerProvenanceGuard`; it is distinct from the default-off built-in worker loop. |
-| `POST /watch/outbox/{id}/nack` | Mounted admin API returning a row to staged/retry state. |
-| `POST /watch/capability-token/mint` | Admin- and canary-guarded mint of one signed execute capability token bound to a directive id. The server pins subject, allowed actions, approval, and cost cap; expiry defaults to one hour and may not exceed 24 hours. Mounted on the sidecar socket only, not proxied at the OpenResty edge. |
-| Tenant policy get/set | Canary-guarded policy surface used by capability-token checks. |
+The OpenResty edge proxies only a subset of these routes to the gateway HTTP
+port: the `/watch/outbox/` prefix, `GET /watch/ui-snapshot/{tenant}`, and the
+exact arm/disarm paths. Every other watch route is mounted on the sidecar
+Unix socket only.
+
+| Surface | Exposure | Behavior |
+| --- | --- | --- |
+| `GET /watch/list/{tenant}` | Sidecar socket only | Registered Sentinels: tier, cooldown, enabled, hard-killed state, last fire, and recent fire count. |
+| `GET /watch/temperature/{tenant}` | Sidecar socket only | Heat score from fire rates; levels are cold, warm, and hot. |
+| `GET /watch/audit/{tenant}` | Sidecar socket only | Descending fire log, capped at 500 rows, including hash-chain fields. |
+| `GET /watch/stats` | Sidecar socket only | Watch counters and gauges including spend, arm rejections, leases, duplicates, kill-switch latency, per-sentinel fires/ticks, temperature, and `action_production_armed`. Mirrored to Prometheus on gateway `GET /metrics` as `gw_watch_*` (including labeled `gw_watch_sentinel_*` and `gw_watch_temperature`). |
+| `GET /watch/ui-snapshot/{tenant}` | Gateway HTTP port | Admin- and canary-guarded sanitized UI projection, including `action_production_armed`. |
+| `POST /watch/force-wake/{sentinel}` | Sidecar socket only | Admin-only manual fire; authentication is checked before existence, and quarantined or hard-killed Sentinels return 409. |
+| `DELETE /watch/quarantine/{sentinel}` | Sidecar socket only | Admin clear of quarantine or hard kill, with optional probation reset. |
+| `GET /watch/verify-chain/{tenant}` | Sidecar socket only | Hash-chain walk with a five-second budget; a broken chain returns 200 with `ok:false`. |
+| `GET /watch/outbox/pubkey` | Gateway HTTP port | Public Ed25519 verification key and key id. |
+| `GET /watch/outbox/{tenant}` and `/{id}` | Gateway HTTP port | Admin- and canary-guarded canonical envelope and signature for client verification. |
+| `POST /watch/outbox/claim` | Gateway HTTP port | Mounted admin API for claiming rows with bounded leases. |
+| `POST /watch/outbox/{id}/heartbeat` | Gateway HTTP port | Mounted admin API for extending a lease using its opaque handle. |
+| `POST /watch/outbox/{id}/ack` | Gateway HTTP port | Mounted admin API for acknowledgement; dismissed or expired rows return 409. |
+| `POST /watch/outbox/{id}/worker_ack` | Gateway HTTP port | Mounted admin completion API accepting `WorkerProvenanceGuard`; it is distinct from the default-off built-in worker loop. |
+| `POST /watch/outbox/{id}/nack` | Gateway HTTP port | Mounted admin API returning a row to staged/retry state. |
+| `POST /watch/capability-token/mint` | Sidecar socket only | Admin- and canary-guarded mint of one signed execute capability token bound to a directive id. The server pins subject, allowed actions, approval, and cost cap; expiry defaults to one hour and may not exceed 24 hours. |
+| Tenant policy get/set | Sidecar socket only | Canary-guarded policy surface used by capability-token checks. |
 
 Admin bearer comparison fails closed for an empty expected secret, caps bearer
 length at 128 bytes, hashes both sides with SHA-256, and compares in constant
 time. See the detailed [Watch HTTP API](../gateway/docs/watch-api.md).
 
 ### Arm and disarm
+
+The OpenResty edge proxies exactly five paths — arm stage, arm pending, arm
+status, arm confirm, and disarm — and only when the desktop pack marker is
+mounted; every other deployment keeps them at 404. The legacy arm route stays
+on the sidecar socket only.
 
 | Surface | Behavior |
 | --- | --- |
@@ -85,8 +95,11 @@ complete operator procedure is
 | `completion-verify-watch` | Detects acknowledged Outbox rows without `VerifiedExact` provenance. |
 | `precedent-integrity-watch` | Detects truncation or mutation of the sessions index. |
 
-The registry loads YAML from `SENTINELS_CONFIG_PATH` and fails fast on an
-unknown Sentinel name.
+No Sentinel profile loads by default. The registry loads only the YAML that
+`SENTINELS_CONFIG_PATH` names and fails fast on an unknown Sentinel name. The
+desktop pack's watch-profile toggle installs the bundled default profile — a
+single `file-inbox-watch` sentinel on the `canary` tenant — into app-owned
+state; zero Sentinels is the normal quiet state.
 
 ### Dispatcher and worker
 
@@ -160,8 +173,12 @@ and frozen [`COMMS_CONTRACT.md`](../sentinel/COMMS_CONTRACT.md).
   provider spend, or execution.
 - Starting the producer does not create spend authority. Only a successful
   hardware ceremony creates the signed `active_arm` used by spend checks.
-- The built-in worker loop is a default-off development path, while its
-  authenticated management APIs are mounted.
+- The built-in worker loop is built and off by default
+  (`WATCH_WORKER_ENABLED`); its authenticated management APIs are mounted.
+  When enabled, it verifies signed envelopes, requires capability tokens, and
+  executes only the `quarantine_producer` effect — `recommend` and `prepare`
+  are nacked as non-executing. It is not presented as an operator-ready
+  autonomous executor.
 - The current default operator path ends at a signed directive artifact.
 
 For the process/language boundary inventory (Lua↔sidecar JSON, Council↔Gateway

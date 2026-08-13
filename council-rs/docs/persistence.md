@@ -18,6 +18,11 @@ Override with:
 export COUNCIL_SESSIONS_DIR=/path/to/sessions
 ```
 
+The default path and the `COUNCIL_SESSIONS_DIR` override apply to source and
+CLI runs. The packaged desktop app (IRIN.app) persists sessions, runs,
+`librarian_chats/`, and War Room local state under
+`~/Library/Application Support/com.irinity.irin/`.
+
 The main session schema is `CouncilSession` in `src/types.rs` and
 `schemas/session.v2.schema.json`.
 

@@ -77,7 +77,9 @@ War Room exposes these primary workflows:
 - **Meta-review** reads and reruns the self-audit report over the drift and
   intervention record.
 - **Librarian** proxies an optional separately configured local service.
-- **Settings** owns runtime endpoints, auth, and app controls.
+- **Settings** owns runtime endpoints, auth, and app controls: the Gateway
+  Pack lifecycle (enable, disable, stop, uninstall), Touch ID arming of the
+  watch producer, and Tailscale phone access.
 
 An empty Outbox does not mean Council is unhealthy. It means no signed
 directive is available from the configured Gateway. A Watch view can be

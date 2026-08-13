@@ -12,6 +12,49 @@ superseded_by: null
 
 **North Star:** Watch is cheap. Thought is rare. Action is final. Every message must prove why the next tier earned attention.
 
+## Status against current source (2026-08)
+
+This is a dated status note, not a contract change. The v0.1 clauses below
+remain frozen. This section records which elements current source realizes and
+which remain unrealized intent.
+
+### Realized in source
+
+- **Envelope spine.** `irin.comms.v0.1`, the CloudEvents 1.0 wrap, and the
+  `data.*` fields match `sovereign-protocol/src/comms/envelope.rs`.
+- **Directive proposal fence.** The `irin.directive.proposal.v1` payload schema
+  is pinned by a shared golden corpus
+  (`sovereign-protocol/src/vectors/directive_fence_cases.json`), enforced by
+  `sovereign-protocol/tests/fence_vectors_golden.rs` and
+  `sovereign-protocol/build.rs`, and consumed by Council
+  (`council-rs/tests/directive_fence_golden.rs`) and the Gateway sidecar
+  (`gateway/sidecar-rs/src/watch/startup_probe.rs`). JCS (RFC 8785) is the
+  signing preimage the Gateway sidecar uses.
+
+### Unrealized intent (contract aspiration, not current source)
+
+- **Sentinel and Librarian as adopting products.** `sentinel/` ships only
+  shared wire types. Sentinel profiles are deterministic observers hosted by
+  the Gateway sidecar, which builds the envelope source
+  `urn:irin:sentinel:{name}`. The Librarian is a council-rs War Room backend
+  subsystem (`council-rs/src/librarian/`) behind a sidecar UDS proxy. No
+  `sovereign-librarian` product exists, and neither side emits or consumes
+  `irin.comms.v0.1` envelopes.
+- **`payload.escalation_target = "sovereign_only"`.** No code sets, reads, or
+  enforces this field. The Escalation wire type is `{state, reason, urgency}`
+  with a product-owned free-JSON payload.
+- **The `Sentinel -> Gateway -> Worker` fast path.** No such route exists.
+  Escalations that proceed go through Council triage
+  (dispatcher -> `council-triage`). The worker only claims already-signed rows
+  from the directive outbox.
+- **Worker as an ephemeral per-directive role.** The built-in worker is a
+  long-running, default-off polling loop in the sidecar
+  (`WATCH_WORKER_ENABLED`), not a per-directive process.
+- **Librarian approval gating and the
+  `Council -> Gateway -> Worker -> Librarian commit proposal` normal path.**
+  The worker never contacts the Librarian, and the `/librarian/commit` proxy
+  is unwired from the watch/worker path.
+
 ## Decision
 
 The four adopting products are **Sentinel**, **Council**, **Gateway**, and **Librarian**.
@@ -103,7 +146,7 @@ That page does not change this v0.1 spine.
 These are intentionally left open in v0.1:
 
 - **Transport binding:** Gateway chooses the first binding. The contract is the spine, not HTTP vs queue vs local IPC.
-- **Payload schemas:** Product-owned payloads are additive until a real demo path proves which fields are load-bearing.
+- **Payload schemas:** Product-owned payloads are additive until a real demo path proves which fields are load-bearing. (Status note: as of 2026-08 the `irin.directive.proposal.v1` payload is pinned by the shared fence golden corpus named in the status section above; other payloads remain additive.)
 - **Worker return shape:** v0.1 requires a return expectation, not a universal result schema.
 - **Librarian commit policy:** Accept/reject/review rules remain Librarian-owned and tenant-scoped.
 - **Sentinel registry mechanics:** Registration, temperature, cooldown, and admission control remain Gateway-owned ADRs.

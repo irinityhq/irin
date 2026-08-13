@@ -201,11 +201,11 @@ xAI/Responses-shape requests, and emits whichever shape the **target
 provider** would have emitted (Anthropic and Vertex are translated back to
 the caller's expected shape via the Rosetta layer).
 
-Streaming is gated by `GW_ENABLE_STREAMING=1` (default off). When enabled,
-Phase 2 supports SSE for all providers via a provider-aware SSE parser
-(`lua/lib/sse.lua`). Anthropic and Vertex streams are translated chunk-by-chunk
-to OpenAI SSE shape in `body_filter_by_lua_block`. `claude-cli` returns `501`
-(CLI pipe, not SSE). See the *Streaming (Phase 2)* section below for the
+Streaming is built and gated by `GW_ENABLE_STREAMING=1` (default off). When
+enabled, the gateway supports SSE for all providers via a provider-aware SSE
+parser (`lua/lib/sse.lua`). Anthropic and Vertex streams are translated
+chunk-by-chunk to OpenAI SSE shape in `body_filter_by_lua_block`. `claude-cli`
+returns `501` (CLI pipe, not SSE). See the *Streaming* section below for the
 full contract.
 
 ---
@@ -519,9 +519,9 @@ trust an upstream verdict (header) but will never compute one itself.
 If you need any of the above, do it in the caller before calling the
 gateway, and pass the verdict in via the headers above.
 
-### Streaming (Phase 2)
+### Streaming
 
-SSE streaming is gated by `GW_ENABLE_STREAMING=1` (default off). When
+SSE streaming is built and gated by `GW_ENABLE_STREAMING=1` (default off). When
 enabled, all providers are supported via a stateful SSE frame parser
 (`lua/lib/sse.lua`). The parser handles named events (Anthropic), plain
 data events (OpenAI/Vertex), CRLF normalization, SSE comments, and TCP
