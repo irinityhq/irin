@@ -1,5 +1,5 @@
-// Mirrors warroom/backend/librarian/routes.py response shapes.
-// Keep in sync.
+// Mirrors the /api/librarian/* response shapes served by
+// council-rs/src/librarian/routes.rs. Keep in sync.
 
 import { getApiBase, getAuthToken } from "./runtime-config";
 

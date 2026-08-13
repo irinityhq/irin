@@ -1,4 +1,4 @@
-// Mirrors the StreamEvent schema in council_stream.py at the project root.
+// Mirrors the StreamEvent schema in council-rs/src/stream/events.rs.
 // Keep in sync when adding event types.
 
 export type StreamEventType =

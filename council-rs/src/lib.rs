@@ -1,7 +1,7 @@
 //! council-rs — Sovereign Intelligence Council
 //!
 //! Multi-model deliberation engine in Rust.
-//! Shared types with Gateway (Aegis) and Librarian (mlx-rs).
+//! Shared types with the Gateway and the in-tree Librarian subsystem.
 
 pub mod cli;
 pub mod config;

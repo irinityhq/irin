@@ -1,7 +1,8 @@
 #!/bin/bash
 # ==========================================================================
-# smoke.sh — Gateway Phase 0 smoke test suite
-# Tests: health, error handling, 501 gates, large bodies, live routing
+# smoke.sh — Gateway smoke test suite
+# Tests: health, error handling, auth, Anthropic/Vertex translator paths,
+# streaming gate, large bodies, batch + Responses API shapes, live routing
 # ==========================================================================
 
 # NOTE: deliberately NOT `set -e`. The script tallies pass/fail/skip per

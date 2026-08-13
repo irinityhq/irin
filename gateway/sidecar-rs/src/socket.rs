@@ -2,9 +2,11 @@
 // socket.rs — management UDS permission boundary.
 //
 // The sidecar's Unix Domain Socket carries the FULL management surface,
-// including the arm/admin routes. nginx has NO /watch/admin/ location, so the
-// file mode is the FIRST and (for non-arm callers) ONLY isolation boundary
-// against other local processes. This module owns that boundary as a small,
+// including the arm/admin routes. nginx proxies only five exact-match
+// /watch/admin/ locations, and only when the desktop Gateway Pack marker is
+// mounted (every other deployment keeps them at 404), so against direct UDS
+// access the file mode is the FIRST and (for non-arm callers) ONLY isolation
+// boundary against other local processes. This module owns that boundary as a small,
 // pure, fail-CLOSED config seam so the default and the parse/validate logic
 // are unit-testable WITHOUT mutating process-global env (parallel-test safe,
 // mirroring the `producer_gate_armed_from` / `LeaseOpts::from_env` precedent).

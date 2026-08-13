@@ -124,9 +124,9 @@ pub fn replay_epoch_from(value: Option<&str>) -> i64 {
 
 /// Builds the two C11-required headers for a council-triage request.
 ///
-/// The caller (future full dispatcher) is responsible for supplying the
-/// `raw_escalation_id` taken directly from the escalation envelope
-/// (never the qualified key).
+/// The caller (the dispatch loop in this module, and the startup probe) is
+/// responsible for supplying the `raw_escalation_id` taken directly from
+/// the escalation envelope (never the qualified key).
 ///
 /// Returns a `HeaderMap` ready to be merged into the reqwest request.
 pub fn build_council_triage_headers(tenant: &str, raw_escalation_id: &str) -> HeaderMap {
