@@ -22,7 +22,7 @@ Council (deliberation engine, :8765)
             metering, budget, provenance, then the same provider
 ```
 
-War Room is the operator surface and the product face: it renders
+War Room is the primary operator surface: it renders
 deliberation rounds, direct-fire prompts, session history, provider
 discovery, cabinet editing, the Gateway Outbox, the Watch view, and drift
 analysis. It talks only to Council's REST/WebSocket API; it never calls a
@@ -164,15 +164,18 @@ and boots with zero sentinels; only the canary overlay pins a committed test
 profile), and the watch producer and dispatcher are disabled by default
 (`WATCH_DISPATCHER_ENABLED=false`, `WATCH_PRODUCER_ENABLED=false`). Enabling
 a Sentinel definition does not enable the producer, and enabling the producer
-does not arm an action path
-— those are three independent gates. Arming requires an explicit,
-hardware-backed operator ceremony; see
+does not arm an action path — those are three independent gates. A capability
+may stop at observation, continue through Council, or take a governed action
+the operator enables later. Adding a Sentinel, board, or verb does not change
+the product's shape. Arming requires an explicit, hardware-backed operator
+ceremony; see
 [`gateway/docs/runbooks/arming-authorization.md`](../gateway/docs/runbooks/arming-authorization.md).
 
-The supported product path ends at a signed directive artifact. Authenticated
-claim, heartbeat, acknowledgement, worker-acknowledgement, and negative-
-acknowledgement routes are mounted as management surfaces. The built-in worker
-loop that uses them is disabled by default and is not operator-ready.
+The current default operator path ends at a signed directive artifact.
+Authenticated claim, heartbeat, acknowledgement, worker-acknowledgement,
+and negative-acknowledgement routes are mounted as management surfaces. The
+built-in worker loop that uses them is disabled by default and is not
+operator-ready.
 
 ## Optional private access
 
