@@ -1,4 +1,4 @@
-//! Streaming deliberation — the council_stream.py equivalent.
+//! Streaming deliberation.
 //!
 //! This module implements the async event protocol for WebSocket consumption.
 //! It re-orchestrates the engine's deliberation loop to yield structured events

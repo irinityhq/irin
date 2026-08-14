@@ -71,6 +71,7 @@ Gateway outbox signs **JCS bytes**, not pretty JSON. This crate owns the algorit
 | ES6 / ryu number formatting | Stable float canonicalization |
 | Strict duplicate-key reject (raw path) | Ambiguous JSON must not sign |
 | Purity / conformance harnesses | Golden + property tests |
+| Selective Kani proofs | Formal proofs in [`src/jcs/kani_proofs.rs`](../sovereign-protocol/src/jcs/kani_proofs.rs), gated by `cfg(kani)`; run with `make verify-formal` (root Makefile target, "Selective Kani + Miri on sovereign-protocol JCS") |
 
 The conformance tests cover these fail-closed edges as well as the nominal RFC
 8785 path.

@@ -7,7 +7,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // Read at run time, never env!(): the shared Cargo target reuses one
+    // compiled build-script binary across checkouts, and a compile-time
+    // manifest dir would point at whichever checkout compiled it last.
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo"),
+    );
     emit_git_rerun_paths(&manifest_dir);
     emit_tracked_file_rerun_paths(&manifest_dir);
 
@@ -40,7 +45,10 @@ fn env_nonempty(key: &str) -> Option<String> {
 }
 
 fn read_source_sha_file() -> Option<String> {
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // Runtime read (see main): the shared target reuses this binary across checkouts.
+    let manifest = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo"),
+    );
     // council-rs → src → throwaway root
     for rel in [
         "../SOURCE_SHA.txt",

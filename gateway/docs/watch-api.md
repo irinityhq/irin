@@ -16,7 +16,7 @@
   - the admin `401` on the outbox mutation routes (claim / heartbeat / ack /
     worker_ack / nack), `POST /watch/tenant-policy/{tenant}`, and the
     capability-token mint.
-- **Canary:** when `WATCH_CANARY_TENANT` is set (compose often `canary`), tenant-scoped admin paths reject other tenants with `403 single_tenant_violation`. Unset → default tenant name `sovereign` for the tripwire config.
+- **Canary:** when `WATCH_CANARY_TENANT` is set, tenant-scoped admin paths reject other tenants with `403 single_tenant_violation`. Base compose defaults it to `sovereign`. The canary overlay and desktop pack set `canary`. The verify/demo stack sets `irin-demo`. Phase-3 smoke defaults to `phase3-smoke`. Unset → default tenant name `sovereign` for the tripwire config.
 
 ### Auth classes
 

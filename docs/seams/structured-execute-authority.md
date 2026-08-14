@@ -18,7 +18,7 @@ Also called capability-token mint/verify/authorize.
 | --- | --- |
 | Wire / type / field invariants | `sentinel/sovereign-protocol` — `CapabilityToken` in `src/types.rs`; JCS via `to_jcs_bytes` in `src/jcs.rs` |
 | Signing preimage golden | `sentinel/sovereign-protocol/tests/wire_golden.rs` — `t22k_capability_token_golden` |
-| Admin mint | `gateway/sidecar-rs/src/watch/api/capability_mint.rs` — `mint_capability_token_json`; route `POST /watch/capability-token/mint` in `src/routes/watch.rs` |
+| Admin mint | `gateway/sidecar-rs/src/watch/api/capability_mint.rs` — `mint_capability_token_json`; handler `watch_mint_capability_token` in `src/routes/watch.rs`; route `POST /watch/capability-token/mint` mounted in `src/routes/mod.rs` |
 | Sign / verify | `gateway/sidecar-rs/src/keymgmt.rs` — `sign_capability_token` / `verify_capability_token` |
 | Authorize / policy / replay | `gateway/sidecar-rs/src/watch/dispatcher.rs` — `is_capability_token_valid`, `bind_capability_token_consumption` |
 | DB wrapper / consumption store | `gateway/sidecar-rs/src/watch/db/outbox_store.rs` — `is_capability_token_valid`, consumption helpers; schema only if identity/replay storage shape changes (`src/watch/db/schema.rs`) |

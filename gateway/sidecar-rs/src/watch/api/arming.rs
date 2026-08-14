@@ -1,4 +1,5 @@
-//! Four-eyes arming ceremony, producer start/disarm, and arm admin router.
+//! Dual-custody local-attest arming ceremony, producer start/disarm, and arm
+//! admin router.
 
 use crate::watch::quarantine::QuarantineState;
 use axum::http::StatusCode;
@@ -11,15 +12,18 @@ use super::helpers::{admin_token_matches, json_response, problem};
 use super::writer_claim::writer_claim_heartbeat_loop;
 
 // ---------------------------------------------------------------------------
-// p0a-four-eyes (the dual-custody invariant / Blind spot 3) — distinct-principal
-// stage->confirm arming flow.
+// Dual-custody local-attest ceremony (the dual-custody invariant /
+// Blind spot 3) — stage->confirm arming flow with a hardware second factor.
 //
 // /arm is the highest-blast-radius admin action on this surface (it starts
 // the CDC producer, the first leg of real council spend). It is therefore
-// gated behind a two-person ceremony: principal A POSTs /arm/stage, a
-// DIFFERENT principal B POSTs /arm/confirm with the stage_id nonce echoed at
-// stage time. Same-principal confirm is rejected (the core four-eyes
-// invariant); a mismatched stage_id is rejected (amendment: a confirm can
+// gated behind a dual-custody ceremony: a principal POSTs /arm/stage with
+// a bearer token (custody domain 1), then POSTs /arm/confirm with the
+// stage_id nonce echoed at stage time plus an ES256 signature from an
+// enrolled enclave/security key over the stored challenge (custody
+// domain 2). The same principal MAY stage and confirm — the second
+// custody domain is the hardware key, not a second bearer (the retired
+// same-principal rule); a mismatched stage_id is rejected (a confirm can
 // never ratify a different/older stage than intended). The legacy
 // single-shot /arm returns 410 Gone so there is no bypass.
 //
@@ -41,14 +45,18 @@ use super::writer_claim::writer_claim_heartbeat_loop;
 // SIDECAR_SOCKET_PATH (default /tmp/gateway-sidecar.sock) is now bound with a
 // tightened default mode 0o660 (owner+group rw, WORLD NONE) — configurable via
 // SIDECAR_SOCKET_MODE/SIDECAR_SOCKET_GID, fail-closed on bad values (socket.rs).
-// The prior 0o777 (world-rwx) is gone. The arm routes are NOT proxied by nginx
-// (nginx.conf has no /watch/admin/ location), so the file mode is the FIRST
+// The prior 0o777 (world-rwx) is gone. nginx proxies the arm routes ONLY as
+// five exact-match /watch/admin/producer/... locations
+// (stage/pending/status/confirm/disarm), and only when the desktop Gateway
+// Pack marker is mounted (nginx.conf) — every other deployment keeps them at
+// 404 and there is deliberately no /watch/admin/ prefix location. Against
+// direct UDS access the file mode is the FIRST
 // transport boundary: at 0o660 only the socket OWNER and the configured GROUP
 // can open the socket and reach this management surface — blast radius reduced
 // from "any local process/uid" to "owner + configured group" (compose:
 // root:triad_mgmt gid 9999, so the nginx worker and root only). The arm ceremony's real
-// control is STILL the GW_ARM_PRINCIPALS bearer + the four-eyes stage/confirm
-// split — the mode is defense-in-depth, NOT a replacement for the bearer. mTLS
+// control is STILL the GW_ARM_PRINCIPALS bearer + the hardware-attestation
+// confirm leg — the mode is defense-in-depth, NOT a replacement for the bearer. mTLS
 // WOULD still add attacker-model value here (a same-owner/same-group process
 // the 0o660 mode does NOT exclude gets no mutual transport auth), so the
 // deviation remains a documented gap, not a
@@ -77,17 +85,16 @@ pub fn arm_stage_ttl() -> Duration {
     Duration::from_millis(ms)
 }
 
-/// p0a-four-eyes — the arming principal registry, parsed once at boot from
+/// The arming principal registry, parsed once at boot from
 /// `GW_ARM_PRINCIPALS='alice:tok_aaaa,bob:tok_bbbb'` (comma-separated
 /// `name:token` entries). Fail-closed posture:
 ///   * empty/unset            → no principal authenticates (401 everywhere);
 ///   * malformed entry        → ENTIRE registry rejected (401 everywhere);
 ///   * duplicate name OR token → ENTIRE registry rejected — two "principals"
-///     sharing a name or a token is four-eyes theater (one human could hold
-///     both halves of the ceremony);
-///   * exactly one principal  → that principal authenticates, but
-///     `is_arm_capable()` is false, so stage/confirm refuse with 403
-///     ("a four-eyes gate with one principal is theater").
+///     sharing a name or a token would collapse distinct audit identities;
+///   * exactly one principal  → arm-capable: that principal authenticates and
+///     may stage AND confirm — the second custody domain is the enrolled
+///     hardware key verified at confirm, not a second bearer (spec §2).
 pub struct ArmPrincipals {
     /// (name, token). Tokens are secrets — never logged, never audited.
     entries: Vec<(String, String)>,
@@ -487,7 +494,7 @@ pub async fn auto_disarm_producer(
 }
 
 /// The actual arm action — spawns `cdc_sweep_loop` with the kill-switch
-/// wiring. Reachable ONLY through the four-eyes confirm path (p0a); the
+/// wiring. Reachable ONLY through the stage/confirm ceremony; the
 /// legacy single-shot route returns 410. Body unchanged from the original
 /// `admin_arm_producer_json` (Phase 1 CDC weld) except the p07
 /// single-writer gate in front of it (single-writer invariant: refuse-to-arm on a second
@@ -585,7 +592,8 @@ async fn arm_producer_start(quarantine: &Arc<QuarantineState>) -> Response {
     }
 }
 
-/// p0a-four-eyes — `POST /watch/admin/producer/arm/stage`.
+/// `POST /watch/admin/producer/arm/stage` — stage leg of the dual-custody
+/// local-attest ceremony.
 ///
 /// Auth: bearer `name:token` must match a principal in the registry.
 /// Requires at least one configured principal (403 otherwise — fail-closed).
@@ -1552,13 +1560,13 @@ pub async fn admin_arm_status_json(
 }
 
 /// LEGACY — `POST /watch/admin/producer/arm` (single-shot, single-bearer).
-/// Removed by p0a-four-eyes (the dual-custody invariant): always 410 Gone pointing
-/// at the stage/confirm ceremony so there is no four-eyes bypass.
+/// Retired by the dual-custody ceremony: always 410 Gone pointing at the
+/// stage/confirm flow so there is no attestation bypass.
 pub async fn admin_arm_producer_json() -> Response {
     problem(
         StatusCode::GONE,
         "gone",
-        "single-shot arm removed (four-eyes): POST /watch/admin/producer/arm/stage then /watch/admin/producer/arm/confirm with a second principal",
+        "single-shot arm removed: POST /watch/admin/producer/arm/stage then /watch/admin/producer/arm/confirm with an enrolled hardware-key attestation",
     )
 }
 
@@ -1689,8 +1697,10 @@ where
 {
     use axum::routing::{get, post};
     axum::Router::new()
-        // p0a-four-eyes (the dual-custody invariant): legacy single-shot arm is 410
-        // Gone; arming requires stage (principal A) + confirm (principal B).
+        // Dual-custody local-attest ceremony: legacy single-shot arm is 410
+        // Gone; arming requires stage (principal bearer) + confirm (bearer
+        // plus an enrolled enclave/security-key signature over the staged
+        // challenge — the same principal may perform both legs).
         .route("/watch/admin/producer/arm", post(arm_legacy_route))
         .route("/watch/admin/producer/arm/stage", post(arm_stage_route))
         // B1 (spec §4.3): crash-resume read of the open stage (bin/arm

@@ -1,6 +1,6 @@
 //! War Room backend — REST endpoints beyond the core deliberation pipeline.
 //!
-//! Each submodule mirrors a Python file in `warroom/backend/`:
+//! Submodules:
 //!   - intervention_log: read sessions/intervention_log.jsonl + aggregate
 //!   - lineage:          read sessions/lineage.jsonl + diff sessions
 //!   - drift:            list/read runs/drift_*.md and runs/weekly_drift_*.json

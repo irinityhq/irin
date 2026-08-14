@@ -1,6 +1,6 @@
 //! Sovereign Protocol Types
 //!
-//! The shared contract between Council, Gateway, and Librarian.
+//! The shared contract between Council and Gateway.
 //! Every type derives Serialize/Deserialize for wire compatibility.
 //! These types are the "sovereign-protocol crate" the Invariant called for.
 
@@ -126,7 +126,7 @@ impl ProviderProvenance {
 }
 
 // ---------------------------------------------------------------------------
-// Provider Response (unified shape from all 4 providers)
+// Provider Response (unified shape from every provider client)
 // ---------------------------------------------------------------------------
 
 /// Response from any LLM provider. Every provider client must return this shape.

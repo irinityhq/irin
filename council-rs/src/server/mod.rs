@@ -1,4 +1,4 @@
-//! HTTP + WebSocket server — axum equivalent of warroom/backend/app.py.
+//! HTTP + WebSocket server (axum).
 //!
 //! Core deliberation:
 //!     GET  /api/health              — credentials available
@@ -18,11 +18,13 @@
 //!     GET  /api/interventions       — operator pause log
 //!     GET  /api/patterns            — aggregated decision style
 //!
-//! Drift self-audit (read-only — runs are Phase 2):
+//! Drift self-audit:
 //!     GET  /api/drift/reports
 //!     GET  /api/drift/reports/:name
+//!     POST /api/drift/run
 //!     GET  /api/drift/weekly
 //!     GET  /api/drift/weekly/history
+//!     POST /api/drift/weekly/run
 //!
 //! Mapmaker briefs:
 //!     GET  /api/mapmaker/briefs
@@ -77,7 +79,7 @@ use crate::governance;
 use crate::librarian;
 use crate::static_web::WebDist;
 
-/// Auth configuration — mirrors Python warroom/backend/security.py.
+/// Auth configuration.
 ///
 /// Three credentials surfaces:
 /// 1. COUNCIL_AUTH_TOKEN  → bearer auth required on warroom + admin endpoints.

@@ -194,10 +194,12 @@ pub(crate) fn build_router(parts: BuildRouterParts) -> Router {
             post(watch::watch_worker_ack_outbox),
         )
         .route("/watch/outbox/{id}/nack", post(watch::watch_nack_outbox))
-        // p0a-four-eyes (the dual-custody invariant): legacy single-shot arm is 410
-        // Gone; arming requires stage (principal A) + confirm (principal B).
-        // The four arm/disarm routes live in the lib crate so the exact
-        // wiring is oneshot-tested .
+        // Dual-custody local-attest ceremony: legacy single-shot arm is 410
+        // Gone; arming requires stage (principal bearer) + confirm (bearer
+        // plus an enrolled enclave/security-key signature over the staged
+        // challenge — the same principal may perform both legs).
+        // The five arm/disarm routes (stage, pending, status, confirm,
+        // disarm) live in the lib crate so the exact wiring is oneshot-tested.
         .merge(crate::watch::api::arm_admin_router(
             crate::watch::api::ArmAdminRouterState {
                 quarantine: watch_quarantine.clone(),

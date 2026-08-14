@@ -1,4 +1,5 @@
-//! Stream event types — exact wire-compatible shapes with council_stream.py.
+//! Stream event types — the WebSocket wire shapes consumed by the War Room
+//! web client.
 //!
 //! EVENT TYPES (StreamEvent.type):
 //!     session_started       — initial config + active/dropped seats

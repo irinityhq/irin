@@ -4,7 +4,12 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // Read at run time, never env!(): the shared Cargo target reuses one
+    // compiled build-script binary across checkouts, and a compile-time
+    // manifest dir would point at whichever checkout compiled it last.
+    let manifest_dir = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo"),
+    );
     // Prefer explicit packaging provenance, then git, then unknown.
     let sha = std::env::var("IRIN_TAURI_BUILD_GIT_SHA")
         .ok()
@@ -143,7 +148,10 @@ fn ensure_bundle_input_placeholders(manifest_dir: &Path) {
 
 fn read_source_sha_file() -> Option<String> {
     // packaging root: .../irin-dmg-.../src/council-rs/warroom-tauri/src-tauri
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    // Runtime read (see main): the shared target reuses this binary across checkouts.
+    let manifest = PathBuf::from(
+        std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR is set by cargo"),
+    );
     let candidates = [
         manifest.join("../../../../SOURCE_SHA.txt"),
         manifest.join("../../../../../SOURCE_SHA.txt"),

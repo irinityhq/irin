@@ -113,8 +113,9 @@ required branch-protection contexts.
 `scripts/classify-ci-paths.sh` is the path-to-lane contract. Its table-driven
 self-test covers documentation, component runtime source, War Room web, Tauri,
 workspace manifests, the shared protocol crate, CI definitions, full-proof
-events, and unknown paths. Unknown paths select the full matrix rather than
-silently missing proof.
+events, and unknown paths. Unknown paths select all product lanes (Rust, Web,
+Tauri, and supply-chain) — the full non-SBOM matrix — rather than silently
+missing proof. They do not select SBOM or the exact candidate/install gates.
 
 Exact candidate and exact install gates additionally use a **base-controlled
 inline overlay** in `ci.yml` so a PR cannot rewrite the classifier to skip

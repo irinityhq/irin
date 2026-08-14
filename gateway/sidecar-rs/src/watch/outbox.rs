@@ -1,8 +1,8 @@
 //! Phase 3 shared durable outbox helpers.
 //!
-//! This module is intentionally storage-only: Act, Dismiss, and restart
-//! recovery paths will all call the same insert helper once the full
-//! dispatcher lands.
+//! This module is intentionally storage-only: the dispatcher
+//! (`watch/dispatcher.rs`), the Act/Dismiss admin routes, and the restart
+//! recovery paths all go through the same insert/ack helpers here.
 
 use rusqlite::{params, OptionalExtension, Transaction};
 

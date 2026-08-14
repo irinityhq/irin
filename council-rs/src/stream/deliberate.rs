@@ -1,7 +1,7 @@
 //! Streaming deliberation — the core async generator.
 //!
-//! Mirrors council_stream.py:deliberate_stream() — re-orchestrates the engine's
-//! deliberation loop to yield StreamEvents via a tokio mpsc channel.
+//! Re-orchestrates the engine's deliberation loop to yield StreamEvents
+//! via a tokio mpsc channel.
 //! Includes pause/resume, intervention handling, SpecOps escalation,
 //! and the race-condition fix (re-pause after escalation).
 
@@ -120,7 +120,6 @@ async fn until_cancelled<T>(
 }
 
 /// Run a streaming deliberation, sending events through the channel.
-/// This is the Rust equivalent of council_stream.py:deliberate_stream().
 pub async fn run(
     config: Arc<Config>,
     stream_config: StreamConfig,
@@ -1871,8 +1870,6 @@ async fn persist_phase_session(
         }),
         context_sources: vec![],
         // Streaming path is the warroom UI — tag as Warroom for §4.4 filtering.
-        // chair token plumbing for the streaming path is v0.1.1 work; emit 0
-        // for now so the serde shape is correct.
         origin: crate::types::SessionOrigin::Warroom,
         execution_route: if effective_via_gateway {
             crate::types::ExecutionRoute::Governed

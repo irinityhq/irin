@@ -92,7 +92,12 @@ signed DMG for the native desktop product (`IRIN.app`).
 War Room includes deliberation, direct-fire prompts, session history, provider
 discovery, cabinet editing, Gateway outbox and Watch views, intervention
 patterns, drift analysis, meta-review, and optional Librarian integration.
-Configure API, WebSocket, Gateway, and auth values in Settings.
+Configure API, WebSocket, Gateway, and auth values in Settings. The installed
+app's Settings also owns the Gateway Pack lifecycle (enable, disable, stop,
+uninstall), Touch ID arming of the watch producer, and Tailscale phone
+access. The watch-sentinels profile toggle and inbox opener live on the
+Watch view, not in Settings. The Gateway Pack is optional and needs
+Docker; core War Room works in Direct mode without Docker.
 
 The installed app always owns its bundled Council. Foreground `make warroom`
 is a separate development process tree. An occupied Council port is a startup

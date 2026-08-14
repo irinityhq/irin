@@ -38,6 +38,31 @@ direct health probe in Settings. The desktop connection still accepts only port
 bases, an optional Gateway health base, and an auth token. See
 `warroom/docs/TAURI-AUTH.md`.
 
+## Shipped native surfaces
+
+Beyond endpoints and auth, the installed app's Settings owns these native
+surfaces:
+
+- **Gateway Pack lifecycle** — status, enable, disable, stop, and uninstall
+  for the optional Gateway Pack. After Enable, a bounded native promote retry
+  moves the runtime from Direct to Governed; it is a post-launch step, not a
+  Settings button. The pack requires the Docker CLI and a running Docker
+  daemon. Core War Room works in Direct mode without Docker; the pack is
+  never required.
+  Operator setup: [gateway/docs/operator-quickstart.md](../../gateway/docs/operator-quickstart.md).
+- **Touch ID** — a macOS Secure Enclave arm ceremony for the watch producer:
+  enroll, arm, renew, and disarm.
+- **Phone access** — Tailscale Serve publication from Settings. Serve only;
+  Tailscale Funnel is rejected, never enabled.
+
+The Watch view, not Settings, owns the **Watch sentinels** profile toggle and
+the **Open inbox folder** opener. Enabling the profile installs the bundled
+default Sentinel profile
+(`packaging/gateway-pack/default-sentinels.yaml`).
+
+For install and recovery problems, see
+[docs/troubleshooting.md](../../docs/troubleshooting.md).
+
 ## Internal native development harness
 
 These targets live under `council-rs/` for desktop shell development and CI.

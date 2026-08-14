@@ -33,9 +33,9 @@ signed Outbox directive.
 
 ![The filed chair ruling beside the model seats and expanded Sheldon evidence](assets/readme/chair-ruling.png)
 
-The demo is a real two-round proceeding: five seats, two validator passes, a
-filed ruling, and an indexed precedent. The displayed provider cost was
-`$0.217`; provider pricing and local CLI entitlements vary.
+The recorded session is a real two-round proceeding: five seats, two
+validator passes, a filed ruling, and an indexed precedent. The displayed
+provider cost was `$0.217`; provider pricing and local CLI entitlements vary.
 
 ## Get started
 
@@ -149,8 +149,9 @@ which starts an app-owned Compose project (`irin-desktop-gateway`), stores the
 Council client key in the macOS Keychain, and only enables governed proceedings
 after authenticated readiness. See
 [`packaging/gateway-pack/README.md`](packaging/gateway-pack/README.md) for the
-v0.1 support matrix (Vertex and CLI proxies stay Direct-only / unsupported in
-the pack).
+v0.1 support matrix. In the pack, Vertex and the Gemini CLI proxy stay
+Direct-only; the Claude and Codex CLI proxies are supported when the
+operator's CLIs are installed and authenticated.
 
 ## Evidence and claim validation (Sheldon)
 
@@ -184,8 +185,12 @@ detail, including the model pin and fallback order: [`council-rs/docs/providers.
 
 Gateway ships deterministic Sentinels (file inbox, silence, queue depth,
 watch health, ledger delta, anomaly, and more) that can escalate observed
-evidence toward Council. The canonical runtime loads no Sentinel profile —
-only the canary overlay pins a committed test profile — and keeps the watch
+evidence toward Council. The canonical runtime loads no Sentinel profile by
+default. Two committed profiles can load one: the development canary fixture
+(`gateway/test/fixtures/canary-sentinels.yaml`), pinned by the canary compose
+overlay, and the packaged app's bundled default profile
+(`packaging/gateway-pack/default-sentinels.yaml`), installed only when the
+operator turns the desktop watch profile on. The runtime keeps the watch
 producer and any action path disabled. Ordinary deliberation never creates a
 signed Outbox directive, and enabling a Sentinel does not enable the producer
 or arm anything. Gateway itself does not need arming for normal governed calls:
