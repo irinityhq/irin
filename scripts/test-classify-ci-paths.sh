@@ -77,6 +77,9 @@ cases=(
   "install-verify selects candidate+install|false false false false false false false false false true true|scripts/install-verify-candidate.sh"
   # W4 negative: docs/tooling must not build a candidate
   "docs-only tooling negative|$all_false|docs/architecture.md docs/development-workflow.md"
+  "coderabbit config stays light|$all_false|.coderabbit.yaml"
+  "packaging pack README stays light in classifier|$all_false|packaging/gateway-pack/README.md"
+  "tauri shell README stays light|$all_false|council-rs/warroom-tauri/README.md"
   "worktree scripts stay light|$all_false|scripts/remove-worktree.sh scripts/worktree-gc.sh"
   "link-agent-context stays light|$all_false|scripts/link-agent-context.sh scripts/test-link-agent-context.sh"
 )
