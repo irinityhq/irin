@@ -139,5 +139,5 @@ impl GatewayPackStatus {
 
 pub const SUPPORT_MATRIX_SUMMARY: &str = "\
 v0.1: API-key providers (xAI/OpenAI/Anthropic/NVIDIA) when present in login env; \
-Vertex Direct-only (no gcloud mount); Claude/Codex CLI proxies not supported; \
+Vertex Direct-only (no gcloud mount); Claude/Codex CLI proxies supported when operator CLIs are installed and authenticated; \
 Watch producer/dispatcher forced off.";
