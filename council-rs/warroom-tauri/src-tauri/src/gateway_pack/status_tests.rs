@@ -557,7 +557,39 @@ fn status_with_council_route_bypasses_warm_cache() {
 #[test]
 fn memory_store_status_without_pack() {
     let _g = test_env_lock();
-    let prev = std::env::var("HOME").ok();
+    // Isolate from the operator machine. The presentation cache can hold a
+    // live sample probed by another test, and IRIN_APP_SUPPORT_ROOT outranks
+    // HOME in app_support_dir(). Cut both before sampling; then the real
+    // classifier runs against an empty store and an empty support root, so
+    // Docker-up plus a running operator pack must still report NotInstalled.
+    //
+    // The guard keeps that isolation panic-safe: a failed assert must not
+    // leak the redirected environment, the cached temp-root sample, or the
+    // temp dir into later tests in this process. Values are captured with
+    // var_os so a non-UTF-8 value is restored, not dropped.
+    struct EnvRestore {
+        home: Option<std::ffi::OsString>,
+        support: Option<std::ffi::OsString>,
+        tmp: std::path::PathBuf,
+    }
+
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            match &self.home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.support {
+                Some(v) => std::env::set_var(crate::private_config::APP_SUPPORT_ROOT_ENV, v),
+                None => std::env::remove_var(crate::private_config::APP_SUPPORT_ROOT_ENV),
+            }
+            // Do not serve the temp-root sample to later tests from the cache.
+            invalidate_status_cache();
+            let _ = fs::remove_dir_all(&self.tmp);
+        }
+    }
+
+    invalidate_status_cache();
     let tmp = std::env::temp_dir().join(format!(
         "gw-pack-st-{}-{}",
         std::process::id(),
@@ -568,7 +600,16 @@ fn memory_store_status_without_pack() {
     ));
     let _ = fs::remove_dir_all(&tmp);
     fs::create_dir_all(&tmp).unwrap();
+    let _restore = EnvRestore {
+        home: std::env::var_os("HOME"),
+        support: std::env::var_os(crate::private_config::APP_SUPPORT_ROOT_ENV),
+        tmp: tmp.clone(),
+    };
     std::env::set_var("HOME", &tmp);
+    std::env::set_var(
+        crate::private_config::APP_SUPPORT_ROOT_ENV,
+        tmp.join("app-support"),
+    );
     let store = MemorySecretStore::default();
     let st = gateway_pack_status(&store);
     assert!(
@@ -577,8 +618,6 @@ fn memory_store_status_without_pack() {
             GatewayPackState::NotInstalled
                 | GatewayPackState::DockerMissing
                 | GatewayPackState::DockerDaemonDown
-                | GatewayPackState::InstalledStopped
-                | GatewayPackState::Disabled
         ),
         "unexpected {:?}",
         st.state
@@ -586,11 +625,6 @@ fn memory_store_status_without_pack() {
     assert!(!st.state.allows_governed());
     assert!(!st.authenticated);
     assert!(!st.council_governed);
-    match prev {
-        Some(v) => std::env::set_var("HOME", v),
-        None => std::env::remove_var("HOME"),
-    }
-    let _ = fs::remove_dir_all(&tmp);
 }
 
 #[test]
