@@ -3,11 +3,11 @@ name: War Room
 description: "Maximum-depth 5-seat, 3-round deliberation for high-stakes decisions"
 rounds: 3
 seats:
-  # One-seat Build promote (2026-07-13 quality shootout): CEO → grok-4.5 local CLI.
-  # Red Team stays hermes grok-4.3 for in-room A/B. Do not mass-flip.
+  # CEO → grok-4.6 (2026-08-13 flywheel tryout). Red Team stays hermes grok-4.3.
+  # Do not mass-flip 4.20 or other grok seats.
   - name: CEO
     provider: grok_build
-    model: "grok-4.5"
+    model: "grok-4.6"
     system: ceo
 
   - name: Mirror

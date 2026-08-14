@@ -1,14 +1,14 @@
 # Grok transport routing — edit when xAI ships new CLI or API model IDs.
 # Council loads this at startup (no recompile). See src/provider/grok_route.rs.
 #
-# Local `grok` CLI (`grok models` as of 2026-07): grok-4.5 (default),
-# grok-composer-2.5-fast, grok-multi-agent. OAuth/subscription agentic seats.
-# Normal deliberation seats still pin grok-4.3 in cabinets (Hermes/xAI path) until
-# scripts/seat-model-shootout.py + human review pick a winner — do NOT mass-flip.
+# Local `grok` CLI (`grok models` as of 2026-08): grok-4.6 (default), grok-4.5,
+# grok-multi-agent. OAuth/subscription agentic seats.
+# Hermes seats stay grok-4.3 / 4.20 until their own tryout — do NOT mass-flip.
 
 # Passed to `grok -m` when the cabinet/role model id matches (value = CLI flag).
-# Lookup is exact match BEFORE api_only_prefixes (so grok-4.5 can be local CLI).
+# Lookup is exact match BEFORE api_only_prefixes (so grok-4.6 / 4.5 stay local CLI).
 cli_models:
+  grok-4.6: grok-4.6
   grok-4.5: grok-4.5
   grok-build: grok-build
   grok-build-0.1: grok-build
