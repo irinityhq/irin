@@ -1566,7 +1566,7 @@ pub async fn admin_arm_producer_json() -> Response {
     problem(
         StatusCode::GONE,
         "gone",
-        "single-shot arm removed (four-eyes): POST /watch/admin/producer/arm/stage then /watch/admin/producer/arm/confirm with a second principal",
+        "single-shot arm removed: POST /watch/admin/producer/arm/stage then /watch/admin/producer/arm/confirm with an enrolled hardware-key attestation",
     )
 }
 

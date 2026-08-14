@@ -5,11 +5,12 @@
 // including the arm/admin routes. nginx proxies only five exact-match
 // /watch/admin/ locations, and only when the desktop Gateway Pack marker is
 // mounted (every other deployment keeps them at 404), so against direct UDS
-// access the file mode is the FIRST and (for non-arm callers) ONLY isolation
-// boundary against other local processes. This module owns that boundary as a small,
-// pure, fail-CLOSED config seam so the default and the parse/validate logic
-// are unit-testable WITHOUT mutating process-global env (parallel-test safe,
-// mirroring the `producer_gate_armed_from` / `LeaseOpts::from_env` precedent).
+// access the file mode is the first and (for non-arm callers) only
+// transport-level isolation boundary against other local processes. This
+// module owns that boundary as a small, pure, fail-CLOSED config seam so
+// the default and the parse/validate logic are unit-testable WITHOUT
+// mutating process-global env (parallel-test safe, mirroring the
+// `producer_gate_armed_from` / `LeaseOpts::from_env` precedent).
 //
 // SECURITY INVARIANT: a malformed SIDECAR_SOCKET_MODE / SIDECAR_SOCKET_GID
 // MUST refuse startup. There is NO fallback to a looser mode (never 0o777).

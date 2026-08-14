@@ -57,7 +57,7 @@ surfaces:
 
 The Watch view, not Settings, owns the **Watch sentinels** profile toggle and
 the **Open inbox folder** opener. Enabling the profile installs the bundled
-file-inbox-watch canary profile
+default Sentinel profile
 (`packaging/gateway-pack/default-sentinels.yaml`).
 
 For install and recovery problems, see

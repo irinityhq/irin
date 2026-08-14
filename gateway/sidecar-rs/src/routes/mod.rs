@@ -198,8 +198,8 @@ pub(crate) fn build_router(parts: BuildRouterParts) -> Router {
         // Gone; arming requires stage (principal bearer) + confirm (bearer
         // plus an enrolled enclave/security-key signature over the staged
         // challenge — the same principal may perform both legs).
-        // The four arm/disarm routes live in the lib crate so the exact
-        // wiring is oneshot-tested .
+        // The five arm/disarm routes (stage, pending, status, confirm,
+        // disarm) live in the lib crate so the exact wiring is oneshot-tested.
         .merge(crate::watch::api::arm_admin_router(
             crate::watch::api::ArmAdminRouterState {
                 quarantine: watch_quarantine.clone(),
