@@ -90,8 +90,8 @@ for path in "${paths[@]}"; do
 
     # Public prose, component documentation, and known root review-bot config
     # retain only the always-on light checks in ci.yml. Negative control: these
-    # must not select exact_candidate. Unknown other root files still hit the
-    # catch-all full product lanes.
+    # must not select exact_candidate or exact_install. Unknown other root files
+    # still hit the catch-all full product lanes.
     *.md|docs/*|gateway/docs/*|sentinel/docs/*|council-rs/docs/*|council-rs/warroom/docs/*|.coderabbit.yaml)
       ;;
 

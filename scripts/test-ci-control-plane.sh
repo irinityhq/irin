@@ -714,6 +714,8 @@ elif base_exact_inst council-rs/warroom-tauri/README.md; then
   fail "council-rs/warroom-tauri/README.md must not select exact_install"
 elif base_exact_cand .coderabbit.yaml; then
   fail ".coderabbit.yaml must not select exact_candidate"
+elif base_exact_inst .coderabbit.yaml; then
+  fail ".coderabbit.yaml must not select exact_install"
 else
   pass "overlay md policy: pack/resource README exact; tauri README and coderabbit light"
 fi
@@ -866,6 +868,14 @@ if [[ "$(sed -n 's/^exact_candidate=//p' <<<"$tauri_readme_sim")" != false \
   fail "tauri shell README overlay must not set exact_*"
 else
   pass "tauri shell README overlay stays light"
+fi
+coderabbit_sim="$(simulate_overlays .coderabbit.yaml)"
+if [[ "$(sed -n 's/^exact_candidate=//p' <<<"$coderabbit_sim")" != false \
+   || "$(sed -n 's/^exact_install=//p' <<<"$coderabbit_sim")" != false \
+   || "$(sed -n 's/^full_matrix=//p' <<<"$coderabbit_sim")" != false ]]; then
+  fail ".coderabbit.yaml overlay must not set exact_* or force-full"
+else
+  pass ".coderabbit.yaml overlay stays light"
 fi
 
 # ---------------------------------------------------------------------------
