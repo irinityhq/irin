@@ -625,8 +625,12 @@ path_universe_file="$tmp/path-universe.txt"
     scripts/candidate-status.sh scripts/ci-build-adhoc-candidate.sh \
     scripts/record-acceptance.sh scripts/smoke-macos-tauri-app.sh \
     packaging/env.sh packaging/build-dmg.sh packaging/gateway-pack/docker-compose.yml \
+    packaging/gateway-pack/README.md \
+    .coderabbit.yaml \
     council-rs/warroom/web/app/page.tsx \
+    council-rs/warroom-tauri/README.md \
     council-rs/warroom-tauri/src-tauri/src/lib.rs \
+    council-rs/warroom-tauri/src-tauri/resources/gateway-pack/README.md \
     council-rs/warroom-tauri/src-tauri/resources/gateway-pack/docker-compose.yml \
     council-rs/scripts/warroom-tauri-dev.sh \
     gateway/sidecar-rs/src/main.rs \
@@ -689,6 +693,31 @@ if (( superset_missing > 0 )); then
   fail "intentional exact_candidate supersets not as modeled"
 else
   pass "intentional exact_candidate supersets modeled (${#intentional_superset_cand[@]} paths)"
+fi
+
+# Overlay markdown policy: shipped pack/resource README stays exact; other
+# overlay-tree READMEs and known root review-bot config stay light. The
+# classifier-true ⇒ base-true underlay above cannot catch a naive *.md carve-out
+# of packaging/gateway-pack/README.md (classifier already treats all *.md as
+# light).
+if ! base_exact_cand packaging/gateway-pack/README.md; then
+  fail "packaging/gateway-pack/README.md must stay exact_candidate"
+elif ! base_exact_inst packaging/gateway-pack/README.md; then
+  fail "packaging/gateway-pack/README.md must stay exact_install"
+elif ! base_exact_cand council-rs/warroom-tauri/src-tauri/resources/gateway-pack/README.md; then
+  fail "resources/gateway-pack README must stay exact_candidate"
+elif ! base_exact_inst council-rs/warroom-tauri/src-tauri/resources/gateway-pack/README.md; then
+  fail "resources/gateway-pack README must stay exact_install"
+elif base_exact_cand council-rs/warroom-tauri/README.md; then
+  fail "council-rs/warroom-tauri/README.md must not select exact_candidate"
+elif base_exact_inst council-rs/warroom-tauri/README.md; then
+  fail "council-rs/warroom-tauri/README.md must not select exact_install"
+elif base_exact_cand .coderabbit.yaml; then
+  fail ".coderabbit.yaml must not select exact_candidate"
+elif base_exact_inst .coderabbit.yaml; then
+  fail ".coderabbit.yaml must not select exact_install"
+else
+  pass "overlay md policy: pack/resource README exact; tauri README and coderabbit light"
 fi
 
 # Hosted invocation: detect-changes job must call these scripts (not only
@@ -823,6 +852,30 @@ if [[ "$(sed -n 's/^full_matrix=//p' <<<"$docs_sim")" != false ]]; then
   fail "docs-only must not force full via base-controlled guard"
 else
   pass "docs-only does not trigger force-full guard"
+fi
+
+pack_readme_sim="$(simulate_overlays packaging/gateway-pack/README.md)"
+if [[ "$(sed -n 's/^exact_candidate=//p' <<<"$pack_readme_sim")" != true \
+   || "$(sed -n 's/^exact_install=//p' <<<"$pack_readme_sim")" != true \
+   || "$(sed -n 's/^full_matrix=//p' <<<"$pack_readme_sim")" != false ]]; then
+  fail "pack README overlay must set exact_* without force-full"
+else
+  pass "pack README overlay keeps exact_* and leaves force-full off"
+fi
+tauri_readme_sim="$(simulate_overlays council-rs/warroom-tauri/README.md)"
+if [[ "$(sed -n 's/^exact_candidate=//p' <<<"$tauri_readme_sim")" != false \
+   || "$(sed -n 's/^exact_install=//p' <<<"$tauri_readme_sim")" != false ]]; then
+  fail "tauri shell README overlay must not set exact_*"
+else
+  pass "tauri shell README overlay stays light"
+fi
+coderabbit_sim="$(simulate_overlays .coderabbit.yaml)"
+if [[ "$(sed -n 's/^exact_candidate=//p' <<<"$coderabbit_sim")" != false \
+   || "$(sed -n 's/^exact_install=//p' <<<"$coderabbit_sim")" != false \
+   || "$(sed -n 's/^full_matrix=//p' <<<"$coderabbit_sim")" != false ]]; then
+  fail ".coderabbit.yaml overlay must not set exact_* or force-full"
+else
+  pass ".coderabbit.yaml overlay stays light"
 fi
 
 # ---------------------------------------------------------------------------

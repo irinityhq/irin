@@ -180,8 +180,17 @@ jobs:
           # rewrite that script to emit exact_candidate=false. Keep the case
           # arms in sync with scripts/classify-ci-paths.sh (enforced by
           # scripts/test-ci-control-plane.sh).
+          # Markdown is light unless it is shipped pack/resource bytes.
+          # Match packaging/gateway-pack/* and */resources/* before the *.md
+          # refuse so a pack README cannot skip isolation.
           path_requires_exact_candidate() {
             case "$1" in
+              packaging/gateway-pack/*|*/resources/*)
+                return 0
+                ;;
+              *.md)
+                return 1
+                ;;
               packaging/*|\
               council-rs/warroom/web/*|\
               council-rs/warroom-tauri/*|\
@@ -223,8 +232,13 @@ jobs:
           }
           path_requires_exact_install() {
             case "$1" in
+              packaging/gateway-pack/*|*/resources/*)
+                return 0
+                ;;
+              *.md)
+                return 1
+                ;;
               packaging/build-dmg.sh|packaging/verify-dmg.sh|packaging/smoke-full-app.sh|packaging/smoke-gateway-pack.sh|packaging/build-app-bundle.sh|packaging/app-bundle-lock.sh|\
-              packaging/gateway-pack/*|\
               scripts/stage-gateway-pack.sh|\
               scripts/build-gateway-pack-dev-images.sh|\
               scripts/build-gateway-pack-prod-images.sh|\

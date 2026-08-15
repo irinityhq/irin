@@ -119,7 +119,9 @@ missing proof. They do not select SBOM or the exact candidate/install gates.
 
 Exact candidate and exact install gates additionally use a **base-controlled
 inline overlay** in `ci.yml` so a PR cannot rewrite the classifier to skip
-isolation. A separate base-controlled force-full guard raises the full non-SBOM
+isolation. Markdown paths are light in that overlay unless they are shipped
+pack or resource bytes (`packaging/gateway-pack/*` and `*/resources/*`).
+A separate base-controlled force-full guard raises the full non-SBOM
 PR matrix when CI policy surfaces change. `scripts/test-ci-control-plane.sh`
 binds the inline exact-path policy to the classifier and proves a hostile
 all-false classifier cannot suppress force-full lanes.

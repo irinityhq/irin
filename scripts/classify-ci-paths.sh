@@ -88,9 +88,11 @@ for path in "${paths[@]}"; do
       set_full_matrix
       ;;
 
-    # Public prose and component documentation retain only the always-on light
-    # checks in ci.yml. Negative control: docs must not select exact_candidate.
-    *.md|docs/*|gateway/docs/*|sentinel/docs/*|council-rs/docs/*|council-rs/warroom/docs/*)
+    # Public prose, component documentation, and known root review-bot config
+    # retain only the always-on light checks in ci.yml. Negative control: these
+    # must not select exact_candidate or exact_install. Unknown other root files
+    # still hit the catch-all full product lanes.
+    *.md|docs/*|gateway/docs/*|sentinel/docs/*|council-rs/docs/*|council-rs/warroom/docs/*|.coderabbit.yaml)
       ;;
 
     # The bootstrap installs cargo-deny for both dependency-policy lanes.
