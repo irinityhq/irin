@@ -107,7 +107,9 @@ not copy those credentials into the repository. Routing maps live in:
 - `gemini_routing.yaml`
 
 The Hermes adapter can be disabled with `COUNCIL_HERMES_SEAT=0` or replaced by
-setting `COUNCIL_HERMES_SEAT_BIN` to an operator-controlled adapter.
+setting `COUNCIL_HERMES_SEAT_BIN` to an operator-controlled adapter. Council
+does not pass `--provider` unless `HERMES_SEAT_PROVIDER` or a `hermes_seats`
+entry sets one. Hermes then uses its default seat, including Grok OAuth.
 
 ## API Seats
 

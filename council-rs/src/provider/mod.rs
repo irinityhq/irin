@@ -79,10 +79,15 @@ async fn dispatch_grok_cli_seat(prompt: &str, system: &str, model: &str) -> Prov
             && let Some(route) = grok_route::resolve_hermes_seat(model)
         {
             if hermes_cli::is_hermes_seat_available() {
+                let provider_label = if route.wire_provider.trim().is_empty() {
+                    "default"
+                } else {
+                    route.wire_provider.as_str()
+                };
                 eprintln!(
                     "   ↪ hermes_cli: '{}' → {} / {} (operator adapter)",
                     model.trim(),
-                    route.wire_provider,
+                    provider_label,
                     route.wire_model
                 );
                 let resp = hermes_cli::ask_hermes(prompt, system, &route).await;
@@ -411,7 +416,8 @@ pub async fn ask_with_opts_and_context(
             grok_route::HermesSeatResolution {
                 wire_model: model.trim().to_string(),
                 wire_provider: std::env::var("HERMES_SEAT_PROVIDER")
-                    .unwrap_or_else(|_| "xai".into()),
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default(),
                 response_label: format!("hermes-cli-{}", model.trim()),
                 cabinet_model: model.trim().to_string(),
             }
@@ -458,7 +464,8 @@ pub async fn ask_with_opts_and_context(
             grok_route::HermesSeatResolution {
                 wire_model: model.trim().to_string(),
                 wire_provider: std::env::var("HERMES_SEAT_PROVIDER")
-                    .unwrap_or_else(|_| "xai".into()),
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default(),
                 response_label: format!("hermes-cli-{}", model.trim()),
                 cabinet_model: model.trim().to_string(),
             }
@@ -504,7 +511,8 @@ pub async fn ask_with_opts_and_context(
                 grok_route::HermesSeatResolution {
                     wire_model: model.trim().to_string(),
                     wire_provider: std::env::var("HERMES_SEAT_PROVIDER")
-                        .unwrap_or_else(|_| "xai".into()),
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default(),
                     response_label: format!("hermes-cli-{}", model.trim()),
                     cabinet_model: model.trim().to_string(),
                 }

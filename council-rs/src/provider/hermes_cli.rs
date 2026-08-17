@@ -136,12 +136,10 @@ pub async fn ask_hermes(
     let provenance = ProviderProvenance::cli_readonly("hermes_cli", "usage_unavailable");
 
     if uses_script_protocol() {
-        cmd.args([
-            "--model",
-            route.wire_model.as_str(),
-            "--provider",
-            route.wire_provider.as_str(),
-        ]);
+        cmd.args(["--model", route.wire_model.as_str()]);
+        if !route.wire_provider.trim().is_empty() {
+            cmd.args(["--provider", route.wire_provider.as_str()]);
+        }
         return agent_cli::run_stdout(
             cmd,
             Some(combined.as_str()),
@@ -152,17 +150,11 @@ pub async fn ask_hermes(
         .await;
     }
 
-    cmd.args([
-        "-z",
-        combined.as_str(),
-        "--provider",
-        route.wire_provider.as_str(),
-        "-m",
-        route.wire_model.as_str(),
-        "--safe-mode",
-        "--ignore-user-config",
-        "--ignore-rules",
-    ]);
+    cmd.args(["-z", combined.as_str(), "-m", route.wire_model.as_str()]);
+    if !route.wire_provider.trim().is_empty() {
+        cmd.args(["--provider", route.wire_provider.as_str()]);
+    }
+    cmd.args(["--ignore-rules", "--yolo"]);
     agent_cli::run_stdout(
         cmd,
         None,

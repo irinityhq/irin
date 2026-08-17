@@ -7,13 +7,14 @@
 # Contract (stable):
 #   hermes-seat-adapter.sh --model <wire-model> [--provider <name>]
 #   Prompt on stdin → final seat text on stdout; errors on stderr; exit 0 on success.
+#   Omit --provider to use the operator Hermes default seat (Grok OAuth).
 #
 # Council only spawns this binary; Hermes/Nous flags live here under your control.
 
 set -euo pipefail
 
 MODEL=""
-PROVIDER="${HERMES_SEAT_PROVIDER:-xai}"
+PROVIDER="${HERMES_SEAT_PROVIDER:-}"
 
 usage() {
   echo "usage: $0 --model <id> [--provider <name>]" >&2
@@ -51,10 +52,12 @@ fi
 
 PROMPT="$(cat)"
 
-# Seat constraints: one-shot, no personal config/plugins, no tool approval hangs.
-exec hermes -z "$PROMPT" \
-  --provider "$PROVIDER" \
-  -m "$MODEL" \
-  --safe-mode \
-  --ignore-user-config \
-  --ignore-rules
+# Use the operator Hermes default seat. Do not pass --safe-mode: it implies
+# --ignore-user-config and drops Grok OAuth stored in ~/.hermes/config.yaml.
+# --ignore-rules keeps personal AGENTS/SOUL/memory out of Council seats.
+# --yolo avoids interactive tool-approval hangs on a oneshot.
+cmd=(hermes -z "$PROMPT" -m "$MODEL" --ignore-rules --yolo)
+if [[ -n "$PROVIDER" ]]; then
+  cmd+=(--provider "$PROVIDER")
+fi
+exec "${cmd[@]}"
