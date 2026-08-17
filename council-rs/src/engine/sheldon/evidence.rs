@@ -12,7 +12,16 @@ pub(super) async fn gather_evidence(
     verbose: bool,
     cache: Option<&EvidenceCache>,
 ) -> String {
-    let has_web = evidence::is_available();
+    gather_evidence_from(topic, context, verbose, cache, evidence::is_available()).await
+}
+
+async fn gather_evidence_from(
+    topic: &str,
+    context: &str,
+    verbose: bool,
+    cache: Option<&EvidenceCache>,
+    has_web: bool,
+) -> String {
     let repo_context = repo_context_evidence(context);
 
     if !has_web && repo_context.is_none() {
@@ -116,12 +125,12 @@ mod tests {
 
     #[tokio::test]
     async fn gather_evidence_with_web_off_emits_repo_context_without_live_x() {
-        let out = gather_evidence(
+        let out = gather_evidence_from(
             "What does Sheldon validate?",
-            &[],
             "src/engine/sheldon/mod.rs\nclaim validator",
             false,
             None,
+            false,
         )
         .await;
 
@@ -130,5 +139,10 @@ mod tests {
         let lowered = out.to_ascii_lowercase();
         assert!(!lowered.contains("live x"));
         assert!(!lowered.contains("xmcp"));
+        assert!(!out.contains("## Web Intelligence"));
+        assert!(!out.contains("## Recency-Biased Web"));
+        assert!(!out.contains("## Breaking News"));
+        assert!(!out.contains("## Academic Papers"));
+        assert!(!out.contains("## Cited URL Content"));
     }
 }
