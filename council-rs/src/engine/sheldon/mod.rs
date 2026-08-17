@@ -1,7 +1,7 @@
 //! Sheldon — between-round claim validator (v9.13).
 //!
 //! Extracts factual claims from seat outputs, gathers evidence from web
-//! tools and live X posts (via xmcp), sends to a validator model, and
+//! tools and operator-provided repo context, sends to a validator model, and
 //! returns structured verdicts. Three anti-hallucination guardrails:
 //!
 //! 1. v9.13.2 taxonomy: SUPPORTED/CONSISTENT/NO_EVIDENCE/CONTRADICTED
@@ -14,7 +14,7 @@
 //!
 //! Module layout (pure split of former `sheldon.rs`):
 //! - `validate` — claim_validator_ready, system prompts, validate_round
-//! - `evidence` — gather_evidence, repo_context, xmcp
+//! - `evidence` — gather_evidence, repo_context
 //! - `web_evidence` — gather_web_evidence + URL/SSRF pipeline
 //! - `report` — parse/override/format/gate
 
@@ -54,10 +54,10 @@ pub(crate) fn citation_override_mode() -> CitationOverrideMode {
 }
 
 /// Session-scoped evidence cache for Sheldon validator (one per deliberation/phase).
-/// Deduplicates web (exa/tavily/news/scholar/firecrawl) and xmcp (live X only) fetches
+/// Deduplicates web (exa/tavily/news/scholar/firecrawl) fetches
 /// across rounds when the normalized query/topic is the same. Stores formatted section strings.
 ///
-/// Hit: skip the HTTP/MCP roundtrip entirely.
+/// Hit: skip the HTTP roundtrip entirely.
 /// Miss: perform fetch, format, store.
 ///
 /// Opt out for debugging: COUNCIL_SHELDON_EVIDENCE_CACHE=0

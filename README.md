@@ -165,17 +165,14 @@ treated as an established fact inside the deliberation.
 Before the validator model runs, Council gathers bounded evidence for it:
 
 - **Provider evidence.** Exa, Tavily and Tavily News, Firecrawl for cited
-  URLs, and optional Semantic Scholar. This is the primary evidence path and
-  needs no xmcp instance.
-- **Live X posts (optional, XMCP-only).** If a local [xmcp](#integrations)
-  instance is reachable, Sheldon calls only its `searchPostsRecent` tool for
-  recent X posts. Sheldon never reads a personal bookmark or intel corpus
-  through xmcp, and xmcp is not required for IRIN to run — if it is down or
-  absent, X evidence from that path is simply absent, not an error.
+  URLs, and optional Semantic Scholar. This is the primary evidence path.
 - **Direct Grok fallback.** If the evidence gather above returns nothing,
   Council falls through to the `grok-cli-default` Grok Build seat, which
   retains its own native web and X search directly against the provider — not
   through Gateway.
+
+IRIN does not talk to a local xmcp instance. Sheldon does not gather live X
+posts through that path.
 
 Gateway transport does not itself supply native web or X search; a governed
 route must not be read as inheriting Sheldon's evidence tools. Operator
@@ -268,10 +265,8 @@ IRIN sits in a small family of companion repositories on the same GitHub org,
 all Apache-2.0-licensed.
 
 - **[xmcp-core](https://github.com/irinityhq/xmcp-core)** — a generic MCP
-  server for X and bookmark-intelligence plumbing, runnable standalone. It is
-  the optional evidence source behind Sheldon's `searchPostsRecent` path; see
-  [Evidence and claim validation](#evidence-and-claim-validation-sheldon) for
-  what it does and does not supply.
+  server for X and bookmark-intelligence plumbing, runnable standalone. IRIN
+  no longer talks to a local xmcp instance.
 - **[hermes-plugin-irin](https://github.com/irinityhq/hermes-plugin-irin)** —
   the current Python Hermes-to-Council bridge.
 

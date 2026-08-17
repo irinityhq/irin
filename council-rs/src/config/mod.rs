@@ -73,7 +73,7 @@ impl Config {
                         .any(|m| m.id == cand.model || cand.model.starts_with(&m.id))
                     {
                         eprintln!(
-                            "⚠️  roles.yaml {} uses model '{}' not found in models.yaml (cost tracking / vault may miss it)",
+                            "⚠️  roles.yaml {} uses model '{}' not found in models.yaml (cost tracking may miss it)",
                             role_name, cand.model
                         );
                     }
@@ -83,16 +83,12 @@ impl Config {
         let cabinets = Self::load_cabinets(base_dir)?;
         let tera = Self::load_prompts(base_dir)?;
 
-        // Phase 0.5 §4.3 + P1 #15: structural validation per cabinet; one batched
-        // xmcp vault check for all unique model IDs (cabinets + roles) so startup
-        // does not spam N warnings when xmcp is offline.
+        // Structural validation per cabinet. Model-id allow-listing is not
+        // applied here: models.yaml stays pricing/routing, not a vault.
         for (name, cabinet) in &cabinets {
             validate_cabinet_structure(name, cabinet, &models)
                 .map_err(|e| anyhow::anyhow!("Cabinet validation failed: {}", e))?;
         }
-
-        let vault_model_ids = collect_config_vault_model_ids(&cabinets, &roles);
-        validate_vault_models(&vault_model_ids).map_err(|e| anyhow::anyhow!("{}", e))?;
 
         Ok(Self {
             cabinets,
@@ -287,18 +283,15 @@ impl Config {
     }
 
     /// Validate a cabinet supplied outside the checked-in registry before
-    /// execution, such as a War Room custom cabinet (structural rules only;
-    /// vault is batched once at `Config::load`).
+    /// execution, such as a War Room custom cabinet (structural rules only).
     pub fn validate_cabinet_for_execution(&self, name: &str, cabinet: &Cabinet) -> Result<()> {
         validate_cabinet_structure(name, cabinet, &self.models)
             .map_err(|e| anyhow::anyhow!("Cabinet validation failed: {}", e))
     }
 
-    /// Structural + per-cabinet vault check (e.g. War Room save before write).
+    /// Structural check before a War Room save write.
     pub fn validate_cabinet_for_save(&self, name: &str, cabinet: &Cabinet) -> Result<()> {
-        self.validate_cabinet_for_execution(name, cabinet)?;
-        let model_ids: Vec<String> = cabinet_model_id_strings(cabinet);
-        validate_vault_models(&model_ids).map_err(|e| anyhow::anyhow!("{e}"))
+        self.validate_cabinet_for_execution(name, cabinet)
     }
 
     /// Load an external cabinet YAML file and insert it into the registry.
@@ -354,10 +347,9 @@ pub fn parse_cabinet_yaml(content: &str) -> Result<Cabinet> {
 
 /// Tolerant re-scan of `<base_dir>/cabinets` for the live `GET /api/cabinets`
 /// listing (feature contract) — parse + hash only; malformed files are skipped with a
-/// warning instead of failing the whole listing. No structural/vault
+/// warning instead of failing the whole listing. No structural
 /// validation here: saved cabinets are validated at save time and again
-/// per-run via `validate_cabinet_for_execution`, and re-running the xmcp
-/// vault check would be a network call per GET.
+/// per-run via `validate_cabinet_for_execution`.
 pub fn scan_cabinets_dir(base_dir: &Path) -> HashMap<String, Cabinet> {
     let cabinet_dir = base_dir.join("cabinets");
     let mut cabinets = HashMap::new();
@@ -403,7 +395,7 @@ pub fn scan_cabinets_dir(base_dir: &Path) -> HashMap<String, Cabinet> {
     cabinets
 }
 
-/// Phase 0.5 §4.3: structural validation for a single cabinet (no vault).
+/// Structural validation for a single cabinet.
 ///
 /// Structural rules (hard-fail, always):
 ///   - chair.provider and chair.model must not start with `council` —
@@ -454,41 +446,4 @@ fn validate_cabinet_structure(
     }
 
     Ok(())
-}
-
-fn cabinet_model_id_strings(cabinet: &Cabinet) -> Vec<String> {
-    let mut ids: Vec<String> = cabinet.seats.iter().map(|s| s.model.clone()).collect();
-    ids.push(cabinet.chair.model.clone());
-    ids
-}
-
-/// Unique model IDs from all cabinets plus utility roles (one vault batch at load).
-fn collect_config_vault_model_ids(
-    cabinets: &HashMap<String, Cabinet>,
-    roles: &RolesConfig,
-) -> Vec<String> {
-    use std::collections::HashSet;
-
-    let mut set = HashSet::new();
-    for cabinet in cabinets.values() {
-        for id in cabinet_model_id_strings(cabinet) {
-            set.insert(id);
-        }
-    }
-    for id in roles.all_model_ids() {
-        set.insert(id.to_string());
-    }
-    let mut out: Vec<String> = set.into_iter().collect();
-    out.sort();
-    out
-}
-
-/// Vault rule (P1 #15): passed to `xmcp::model_check_blocking`, which owns the
-/// offline/dev tolerance contract (`COUNCIL_SKIP_VAULT_CHECK`, unreachable soft-pass).
-fn validate_vault_models(model_ids: &[String]) -> Result<(), String> {
-    if model_ids.is_empty() {
-        return Ok(());
-    }
-    let refs: Vec<&str> = model_ids.iter().map(String::as_str).collect();
-    crate::xmcp::model_check_blocking(&refs).map_err(|e| format!("xmcp model_check failed: {e}"))
 }

@@ -119,7 +119,7 @@ pub async fn validate_round(
         None => return ValidateRoundOutcome::Skipped(ValidateSkipReason::InsufficientResponses),
     };
 
-    // Local-code guard BEFORE paid evidence gather (xmcp / web).
+    // Local-code guard BEFORE paid evidence gather (web).
     if let Some(reason) = should_skip_validator_llm(&position_summary, context, "") {
         if config.verbose {
             eprintln!("   ⏭️  Sheldon: {reason} — skipping validator");

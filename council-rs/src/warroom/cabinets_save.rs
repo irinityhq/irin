@@ -267,12 +267,7 @@ chair:
     #[test]
     fn save_then_resolve_owned_fallback_is_launchable() {
         // Empty startup registry simulates a cabinet saved after the immutable
-        // Arc<Config> snapshot was taken. Vault check is bypassed so the test
-        // does not require a live xmcp (matches model_check_blocking tolerance).
-        // SAFETY: test-only env mutation; single-threaded within this test.
-        unsafe {
-            std::env::set_var("COUNCIL_SKIP_VAULT_CHECK", "1");
-        }
+        // Arc<Config> snapshot was taken.
         let base = temp_base();
         let saved = validate_save_request("after-start", VALID_YAML).unwrap();
         write_cabinet_yaml(&base, "after-start", VALID_YAML).unwrap();

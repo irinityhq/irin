@@ -16,7 +16,7 @@ pub struct HermesSeatEntry {
 }
 
 fn default_hermes_provider() -> String {
-    "xai".into()
+    String::new()
 }
 
 /// How council talks to Hermes — explicit in grok_routing.yaml (not inferred from filenames).
@@ -65,7 +65,7 @@ pub struct GrokRoutingFile {
     pub cli_default_label: String,
     #[serde(default = "default_cli_pinned_label_prefix")]
     pub cli_pinned_label_prefix: String,
-    /// Explicit cabinet model → Hermes xAI (or other) wire ids.
+    /// Explicit cabinet model → Hermes wire ids. Empty provider = Hermes default seat.
     #[serde(default)]
     pub hermes_seats: std::collections::HashMap<String, HermesSeatEntry>,
     /// When true, any `api_only_ids` / prefix match uses Hermes if available.
@@ -144,14 +144,14 @@ fn default_hermes_seats() -> std::collections::HashMap<String, HermesSeatEntry> 
         (
             "grok-4.3".into(),
             HermesSeatEntry {
-                provider: "xai".into(),
+                provider: String::new(),
                 model: None,
             },
         ),
         (
             "grok-4.20-0309-reasoning".into(),
             HermesSeatEntry {
-                provider: "xai".into(),
+                provider: String::new(),
                 model: None,
             },
         ),
@@ -321,7 +321,7 @@ pub fn resolve_hermes_seat_with(
             e.model.clone().unwrap_or_else(|| cabinet_model.to_string()),
         )
     } else {
-        ("xai".into(), cabinet_model.to_string())
+        (String::new(), cabinet_model.to_string())
     };
 
     Some(HermesSeatResolution {
@@ -372,7 +372,7 @@ mod tests {
         let r = GrokRoutingFile::default();
         let h = resolve_hermes_seat_with(&r, "grok-4.3").expect("hermes route");
         assert_eq!(h.wire_model, "grok-4.3");
-        assert_eq!(h.wire_provider, "xai");
+        assert_eq!(h.wire_provider, "");
         assert_eq!(h.response_label, "hermes-cli-grok-4.3");
     }
 
@@ -380,6 +380,20 @@ mod tests {
     fn hermes_skips_grok_build() {
         let r = GrokRoutingFile::default();
         assert!(resolve_hermes_seat_with(&r, "grok-build").is_none());
+    }
+
+    #[test]
+    fn hermes_honors_explicit_provider_override() {
+        let mut r = GrokRoutingFile::default();
+        r.hermes_seats.insert(
+            "grok-4.3".into(),
+            HermesSeatEntry {
+                provider: "xai".into(),
+                model: None,
+            },
+        );
+        let h = resolve_hermes_seat_with(&r, "grok-4.3").expect("hermes route");
+        assert_eq!(h.wire_provider, "xai");
     }
 
     #[test]

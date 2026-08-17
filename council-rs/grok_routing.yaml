@@ -16,7 +16,7 @@ cli_models:
   grok-composer-2.5-fast: grok-composer-2.5-fast
   grok-multi-agent: grok-multi-agent
 
-# Cabinet/role ids that mean "xAI API / Hermes wire" — never pass to local `grok -m`
+# Cabinet/role ids that mean "Hermes default seat" — never pass to local `grok -m`
 # as if they were Build models. Hermes adapter owns these when use_hermes_for_api_only.
 api_only_ids:
   - grok-4.3
@@ -49,12 +49,10 @@ hermes:
   adapter_protocol: script
   default_adapter: scripts/hermes-seat-adapter.sh
 
+# Omit provider so Hermes uses its configured default seat (Grok OAuth).
+# Set provider only to force a non-default Hermes provider.
 hermes_seats:
-  grok-4.3:
-    provider: xai
-  grok-4.20-0309-reasoning:
-    provider: xai
-  grok-4.20-0309-non-reasoning:
-    provider: xai
-  grok-4.20-multi-agent-0309:
-    provider: xai
+  grok-4.3: {}
+  grok-4.20-0309-reasoning: {}
+  grok-4.20-0309-non-reasoning: {}
+  grok-4.20-multi-agent-0309: {}

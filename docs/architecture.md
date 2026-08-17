@@ -71,17 +71,13 @@ When validation is enabled, Sheldon gathers bounded evidence before the
 validator model runs, in this order:
 
 1. **Provider evidence.** Exa, Tavily and Tavily News, Firecrawl for cited
-   URLs, and optional Semantic Scholar. This is the primary path and needs no
-   xmcp instance.
-2. **Live X posts (optional, XMCP-only).** If a local xmcp MCP instance is
-   reachable, Sheldon calls only its `searchPostsRecent` tool
-   (`council-rs/src/xmcp.rs`) for recent X posts. Sheldon does not consult a
-   personal bookmark or intel corpus through xmcp. xmcp is optional and not
-   required for IRIN to run; if it is down, X evidence from that path is
-   simply absent, not an error.
-3. **Direct Grok fallback.** If the gather above returns no evidence, Council
+   URLs, and optional Semantic Scholar. This is the primary path.
+2. **Direct Grok fallback.** If the gather above returns no evidence, Council
    falls through to the `grok-cli-default` Grok Build seat, which keeps its
    own native web and X search directly against the provider.
+
+IRIN does not talk to a local xmcp instance. Sheldon does not gather live X
+posts through that path.
 
 Gateway does not provide native web or X search: governed routes must not
 claim tools the Gateway cannot preserve. Operator detail, including the

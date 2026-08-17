@@ -20,7 +20,6 @@ pub mod static_web;
 pub mod stream;
 pub mod types;
 pub mod warroom;
-pub mod xmcp;
 
 #[cfg(test)]
 #[allow(clippy::module_inception)]

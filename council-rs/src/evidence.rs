@@ -95,7 +95,7 @@ pub async fn check_available(verbose: bool) -> bool {
             eprintln!("🔍 Validator: native web evidence disabled by COUNCIL_SHELDON_WEB_EVIDENCE");
         } else {
             eprintln!(
-                "🔍 Validator: no native web evidence keys detected — fresh-intel limited to xmcp"
+                "🔍 Validator: no native web evidence keys detected — no fresh-intel sources configured"
             );
         }
     }
