@@ -22,9 +22,9 @@ test.beforeEach(async ({ page }) => {
       ) {
         return;
       }
-      // Resource errors from other live local services (xmcp :8000, gateway
-      // :8080) are environment noise — only the council backend and the app
-      // origin are signals here.
+      // Resource errors from other live local services (gateway :8080) are
+      // environment noise — only the council backend and the app origin are
+      // signals here.
       const src = msg.location()?.url ?? "";
       if (
         src &&
@@ -329,7 +329,7 @@ test.describe("War Room smoke", () => {
     }, BACKEND);
     expect(body).toHaveProperty("providers_available");
     expect(Array.isArray(body.providers_available)).toBe(true);
-    // CORS + shape only — CI has no live provider vault (xmcp unreachable).
+    // CORS + shape only — CI does not probe a live provider vault.
   });
 
   test("browser can fetch sessions API with CORS", async ({ page }) => {

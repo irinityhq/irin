@@ -310,7 +310,7 @@ pub async fn ask_streaming_with_context(
 
 /// Sheldon claim_validator dispatch — honors `req_ctx` gateway routing. Grok Build
 /// and explicit xAI API transports may search natively; Hermes consumes the evidence
-/// Council gathered through xmcp and the native evidence pipeline.
+/// Council gathered through the native evidence pipeline.
 pub async fn ask_validator(
     provider: &str,
     prompt: &str,

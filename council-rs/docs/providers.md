@@ -49,13 +49,13 @@ then its configured fallback. Frame check uses the more reliable short-prompt
 order: `grok-4.3`, then `grok-4.20-0309-reasoning`, then its fallbacks.
 
 Sheldon uses `grok-4.20-0309-reasoning` over Hermes as its primary evaluator.
-Council gathers the evidence before that call: live X posts come from xmcp
-`searchPostsRecent`; broader web evidence comes from Exa, Tavily and Tavily
-News, Firecrawl for cited URLs, and optional Semantic Scholar. The Hermes
-validator receives that bounded evidence in its prompt and is not described as
-having a native search tool. If the gather returns no evidence, Council advances
-to the `grok-cli-default` Grok Build fallback, which retains native web and X
-search; the remaining cascade handles provider failures.
+Council gathers the evidence before that call: web evidence comes from Exa,
+Tavily and Tavily News, Firecrawl for cited URLs, and optional Semantic
+Scholar. IRIN does not talk to a local xmcp instance. The Hermes validator
+receives that bounded evidence in its prompt and is not described as having a
+native search tool. If the gather returns no evidence, Council advances to the
+`grok-cli-default` Grok Build fallback, which retains native web and X search;
+the remaining cascade handles provider failures.
 
 ## How Discovery Builds the List
 

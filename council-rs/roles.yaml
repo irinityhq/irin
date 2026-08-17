@@ -41,8 +41,8 @@ roles:
   claim_validator:
     description: "Claim verification (Sheldon) between rounds for SUPPORTED/CONTRADICTED/NO_EVIDENCE"
     cascade:
-      # Pinned evaluator. X and web evidence are gathered independently by
-      # xmcp + the native evidence pipeline before this evidence-only call.
+      # Pinned evaluator. Web evidence is gathered independently by the
+      # native evidence pipeline before this evidence-only call.
       - provider: grok_hermes
         model: grok-4.20-0309-reasoning
         max_tokens: 1024

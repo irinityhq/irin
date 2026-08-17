@@ -1,23 +1,21 @@
-// Evidence orchestration: multi-source gather, repo context, live X via xmcp.
+// Evidence orchestration: native web gather and operator-provided repo context.
 
-use super::web_evidence::{build_query_pairs, extract_keywords, gather_web_evidence};
+use super::web_evidence::gather_web_evidence;
 use super::{EvidenceCache, REPO_CONTEXT_MAX_BYTES, truncate};
 use crate::evidence;
 use crate::types::SeatResponse;
-use crate::xmcp;
 
 pub(super) async fn gather_evidence(
     topic: &str,
-    valid: &[&SeatResponse],
+    _valid: &[&SeatResponse],
     context: &str,
     verbose: bool,
     cache: Option<&EvidenceCache>,
 ) -> String {
-    let has_xmcp = xmcp::is_available().await;
     let has_web = evidence::is_available();
     let repo_context = repo_context_evidence(context);
 
-    if !has_xmcp && !has_web && repo_context.is_none() {
+    if !has_web && repo_context.is_none() {
         if verbose {
             eprintln!("🔍 Validator: no evidence sources available — claim extraction only");
         }
@@ -26,9 +24,6 @@ pub(super) async fn gather_evidence(
 
     if verbose {
         let mut sources = Vec::new();
-        if has_xmcp {
-            sources.push("xmcp");
-        }
         if has_web {
             sources.push("native web");
         }
@@ -38,27 +33,12 @@ pub(super) async fn gather_evidence(
         eprintln!("🔍 Validator: {} detected", sources.join(" + "));
     }
 
-    let combined_text: String = valid
-        .iter()
-        .take(3)
-        .map(|r| truncate(&r.text, 500))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let keywords = extract_keywords(&combined_text, topic);
-    let queries = build_query_pairs(&keywords);
-
-    // Run all evidence sources in parallel.
-    // xmcp is used *only* for live/recent X posts (raw intel via searchPostsRecent).
-    // Personal bookmark/intel corpus is never consulted from Sheldon.
-    let xmcp_fut = gather_xmcp_evidence(topic, &queries, has_xmcp, cache);
-    let web_fut = gather_web_evidence(topic, has_web, verbose, cache);
-    let (xmcp_parts, web_parts) = tokio::join!(xmcp_fut, web_fut);
+    let web_parts = gather_web_evidence(topic, has_web, verbose, cache).await;
 
     let mut parts = Vec::new();
     if let Some(repo_context) = repo_context {
         parts.push(repo_context);
     }
-    parts.extend(xmcp_parts);
     parts.extend(web_parts);
 
     if parts.is_empty() {
@@ -102,64 +82,6 @@ fn repo_context_evidence(context: &str) -> Option<String> {
     ))
 }
 
-async fn gather_xmcp_evidence(
-    _topic: &str,
-    queries: &[String],
-    available: bool,
-    _cache: Option<&EvidenceCache>,
-) -> Vec<String> {
-    if !available {
-        return vec![];
-    }
-
-    let mut parts = Vec::new();
-
-    // Sheldon uses xmcp *strictly* as a bridge to live/recent X posts (raw intel).
-    // The personal bookmark / intel corpus is **never** queried from here.
-    // Bookmarks can be sparse/stale and would bias validation toward the
-    // operator's existing collection rather than fresh public signals.
-    //
-    // We use xmcp::search_posts (searchPostsRecent) for live X only.
-    let mut seen_ids = std::collections::HashSet::new();
-    let mut post_results = Vec::new();
-    for q in queries.iter().take(3) {
-        let hits = xmcp::search_posts(q, 3).await;
-        for p in hits {
-            let pid = p
-                .get("id")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            if !pid.is_empty() && !seen_ids.insert(pid) {
-                continue;
-            }
-            post_results.push(p);
-        }
-    }
-
-    if !post_results.is_empty() {
-        parts.push("## Live X Posts (via xmcp)".into());
-        for post in post_results.iter().take(8) {
-            let text = post.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let text_short = truncate(text, 300);
-            let likes = post
-                .get("public_metrics")
-                .and_then(|m| m.get("like_count"))
-                .and_then(|v| v.as_u64())
-                .unwrap_or(0);
-            let mut entry = format!("- {}", text_short);
-            if likes > 0 {
-                entry.push_str(&format!(" [{} likes]", likes));
-            }
-            // If the live search payload ever carries enrichment, we can surface
-            // it here the same way (author, why, etc.). For now this is raw live.
-            parts.push(entry);
-        }
-    }
-
-    parts
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +112,23 @@ mod tests {
         assert!(evidence.contains("[repo context truncated]"));
 
         assert!(evidence.is_char_boundary(evidence.len()));
+    }
+
+    #[tokio::test]
+    async fn gather_evidence_with_web_off_emits_repo_context_without_live_x() {
+        let out = gather_evidence(
+            "What does Sheldon validate?",
+            &[],
+            "src/engine/sheldon/mod.rs\nclaim validator",
+            false,
+            None,
+        )
+        .await;
+
+        assert!(out.contains("## Local Repo Context"));
+        assert!(out.contains("src/engine/sheldon/mod.rs"));
+        let lowered = out.to_ascii_lowercase();
+        assert!(!lowered.contains("live x"));
+        assert!(!lowered.contains("xmcp"));
     }
 }

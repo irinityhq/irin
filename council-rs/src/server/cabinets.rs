@@ -137,10 +137,8 @@ pub(super) async fn cabinets_save_handler(
         }
     };
 
-    // Full execution validation (structural + xmcp vault) before the write —
-    // the same gate the WS custom_cabinet path runs per-run.
-    // `model_check_blocking` is a synchronous network call, so offload per the
-    // spawn_blocking convention used by precedent_reindex / embeddings_rebuild.
+    // Structural save validation before the write — the same gate the WS
+    // custom_cabinet path runs per-run.
     let config = state.config.clone();
     let name_for_validation = req.name.clone();
     let validated = tokio::task::spawn_blocking(move || {
