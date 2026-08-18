@@ -1118,6 +1118,59 @@ async fn t27_upsert_idempotent_preserves_runtime_state() {
 }
 
 #[tokio::test]
+async fn sync_registration_enabled_follows_loaded_profile() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("watch.db");
+    let db = Arc::new(WatchDb::open(&db_path).await.unwrap());
+    db.run_migrations().await.unwrap();
+    db.upsert_sentinel_registration("sovereign", "keep", "polling", 5000, "{}")
+        .await
+        .unwrap();
+    db.upsert_sentinel_registration("sovereign", "stale", "polling", 5000, "{}")
+        .await
+        .unwrap();
+    db.sync_registration_enabled(&[("sovereign".into(), "keep".into())])
+        .await
+        .unwrap();
+    let rows = db.list_registered("sovereign").await.unwrap();
+    let keep = rows.iter().find(|r| r.name == "keep").unwrap();
+    let stale = rows.iter().find(|r| r.name == "stale").unwrap();
+    assert!(keep.enabled, "loaded profile name must stay enabled");
+    assert!(!stale.enabled, "name absent from profile must be disabled");
+
+    db.sync_registration_enabled(&[]).await.unwrap();
+    let rows = db.list_registered("sovereign").await.unwrap();
+    assert!(
+        rows.iter().all(|r| !r.enabled),
+        "empty profile (Watch Off) must disable every row"
+    );
+}
+
+#[tokio::test]
+async fn gate4_ui_snapshot_hides_disabled_registry_rows() {
+    let (_tmp, _path, state) = ui_snapshot_fixture().await;
+    state.db.sync_registration_enabled(&[]).await.unwrap();
+    let response = ui_snapshot_router(state)
+        .oneshot(
+            Request::builder()
+                .uri("/watch/ui-snapshot/configured-canary")
+                .header("Authorization", "Bearer snapshot-admin")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(
+        value["sentinels"].as_array().unwrap().len(),
+        0,
+        "Watch Off must not list disabled registry leftovers"
+    );
+}
+
+#[tokio::test]
 async fn t28_temperature_zero_when_no_fires() {
     let tmp = tempfile::TempDir::new().unwrap();
     let db_path = tmp.path().join("watch.db");

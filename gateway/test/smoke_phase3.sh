@@ -180,6 +180,15 @@ TRIGGER_FILE=""
 SMOKE_ARTIFACT_DIR="${SMOKE_ARTIFACT_DIR:-/tmp/gateway-phase3-smoke-artifacts}"
 mkdir -p "$SMOKE_ARTIFACT_DIR"
 
+# Compose-owned ledger seed only — never the operator canonical
+# ~/.irin/ledger_key.pem and never host ~/.config/gcloud.
+export IRIN_COMPOSE_LEDGER_KEY="${IRIN_COMPOSE_LEDGER_KEY:-$HOME/.irin/compose-ledger-key}"
+if [ ! -f "$IRIN_COMPOSE_LEDGER_KEY" ]; then
+    mkdir -p "$(dirname "$IRIN_COMPOSE_LEDGER_KEY")"
+    openssl rand -out "$IRIN_COMPOSE_LEDGER_KEY" 32
+    chmod 600 "$IRIN_COMPOSE_LEDGER_KEY"
+fi
+
 # Arm ceremony for attested-arm attested reserve (positive path only).
 # Boot-time: GW_ARM_PRINCIPALS (>=2) + GW_ARM_ATTEST_KEYS_PATH must be set
 # and the registry file present on sidecar_data volume at sidecar start.
@@ -596,8 +605,7 @@ Set COUNCIL_GATEWAY_TOKEN before running the council endpoint smoke."
             echo '      - sidecar_sock:/run/sidecar'
             echo '      - sidecar_data:/var/lib/sidecar'
             echo '      - ./demo/inbox:/var/lib/gateway/inbox:ro'
-            echo '      - ${HOME}/.irin/ledger_key.pem:/run/secrets/ledger_key:ro'
-            echo '      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro'
+            echo '      - ${IRIN_COMPOSE_LEDGER_KEY:-${HOME}/.irin/compose-ledger-key}:/run/secrets/ledger_key:ro'
             if [ "$DO_ARM" = true ]; then
                 echo "      - ${ATT_KEYS_JSON}:/var/lib/sidecar/attest_keys.json:ro"
                 # NOTE: the CLEAN-binary bind-mount overlay is GONE. The unified

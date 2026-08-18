@@ -9,10 +9,9 @@
 #     ports list — a plain overlay would APPEND and re-bind 18080, colliding
 #     with a running stack). Default 28080; set DEMO_GW_PORT to move it.
 #   - Swaps the sidecar ledger key for a demo-ephemeral 32-byte key
-#     (DEMO_LEDGER_KEY) instead of the operator's ~/.irin/ledger_key.pem,
-#     and drops the host ${HOME}/.config/gcloud mount (the demo makes no real
-#     provider calls). `!override` REPLACES the whole volumes list, so both the
-#     real-key mount and the gcloud mount are gone, not merged back in.
+#     (DEMO_LEDGER_KEY) instead of the compose-owned ~/.irin/compose-ledger-key.
+#     `!override` REPLACES the whole volumes list so the demo never sees the
+#     live stack seed. Base compose does not mount host gcloud ADC.
 #   - Adds the synthetic arm attest registry (DEMO_ATTEST_KEYS) the demo's
 #     software (non-Touch-ID) arm ceremony verifies against.
 #   - Pins image names (DEMO_*_IMAGE) so an existing local build is reused via

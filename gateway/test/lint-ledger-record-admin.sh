@@ -72,6 +72,17 @@ grep -Eq '^env[[:space:]]+LEDGER_ADMIN_KEY;' "$NGINX" \
 grep -Eq '^env[[:space:]]+ADMIN_KEY;' "$NGINX" \
     || fail "nginx.conf must declare env ADMIN_KEY; so Lua can read the fallback"
 
+# /vertex/token is a secret-bearing sibling of /ledger/*: same X-Admin-Key gate.
+vertex_token_body="$(
+    sed -n '/^function _M\.vertex_token(/,/^function _M\./p' "$SIDECAR" \
+        | sed '$d'
+)"
+[[ -n "$vertex_token_body" ]] || fail "could not extract _M.vertex_token from sidecar.lua"
+printf '%s\n' "$vertex_token_body" | grep -q 'X-Admin-Key' \
+    || fail "vertex_token must send X-Admin-Key header"
+printf '%s\n' "$vertex_token_body" | grep -q 'LEDGER_ADMIN_KEY == ""' \
+    || fail "vertex_token must fail closed when LEDGER_ADMIN_KEY is empty"
+
 if [[ "$EXIT" -ne 0 ]]; then
     echo
     echo "❌ lint-ledger-record-admin: contract violations above (ProjectMem #0093)"

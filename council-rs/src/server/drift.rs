@@ -64,7 +64,7 @@ pub(super) fn default_drift_limit() -> Option<usize> {
 
 pub(super) async fn drift_run(
     State(state): State<AppState>,
-    body: Option<axum::Json<DriftRunBody>>,
+    axum::Json(body): axum::Json<DriftRunBody>,
 ) -> impl IntoResponse {
     if warroom::drift::is_running() {
         return (
@@ -80,10 +80,6 @@ pub(super) async fn drift_run(
         )
             .into_response();
     }
-    let body = body.map(|b| b.0).unwrap_or(DriftRunBody {
-        window: 7,
-        limit: Some(8),
-    });
     let window = body.window.clamp(1, 90);
     let limit = body.limit.map(|l| l.clamp(1, 50));
 
@@ -108,7 +104,7 @@ pub(super) struct WeeklyRunBody {
 
 pub(super) async fn drift_weekly_run(
     State(state): State<AppState>,
-    body: Option<axum::Json<WeeklyRunBody>>,
+    axum::Json(body): axum::Json<WeeklyRunBody>,
 ) -> impl IntoResponse {
     if warroom::drift::is_running() {
         return (
@@ -124,11 +120,6 @@ pub(super) async fn drift_weekly_run(
         )
             .into_response();
     }
-    let body = body.map(|b| b.0).unwrap_or(WeeklyRunBody {
-        window: 7,
-        limit: Some(8),
-        post_webhooks: false,
-    });
     let window = body.window.clamp(1, 90);
     let limit = body.limit.map(|l| l.clamp(1, 50));
     let post = body.post_webhooks;
@@ -155,3 +146,104 @@ pub(super) async fn drift_weekly_history(Query(q): Query<WeeklyHistoryQuery>) ->
 }
 
 // ───── Mapmaker briefs / map preview ──────────────────────────
+
+#[cfg(test)]
+mod json_body_required_tests {
+    use super::{DriftRunBody, WeeklyRunBody};
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use serde::Deserialize;
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    async fn echo_drift(Json(body): Json<DriftRunBody>) -> Json<Value> {
+        Json(serde_json::json!({"window": body.window, "limit": body.limit}))
+    }
+
+    async fn echo_weekly(Json(body): Json<WeeklyRunBody>) -> Json<Value> {
+        Json(serde_json::json!({
+            "window": body.window,
+            "limit": body.limit,
+            "post_webhooks": body.post_webhooks
+        }))
+    }
+
+    fn app() -> Router {
+        Router::new()
+            .route("/run", post(echo_drift))
+            .route("/weekly", post(echo_weekly))
+    }
+
+    #[derive(Deserialize)]
+    struct Echo {
+        window: u32,
+        limit: Option<usize>,
+        #[serde(default)]
+        post_webhooks: bool,
+    }
+
+    #[tokio::test]
+    async fn text_plain_is_rejected() {
+        for path in ["/run", "/weekly"] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "text/plain")
+                        .body(Body::from("x"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{path} must reject a simple POST"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn empty_json_uses_defaults() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/run")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let echo: Echo = serde_json::from_slice(&body).unwrap();
+        assert_eq!(echo.window, 7);
+        assert_eq!(echo.limit, Some(8));
+    }
+
+    #[tokio::test]
+    async fn weekly_json_uses_defaults() {
+        let response = app()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/weekly")
+                    .header("content-type", "application/json")
+                    .body(Body::from("{}"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let echo: Echo = serde_json::from_slice(&body).unwrap();
+        assert_eq!(echo.window, 7);
+        assert_eq!(echo.limit, Some(8));
+        assert!(!echo.post_webhooks);
+    }
+}

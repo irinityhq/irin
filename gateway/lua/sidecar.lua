@@ -551,6 +551,11 @@ end
 -- @return table|nil response data
 -- @return string|nil error message
 function _M.vertex_token()
+    -- Fail closed before the GET when the writer key is missing. The sidecar
+    -- gates /vertex/token on X-Admin-Key (same admin-proxy idiom as /ledger/*).
+    if LEDGER_ADMIN_KEY == "" then
+        return nil, "ledger admin key not configured (set LEDGER_ADMIN_KEY or ADMIN_KEY)"
+    end
     local httpc = http.new()
     httpc:set_timeout(SIDECAR_TIMEOUT_MS)
 
@@ -577,7 +582,10 @@ function _M.vertex_token()
     local res, req_err = httpc:request{
         method  = "GET",
         path    = "/vertex/token",
-        headers = { ["Host"] = host_field },
+        headers = {
+            ["Host"] = host_field,
+            ["X-Admin-Key"] = LEDGER_ADMIN_KEY,
+        },
     }
     if not res then
         httpc:close()

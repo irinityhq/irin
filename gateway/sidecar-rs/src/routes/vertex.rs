@@ -20,7 +20,13 @@ pub(super) struct VertexTokenError {
 
 pub(super) async fn vertex_token_handler(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
+    // Same admin-proxy gate as /ledger/*: socket perms are the first
+    // boundary, not a bearer replacement. Lua already holds LEDGER_ADMIN_KEY.
+    if let Err(resp) = super::ledger::require_admin_header(&state.auth, &headers).await {
+        return resp.into_response();
+    }
     match state.vertex_token.get_token().await {
         Ok((token, source)) => (
             StatusCode::OK,

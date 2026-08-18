@@ -23,7 +23,8 @@ starts Council and War Room Web, not Gateway.
 `make gateway-prepare-config` creates:
 
 - `~/.config/irin/gateway.env` for Gateway development settings
-- `~/.irin/ledger_key.pem` for the local Ed25519 signing seed
+- `~/.irin/ledger_key.pem` for host-side ledger tools (`ledger-fsck`)
+- `~/.irin/compose-ledger-key` for the compose sidecar (never the canonical key, never host `~/.config/gcloud`)
 
 Configuration files and the signing seed are mode `0600`. The helper preserves
 valid operator-owned values while adding or replacing missing, placeholder, or

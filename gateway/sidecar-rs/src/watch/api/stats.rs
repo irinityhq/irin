@@ -625,6 +625,7 @@ pub async fn ui_snapshot_json(
     let sentinels = match db.list_registered(&tenant).await {
         Ok(rows) => rows
             .into_iter()
+            .filter(|row| row.enabled)
             .map(|row| UiSentinelReadiness {
                 name: row.name,
                 tier: row.tier,

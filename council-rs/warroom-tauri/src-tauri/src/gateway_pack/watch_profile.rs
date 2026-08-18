@@ -113,6 +113,58 @@ pub(crate) fn remove_profile_file() -> Result<(), String> {
     Ok(())
 }
 
+fn read_profile_bytes() -> Result<Option<Vec<u8>>, String> {
+    let path = watch_profile_path();
+    if !path.is_file() {
+        return Ok(None);
+    }
+    fs::read(&path)
+        .map(Some)
+        .map_err(|e| format!("read watch profile: {e}"))
+}
+
+fn restore_profile_bytes(body: &[u8]) -> Result<(), String> {
+    ensure_watch_dirs()?;
+    let dest = watch_profile_path();
+    let tmp = dest.with_extension("yaml.tmp");
+    fs::write(&tmp, body).map_err(|e| format!("restore watch profile: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&tmp, fs::Permissions::from_mode(0o600));
+    }
+    fs::rename(&tmp, &dest).map_err(|e| format!("restore watch profile: {e}"))?;
+    Ok(())
+}
+
+/// Install or remove the durable profile, then reconcile. On reconcile
+/// failure the file is rolled back so `watch_sentinels_enabled()` matches
+/// the pack that actually came up.
+fn commit_watch_profile_switch<F>(enabled: bool, mut reconcile: F) -> Result<bool, String>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    if enabled {
+        install_default_profile_file()?;
+        if let Err(e) = reconcile() {
+            let _ = remove_profile_file();
+            return Err(format!(
+                "pack recreate failed; watch profile rolled back: {e}"
+            ));
+        }
+    } else {
+        let previous = read_profile_bytes()?;
+        remove_profile_file()?;
+        if let Err(e) = reconcile() {
+            if let Some(body) = previous {
+                let _ = restore_profile_bytes(&body);
+            }
+            return Err(format!("pack recreate failed; watch profile restored: {e}"));
+        }
+    }
+    Ok(watch_sentinels_enabled())
+}
+
 /// Bounded pack recreate so the sidecar reloads SENTINELS_CONFIG_PATH pins.
 fn reconcile_pack_for_profile(store: &dyn SecretStore) -> Result<(), String> {
     match probe_docker_daemon() {
@@ -186,40 +238,23 @@ pub fn set_watch_sentinels_enabled(store: &dyn SecretStore, enabled: bool) -> Re
         e
     })?;
 
-    if enabled {
-        install_default_profile_file().map_err(|e| {
+    match commit_watch_profile_switch(enabled, || reconcile_pack_for_profile(store)) {
+        Ok(state) => {
+            lifecycle_stage(
+                "watch_profile",
+                if enabled {
+                    "reconciled_on"
+                } else {
+                    "reconciled_off"
+                },
+            );
+            Ok(state)
+        }
+        Err(e) => {
             lifecycle_stage("watch_profile", "error");
-            e
-        })?;
-        lifecycle_stage("watch_profile", "installed");
-    } else {
-        remove_profile_file().map_err(|e| {
-            lifecycle_stage("watch_profile", "error");
-            e
-        })?;
-        lifecycle_stage("watch_profile", "removed");
+            Err(e)
+        }
     }
-
-    // Always reconcile when pack is installed so pins + containers match the
-    // durable switch. Failures surface to the operator (never silent 0 sentinels
-    // while "enabled").
-    if let Err(e) = reconcile_pack_for_profile(store) {
-        lifecycle_stage("watch_profile", "error");
-        // Leave file state as the durable switch; operator can re-toggle or fix
-        // Docker and resume. Report the error clearly.
-        return Err(format!(
-            "watch profile file updated but pack recreate failed: {e}"
-        ));
-    }
-    lifecycle_stage(
-        "watch_profile",
-        if enabled {
-            "reconciled_on"
-        } else {
-            "reconciled_off"
-        },
-    );
-    Ok(watch_sentinels_enabled())
 }
 
 #[cfg(test)]
@@ -250,6 +285,59 @@ mod tests {
             .contains("sentinels.yaml"));
         remove_profile_file().unwrap();
         assert!(!watch_sentinels_enabled());
+        match prev_support {
+            Some(v) => std::env::set_var(APP_SUPPORT_ROOT_ENV, v),
+            None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),
+        }
+        let _ = fs::remove_dir_all(&support);
+    }
+
+    #[test]
+    fn failed_enable_rolls_back_profile_file() {
+        let _g = test_env_lock();
+        let prev_support = std::env::var(APP_SUPPORT_ROOT_ENV).ok();
+        let support = std::env::temp_dir().join(format!(
+            "gw-watch-profile-rollback-on-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&support);
+        fs::create_dir_all(&support).unwrap();
+        std::env::set_var(APP_SUPPORT_ROOT_ENV, &support);
+        let _ = remove_profile_file();
+        let err = commit_watch_profile_switch(true, || Err("docker down".into())).unwrap_err();
+        assert!(err.contains("rolled back"), "{err}");
+        assert!(
+            !watch_sentinels_enabled(),
+            "failed On must not leave the profile file"
+        );
+        match prev_support {
+            Some(v) => std::env::set_var(APP_SUPPORT_ROOT_ENV, v),
+            None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),
+        }
+        let _ = fs::remove_dir_all(&support);
+    }
+
+    #[test]
+    fn failed_disable_restores_profile_file() {
+        let _g = test_env_lock();
+        let prev_support = std::env::var(APP_SUPPORT_ROOT_ENV).ok();
+        let support = std::env::temp_dir().join(format!(
+            "gw-watch-profile-rollback-off-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&support);
+        fs::create_dir_all(&support).unwrap();
+        std::env::set_var(APP_SUPPORT_ROOT_ENV, &support);
+        install_default_profile_file().expect("install template");
+        let before = fs::read(watch_profile_path()).unwrap();
+        let err = commit_watch_profile_switch(false, || Err("docker down".into())).unwrap_err();
+        assert!(err.contains("restored"), "{err}");
+        assert!(
+            watch_sentinels_enabled(),
+            "failed Off must restore the profile file"
+        );
+        assert_eq!(fs::read(watch_profile_path()).unwrap(), before);
+        let _ = remove_profile_file();
         match prev_support {
             Some(v) => std::env::set_var(APP_SUPPORT_ROOT_ENV, v),
             None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),

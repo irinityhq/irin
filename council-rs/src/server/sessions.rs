@@ -187,9 +187,9 @@ pub(super) struct ForkBody {
 pub(super) async fn session_fork(
     State(state): State<AppState>,
     Path(id): Path<String>,
-    body: Option<axum::Json<ForkBody>>,
+    axum::Json(body): axum::Json<ForkBody>,
 ) -> impl IntoResponse {
-    let swaps = body.map(|b| b.0.swaps).unwrap_or_default();
+    let swaps = body.swaps;
     let result = warroom::fork::fork_session(&state.config, &id, &swaps);
     if result.get("error").is_some() {
         return (axum::http::StatusCode::NOT_FOUND, axum::Json(result)).into_response();
