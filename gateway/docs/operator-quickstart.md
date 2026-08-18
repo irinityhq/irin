@@ -33,7 +33,8 @@ environment and are never copied into Gateway configuration.
 
 An existing compose volume signed with the old host seed (`~/.irin/ledger_key.pem`)
 will not verify against the compose-owned seed. Before `make up`, copy the
-previous seed to `~/.irin/compose-ledger-key`, or recreate the sidecar data
+previous seed to the path selected by `IRIN_COMPOSE_LEDGER_KEY`
+(default: `~/.irin/compose-ledger-key`), or recreate the sidecar data
 volume. Recreating the volume drops that stack's ledger history.
 
 ## Health
