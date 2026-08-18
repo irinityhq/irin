@@ -110,7 +110,16 @@ fi
 if grep -Eq -- '-[[:space:]].*\.config/gcloud:' "$compose"; then
   fail "dev compose must not mount host ~/.config/gcloud"
 fi
-grep -q 'compose-ledger-key' "$compose" \
-  || fail "dev compose must mount the compose-owned ledger seed"
+grep -Eq -- '^[[:space:]]*-[[:space:]].*compose-ledger-key.*:/run/secrets/ledger_key:ro[[:space:]]*$' "$compose" \
+  || fail "dev compose must mount the compose-owned ledger seed at /run/secrets/ledger_key:ro"
+
+dry="$(make -nC "$ROOT/gateway" up IRIN_COMPOSE_LEDGER_KEY=/custom/compose-key)"
+printf '%s\n' "$dry" | grep -Fq 'LEDGER_KEY_PATH="/custom/compose-key"' \
+  || fail "compose-ledger-key must generate the explicit IRIN_COMPOSE_LEDGER_KEY path"
+printf '%s\n' "$dry" | grep -Fq 'IRIN_COMPOSE_LEDGER_KEY="/custom/compose-key"' \
+  || fail "make up must pass the explicit IRIN_COMPOSE_LEDGER_KEY through to Compose"
+if printf '%s\n' "$dry" | grep -E 'IRIN_COMPOSE_LEDGER_KEY="[^"]*compose-ledger-key"'; then
+  fail "make up must not overwrite an explicit IRIN_COMPOSE_LEDGER_KEY"
+fi
 
 printf 'gateway prepare-config tests passed\n'

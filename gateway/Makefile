@@ -9,6 +9,7 @@
 LEDGER_KEY_PATH ?= $(HOME)/.irin/ledger_key.pem
 # Compose-owned seed only. Never the operator canonical ledger_key.pem.
 COMPOSE_LEDGER_KEY ?= $(HOME)/.irin/compose-ledger-key
+IRIN_COMPOSE_LEDGER_KEY ?= $(COMPOSE_LEDGER_KEY)
 # LEDGER_OLD_SIGNING_KEY_PATH (optional, for rotation dual-sign window) now subject to same P0 hygiene checks (0600, 32B, panic if set+bad) as primary.
 
 .PHONY: help ledger-key-dev compose-ledger-key validate smoke security-test contract-check lint-lua lua-unit up down logs ledger-fsck models-validate test-council-644 check-no-openssl audit-rust metrics-contract build-sidecar-smoke smoke-phase3 smoke-phase3-arm-only test-rust-suites test-rust-security test-triad triad-test triad-smoke prove-provenance verify verify-down demo demo-down
@@ -76,7 +77,7 @@ ledger-key-dev:
 # Compose stack key: a dedicated seed so `make up` never bind-mounts the
 # operator canonical ~/.irin/ledger_key.pem into the sidecar container.
 compose-ledger-key:
-	$(MAKE) ledger-key-dev LEDGER_KEY_PATH="$(COMPOSE_LEDGER_KEY)"
+	$(MAKE) ledger-key-dev LEDGER_KEY_PATH="$(IRIN_COMPOSE_LEDGER_KEY)"
 
 # --------------------------------------------------------------------------
 # provision-key — creates a new virtual API key via the gateway admin proxy.
@@ -360,7 +361,7 @@ ledger-fsck:
 # T23: --locked on release path + committed lock (buildability). Clean clone + this proves no missing pins for sovereign-protocol dep.
 
 up: compose-ledger-key
-	IRIN_COMPOSE_LEDGER_KEY="$(COMPOSE_LEDGER_KEY)" docker compose up -d --build
+	IRIN_COMPOSE_LEDGER_KEY="$(IRIN_COMPOSE_LEDGER_KEY)" docker compose up -d --build
 
 down:
 	docker compose down

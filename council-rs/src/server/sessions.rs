@@ -388,3 +388,57 @@ mod normalize_index_entry_tests {
         assert!(normalize_index_entry("[1,2]").is_none());
     }
 }
+
+#[cfg(test)]
+mod json_body_required_tests {
+    use super::session_fork;
+    use crate::config::Config;
+    use crate::librarian;
+    use crate::server::AppState;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
+    use tower::ServiceExt;
+
+    fn test_state() -> AppState {
+        AppState {
+            config: Arc::new(Config {
+                cabinets: std::collections::HashMap::new(),
+                models: crate::types::ModelRegistry {
+                    models: std::collections::HashMap::new(),
+                },
+                roles: crate::types::RolesConfig::default(),
+                tera: tera::Tera::default(),
+                base_dir: std::env::temp_dir(),
+            }),
+            librarian: librarian::routes::LibrarianState::from_env(),
+            deliberate_semaphore: Arc::new(Semaphore::new(1)),
+        }
+    }
+
+    #[tokio::test]
+    async fn production_session_fork_rejects_text_plain() {
+        let app = Router::new()
+            .route("/api/sessions/{id}/fork", post(session_fork))
+            .with_state(test_state());
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/nonexistent/fork")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("x"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "session_fork must reject a simple POST"
+        );
+    }
+}

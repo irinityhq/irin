@@ -31,6 +31,11 @@ valid operator-owned values while adding or replacing missing, placeholder, or
 invalid IRIN-managed fields. Provider credentials remain in the login-shell
 environment and are never copied into Gateway configuration.
 
+An existing compose volume signed with the old host seed (`~/.irin/ledger_key.pem`)
+will not verify against the compose-owned seed. Before `make up`, copy the
+previous seed to `~/.irin/compose-ledger-key`, or recreate the sidecar data
+volume. Recreating the volume drops that stack's ledger history.
+
 ## Health
 
 ```bash

@@ -183,11 +183,8 @@ mkdir -p "$SMOKE_ARTIFACT_DIR"
 # Compose-owned ledger seed only — never the operator canonical
 # ~/.irin/ledger_key.pem and never host ~/.config/gcloud.
 export IRIN_COMPOSE_LEDGER_KEY="${IRIN_COMPOSE_LEDGER_KEY:-$HOME/.irin/compose-ledger-key}"
-if [ ! -f "$IRIN_COMPOSE_LEDGER_KEY" ]; then
-    mkdir -p "$(dirname "$IRIN_COMPOSE_LEDGER_KEY")"
-    openssl rand -out "$IRIN_COMPOSE_LEDGER_KEY" 32
-    chmod 600 "$IRIN_COMPOSE_LEDGER_KEY"
-fi
+# Same 32-byte / 0600 checks as ledger-key-dev (generate if missing).
+make -C "$GATEWAY_ROOT" compose-ledger-key
 
 # Arm ceremony for attested-arm attested reserve (positive path only).
 # Boot-time: GW_ARM_PRINCIPALS (>=2) + GW_ARM_ATTEST_KEYS_PATH must be set

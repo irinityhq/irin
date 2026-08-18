@@ -78,10 +78,14 @@ vertex_token_body="$(
         | sed '$d'
 )"
 [[ -n "$vertex_token_body" ]] || fail "could not extract _M.vertex_token from sidecar.lua"
-printf '%s\n' "$vertex_token_body" | grep -q 'X-Admin-Key' \
-    || fail "vertex_token must send X-Admin-Key header"
-printf '%s\n' "$vertex_token_body" | grep -q 'LEDGER_ADMIN_KEY == ""' \
-    || fail "vertex_token must fail closed when LEDGER_ADMIN_KEY is empty"
+printf '%s\n' "$vertex_token_body" | grep -Fq '["X-Admin-Key"] = LEDGER_ADMIN_KEY' \
+    || fail "vertex_token must assign [\"X-Admin-Key\"] = LEDGER_ADMIN_KEY"
+guard_line="$(printf '%s\n' "$vertex_token_body" | grep -n 'LEDGER_ADMIN_KEY == ""' | head -n1 | cut -d: -f1)"
+httpc_line="$(printf '%s\n' "$vertex_token_body" | grep -n 'local httpc = http.new()' | head -n1 | cut -d: -f1)"
+[[ -n "$guard_line" ]] || fail "vertex_token must fail closed when LEDGER_ADMIN_KEY is empty"
+[[ -n "$httpc_line" ]] || fail "vertex_token must create an HTTP client after the empty-key guard"
+[[ "$guard_line" -lt "$httpc_line" ]] \
+    || fail "vertex_token empty-key guard must run before local httpc = http.new()"
 
 if [[ "$EXIT" -ne 0 ]]; then
     echo

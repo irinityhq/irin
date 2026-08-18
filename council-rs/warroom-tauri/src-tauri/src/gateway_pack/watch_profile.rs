@@ -137,30 +137,41 @@ fn restore_profile_bytes(body: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
+/// Restore the snapshot taken before a switch, then reconcile so the pack
+/// matches the restored file. Restore errors abort before a second reconcile.
+fn rollback_watch_profile<F>(previous: Option<&[u8]>, mut reconcile: F) -> Result<(), String>
+where
+    F: FnMut() -> Result<(), String>,
+{
+    match previous {
+        Some(body) => restore_profile_bytes(body)?,
+        None => remove_profile_file()?,
+    }
+    reconcile()
+}
+
 /// Install or remove the durable profile, then reconcile. On reconcile
-/// failure the file is rolled back so `watch_sentinels_enabled()` matches
-/// the pack that actually came up.
+/// failure the prior file is restored and the pack is compensating-recreated
+/// so `watch_sentinels_enabled()` matches the pack that actually came up.
 fn commit_watch_profile_switch<F>(enabled: bool, mut reconcile: F) -> Result<bool, String>
 where
     F: FnMut() -> Result<(), String>,
 {
+    let previous = read_profile_bytes()?;
     if enabled {
         install_default_profile_file()?;
-        if let Err(e) = reconcile() {
-            let _ = remove_profile_file();
-            return Err(format!(
-                "pack recreate failed; watch profile rolled back: {e}"
-            ));
-        }
     } else {
-        let previous = read_profile_bytes()?;
         remove_profile_file()?;
-        if let Err(e) = reconcile() {
-            if let Some(body) = previous {
-                let _ = restore_profile_bytes(&body);
-            }
-            return Err(format!("pack recreate failed; watch profile restored: {e}"));
-        }
+    }
+    if let Err(e) = reconcile() {
+        return match rollback_watch_profile(previous.as_deref(), reconcile) {
+            Ok(()) => Err(format!(
+                "pack recreate failed; watch profile and pack restored: {e}"
+            )),
+            Err(heal) => Err(format!(
+                "pack recreate failed; watch profile restore or pack heal failed: {e}; {heal}"
+            )),
+        };
     }
     Ok(watch_sentinels_enabled())
 }
@@ -304,8 +315,17 @@ mod tests {
         fs::create_dir_all(&support).unwrap();
         std::env::set_var(APP_SUPPORT_ROOT_ENV, &support);
         let _ = remove_profile_file();
-        let err = commit_watch_profile_switch(true, || Err("docker down".into())).unwrap_err();
-        assert!(err.contains("rolled back"), "{err}");
+        let mut calls = 0;
+        let err = commit_watch_profile_switch(true, || {
+            calls += 1;
+            Err("docker down".into())
+        })
+        .unwrap_err();
+        assert!(err.contains("restore or pack heal failed"), "{err}");
+        assert_eq!(
+            calls, 2,
+            "failed On must compensating-reconcile after restore"
+        );
         assert!(
             !watch_sentinels_enabled(),
             "failed On must not leave the profile file"
@@ -330,14 +350,98 @@ mod tests {
         std::env::set_var(APP_SUPPORT_ROOT_ENV, &support);
         install_default_profile_file().expect("install template");
         let before = fs::read(watch_profile_path()).unwrap();
-        let err = commit_watch_profile_switch(false, || Err("docker down".into())).unwrap_err();
-        assert!(err.contains("restored"), "{err}");
+        let mut calls = 0;
+        let err = commit_watch_profile_switch(false, || {
+            calls += 1;
+            Err("docker down".into())
+        })
+        .unwrap_err();
+        assert!(
+            err.contains("restored") || err.contains("heal failed"),
+            "{err}"
+        );
+        assert_eq!(
+            calls, 2,
+            "failed Off must compensating-reconcile after restore"
+        );
         assert!(
             watch_sentinels_enabled(),
             "failed Off must restore the profile file"
         );
         assert_eq!(fs::read(watch_profile_path()).unwrap(), before);
         let _ = remove_profile_file();
+        match prev_support {
+            Some(v) => std::env::set_var(APP_SUPPORT_ROOT_ENV, v),
+            None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),
+        }
+        let _ = fs::remove_dir_all(&support);
+    }
+
+    #[test]
+    fn failed_enable_restores_existing_profile() {
+        let _g = test_env_lock();
+        let prev_support = std::env::var(APP_SUPPORT_ROOT_ENV).ok();
+        let support = std::env::temp_dir().join(format!(
+            "gw-watch-profile-rollback-on-existing-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&support);
+        fs::create_dir_all(&support).unwrap();
+        std::env::set_var(APP_SUPPORT_ROOT_ENV, &support);
+        restore_profile_bytes(b"custom-prior-profile\n").expect("seed existing profile");
+        let before = fs::read(watch_profile_path()).unwrap();
+        let mut calls = 0;
+        let err = commit_watch_profile_switch(true, || {
+            calls += 1;
+            Err("control plane not ready".into())
+        })
+        .unwrap_err();
+        assert!(err.contains("restore or pack heal failed"), "{err}");
+        assert_eq!(
+            calls, 2,
+            "failed On must compensating-reconcile after restore"
+        );
+        assert_eq!(
+            fs::read(watch_profile_path()).unwrap(),
+            before,
+            "failed On must restore the prior profile, not delete it"
+        );
+        let _ = remove_profile_file();
+        match prev_support {
+            Some(v) => std::env::set_var(APP_SUPPORT_ROOT_ENV, v),
+            None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),
+        }
+        let _ = fs::remove_dir_all(&support);
+    }
+
+    #[test]
+    fn failed_switch_heals_pack_when_second_reconcile_succeeds() {
+        let _g = test_env_lock();
+        let prev_support = std::env::var(APP_SUPPORT_ROOT_ENV).ok();
+        let support = std::env::temp_dir().join(format!(
+            "gw-watch-profile-heal-after-recreate-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&support);
+        fs::create_dir_all(&support).unwrap();
+        std::env::set_var(APP_SUPPORT_ROOT_ENV, &support);
+        let _ = remove_profile_file();
+        let mut calls = 0;
+        let err = commit_watch_profile_switch(true, || {
+            calls += 1;
+            if calls == 1 {
+                Err("control plane not ready".into())
+            } else {
+                Ok(())
+            }
+        })
+        .unwrap_err();
+        assert!(err.contains("watch profile and pack restored"), "{err}");
+        assert_eq!(calls, 2, "heal must run after the first recreate failure");
+        assert!(
+            !watch_sentinels_enabled(),
+            "healed On-from-empty must leave no profile file"
+        );
         match prev_support {
             Some(v) => std::env::set_var(APP_SUPPORT_ROOT_ENV, v),
             None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),

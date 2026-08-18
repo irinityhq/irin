@@ -149,44 +149,44 @@ pub(super) async fn drift_weekly_history(Query(q): Query<WeeklyHistoryQuery>) ->
 
 #[cfg(test)]
 mod json_body_required_tests {
-    use super::{DriftRunBody, WeeklyRunBody};
-    use axum::body::{Body, to_bytes};
+    use super::{DriftRunBody, WeeklyRunBody, drift_run, drift_weekly_run};
+    use crate::config::Config;
+    use crate::librarian;
+    use crate::server::AppState;
+    use axum::Router;
+    use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::post;
-    use axum::{Json, Router};
-    use serde::Deserialize;
-    use serde_json::Value;
+    use std::sync::Arc;
+    use tokio::sync::Semaphore;
     use tower::ServiceExt;
 
-    async fn echo_drift(Json(body): Json<DriftRunBody>) -> Json<Value> {
-        Json(serde_json::json!({"window": body.window, "limit": body.limit}))
-    }
-
-    async fn echo_weekly(Json(body): Json<WeeklyRunBody>) -> Json<Value> {
-        Json(serde_json::json!({
-            "window": body.window,
-            "limit": body.limit,
-            "post_webhooks": body.post_webhooks
-        }))
+    fn test_state() -> AppState {
+        AppState {
+            config: Arc::new(Config {
+                cabinets: std::collections::HashMap::new(),
+                models: crate::types::ModelRegistry {
+                    models: std::collections::HashMap::new(),
+                },
+                roles: crate::types::RolesConfig::default(),
+                tera: tera::Tera::default(),
+                base_dir: std::env::temp_dir(),
+            }),
+            librarian: librarian::routes::LibrarianState::from_env(),
+            deliberate_semaphore: Arc::new(Semaphore::new(1)),
+        }
     }
 
     fn app() -> Router {
         Router::new()
-            .route("/run", post(echo_drift))
-            .route("/weekly", post(echo_weekly))
-    }
-
-    #[derive(Deserialize)]
-    struct Echo {
-        window: u32,
-        limit: Option<usize>,
-        #[serde(default)]
-        post_webhooks: bool,
+            .route("/api/drift/run", post(drift_run))
+            .route("/api/drift/weekly/run", post(drift_weekly_run))
+            .with_state(test_state())
     }
 
     #[tokio::test]
-    async fn text_plain_is_rejected() {
-        for path in ["/run", "/weekly"] {
+    async fn production_handlers_reject_text_plain() {
+        for path in ["/api/drift/run", "/api/drift/weekly/run"] {
             let response = app()
                 .oneshot(
                     Request::builder()
@@ -206,44 +206,18 @@ mod json_body_required_tests {
         }
     }
 
-    #[tokio::test]
-    async fn empty_json_uses_defaults() {
-        let response = app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/run")
-                    .header("content-type", "application/json")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let echo: Echo = serde_json::from_slice(&body).unwrap();
-        assert_eq!(echo.window, 7);
-        assert_eq!(echo.limit, Some(8));
+    #[test]
+    fn empty_json_uses_defaults() {
+        let body: DriftRunBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(body.window, 7);
+        assert_eq!(body.limit, Some(8));
     }
 
-    #[tokio::test]
-    async fn weekly_json_uses_defaults() {
-        let response = app()
-            .oneshot(
-                Request::builder()
-                    .method("POST")
-                    .uri("/weekly")
-                    .header("content-type", "application/json")
-                    .body(Body::from("{}"))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let echo: Echo = serde_json::from_slice(&body).unwrap();
-        assert_eq!(echo.window, 7);
-        assert_eq!(echo.limit, Some(8));
-        assert!(!echo.post_webhooks);
+    #[test]
+    fn weekly_json_uses_defaults() {
+        let body: WeeklyRunBody = serde_json::from_str("{}").unwrap();
+        assert_eq!(body.window, 7);
+        assert_eq!(body.limit, Some(8));
+        assert!(!body.post_webhooks);
     }
 }
