@@ -394,8 +394,9 @@ async fn hydrate_runtime_state(authority: BootAuthority) -> anyhow::Result<BootH
 
     // T27 — boot-time registry upsert: write each loaded sentinel into
     // watch_sentinels so `/watch/list/{tenant}` has something to return.
-    // ON CONFLICT preserves hard_killed_at / probation_until / enabled
-    // (see WatchDb::upsert_sentinel_registration), so restart-safe.
+    // ON CONFLICT preserves hard_killed_at / probation_until / enabled;
+    // sync_registration_enabled then sets enabled from the loaded profile
+    // so Watch Off / rename cannot leave ready-looking leftover rows.
     let mut sentinels: Vec<std::sync::Arc<dyn watch::Sentinel>> =
         Vec::with_capacity(loaded_sentinels.len());
     let mut force_wake_map: std::collections::HashMap<
@@ -438,6 +439,14 @@ async fn hydrate_runtime_state(authority: BootAuthority) -> anyhow::Result<BootH
             loaded.sentinel.clone(),
         );
         sentinels.push(loaded.sentinel);
+    }
+    let loaded_keys: Vec<(String, String)> = sentinels
+        .iter()
+        .map(|s| (s.tenant().to_string(), s.name().to_string()))
+        .collect();
+    if let Err(e) = watch_db.sync_registration_enabled(&loaded_keys).await {
+        tracing::error!("watch_sentinels enabled-sync failed: {:#}", e);
+        std::process::exit(1);
     }
     let watch_registry: watch::api::ForceWakeRegistry = std::sync::Arc::new(force_wake_map);
 

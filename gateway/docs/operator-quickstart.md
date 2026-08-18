@@ -23,12 +23,19 @@ starts Council and War Room Web, not Gateway.
 `make gateway-prepare-config` creates:
 
 - `~/.config/irin/gateway.env` for Gateway development settings
-- `~/.irin/ledger_key.pem` for the local Ed25519 signing seed
+- `~/.irin/ledger_key.pem` for host-side ledger tools (`ledger-fsck`)
+- `~/.irin/compose-ledger-key` for the compose sidecar (never the canonical key, never host `~/.config/gcloud`)
 
 Configuration files and the signing seed are mode `0600`. The helper preserves
 valid operator-owned values while adding or replacing missing, placeholder, or
 invalid IRIN-managed fields. Provider credentials remain in the login-shell
 environment and are never copied into Gateway configuration.
+
+An existing compose volume signed with the old host seed (`~/.irin/ledger_key.pem`)
+will not verify against the compose-owned seed. Before `make up`, copy the
+previous seed to the path selected by `IRIN_COMPOSE_LEDGER_KEY`
+(default: `~/.irin/compose-ledger-key`), or recreate the sidecar data
+volume. Recreating the volume drops that stack's ledger history.
 
 ## Health
 

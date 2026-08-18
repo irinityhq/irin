@@ -51,9 +51,12 @@ fresh="$tmp/fresh"
 run_helper "$fresh" >/dev/null
 env_file="$fresh/config/irin/gateway.env"
 ledger="$fresh/irin-home/ledger_key.pem"
-[[ -f "$env_file" && -f "$ledger" ]] || fail "fresh files missing"
+compose_ledger="$fresh/irin-home/compose-ledger-key"
+[[ -f "$env_file" && -f "$ledger" && -f "$compose_ledger" ]] || fail "fresh files missing"
 [[ "$(mode_of "$env_file")" == 600 ]] || fail "gateway.env is not 0600"
 [[ "$(mode_of "$ledger")" == 600 ]] || fail "ledger key is not 0600"
+[[ "$(mode_of "$compose_ledger")" == 600 ]] || fail "compose ledger key is not 0600"
+[[ "$(wc -c < "$compose_ledger" | tr -d ' ')" == 32 ]] || fail "compose ledger key is not 32 bytes"
 [[ "$(mode_of "$(dirname "$env_file")")" == 700 ]] || fail "config dir is not 0700"
 [[ "$(mode_of "$(dirname "$ledger")")" == 700 ]] || fail "IRIN home is not 0700"
 [[ "$(wc -c < "$ledger" | tr -d ' ')" == 32 ]] || fail "ledger key is not 32 bytes"
@@ -99,5 +102,24 @@ if run_helper "$invalid" >/dev/null 2>&1; then
 fi
 [[ "$(wc -c < "$invalid/irin-home/ledger_key.pem" | tr -d ' ')" == 5 ]] \
   || fail "invalid ledger key was overwritten"
+
+compose="$ROOT/gateway/docker-compose.yml"
+if grep -Eq -- '-[[:space:]].*ledger_key\.pem:' "$compose"; then
+  fail "dev compose must not mount canonical ~/.irin/ledger_key.pem"
+fi
+if grep -Eq -- '-[[:space:]].*\.config/gcloud:' "$compose"; then
+  fail "dev compose must not mount host ~/.config/gcloud"
+fi
+grep -Eq -- '^[[:space:]]*-[[:space:]].*compose-ledger-key.*:/run/secrets/ledger_key:ro[[:space:]]*$' "$compose" \
+  || fail "dev compose must mount the compose-owned ledger seed at /run/secrets/ledger_key:ro"
+
+dry="$(make -nC "$ROOT/gateway" up IRIN_COMPOSE_LEDGER_KEY=/custom/compose-key)"
+printf '%s\n' "$dry" | grep -Fq 'LEDGER_KEY_PATH="/custom/compose-key"' \
+  || fail "compose-ledger-key must generate the explicit IRIN_COMPOSE_LEDGER_KEY path"
+printf '%s\n' "$dry" | grep -Fq 'IRIN_COMPOSE_LEDGER_KEY="/custom/compose-key"' \
+  || fail "make up must pass the explicit IRIN_COMPOSE_LEDGER_KEY through to Compose"
+if printf '%s\n' "$dry" | grep -E 'IRIN_COMPOSE_LEDGER_KEY="[^"]*compose-ledger-key"'; then
+  fail "make up must not overwrite an explicit IRIN_COMPOSE_LEDGER_KEY"
+fi
 
 printf 'gateway prepare-config tests passed\n'

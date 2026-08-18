@@ -294,6 +294,35 @@ impl WatchDb {
         Ok(())
     }
 
+    /// Align `enabled` with the currently loaded profile.
+    ///
+    /// Loaded `(tenant, name)` pairs become `enabled=1`. Every other row
+    /// becomes `enabled=0`. Hard-kill and probation columns stay untouched.
+    /// An empty loaded set (Watch Off) disables every registry row so
+    /// ui-snapshot cannot keep showing a ready sentinel the runner does not
+    /// have.
+    pub async fn sync_registration_enabled(
+        &self,
+        loaded: &[(String, String)],
+    ) -> anyhow::Result<()> {
+        let loaded = loaded.to_vec();
+        self.conn
+            .call(move |conn| {
+                let tx = conn.transaction()?;
+                tx.execute("UPDATE watch_sentinels SET enabled = 0", [])?;
+                for (tenant, name) in &loaded {
+                    tx.execute(
+                        "UPDATE watch_sentinels SET enabled = 1 WHERE tenant = ?1 AND name = ?2",
+                        rusqlite::params![tenant, name],
+                    )?;
+                }
+                tx.commit()?;
+                Ok::<(), rusqlite::Error>(())
+            })
+            .await?;
+        Ok(())
+    }
+
     /// T33.7 P1-5 — list sentinel rows whose `probation_until` is still in
     /// the future AND `hard_killed_at` is NULL. Used by
     /// `QuarantineState::hydrate_probation_from_db` on boot to mirror the

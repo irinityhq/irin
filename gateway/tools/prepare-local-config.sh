@@ -9,6 +9,7 @@ CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
 IRIN_HOME="${IRIN_HOME:-$HOME/.irin}"
 GATEWAY_ENV="${IRIN_GATEWAY_ENV:-$CONFIG_HOME/irin/gateway.env}"
 LEDGER_KEY="${LEDGER_KEY_PATH:-$IRIN_HOME/ledger_key.pem}"
+COMPOSE_LEDGER_KEY="${IRIN_COMPOSE_LEDGER_KEY:-$IRIN_HOME/compose-ledger-key}"
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
@@ -86,6 +87,20 @@ else
   [[ "$size" == "32" ]] || die "existing ledger key must be exactly 32 bytes"
   chmod 600 "$LEDGER_KEY"
   printf 'Keeping existing ledger key at %s\n' "$LEDGER_KEY"
+fi
+
+# Compose stack uses a dedicated seed so docker never bind-mounts the
+# operator canonical ledger_key.pem or host gcloud ADC.
+if [[ ! -f "$COMPOSE_LEDGER_KEY" ]]; then
+  mkdir -p "$(dirname "$COMPOSE_LEDGER_KEY")"
+  openssl rand -out "$COMPOSE_LEDGER_KEY" 32
+  chmod 600 "$COMPOSE_LEDGER_KEY"
+  printf 'Generated compose ledger key at %s\n' "$COMPOSE_LEDGER_KEY"
+else
+  compose_size="$(wc -c < "$COMPOSE_LEDGER_KEY" | tr -d ' ')"
+  [[ "$compose_size" == "32" ]] || die "existing compose ledger key must be exactly 32 bytes"
+  chmod 600 "$COMPOSE_LEDGER_KEY"
+  printf 'Keeping existing compose ledger key at %s\n' "$COMPOSE_LEDGER_KEY"
 fi
 
 printf 'Gateway local configuration is ready.\n'

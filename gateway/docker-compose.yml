@@ -189,14 +189,11 @@ services:
       # fixture) exercise the unseeded fire path. `./demo/inbox/.gitkeep` keeps
       # the path present in clones. The D9 activation fix starts the watcher.
       - ./demo/inbox:/var/lib/gateway/inbox:ro
-      # Trust root: the host file at ~/.irin/ledger_key.pem is 32 raw bytes
-      # (despite the misleading extension — see COUNCIL_GATEWAY_CONTRACT.md).
-      # Mount read-only at a stable in-container path.
-      - ${HOME}/.irin/ledger_key.pem:/run/secrets/ledger_key:ro
-      # Allow sidecar to access the host's gcloud Application Default Credentials.
-      # If this is missing on the host, Docker will create an empty directory,
-      # which is harmless (gcp_auth will gracefully fall back to env var).
-      - ${HOME}/.config/gcloud:/root/.config/gcloud:ro
+      # Compose-owned 32-byte seed — never the operator canonical
+      # ~/.irin/ledger_key.pem and never host ~/.config/gcloud (ADC refresh
+      # tokens). `make up` / prepare-local-config.sh generate this file.
+      # Vertex in this topology uses env credentials, not a host ADC mount.
+      - ${IRIN_COMPOSE_LEDGER_KEY:-${HOME}/.irin/compose-ledger-key}:/run/secrets/ledger_key:ro
     depends_on:
       # The Phase 3 startup probe calls the gateway router after the sidecar
       # binds its UDS server. The gateway must therefore be started before the
