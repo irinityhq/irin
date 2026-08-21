@@ -426,6 +426,22 @@ jobs:
       - name: Self-test checker
         run: scripts/check-public-pr-language.sh --self-test
 
+      - name: Self-test test-weakening tripwire
+        run: |
+          bash scripts/test-check-test-weakening.sh
+
+      - name: Test-weakening tripwire
+        if: github.event_name == 'pull_request'
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          # The override must be stated in the PR description as a line
+          # "Test-weakening-ack: <reason>"; it is echoed into the job log.
+          ack="$(printf '%s\n' "${PR_BODY}" | sed -n 's/^Test-weakening-ack:[[:space:]]*//p' | head -n 1)"
+          IRIN_TEST_WEAKENING_ACK="${ack}" bash scripts/check-test-weakening.sh "${BASE_SHA}"
+
       - name: Check PR title, body, and commits
         if: github.event_name == 'pull_request'
         env:

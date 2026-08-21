@@ -85,17 +85,29 @@ proof only** — not Candidate verified, Installed, Accepted, or Published. It:
   crate uses package-scoped fmt/clippy/test; full matrix or multi-crate fan-out
   still runs the workspace);
 - treats every War Room Web change as a Tauri product change;
-- proves hosted Next behavior, the exact embedded static export, Tauri Rust,
-  and a native macOS application launch and visible-surface smoke when those
-  lanes are selected;
+- proves hosted Next behavior, the exact embedded static export, and Tauri
+  Rust when those lanes are selected, then runs the cold-launch gate: one
+  native build, five cold launches, every one must show the War Room. A single
+  red launch fails the receipt. The gate then refuses that exact working tree
+  until its newest verdict is a pass; the one exception is a rerun with
+  `IRIN_COLD_LAUNCH_RERUN_REASON` set, which the receipt and the shared
+  verdict ledger both record;
+- names every change that lowers the proof bar — deleted or skipped tests,
+  lost assertions, escape hatches added to proof scripts, raised timeouts or
+  retry counts, source changed with no test touched — and refuses unless
+  `IRIN_TEST_WEAKENING_ACK` carries the reason. CI runs the same tripwire on
+  every pull request and reads the reason from a `Test-weakening-ack: <reason>`
+  line in the PR description;
 - rejects high or critical production npm advisories;
 - runs public-tree, public-language, secret, and whitespace checks; and
 - writes an ignored receipt under `.irin-receipts/` with the branch, commits,
   complete changed-file set, deterministic tested-tree fingerprint, lanes,
   commands, results, and completion time.
 
-Prefer one ship-check per PR. Re-run only when `origin/main` moved or the
-receipt failed. Keep open full-matrix pull requests to a minimum so branches do
+Prefer one ship-check per PR. Re-run only when `origin/main` moved or the tree
+changed after a fix. A failed cold launch is a product bug to fix, not a
+receipt to re-run; the exception above is for environmental failures and
+leaves a trail. Keep open full-matrix pull requests to a minimum so branches do
 not invalidate each other in a re-proof loop.
 
 If pinned tooling is absent, the gate downloads `cargo-deny` 0.19.9 and
@@ -142,10 +154,12 @@ The War Room gate has three distinct proofs:
 1. Hosted Playwright tests exercise the browser-served Next application.
 2. Export Playwright tests serve `warroom-web-dist`, the exact assets embedded
    by Tauri, and repeat the full hosted Playwright corpus against that export.
-3. The required local macOS ship smoke builds and launches a non-promotable
-   native test app (isolated bundle id; not the production DMG path), proves its
-   process and window remain alive, captures only that application window, and
-   verifies visible core navigation text. It uses no provider credentials and
+3. The required local macOS cold-launch gate builds a non-promotable native
+   test app once (isolated bundle id; not the production DMG path) and
+   cold-launches it five times. Every launch must prove its process and window
+   remain alive, capture only that application window, and show the visible
+   core navigation text. One failed launch fails the gate, and the unchanged
+   tree is refused afterwards (see the ship-check exception above). It uses no provider credentials and
    does not arm Watch or execute a real action. CI separately records a
    headless process proof and labels it as such; it does not claim visual proof.
    Ship the product artifact with `make dmg-build` (release transaction for

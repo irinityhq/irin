@@ -210,7 +210,7 @@ async fn cli_ask(prompt: &str, system: &str, model: &str) -> CliOutcome {
     let timeout_error = format!("claude CLI timeout ({}s)", cli_timeout.as_secs());
     let output = match wait_with_timeout_output(child, cli_timeout, timeout_error, t0).await {
         Ok(o) => o,
-        Err(resp) => return CliOutcome::Response(Box::new(resp)),
+        Err(resp) => return CliOutcome::Response(resp),
     };
 
     let latency_ms = t0.elapsed().as_millis() as u64;
@@ -313,7 +313,7 @@ async fn wait_with_timeout_output(
     timeout_duration: Duration,
     timeout_error: String,
     t0: Instant,
-) -> Result<Output, ProviderResponse> {
+) -> Result<Output, Box<ProviderResponse>> {
     let stdout_task = tokio::spawn(read_pipe(child.stdout.take()));
     let stderr_task = tokio::spawn(read_pipe(child.stderr.take()));
 
@@ -322,22 +322,22 @@ async fn wait_with_timeout_output(
         Ok(Err(e)) => {
             stdout_task.abort();
             stderr_task.abort();
-            return Err(ProviderResponse {
+            return Err(Box::new(ProviderResponse {
                 error: Some(format!("claude CLI wait: {}", e)),
                 latency_ms: t0.elapsed().as_millis() as u64,
                 ..Default::default()
-            });
+            }));
         }
         Err(_) => {
             let _ = child.start_kill();
             let _ = timeout(Duration::from_secs(5), child.wait()).await;
             stdout_task.abort();
             stderr_task.abort();
-            return Err(ProviderResponse {
+            return Err(Box::new(ProviderResponse {
                 error: Some(timeout_error),
                 latency_ms: t0.elapsed().as_millis() as u64,
                 ..Default::default()
-            });
+            }));
         }
     };
 
