@@ -95,8 +95,9 @@ proof only** — not Candidate verified, Installed, Accepted, or Published. It:
 - names every change that lowers the proof bar — deleted or skipped tests,
   lost assertions, escape hatches added to proof scripts, raised timeouts or
   retry counts, source changed with no test touched — and refuses unless
-  `IRIN_TEST_WEAKENING_ACK` carries the reason, which the receipt records and
-  the PR description must repeat;
+  `IRIN_TEST_WEAKENING_ACK` carries the reason. CI runs the same tripwire on
+  every pull request and reads the reason from a `Test-weakening-ack: <reason>`
+  line in the PR description;
 - rejects high or critical production npm advisories;
 - runs public-tree, public-language, secret, and whitespace checks; and
 - writes an ignored receipt under `.irin-receipts/` with the branch, commits,

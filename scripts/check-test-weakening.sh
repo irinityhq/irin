@@ -5,7 +5,8 @@
 #   loss in test files, escape hatches added to proof scripts, raised
 #   timeouts/retry counts, and source changes with no test change at all.
 # Any finding exits 1. The only override is an explicit, non-empty
-# IRIN_TEST_WEAKENING_ACK="<reason>", which still prints every finding.
+# IRIN_TEST_WEAKENING_ACK="<reason>", which still prints every finding. CI
+# takes the reason from a "Test-weakening-ack: <reason>" line in the PR body.
 #
 # usage: scripts/check-test-weakening.sh [base-ref]   (default origin/main)
 set -euo pipefail
@@ -222,7 +223,7 @@ if ack:
     print(f"test-weakening: acknowledged by IRIN_TEST_WEAKENING_ACK: {ack}")
     sys.exit(0)
 sys.stdout.flush()
-print("test-weakening: refusing. State the reason in the PR description and set "
-      "IRIN_TEST_WEAKENING_ACK=\"<reason>\" to proceed.", file=sys.stderr)
+print("test-weakening: refusing. Locally set IRIN_TEST_WEAKENING_ACK=\"<reason>\"; "
+      "in the PR description add a line \"Test-weakening-ack: <reason>\".", file=sys.stderr)
 sys.exit(1)
 PY
