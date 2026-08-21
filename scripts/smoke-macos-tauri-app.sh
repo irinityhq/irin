@@ -49,10 +49,14 @@ tmp="$(mktemp -d "${TMPDIR:-/tmp}/irin-native-smoke.XXXXXX")"
 pid=""
 launcher_pid=""
 binary_pattern=""
+# Mirror the Council listener (tokio TcpListener::bind sets SO_REUSEADDR): a
+# port left only with TIME_WAIT sockets from a previous launch is free for the
+# app, and must read as free here. A live listener still fails this bind.
 port_is_free() {
   python3 -c '
 import socket, sys
 with socket.socket() as sock:
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         sock.bind(("127.0.0.1", int(sys.argv[1])))
     except OSError:
