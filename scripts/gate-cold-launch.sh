@@ -66,12 +66,29 @@ rm -f "$tree_index"
 # ponytail: local file; an operator who edits .git can still erase it. Remote
 # attestation is the upgrade if that ever matters.
 ledger="$(git rev-parse --git-common-dir)/irin-cold-launch-ledger"
+# One gate at a time per repository: two concurrent runs of the same tree could
+# both read the ledger before either writes, and a late PASS would bury the
+# other run's FAIL. The lock holds for the whole run; a dead holder is evicted.
+lock="$ledger.lock"
+target_dir=""
+cleanup() { rm -rf "$lock" ${target_dir:+"$target_dir"}; }
+if ! mkdir "$lock" 2>/dev/null; then
+  holder="$(cat "$lock/pid" 2>/dev/null || true)"
+  if [[ -n "$holder" ]] && kill -0 "$holder" 2>/dev/null; then
+    printf 'ERROR: another cold-launch gate is running (pid %s); wait for its verdict\n' "$holder" >&2
+    exit 1
+  fi
+  rm -rf "$lock" && mkdir "$lock"
+fi
+trap cleanup EXIT INT TERM
+printf '%s\n' "$$" >"$lock/pid"
+# Ledger rows are tab-separated: timestamp, tree, verdict, receipt path.
 last_verdict=""
 last_receipt=""
 if [[ -f "$ledger" ]]; then
-  last_line="$(awk -v t="$tree" '$2 == t { line = $0 } END { print line }' "$ledger")"
-  last_verdict="$(printf '%s' "$last_line" | awk '{print $3}')"
-  last_receipt="$(printf '%s' "$last_line" | awk '{print $4}')"
+  last_line="$(awk -F '\t' -v t="$tree" '$2 == t { line = $0 } END { print line }' "$ledger")"
+  last_verdict="$(printf '%s' "$last_line" | cut -f 3)"
+  last_receipt="$(printf '%s' "$last_line" | cut -f 4)"
 fi
 rerun_reason="${IRIN_COLD_LAUNCH_RERUN_REASON:-}"
 if [[ "$last_verdict" == FAIL && -z "$rerun_reason" ]]; then
@@ -84,13 +101,12 @@ fi
 prior_fail="$last_receipt"
 [[ "$last_verdict" == FAIL ]] || prior_fail=""
 record_verdict() {
-  printf '%s %s %s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$tree" "$1" "$receipt" >>"$ledger"
+  printf '%s\t%s\t%s\t%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$tree" "$1" "$receipt" >>"$ledger"
 }
 
 target_dir="$(mktemp -d "${TMPDIR:-/tmp}/irin-cold-launch.XXXXXX")"
-trap 'rm -rf "$target_dir"' EXIT INT TERM
 
-receipt="$ROOT/.irin-receipts/cold-launch-$(date '+%Y%m%dT%H%M%S%z').txt"
+receipt="$ROOT/.irin-receipts/cold-launch-$(date '+%Y%m%dT%H%M%S%z')-$$.txt"
 {
   printf 'IRIN COLD-LAUNCH GATE\n'
   printf 'started=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')"

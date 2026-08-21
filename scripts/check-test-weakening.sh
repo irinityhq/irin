@@ -23,23 +23,25 @@ git rev-parse --verify --quiet "${base}^{commit}" >/dev/null || {
 }
 
 diff_file="$(mktemp "${TMPDIR:-/tmp}/irin-test-weakening.XXXXXX")"
-trap 'rm -f "$diff_file"' EXIT
+untracked_file="$(mktemp "${TMPDIR:-/tmp}/irin-test-weakening-untracked.XXXXXX")"
+trap 'rm -f "$diff_file" "$untracked_file"' EXIT
 git diff -U0 --no-color --no-ext-diff "$base" -- >"$diff_file"
-untracked="$(git ls-files --others --exclude-standard)"
+git ls-files --others --exclude-standard -z >"$untracked_file"
 
 IRIN_TW_ACK="${IRIN_TEST_WEAKENING_ACK:-}" \
-  python3 - "$diff_file" "$untracked" "$base" <<'PY'
+  python3 - "$diff_file" "$untracked_file" "$base" <<'PY'
 import os
 import re
 import subprocess
 import sys
 
-diff_path, untracked_raw, base_ref = sys.argv[1], sys.argv[2], sys.argv[3]
+diff_path, untracked_path, base_ref = sys.argv[1], sys.argv[2], sys.argv[3]
 ack = os.environ.get("IRIN_TW_ACK", "").strip()
 
 TEST_FILE = re.compile(
     r"(^|/)tests?/.*\.(rs|sh|ts|tsx|js|lua)$"
     r"|_tests?\.rs$"
+    r"|(^|/)tests?\.rs$"
     r"|\.(test|spec)\.(ts|tsx|js)$"
     r"|(^|/)test-[^/]+\.sh$"
     r"|_spec\.lua$|_test\.lua$"
@@ -92,6 +94,7 @@ deleted_files = []
 changed_files = set()
 
 cur = None
+pending = None
 new_line = 0
 old_line = 0
 with open(diff_path, encoding="utf-8", errors="replace") as handle:
@@ -137,8 +140,13 @@ with open(diff_path, encoding="utf-8", errors="replace") as handle:
             removed[cur].append((old_line, line[1:]))
             old_line += 1
 
-for path in [p for p in untracked_raw.split("\n") if p]:
+with open(untracked_path, "rb") as handle:
+    untracked = [p.decode("utf-8", "replace") for p in handle.read().split(b"\0") if p]
+for path in untracked:
     if path in changed_files or not os.path.isfile(path):
+        continue
+    # Only files a rule can see are worth reading; a stray log or video is not.
+    if not (TEST_FILE.search(path) or SOURCE_FILE.search(path) or PROOF_FILE.search(path)):
         continue
     changed_files.add(path)
     removed.setdefault(path, [])
@@ -154,35 +162,83 @@ def add(kind, path, lineno, detail):
     findings.append((kind, path, lineno, detail))
 
 
-CFG_TEST = re.compile(r"^\s*#\[cfg\(test\)\]")
+# `#[cfg(test)]`, `#[cfg(all(test, ...))]`, `#[cfg(any(test, ...))]`,
+# `#[cfg(all(feature = "x", test))]`. Never `#[cfg(not(test))]`: that is production.
+CFG_TEST = re.compile(r"^\s*#\[cfg\((?:test\b|(?:all|any)\((?:[^()]*,\s*)?test\b)")
+RAW_STR = re.compile(r"b?r(#*)\"")
+CHAR_LIT = re.compile(r"'(?:\\.|[^\\'\n])'")
+
+def code_braces(text):
+    """Yield (line_index, brace) for every `{` / `}` in Rust source that is not
+    inside a string, raw string, byte string, char literal, or comment."""
+    i, n, line = 0, len(text), 0
+    while i < n:
+        c = text[i]
+        word_start = i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")
+        if c == "\n":
+            line += 1
+            i += 1
+        elif text.startswith("//", i):
+            j = text.find("\n", i)
+            i = n if j < 0 else j
+        elif text.startswith("/*", i):
+            depth, i = 1, i + 2
+            while i < n and depth:
+                if text.startswith("/*", i):
+                    depth, i = depth + 1, i + 2
+                elif text.startswith("*/", i):
+                    depth, i = depth - 1, i + 2
+                else:
+                    line += text[i] == "\n"
+                    i += 1
+        elif word_start and (m := RAW_STR.match(text, i)):
+            close = '"' + m.group(1)
+            j = text.find(close, m.end())
+            j = n if j < 0 else j + len(close)
+            line += text.count("\n", i, j)
+            i = j
+        elif c == '"' or (c == "b" and word_start and text.startswith('b"', i)):
+            i += 2 if c == "b" else 1
+            while i < n and text[i] != '"':
+                if text[i] == "\\":
+                    i += 1
+                if i < n and text[i] == "\n":
+                    line += 1
+                i += 1
+            i += 1
+        elif c == "'" and (m := CHAR_LIT.match(text, i)):
+            i = m.end()
+        else:
+            if c in "{}":
+                yield line, c
+            i += 1
 
 def test_regions(text):
-    """Line ranges (1-based, inclusive) of `#[cfg(test)]` items in Rust source.
-    Brace-matched from the first `{` after the attribute; good enough for
-    `mod tests { ... }` and single test fns."""
+    """Line ranges (1-based, inclusive) of test-only items in Rust source:
+    from a test `#[cfg]` attribute to the brace that closes its item. A region
+    whose braces never balance runs to end of file."""
     lines = text.split("\n")
+    starts = [i for i, l in enumerate(lines) if CFG_TEST.search(l)]
+    if not starts:
+        return []
+    braces = list(code_braces(text))
     regions = []
-    i = 0
-    while i < len(lines):
-        if CFG_TEST.search(lines[i]):
-            start = i + 1
-            depth = 0
-            opened = False
-            j = i
-            while j < len(lines):
-                for ch in lines[j]:
-                    if ch == "{":
-                        depth += 1
-                        opened = True
-                    elif ch == "}":
-                        depth -= 1
-                if opened and depth <= 0:
-                    break
-                j += 1
-            regions.append((start, j + 1))
-            i = j + 1
-        else:
-            i += 1
+    for start in starts:
+        # A brace-less item (`mod tests;`, `use a::b;`) has no inline region:
+        # `mod tests;` keeps its tests in a sibling file, which TEST_FILE covers.
+        item = next((l for l in lines[start + 1:] if l.strip() and not l.lstrip().startswith("#[")), "")
+        code = item.split("//")[0]
+        if ";" in code and ("{" not in code or code.index(";") < code.index("{")):
+            continue
+        depth, end = 0, len(lines) - 1
+        for li, ch in braces:
+            if li < start:
+                continue
+            depth += 1 if ch == "{" else -1
+            if depth <= 0:
+                end = li
+                break
+        regions.append((start + 1, end + 1))
     return regions
 
 def base_text(path):

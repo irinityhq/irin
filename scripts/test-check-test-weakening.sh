@@ -21,6 +21,17 @@ mod tests {
     fn adds() { assert_eq!(super::add(1, 2), 3); assert!(true); }
 }
 EOF
+cat >src/brace.rs <<'EOF'
+pub fn label() -> &'static str { "}" }
+#[cfg(test)]
+mod tests {
+    const MARKER: &str = "}"; // a '}' here must not end the region
+    const WRAPPED: &str = "line one \
+        line two";
+    #[test]
+    fn labels() { assert_eq!(super::label(), MARKER); assert_eq!(WRAPPED.len(), 25); assert!(true); }
+}
+EOF
 cat >tests/contract.rs <<'EOF'
 #[test]
 fn contract_holds() { assert_eq!(1, 1); }
@@ -37,8 +48,8 @@ git add -A && git commit -q -m base
 
 # The tripwire honors IRIN_TEST_WEAKENING_ACK from the environment; the
 # self-test must not inherit an ack from the caller's shell.
-run_check() { env -u IRIN_TEST_WEAKENING_ACK bash "$CHECK" main >"$work/out.txt" 2>&1; echo $?; }
-run_check_ack() { env IRIN_TEST_WEAKENING_ACK="$1" bash "$CHECK" main >"$work/out.txt" 2>&1; echo $?; }
+run_check() { local rc=0; env -u IRIN_TEST_WEAKENING_ACK bash "$CHECK" main >"$work/out.txt" 2>&1 || rc=$?; echo "$rc"; }
+run_check_ack() { local rc=0; env IRIN_TEST_WEAKENING_ACK="$1" bash "$CHECK" main >"$work/out.txt" 2>&1 || rc=$?; echo "$rc"; }
 expect_finding() { grep -q "test-weakening: $1" "$work/out.txt" || { cat "$work/out.txt" >&2; fail "missing finding: $1"; }; }
 
 # --- clean source + test change passes ---
@@ -135,6 +146,59 @@ mod tests {
 }
 EOF
 [[ "$(run_check)" == 1 ]] || { cat "$work/out.txt" >&2; fail "production assert must not count as test touched"; }
+expect_finding 'source-without-tests src/lib.rs'
+git checkout -q -- . && git clean -qfd
+
+# --- a brace inside a test string does not end the test region ---
+cat >src/brace.rs <<'EOF'
+pub fn label() -> &'static str { "}" }
+#[cfg(test)]
+mod tests {
+    const MARKER: &str = "}"; // a '}' here must not end the region
+    const WRAPPED: &str = "line one \
+        line two";
+    #[test]
+    fn labels() { assert_eq!(super::label(), MARKER); assert_eq!(WRAPPED.len(), 25); }
+}
+EOF
+[[ "$(run_check)" == 1 ]] || { cat "$work/out.txt" >&2; fail "assertion after a braced string should still count"; }
+expect_finding 'assertion-loss src/brace.rs'
+git checkout -q -- . && git clean -qfd
+
+# --- cfg(all(test, ...)) modules are test regions too ---
+cat >src/lib.rs <<'EOF'
+pub fn add(a: u32, b: u32) -> u32 { a + b + 0 }
+#[cfg(all(test, unix))]
+mod tests {
+    #[test]
+    fn adds() { assert_eq!(super::add(1, 2), 3); assert!(true); assert_eq!(super::add(0, 0), 0); }
+}
+EOF
+[[ "$(run_check)" == 0 ]] || { cat "$work/out.txt" >&2; fail "cfg(all(test, ..)) edit should count as test touched"; }
+git checkout -q -- . && git clean -qfd
+
+# --- `#[cfg(test)] mod tests;` marks no inline region ---
+cat >src/extra.rs <<'EOF'
+#[cfg(test)]
+mod tests;
+pub fn later() -> u32 { assert!(true); 2 }
+EOF
+[[ "$(run_check)" == 1 ]] || { cat "$work/out.txt" >&2; fail "code after a mod tests; declaration is production"; }
+expect_finding 'source-without-tests src/extra.rs'
+git checkout -q -- . && git clean -qfd
+
+# --- cfg(not(test)) is production, not a test region ---
+cat >src/lib.rs <<'EOF'
+pub fn add(a: u32, b: u32) -> u32 { a + b }
+#[cfg(not(test))]
+pub fn prod() -> u32 { assert!(true); 1 }
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn adds() { assert_eq!(super::add(1, 2), 3); assert!(true); }
+}
+EOF
+[[ "$(run_check)" == 1 ]] || { cat "$work/out.txt" >&2; fail "cfg(not(test)) must not count as test touched"; }
 expect_finding 'source-without-tests src/lib.rs'
 git checkout -q -- . && git clean -qfd
 
