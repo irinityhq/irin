@@ -250,6 +250,10 @@ if [[ "$mode" == "check" ]]; then
   if printf '%s\n' "${paths[@]}" | grep -Eq '^\.github/workflows/|^scripts/test-ci-control-plane\.sh$|^scripts/check-review-settlement\.sh$|^scripts/run-actionlint\.sh$|^scripts/classify-ci-paths\.sh$'; then
     run "CI control-plane contracts" bash scripts/test-ci-control-plane.sh
   fi
+  if printf '%s\n' "${paths[@]}" | grep -Eq '^scripts/(check-test-weakening|test-check-test-weakening)\.sh$'; then
+    run "Test-weakening tripwire self-test" bash scripts/test-check-test-weakening.sh
+  fi
+  run "Test-weakening tripwire" bash scripts/check-test-weakening.sh origin/main
   run "Diff whitespace" git diff --check origin/main --
   exit 0
 fi
@@ -263,6 +267,8 @@ run "Candidate store contracts" bash packaging/test-candidate-store.sh
 run "W5 remove-worktree evidence contracts" bash scripts/test-remove-worktree-evidence.sh
 run "W5 fake-gh publication contracts" bash scripts/test-publish-fake-gh.sh
 run "GitHub Actions lint" bash scripts/run-actionlint.sh
+run "Test-weakening tripwire self-test" bash scripts/test-check-test-weakening.sh
+run "Test-weakening tripwire" bash scripts/check-test-weakening.sh origin/main
 
 if [[ "$any_rust" == true ]]; then
   run_rust_ship_proof
@@ -301,8 +307,10 @@ if [[ "$(lane warroom_web)" == true || "$(lane warroom_tauri)" == true ]]; then
     printf 'ERROR: native visual proof cannot be disabled during make ship-check\n' >&2
     exit 1
   fi
-  run "Native macOS Tauri visual smoke" env -u IRIN_NATIVE_APP \
-    IRIN_NATIVE_SKIP_BUILD=0 IRIN_NATIVE_VISUAL=1 scripts/smoke-macos-tauri-app.sh
+  # One exact native build, five cold launches, every one must show the War
+  # Room. The first red launch fails; there is no rerun path.
+  run "Cold-launch gate (5/5, no rerun)" env -u IRIN_NATIVE_APP -u IRIN_NATIVE_SKIP_BUILD \
+    IRIN_NATIVE_VISUAL=1 bash scripts/gate-cold-launch.sh
 fi
 
 run "Public tree" make release-check

@@ -1,6 +1,6 @@
 .DEFAULT_GOAL := help
 
-.PHONY: help release-check worktree worktree-remove tools lint-crypto preflight check ship-check verify verify-down verify-formal docker-cache-prune warroom dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction candidate-status install-verify record-acceptance export-candidate import-candidate link-ship-board link-agent-context shipping-method-smoke worktree-gc lint-security opengrep lint-lua gateway-prepare-config
+.PHONY: help release-check worktree worktree-remove tools lint-crypto preflight check ship-check gate-cold-launch check-test-weakening verify verify-down verify-formal docker-cache-prune warroom dmg-build dmg-verify dmg-smoke build test gateway-pack-stage gateway-pack-dev-images gateway-pack-test gateway-pack-integration-smoke gateway-pack-ui-smoke gateway-pack-prod-images production-manifest release-transaction candidate-status install-verify record-acceptance export-candidate import-candidate link-ship-board link-agent-context shipping-method-smoke worktree-gc lint-security opengrep lint-lua gateway-prepare-config
 
 release-check: ## Verify public source-tree boundaries
 	bash scripts/check-public-tree.sh
@@ -39,6 +39,12 @@ check: ## Run fast tests selected from the current diff
 
 ship-check: ## Diff-selected source proof + receipt (not a shipping tier)
 	bash scripts/dev-check.sh --ship
+
+gate-cold-launch: ## Build once, cold-launch 5x; any red launch fails (macOS, no rerun)
+	bash scripts/gate-cold-launch.sh
+
+check-test-weakening: ## Name every change that lowers the proof bar vs origin/main
+	bash scripts/check-test-weakening.sh
 
 verify: ## Prove the loop ($0, no keys): one signed directive lands in the outbox
 	$(MAKE) -C gateway verify
