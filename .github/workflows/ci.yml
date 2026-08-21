@@ -1,16 +1,15 @@
 name: IRIN CI
 
 on:
-  # Pull requests and merge-queue checks enter through ci-pr.yml, which calls
-  # this file from the reviewed base pin (`ci.yml@main`), not from the PR head.
-  # Ordinary PR CI therefore executes main's workflow revision; branch
-  # workflow_dispatch on the PR tip is the explicit same-revision receipt for
-  # CI-changing PRs. The runner predicate below keeps public and untrusted code
-  # on hosted runners.
-  # Do not add a top-level merge_group trigger here: that would dual-run a
-  # second graph whose job names lack the protected `ci /` prefix. Queue
-  # checks report via the ci-pr.yml caller; detect-changes still classifies
-  # merge_group when invoked through workflow_call (caller event_name).
+  # Pull requests enter through ci-pr.yml, which calls this file from the
+  # reviewed base pin (`ci.yml@main`), not from the PR head. Ordinary PR CI
+  # therefore executes main's workflow revision; branch workflow_dispatch on
+  # the PR tip is the explicit same-revision receipt for CI-changing PRs.
+  # The runner predicate below keeps public and untrusted code on hosted
+  # runners.
+  # Do not add a top-level pull_request trigger here: that would dual-run a
+  # second graph whose job names lack the protected `ci /` prefix. PR checks
+  # report via the ci-pr.yml caller.
   workflow_call:
   push:
     branches: ["main"]
@@ -119,21 +118,6 @@ jobs:
               base="${{ github.event.pull_request.base.sha }}"
               head="${{ github.event.pull_request.head.sha }}"
               if git cat-file -e "${base}^{commit}" 2>/dev/null; then
-                changed=()
-                diff_output="$(git diff --name-only "$base...$head" --)"
-                while IFS= read -r path; do
-                  [[ -n "$path" ]] && changed+=("$path")
-                done <<<"$diff_output"
-              else
-                changed=(__unknown_base__)
-              fi
-              ;;
-            merge_group)
-              # Real merge-queue base/head SHAs (path-scoped; not full-matrix).
-              base="${{ github.event.merge_group.base_sha }}"
-              head="${{ github.event.merge_group.head_sha }}"
-              if [[ -n "$base" && -n "$head" ]] \
-                && git cat-file -e "${base}^{commit}" 2>/dev/null; then
                 changed=()
                 diff_output="$(git diff --name-only "$base...$head" --)"
                 while IFS= read -r path; do

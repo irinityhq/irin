@@ -12,7 +12,6 @@ only on GitHub-hosted runners.
 | --- | --- | --- |
 | Private-repository, same-repository pull request authored by `iws17` | Restricted runner group with the `irin-ci` label; selected Tauri shell work uses `macos-15` | Changed-path lanes plus always-on checks |
 | Public repository, fork, bot, or any other pull request | `ubuntu-latest`; selected Tauri shell work uses `macos-15` | Changed-path lanes plus always-on checks |
-| Merge-queue check (`merge_group`) | Restricted runner group while private; `ubuntu-latest` when public; Tauri shell work uses `macos-15` | Path-scoped to the merge group's exact `base_sha...head_sha` diff plus always-on checks |
 | Push to `main` | `ubuntu-latest`; Tauri shell work uses `macos-15` | Path-scoped to that push's exact `before...sha` diff plus always-on checks; not a full integrated matrix |
 | `workflow_dispatch` | Restricted runner group while private; `ubuntu-latest` when public; Tauri shell work uses `macos-15` | Full matrix; Gateway smoke remains explicit opt-in; an opted-in private `main` run also performs the exact-source no-spend proof |
 | Nightly schedule | Restricted runner group while private; `ubuntu-latest` when public; Tauri shell work uses `macos-15` | Full matrix |
@@ -30,11 +29,9 @@ label-gated lanes retain their normal behavior. Called job names receive the
 `ci /` prefix; keeping the caller job id stable preserves the required
 `ci / CI required` context.
 
-Merge-queue checks enter through the same dispatcher and the same base pin, so
-the protected context name is identical for a queued merge and an ordinary pull
-request. `ci.yml` intentionally has no top-level `merge_group` trigger: that
-would dual-run a second graph whose job names lack the `ci /` prefix and never
-satisfy the protected context.
+`ci.yml` has no pull-request trigger of its own. PRs enter only through
+`ci-pr.yml` so called job names keep the `ci /` prefix and the protected
+`ci / CI required` context stays stable.
 
 **Consequence:** an ordinary PR that edits `ci.yml` is linted and classified,
 but the proposed workflow revision is **not** executed by the ordinary PR
@@ -72,11 +69,8 @@ overflow cancels a run: stop the held-fix merge cadence, let the queue drain,
 re-run the cancelled main SHA (or re-push an empty commit only when necessary),
 and do not treat a later path-scoped run as covering a missing receipt.
 Superseded-PR cancellation lives only on `ci-pr.yml`, which keys its group on
-the pull-request number with `cancel-in-progress: true`. On that same
-dispatcher, merge-queue runs key on the merge group's head SHA and set
-`cancel-in-progress: false`, so a queued merge cannot be superseded by
-ordinary pull-request updates. Neither group shares a concurrency mapping with
-`queue: max`.
+the pull-request number with `cancel-in-progress: true`. That group does not
+share a concurrency mapping with `queue: max`.
 
 Scheduled and manual runs use the full integrated matrix and unique concurrency
 groups; they do not join the main-push queue. Full-matrix proof is also
@@ -187,7 +181,7 @@ packages instead of reinstalling them for each run.
 
 ## CodeQL advanced setup
 
-`CodeQL Advanced` runs on pull requests, merge-queue checks, pushes to `main`,
+`CodeQL Advanced` runs on pull requests, pushes to `main`,
 a weekly schedule, and manual dispatch. It uses the restricted runner group
 only for the private, same-repository trusted path and GitHub-hosted capacity
 otherwise. It analyzes
@@ -195,24 +189,22 @@ Actions, JavaScript/TypeScript, Python, and Rust independently, then reports
 the stable `CodeQL required` aggregate. The aggregate is a separate
 branch-protection context rather than part of `ci / CI required`.
 
-Dependency review runs on pull requests and merge-queue checks with read-only
+Dependency review runs on pull requests with read-only
 permissions and a full-SHA-pinned GitHub action. Its stable `Dependency Review`
 check rejects newly introduced vulnerabilities of moderate severity or higher.
-Merge-queue runs pass the merge group's base and head refs explicitly, because
-the action derives them automatically only on a pull-request event.
 
-## Review settlement (pre-queue)
+## Review settlement
 
 Solo-maintainer branch protection keeps `required_approving_review_count` at
 zero and enables conversation resolution. That combination does **not** wait
 for a pending review *request* to clear: a requested bot or human review can
-still be in flight while a PR enters the merge queue. PR #70 is the reference
-incident (Copilot requested, queue/merge completed, review landed afterward on
+still be in flight while a PR is merged. PR #70 is the reference
+incident (Copilot requested, merge completed, review landed afterward on
 the same head).
 
 `Review settlement` is a stable required-check *producer* in
 `.github/workflows/review-settlement.yml`. It reuses the existing required
-status-check and merge-queue mechanism (not a second control plane). The job
+status-check mechanism (not a second control plane). The job
 name is the protected context name. Evaluation lives in
 `scripts/check-review-settlement.sh` and is covered by deterministic fixtures
 in `scripts/test-ci-control-plane.sh`.
@@ -240,15 +232,15 @@ not implemented; fail-closed on overflow is the deliberate small bound.
 
 **Threads are out of scope for this check.** GitHub emits no supported Actions
 workflow event when a conversation is resolved, so a custom required check that
-failed on unresolved threads would stay red until a manual rerun and could not
-be repaired by `merge_group` alone. Required conversation-resolution branch
+failed on unresolved threads would stay red until a manual rerun. Required
+conversation-resolution branch
 protection (already enabled on `main`) is the sole enforceable layer for open
 review threads. This job does not query or evaluate `reviewThreads`, and must
 not add a webhook or dispatch control plane to re-run on resolve.
 
 Event surfaces: pull-request open/reopen/synchronize/ready/draft conversion,
-review requested/removed, pull-request review submitted/edited/dismissed, and
-`merge_group` `checks_requested`. Both `pull_request` and `pull_request_review`
+review requested/removed, and pull-request review submitted/edited/dismissed.
+Both `pull_request` and `pull_request_review`
 resolve the PR number from `github.event.pull_request.number` (the review
 object does not nest the PR). Draft PRs are treated as not-ready (the check
 passes with a note); `ready_for_review` re-evaluates.

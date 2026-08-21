@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fail-closed pre-queue review settlement evaluator for IRIN.
+# Fail-closed review settlement evaluator for IRIN.
 #
 # Settlement (this check) means: no pending review requests, every
 # non-dismissed opinionated review (APPROVED / CHANGES_REQUESTED) is bound to
