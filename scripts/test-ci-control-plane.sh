@@ -29,6 +29,42 @@ import re
 import sys
 from pathlib import Path
 
+
+def strip_line_comment(line):
+    in_s = in_d = escaped = False
+    out = []
+    for char in line:
+        if escaped:
+            out.append(char)
+            escaped = False
+            continue
+        if char == "\\" and in_d:
+            out.append(char)
+            escaped = True
+            continue
+        if char == "'" and not in_d:
+            in_s = not in_s
+            out.append(char)
+            continue
+        if char == '"' and not in_s:
+            in_d = not in_d
+            out.append(char)
+            continue
+        if char == "#" and not in_s and not in_d:
+            break
+        out.append(char)
+    return "".join(out).rstrip()
+
+
+def mapping_value(block, key):
+    prefix = re.compile(r"^\s*" + re.escape(key) + r":\s*(.*)$")
+    for raw in block.splitlines():
+        match = prefix.match(strip_line_comment(raw))
+        if match:
+            return match.group(1).strip()
+    return None
+
+
 ci = Path(sys.argv[1]).read_text(encoding="utf-8")
 pr = Path(sys.argv[2]).read_text(encoding="utf-8")
 errors = []
@@ -38,17 +74,18 @@ if not m:
     errors.append("ci.yml missing top-level concurrency block")
 else:
     block = m.group(1)
+    cancel = mapping_value(block, "cancel-in-progress")
     if "queue: max" not in block:
         errors.append("ci.yml concurrency must set queue: max for main merge retention")
-    if re.search(r"cancel-in-progress:\s*true", block):
+    if cancel == "true":
         errors.append("ci.yml must not set cancel-in-progress: true (illegal with queue:max)")
-    if not re.search(r"cancel-in-progress:\s*false", block):
+    if cancel != "false":
         errors.append("ci.yml must set cancel-in-progress: false explicitly")
     if "main-push" not in block:
         errors.append("ci.yml concurrency group must name a stable main-push bucket")
     if "github.run_id" not in block:
         errors.append("ci.yml non-main events must unique-ify groups with github.run_id")
-    if re.search(r"cancel-in-progress:\s*\$\{\{", block):
+    if cancel is not None and "${{" in cancel:
         errors.append("ci.yml cancel-in-progress must be literal false, not an expression")
 
 m = re.search(r"(?m)^concurrency:\n((?:  .*\n)+)", pr)
@@ -56,12 +93,14 @@ if not m:
     errors.append("ci-pr.yml missing top-level concurrency block for PR cancellation")
 else:
     block = m.group(1)
+    cancel = mapping_value(block, "cancel-in-progress")
     if "queue:" in block:
         errors.append("ci-pr.yml must not set queue (cancel surface only)")
     # PR updates cancel. Merge queue is disabled; do not special-case merge_group.
-    if not re.search(r"cancel-in-progress:\s*true\b", block):
+    # Read the active YAML scalar, not a later comment token.
+    if cancel != "true":
         errors.append("ci-pr.yml cancel-in-progress must be true")
-    if re.search(r"cancel-in-progress:\s*\$\{\{", block):
+    if cancel is not None and "${{" in cancel:
         errors.append("ci-pr.yml cancel-in-progress must be literal true, not an expression")
     if "github.event.pull_request.number" not in block:
         errors.append("ci-pr.yml concurrency group must be per-PR number")
@@ -69,6 +108,14 @@ else:
         errors.append("ci-pr.yml concurrency group should be namespaced irin-ci-pr-*")
     if "merge_group" in block or "irin-ci-merge-group-" in block:
         errors.append("ci-pr.yml must not namespace merge_group concurrency")
+    commented = (
+        "  group: irin-ci-pr-1\n"
+        "  cancel-in-progress: false # cancel-in-progress: true\n"
+    )
+    if mapping_value(commented, "cancel-in-progress") == "true":
+        errors.append("commented true must not satisfy cancel-in-progress: true")
+    if mapping_value(commented, "cancel-in-progress") != "false":
+        errors.append("comment strip must keep the active false scalar")
 
 if "uses: irinityhq/irin/.github/workflows/ci.yml@main" not in pr:
     errors.append("ci-pr.yml must keep the @main dispatcher pin")
@@ -89,9 +136,105 @@ fi
 CODEQL_YML="$ROOT/.github/workflows/codeql.yml"
 DEP_REVIEW_YML="$ROOT/.github/workflows/dependency-review.yml"
 on_has_merge_group() {
-  # Top-level workflow trigger (indented under `on:`), not a shell case arm.
-  grep -E '^[[:space:]]{2}merge_group:' "$1" >/dev/null
+  # Top-level `on:` trigger: mapping, flow sequence, or block sequence.
+  python3 - "$1" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+
+def strip_line_comment(line):
+    in_s = in_d = escaped = False
+    out = []
+    for char in line:
+        if escaped:
+            out.append(char)
+            escaped = False
+            continue
+        if char == "\\" and in_d:
+            out.append(char)
+            escaped = True
+            continue
+        if char == "'" and not in_d:
+            in_s = not in_s
+            out.append(char)
+            continue
+        if char == '"' and not in_s:
+            in_d = not in_d
+            out.append(char)
+            continue
+        if char == "#" and not in_s and not in_d:
+            break
+        out.append(char)
+    return "".join(out).rstrip()
+
+
+def on_declares_merge_group(text):
+    lines = text.splitlines()
+    start = next(
+        (
+            i
+            for i, raw in enumerate(lines)
+            if re.match(r"^on:\s*", strip_line_comment(raw))
+        ),
+        None,
+    )
+    if start is None:
+        return False
+    collected = [strip_line_comment(lines[start])]
+    for raw in lines[start + 1 :]:
+        if raw.strip() == "":
+            collected.append("")
+            continue
+        if re.match(r"^[A-Za-z0-9_-]+:", raw):
+            break
+        collected.append(strip_line_comment(raw))
+    on = "\n".join(collected)
+    if re.search(r"(?m)^\s*merge_group\s*:", on):
+        return True
+    if re.search(r"(?m)^\s*-\s*merge_group\s*$", on):
+        return True
+    if re.search(r"\[[^\]]*\bmerge_group\b[^\]]*\]", on):
+        return True
+    return False
+
+
+sys.exit(0 if on_declares_merge_group(Path(sys.argv[1]).read_text(encoding="utf-8")) else 1)
+PY
 }
+# Negative fixtures: forms the old mapping-only grep missed.
+_merge_group_pred_dir="$(mktemp -d "${TMPDIR:-/tmp}/irin-merge-group-pred.XXXXXX")"
+printf '%s\n' 'on: [pull_request, merge_group]' 'jobs:' '  x: {}' \
+  >"$_merge_group_pred_dir/array.yml"
+printf '%s\n' 'on:' '  - pull_request' '  - merge_group' 'jobs:' '  x: {}' \
+  >"$_merge_group_pred_dir/list.yml"
+printf '%s\n' 'on:' '  pull_request:' '    branches: [main]' 'jobs:' '  x: {}' \
+  >"$_merge_group_pred_dir/clean.yml"
+printf '%s\n' 'on:' '  pull_request:' '    branches: [main]' \
+  '  # merge_group: leftover comment' 'jobs:' '  x: {}' \
+  >"$_merge_group_pred_dir/comment.yml"
+if ! on_has_merge_group "$_merge_group_pred_dir/array.yml"; then
+  fail "on_has_merge_group missed flow-sequence merge_group"
+else
+  pass "on_has_merge_group detects flow-sequence merge_group"
+fi
+if ! on_has_merge_group "$_merge_group_pred_dir/list.yml"; then
+  fail "on_has_merge_group missed block-sequence merge_group"
+else
+  pass "on_has_merge_group detects block-sequence merge_group"
+fi
+if on_has_merge_group "$_merge_group_pred_dir/clean.yml"; then
+  fail "on_has_merge_group false-positive on pull_request-only on:"
+else
+  pass "on_has_merge_group accepts pull_request-only on:"
+fi
+if on_has_merge_group "$_merge_group_pred_dir/comment.yml"; then
+  fail "on_has_merge_group false-positive on commented merge_group"
+else
+  pass "on_has_merge_group ignores commented merge_group"
+fi
+rm -rf "$_merge_group_pred_dir"
+unset _merge_group_pred_dir
 if on_has_merge_group "$CI_PR"; then
   fail "ci-pr.yml must not trigger on merge_group (merge queue is disabled)"
 else
@@ -103,7 +246,7 @@ if on_has_merge_group "$CI_YML"; then
 else
   pass "ci.yml does not dual-trigger merge_group"
 fi
-if file_has_fixed 'merge_group)' "$CI_YML" \
+if file_has_ere 'merge_group[[:space:]]*\)' "$CI_YML" \
   || file_has_fixed 'github.event.merge_group.base_sha' "$CI_YML" \
   || file_has_fixed 'github.event.merge_group.head_sha' "$CI_YML"; then
   fail "detect-changes must not classify merge_group (merge queue is disabled)"
@@ -114,9 +257,17 @@ if ! python3 - "$CI_YML" <<'PY'
 import re
 import sys
 from pathlib import Path
+
+ARM = re.compile(r"(?m)^\s*merge_group\s*\)")
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
-if re.search(r"merge_group\)\s*\n(.*?\n\s*;;)", text, re.S):
+if ARM.search(text):
     sys.stderr.write("ci.yml still has a merge_group detect-changes arm\n")
+    sys.exit(1)
+if not ARM.search("            merge_group )\n              changed=()\n              ;;\n"):
+    sys.stderr.write("whitespace merge_group case arm not detected\n")
+    sys.exit(1)
+if ARM.search("            pull_request)\n              ;;\n"):
+    sys.stderr.write("pull_request arm misread as merge_group\n")
     sys.exit(1)
 sys.exit(0)
 PY
@@ -217,14 +368,56 @@ if not m:
     sys.stderr.write("review-settlement.yml missing concurrency block\n")
     sys.exit(1)
 block = m.group(1)
-if not re.search(r"cancel-in-progress:\s*true\b", block):
+
+
+def strip_line_comment(line):
+    in_s = in_d = escaped = False
+    out = []
+    for char in line:
+        if escaped:
+            out.append(char)
+            escaped = False
+            continue
+        if char == "\\" and in_d:
+            out.append(char)
+            escaped = True
+            continue
+        if char == "'" and not in_d:
+            in_s = not in_s
+            out.append(char)
+            continue
+        if char == '"' and not in_s:
+            in_d = not in_d
+            out.append(char)
+            continue
+        if char == "#" and not in_s and not in_d:
+            break
+        out.append(char)
+    return "".join(out).rstrip()
+
+
+def mapping_value(block, key):
+    prefix = re.compile(r"^\s*" + re.escape(key) + r":\s*(.*)$")
+    for raw in block.splitlines():
+        match = prefix.match(strip_line_comment(raw))
+        if match:
+            return match.group(1).strip()
+    return None
+
+
+cancel = mapping_value(block, "cancel-in-progress")
+if cancel != "true":
     sys.stderr.write("review-settlement cancel-in-progress must be true\n")
     sys.exit(1)
-if re.search(r"cancel-in-progress:\s*\$\{\{", block):
+if cancel is not None and "${{" in cancel:
     sys.stderr.write(
         "review-settlement cancel-in-progress must be literal true, "
         "not an expression\n"
     )
+    sys.exit(1)
+commented = "  cancel-in-progress: false # cancel-in-progress: true\n"
+if mapping_value(commented, "cancel-in-progress") == "true":
+    sys.stderr.write("commented true must not satisfy review-settlement cancel\n")
     sys.exit(1)
 if "merge_group" in block or "merge-group-" in block:
     sys.stderr.write("review-settlement concurrency must not namespace merge_group\n")
