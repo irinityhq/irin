@@ -112,6 +112,32 @@ EOF
 [[ "$(run_check)" == 0 ]] || { cat "$work/out.txt" >&2; fail "inline test edit should count as test touched"; }
 git checkout -q -- . && git clean -qfd
 
+# --- production change that drops one inline-test assertion refuses ---
+cat >src/lib.rs <<'EOF'
+pub fn add(a: u32, b: u32) -> u32 { a + b + 0 }
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn adds() { assert_eq!(super::add(1, 2), 3); }
+}
+EOF
+[[ "$(run_check)" == 1 ]] || { cat "$work/out.txt" >&2; fail "inline assertion loss should refuse"; }
+expect_finding 'assertion-loss src/lib.rs'
+git checkout -q -- . && git clean -qfd
+
+# --- production-only assert! is not a test change ---
+cat >src/lib.rs <<'EOF'
+pub fn add(a: u32, b: u32) -> u32 { assert!(a < 1000); a + b }
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn adds() { assert_eq!(super::add(1, 2), 3); assert!(true); }
+}
+EOF
+[[ "$(run_check)" == 1 ]] || { cat "$work/out.txt" >&2; fail "production assert must not count as test touched"; }
+expect_finding 'source-without-tests src/lib.rs'
+git checkout -q -- . && git clean -qfd
+
 # --- docs-only change passes ---
 printf 'notes\n' >README.md
 [[ "$(run_check)" == 0 ]] || { cat "$work/out.txt" >&2; fail "docs-only change should pass"; }

@@ -28,12 +28,13 @@ git diff -U0 --no-color --no-ext-diff "$base" -- >"$diff_file"
 untracked="$(git ls-files --others --exclude-standard)"
 
 IRIN_TW_ACK="${IRIN_TEST_WEAKENING_ACK:-}" \
-  python3 - "$diff_file" "$untracked" <<'PY'
+  python3 - "$diff_file" "$untracked" "$base" <<'PY'
 import os
 import re
+import subprocess
 import sys
 
-diff_path, untracked_raw = sys.argv[1], sys.argv[2]
+diff_path, untracked_raw, base_ref = sys.argv[1], sys.argv[2], sys.argv[3]
 ack = os.environ.get("IRIN_TW_ACK", "").strip()
 
 TEST_FILE = re.compile(
@@ -85,13 +86,14 @@ CLEANUP = re.compile(
     r"|docker\s+(rm|stop|kill|compose\s+down)|git\s+worktree\s+remove|tmutil|launchctl\s+(bootout|unload))\b"
 )
 
-removed = {}   # file -> [line]
-added = {}     # file -> [(lineno, line)]
+removed = {}   # file -> [(old_lineno, line)]
+added = {}     # file -> [(new_lineno, line)]
 deleted_files = []
 changed_files = set()
 
 cur = None
 new_line = 0
+old_line = 0
 with open(diff_path, encoding="utf-8", errors="replace") as handle:
     for raw in handle:
         line = raw.rstrip("\n")
@@ -122,8 +124,9 @@ with open(diff_path, encoding="utf-8", errors="replace") as handle:
                 cur = pending
             continue
         if line.startswith("@@"):
-            m = re.match(r"@@ -\d+(?:,\d+)? \+(\d+)", line)
-            new_line = int(m.group(1)) if m else 0
+            m = re.match(r"@@ -(\d+)(?:,\d+)? \+(\d+)", line)
+            old_line = int(m.group(1)) if m else 0
+            new_line = int(m.group(2)) if m else 0
             continue
         if cur is None:
             continue
@@ -131,7 +134,8 @@ with open(diff_path, encoding="utf-8", errors="replace") as handle:
             added[cur].append((new_line, line[1:]))
             new_line += 1
         elif line.startswith("-"):
-            removed[cur].append(line[1:])
+            removed[cur].append((old_line, line[1:]))
+            old_line += 1
 
 for path in [p for p in untracked_raw.split("\n") if p]:
     if path in changed_files or not os.path.isfile(path):
@@ -149,6 +153,76 @@ findings = []
 def add(kind, path, lineno, detail):
     findings.append((kind, path, lineno, detail))
 
+
+CFG_TEST = re.compile(r"^\s*#\[cfg\(test\)\]")
+
+def test_regions(text):
+    """Line ranges (1-based, inclusive) of `#[cfg(test)]` items in Rust source.
+    Brace-matched from the first `{` after the attribute; good enough for
+    `mod tests { ... }` and single test fns."""
+    lines = text.split("\n")
+    regions = []
+    i = 0
+    while i < len(lines):
+        if CFG_TEST.search(lines[i]):
+            start = i + 1
+            depth = 0
+            opened = False
+            j = i
+            while j < len(lines):
+                for ch in lines[j]:
+                    if ch == "{":
+                        depth += 1
+                        opened = True
+                    elif ch == "}":
+                        depth -= 1
+                if opened and depth <= 0:
+                    break
+                j += 1
+            regions.append((start, j + 1))
+            i = j + 1
+        else:
+            i += 1
+    return regions
+
+def base_text(path):
+    try:
+        return subprocess.run(["git", "show", f"{base_ref}:{path}"], capture_output=True,
+                              text=True, errors="replace", check=True).stdout
+    except subprocess.CalledProcessError:
+        return ""
+
+def work_text(path):
+    try:
+        with open(path, encoding="utf-8", errors="replace") as handle:
+            return handle.read()
+    except OSError:
+        return ""
+
+def in_regions(lineno, regions):
+    return any(a <= lineno <= b for a, b in regions)
+
+# Lines that count as "test lines": every line of a TEST_FILE, or lines inside a
+# `#[cfg(test)]` region of a Rust source file (old revision for removed lines,
+# working tree for added lines). Production code never counts.
+region_cache = {}
+def test_lines(path):
+    if path in region_cache:
+        return region_cache[path]
+    rem = removed.get(path, [])
+    addl = added.get(path, [])
+    if TEST_FILE.search(path):
+        result = ([l for _, l in rem], [l for _, l in addl])
+    elif path.endswith(".rs"):
+        old_regions = test_regions(base_text(path))
+        new_regions = test_regions(work_text(path))
+        result = ([l for n, l in rem if in_regions(n, old_regions)],
+                  [l for n, l in addl if in_regions(n, new_regions)])
+    else:
+        result = ([], [])
+    region_cache[path] = result
+    return result
+
 # 1. Deleted test files.
 for path in deleted_files:
     if TEST_FILE.search(path):
@@ -158,17 +232,18 @@ for path in deleted_files:
 for path in sorted(changed_files):
     rem = removed.get(path, [])
     addl = added.get(path, [])
-    rem_decl = sum(1 for l in rem if TEST_DECL.search(l))
-    add_decl = sum(1 for l in addl if TEST_DECL.search(l[1]))
+    rem_decl = sum(1 for _, l in rem if TEST_DECL.search(l))
+    add_decl = sum(1 for _, l in addl if TEST_DECL.search(l))
     if rem_decl > add_decl and path not in deleted_files:
         add("removed-test-cases", path, 0, f"{rem_decl - add_decl} test case(s) removed net")
     if SOURCE_FILE.search(path):
         for lineno, l in addl:
             if SKIP.search(l):
                 add("added-skip", path, lineno, l.strip())
-    if TEST_FILE.search(path) or rem_decl or add_decl:
-        rem_assert = sum(len(ASSERT.findall(l)) for l in rem)
-        add_assert = sum(len(ASSERT.findall(l[1])) for l in addl)
+    rem_t, add_t = test_lines(path)
+    if rem_t or add_t:
+        rem_assert = sum(len(ASSERT.findall(l)) for l in rem_t)
+        add_assert = sum(len(ASSERT.findall(l)) for l in add_t)
         if rem_assert > add_assert and path not in deleted_files:
             add("assertion-loss", path, 0, f"{rem_assert - add_assert} assertion(s) removed net")
 
@@ -187,7 +262,7 @@ for path in sorted(changed_files):
 # 6. Raised timeouts / retry counts: same line text, larger number.
 for path in sorted(changed_files):
     rem_tunable = {}
-    for l in removed.get(path, []):
+    for _, l in removed.get(path, []):
         if TUNABLE.search(l) and NUM.search(l):
             rem_tunable.setdefault(NUM.sub("#", l).strip(), []).append(max(int(n) for n in NUM.findall(l)))
     for lineno, l in added.get(path, []):
@@ -202,10 +277,10 @@ for path in sorted(changed_files):
 
 # 7. Source changed, no test changed anywhere.
 src_changed = [p for p in changed_files if SOURCE_FILE.search(p) and not TEST_FILE.search(p) and p not in deleted_files]
-test_touched = (
-    any(TEST_FILE.search(p) for p in changed_files)
-    or any(TEST_DECL.search(l[1]) or ASSERT.search(l[1]) for p in changed_files for l in added.get(p, []))
-    or any(TEST_DECL.search(l) or ASSERT.search(l) for p in changed_files for l in removed.get(p, []))
+test_touched = any(TEST_FILE.search(p) for p in changed_files) or any(
+    TEST_DECL.search(l) or ASSERT.search(l)
+    for p in changed_files
+    for l in test_lines(p)[0] + test_lines(p)[1]
 )
 if src_changed and not test_touched:
     add("source-without-tests", src_changed[0], 0,

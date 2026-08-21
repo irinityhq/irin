@@ -119,7 +119,14 @@ for (( i = 1; i <= runs; i++ )); do
     IRIN_NATIVE_VISUAL=1 \
     bash "$ROOT/scripts/smoke-macos-tauri-app.sh"; then
     # Every launch must run the bundle built on launch 1; refuse a swapped app.
-    this_sha="$(shasum -a 256 "$app_binary" 2>/dev/null | awk '{print $1}')"
+    this_sha="$(shasum -a 256 "$app_binary" 2>/dev/null | awk '{print $1}' || true)"
+    if [[ -z "$this_sha" ]]; then
+      printf 'run=%d result=FAIL reason=bundle-sha-unavailable\n' "$i" >>"$receipt"
+      printf 'status=FAIL passed=%d/%d finished=%s\n' "$passed" "$runs" "$(date '+%Y-%m-%dT%H:%M:%S%z')" >>"$receipt"
+      record_verdict FAIL
+      printf 'ERROR: could not hash the app binary %s (receipt %s)\n' "$app_binary" "$receipt" >&2
+      exit 1
+    fi
     if (( i == 1 )); then
       bundle_sha="$this_sha"
       printf 'bundle_sha256=%s\n' "$bundle_sha" >>"$receipt"
