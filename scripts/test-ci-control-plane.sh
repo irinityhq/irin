@@ -58,28 +58,17 @@ else:
     block = m.group(1)
     if "queue:" in block:
         errors.append("ci-pr.yml must not set queue (cancel surface only)")
-    # PR updates cancel; merge_group must not cancel.
-    # Reject literal true/false and reversed event comparisons.
-    if not re.search(
-        r"cancel-in-progress:\s*\$\{\{\s*github\.event_name\s*!=\s*'merge_group'\s*\}\}",
-        block,
-    ):
-        errors.append(
-            "ci-pr.yml cancel-in-progress must be "
-            "${{ github.event_name != 'merge_group' }} "
-            "(PR cancels; merge_group does not)"
-        )
+    # PR updates cancel. Merge queue is disabled; do not special-case merge_group.
+    if not re.search(r"cancel-in-progress:\s*true\b", block):
+        errors.append("ci-pr.yml cancel-in-progress must be true")
+    if re.search(r"cancel-in-progress:\s*\$\{\{", block):
+        errors.append("ci-pr.yml cancel-in-progress must be literal true, not an expression")
     if "github.event.pull_request.number" not in block:
         errors.append("ci-pr.yml concurrency group must be per-PR number")
     if "irin-ci-pr-" not in block:
         errors.append("ci-pr.yml concurrency group should be namespaced irin-ci-pr-*")
-    if "irin-ci-merge-group-" not in block:
-        errors.append("ci-pr.yml concurrency must namespace merge_group runs")
-    if "github.event.merge_group.head_sha" not in block:
-        errors.append(
-            "ci-pr.yml merge_group concurrency group must key on "
-            "github.event.merge_group.head_sha"
-        )
+    if "merge_group" in block or "irin-ci-merge-group-" in block:
+        errors.append("ci-pr.yml must not namespace merge_group concurrency")
 
 if "uses: irinityhq/irin/.github/workflows/ci.yml@main" not in pr:
     errors.append("ci-pr.yml must keep the @main dispatcher pin")
@@ -95,7 +84,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# merge_group wiring: every required-check producer + real SHA classification
+# merge_group is retired: required-check producers must not trigger on it
 # ---------------------------------------------------------------------------
 CODEQL_YML="$ROOT/.github/workflows/codeql.yml"
 DEP_REVIEW_YML="$ROOT/.github/workflows/dependency-review.yml"
@@ -103,10 +92,10 @@ on_has_merge_group() {
   # Top-level workflow trigger (indented under `on:`), not a shell case arm.
   grep -E '^[[:space:]]{2}merge_group:' "$1" >/dev/null
 }
-if ! on_has_merge_group "$CI_PR"; then
-  fail "ci-pr.yml must trigger on merge_group (produces ci / CI required)"
+if on_has_merge_group "$CI_PR"; then
+  fail "ci-pr.yml must not trigger on merge_group (merge queue is disabled)"
 else
-  pass "ci-pr.yml triggers on merge_group"
+  pass "ci-pr.yml does not trigger on merge_group"
 fi
 if on_has_merge_group "$CI_YML"; then
   # Dual trigger would report unprotected job names alongside the ci/ prefix.
@@ -114,57 +103,43 @@ if on_has_merge_group "$CI_YML"; then
 else
   pass "ci.yml does not dual-trigger merge_group"
 fi
-if ! file_has_fixed 'merge_group)' "$CI_YML" \
-  || ! file_has_fixed 'github.event.merge_group.base_sha' "$CI_YML" \
-  || ! file_has_fixed 'github.event.merge_group.head_sha' "$CI_YML"; then
-  fail "detect-changes must classify merge_group via base_sha/head_sha"
+if file_has_fixed 'merge_group)' "$CI_YML" \
+  || file_has_fixed 'github.event.merge_group.base_sha' "$CI_YML" \
+  || file_has_fixed 'github.event.merge_group.head_sha' "$CI_YML"; then
+  fail "detect-changes must not classify merge_group (merge queue is disabled)"
 else
-  pass "detect-changes classifies merge_group base/head SHAs"
+  pass "detect-changes has no merge_group classification"
 fi
-# Permanent full-matrix fallback must not be the only merge_group path.
 if ! python3 - "$CI_YML" <<'PY'
 import re
 import sys
 from pathlib import Path
 text = Path(sys.argv[1]).read_text(encoding="utf-8")
-m = re.search(r"merge_group\)\s*\n(.*?\n\s*;;)", text, re.S)
-if not m:
-    sys.stderr.write("missing merge_group case arm\n")
-    sys.exit(1)
-arm = m.group(1)
-if re.search(r"changed=\(__unknown_event__\)", arm):
-    sys.stderr.write("merge_group arm must not assign __unknown_event__\n")
-    sys.exit(1)
-if "base_sha" not in arm or "head_sha" not in arm:
-    sys.stderr.write("merge_group arm must use base_sha and head_sha\n")
-    sys.exit(1)
-if "git diff --name-only" not in arm:
-    sys.stderr.write("merge_group arm must path-diff base...head\n")
+if re.search(r"merge_group\)\s*\n(.*?\n\s*;;)", text, re.S):
+    sys.stderr.write("ci.yml still has a merge_group detect-changes arm\n")
     sys.exit(1)
 sys.exit(0)
 PY
 then
   fail "merge_group case arm contract"
 else
-  pass "merge_group case arm uses real SHAs (not __unknown_event__)"
+  pass "ci.yml has no merge_group detect-changes arm"
 fi
-if ! on_has_merge_group "$CODEQL_YML"; then
-  fail "codeql.yml must trigger on merge_group (CodeQL required)"
+if on_has_merge_group "$CODEQL_YML"; then
+  fail "codeql.yml must not trigger on merge_group (merge queue is disabled)"
 else
-  pass "codeql.yml triggers on merge_group"
+  pass "codeql.yml does not trigger on merge_group"
 fi
-if ! on_has_merge_group "$DEP_REVIEW_YML"; then
-  fail "dependency-review.yml must trigger on merge_group"
+if on_has_merge_group "$DEP_REVIEW_YML"; then
+  fail "dependency-review.yml must not trigger on merge_group"
 else
-  pass "dependency-review.yml triggers on merge_group"
+  pass "dependency-review.yml does not trigger on merge_group"
 fi
-if ! file_has_fixed 'base-ref:' "$DEP_REVIEW_YML" \
-  || ! file_has_fixed 'head-ref:' "$DEP_REVIEW_YML" \
-  || ! file_has_fixed 'github.event.merge_group.base_sha' "$DEP_REVIEW_YML" \
-  || ! file_has_fixed 'github.event.merge_group.head_sha' "$DEP_REVIEW_YML"; then
-  fail "dependency-review must pass base-ref/head-ref on merge_group"
+if file_has_fixed 'github.event.merge_group.base_sha' "$DEP_REVIEW_YML" \
+  || file_has_fixed 'github.event.merge_group.head_sha' "$DEP_REVIEW_YML"; then
+  fail "dependency-review must not pass merge_group base-ref/head-ref"
 else
-  pass "dependency-review passes base-ref/head-ref for merge_group"
+  pass "dependency-review has no merge_group refs"
 fi
 # Required check job name must remain "Dependency Review" (protected context).
 if ! grep -E '^[[:space:]]+name: Dependency Review[[:space:]]*$' "$DEP_REVIEW_YML" >/dev/null; then
@@ -174,7 +149,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Review settlement gate: pre-queue required-check producer (#0101 / PR #70)
+# Review settlement gate: required-check producer (#0101 / PR #70)
 # ---------------------------------------------------------------------------
 REVIEW_SETTLEMENT_YML="$ROOT/.github/workflows/review-settlement.yml"
 REVIEW_SETTLEMENT_SH="$ROOT/scripts/check-review-settlement.sh"
@@ -188,10 +163,10 @@ elif [[ ! -f "$REVIEW_SETTLEMENT_POLL_SH" ]]; then
 else
   pass "review settlement workflow + evaluator + poll wrapper present"
 fi
-if ! on_has_merge_group "$REVIEW_SETTLEMENT_YML"; then
-  fail "review-settlement.yml must trigger on merge_group (required-check producer)"
+if on_has_merge_group "$REVIEW_SETTLEMENT_YML"; then
+  fail "review-settlement.yml must not trigger on merge_group (merge queue is disabled)"
 else
-  pass "review-settlement.yml triggers on merge_group"
+  pass "review-settlement.yml does not trigger on merge_group"
 fi
 # Review-related events that re-evaluate settlement on the current head.
 for needle in \
@@ -231,7 +206,7 @@ if ! file_has_fixed 'scripts/check-review-settlement.sh' "$REVIEW_SETTLEMENT_POL
 else
   pass "poll-review-settlement.sh invokes the settlement evaluator"
 fi
-# Concurrency split mirrors dependency-review: PR cancels, merge_group does not.
+# Concurrency: PR updates cancel. Merge queue is disabled.
 if ! python3 - "$REVIEW_SETTLEMENT_YML" <<'PY'
 import re
 import sys
@@ -242,22 +217,22 @@ if not m:
     sys.stderr.write("review-settlement.yml missing concurrency block\n")
     sys.exit(1)
 block = m.group(1)
-if not re.search(
-    r"cancel-in-progress:\s*\$\{\{\s*github\.event_name\s*!=\s*'merge_group'\s*\}\}",
-    block,
-):
+if not re.search(r"cancel-in-progress:\s*true\b", block):
+    sys.stderr.write("review-settlement cancel-in-progress must be true\n")
+    sys.exit(1)
+if re.search(r"cancel-in-progress:\s*\$\{\{", block):
     sys.stderr.write(
-        "review-settlement cancel-in-progress must be "
-        "${{ github.event_name != 'merge_group' }}\n"
+        "review-settlement cancel-in-progress must be literal true, "
+        "not an expression\n"
     )
     sys.exit(1)
-if "merge-group-" not in block and "merge_group" not in block:
-    sys.stderr.write("review-settlement concurrency must namespace merge_group\n")
+if "merge_group" in block or "merge-group-" in block:
+    sys.stderr.write("review-settlement concurrency must not namespace merge_group\n")
     sys.exit(1)
 # PR number for PR + review events must key on github.event.pull_request.number
 if "github.event.pull_request.number" not in block:
     sys.stderr.write(
-        "review-settlement concurrency must key non-merge_group on "
+        "review-settlement concurrency must key on "
         "github.event.pull_request.number\n"
     )
     sys.exit(1)
@@ -272,7 +247,7 @@ PY
 then
   fail "review-settlement concurrency contract"
 else
-  pass "review-settlement concurrency: PR cancel, merge_group retain"
+  pass "review-settlement concurrency: PR cancel"
 fi
 # #0106: pull_request_review resolves PR via root github.event.pull_request.number
 if ! python3 - "$REVIEW_SETTLEMENT_YML" <<'PY'

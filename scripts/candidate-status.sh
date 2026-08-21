@@ -195,7 +195,7 @@ check_ci_required_green() {
     return 0
   fi
   # Accept both the nested workflow name ("ci / CI required") and any bare
-  # "CI required" context so merge-queue tips and older PR commits both resolve.
+  # "CI required" context so PR tips and older commits both resolve.
   if api_out="$(gh api "repos/${owner_repo}/commits/${sha}/check-runs?per_page=100" \
       --jq '[.check_runs[] | select(.name == "CI required" or .name == "ci / CI required")] | if length == 0 then empty else (map(select(.conclusion == "success")) + .)[0] | {status, conclusion} end' \
       2>/dev/null)"; then
