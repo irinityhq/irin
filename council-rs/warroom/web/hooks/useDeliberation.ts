@@ -391,19 +391,47 @@ function mapRound(
   };
 }
 
+/**
+ * Socket lifecycle epochs. `start`, `reset`, and `abort` each open a new
+ * epoch; callbacks captured under an older epoch (a replaced socket's late
+ * `onclose`, a stray event) are dropped so they cannot flip the current
+ * proceeding to `error`. Exported for unit tests.
+ */
+export function createSocketLifecycle() {
+  let epoch = 0;
+  return {
+    next(): number {
+      return ++epoch;
+    },
+    isCurrent(e: number): boolean {
+      return e === epoch;
+    },
+    guard<T extends unknown[]>(e: number, fn: (...args: T) => void) {
+      return (...args: T) => {
+        if (e === epoch) fn(...args);
+      };
+    },
+  };
+}
+
 export function useDeliberation() {
   const [state, dispatch] = useReducer(reduceDeliberationState, initialState);
   const sockRef = useRef<DeliberationSocket | null>(null);
+  const lifecycleRef = useRef<ReturnType<typeof createSocketLifecycle> | null>(null);
+  lifecycleRef.current ??= createSocketLifecycle();
 
   const start = useCallback((p: StartPayload) => {
+    const lifecycle = lifecycleRef.current!;
+    const epoch = lifecycle.next();
     sockRef.current?.close();
     dispatch({ kind: "connecting" });
     void configReady.then(() => {
+      if (!lifecycle.isCurrent(epoch)) return;
       sockRef.current = openDeliberation(
         p,
-        (ev) => dispatch({ kind: "event", ev }),
-        (msg) => dispatch({ kind: "fatal", message: msg }),
-        () => dispatch({ kind: "closed" }),
+        lifecycle.guard(epoch, (ev) => dispatch({ kind: "event", ev })),
+        lifecycle.guard(epoch, (msg) => dispatch({ kind: "fatal", message: msg })),
+        lifecycle.guard(epoch, () => dispatch({ kind: "closed" })),
       );
     });
   }, []);
@@ -414,12 +442,14 @@ export function useDeliberation() {
   }, []);
 
   const reset = useCallback(() => {
+    lifecycleRef.current!.next();
     sockRef.current?.close();
     sockRef.current = null;
     dispatch({ kind: "reset" });
   }, []);
 
   const abort = useCallback(() => {
+    lifecycleRef.current!.next();
     sockRef.current?.close();
     sockRef.current = null;
     dispatch({ kind: "aborted" });
