@@ -442,7 +442,10 @@ async fn handle_gateway_response(
     if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         let snippet = if body.len() > 200 {
-            format!("{}...", crate::engine::deliberate::truncate_utf8(&body, 200))
+            format!(
+                "{}...",
+                crate::engine::deliberate::truncate_utf8(&body, 200)
+            )
         } else {
             body
         };

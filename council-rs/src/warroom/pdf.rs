@@ -389,7 +389,10 @@ mod tests {
         let word = "é".repeat(20);
         let lines = super::wrap_text(&word, 8);
         assert_eq!(lines, vec!["é".repeat(8), "é".repeat(8), "é".repeat(4)]);
-        assert_eq!(super::wrap_text("short words only", 8), vec!["short", "words", "only"]);
+        assert_eq!(
+            super::wrap_text("short words only", 8),
+            vec!["short", "words", "only"]
+        );
     }
 
     use super::*;

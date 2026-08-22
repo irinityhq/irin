@@ -21,10 +21,9 @@ use super::intervention::{Intervention, InterventionQueue};
 use crate::config::Config;
 use crate::engine::context::RequestContext;
 use crate::engine::deliberate::{
-    truncate_utf8,
     JudgeUsage, convergence_quality_penalty_enabled, effective_convergence_threshold,
     governed_alternative_transport_model_groups, governed_required_transport_models, judge_round,
-    seat_preamble_for, should_pause_for_budget,
+    seat_preamble_for, should_pause_for_budget, truncate_utf8,
 };
 use crate::mode::Mode;
 use crate::precedent;
