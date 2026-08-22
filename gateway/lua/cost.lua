@@ -811,6 +811,7 @@ function _M.account()
     local normalized_body = ngx.ctx.gw_response_buf_normalized or native_body
 
     local usage
+    local unparsed = false
     local is_streaming = record.is_streaming
     if is_streaming and ngx.ctx.gw_streaming_usage then
         local su = ngx.ctx.gw_streaming_usage
@@ -847,13 +848,30 @@ function _M.account()
                 "tokens_in≈", usage.tokens_in, " model=",
                 record.resolved_model or "unknown")
     else
-        if not native_body or native_body == "" then return end
-        local native_resp, parse_err = cjson.decode(native_body)
-        if not native_resp then
-            ngx.log(ngx.WARN, "cost: failed to parse native response: ", parse_err)
-            return
+        -- Empty or unparseable native body: pre-fix this early-returned and
+        -- the request left NO ledger row (B-09 / #0165). Degrade like the
+        -- capped path instead: input-only estimate, tokens_estimated=true,
+        -- no cache_store (there is no parsed payload to cache).
+        local native_resp, parse_err
+        if native_body and native_body ~= "" then
+            native_resp, parse_err = cjson.decode(native_body)
+        else
+            parse_err = "empty body"
         end
-        usage = providers.extract_usage(record.provider, native_resp)
+        if native_resp then
+            usage = providers.extract_usage(record.provider, native_resp)
+        else
+            unparsed = true
+            local raw_len = (record.raw_body and #record.raw_body) or 0
+            usage = {
+                tokens_in  = math.floor(raw_len / 4),
+                tokens_out = 0,
+                cached_in  = 0,
+            }
+            ngx.log(ngx.WARN, "cost: unparseable native response (", tostring(parse_err),
+                    ") — input-only estimate tokens_in≈", usage.tokens_in,
+                    " model=", record.resolved_model or "unknown")
+        end
     end
 
     -- Calculate cost
@@ -884,6 +902,7 @@ function _M.account()
         latency_ms      = latency_ms,
         status          = ngx.status,
         capped          = capped,
+        unparsed        = unparsed,
         is_streaming    = is_streaming or false,
         timestamp       = ngx.localtime(),
     })
@@ -952,9 +971,10 @@ function _M.account()
     -- forensics and lets the cache survive translator improvements that
     -- bump TRANSLATOR_VERSION. Capped responses skip cache_store — we have
     -- no parsed payload to cache.
-    local fb_native_for_cache   = (is_success and not capped and not is_streaming and not ngx.ctx.gw_credentials_redacted) and native_body or nil
+    local fb_native_for_cache   = (is_success and not capped and not unparsed and not is_streaming and not ngx.ctx.gw_credentials_redacted) and native_body or nil
     local fb_translator_version = translator.TRANSLATOR_VERSION
     local fb_capped             = capped
+    local fb_unparsed           = unparsed
 
     -- Council ledger annotations (§6.6). Branch on wrapper-vs-leaf:
     --   * provider == "council"            → council_wrapper kind. Wrapper
@@ -1093,8 +1113,9 @@ function _M.account()
             sensitivity     = fb_sensitivity,
             council_role    = fb_council_role,
             capped          = fb_capped,
+            unparsed        = fb_unparsed,
             is_streaming    = is_streaming or false,
-            tokens_estimated = fb_capped,
+            tokens_estimated = fb_capped or fb_unparsed,
         }
         -- §6.6 — council wrapper or leaf annotation. `kind` drives the
         -- §6.4 SQL aggregation: wrapper rows (no parent) count toward
