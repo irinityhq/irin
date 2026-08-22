@@ -760,8 +760,10 @@ async fn execute_deliberation_rounds(
             total_cost += cost;
         }
 
-        // v9.12.0: Structured judge replaces naked float
-        let judge = if round_num < cabinet.rounds && responses.len() >= 2 {
+        // v9.12.0: Structured judge replaces naked float. Every round is
+        // judged, including the last (parity with the stream core, B-07);
+        // the round gate only decides whether convergence may stop early.
+        let judge = if responses.len() >= 2 {
             judge_round(
                 &responses,
                 topic,
