@@ -1100,17 +1100,27 @@ async fn start_council_server(
 
 /// Stop the tracked council server (best effort kill).
 #[tauri::command]
-async fn stop_council_server(
-    app: AppHandle,
-    state: State<'_, CouncilServer>,
-) -> Result<String, String> {
-    let had = state.0.lock().map_err(|e| e.to_string())?.child.is_some();
-    stop_tracked_council_server(&app);
-    if had {
-        Ok("council server stop signal sent".to_string())
-    } else {
-        Ok("no tracked council server to stop".to_string())
-    }
+async fn stop_council_server(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Same lifecycle guard as restart/enable/disable: a Stop that lands
+        // after restart_sidecar spawned its replacement must not kill it.
+        let _lifecycle = council_lifecycle_guard();
+        let had = app
+            .state::<CouncilServer>()
+            .0
+            .lock()
+            .map_err(|e| e.to_string())?
+            .child
+            .is_some();
+        stop_tracked_council_server(&app);
+        if had {
+            Ok("council server stop signal sent".to_string())
+        } else {
+            Ok("no tracked council server to stop".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Restart the council sidecar with gateway routing toggled.
