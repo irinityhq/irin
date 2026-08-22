@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { ABORT_NOTICE, applyEvent, reduceDeliberationState } from "./useDeliberation";
+import {
+  ABORT_NOTICE,
+  CONNECTION_LOST_NOTICE,
+  applyEvent,
+  createSocketLifecycle,
+  reduceDeliberationState,
+} from "./useDeliberation";
 import { initialState } from "@/lib/types";
 import type { PrecedentMatch, StreamEvent } from "@/lib/types";
 
@@ -235,5 +241,52 @@ describe("operator Abort", () => {
   it("does not replace a completed run with an Abort state", () => {
     const done = { ...initialState, phase: "done" as const };
     expect(reduceDeliberationState(done, { kind: "aborted" })).toBe(done);
+  });
+});
+
+describe("closed action", () => {
+  it("surfaces a mid-deliberation drop as the shared connection-lost notice", () => {
+    const next = reduceDeliberationState(
+      { ...initialState, phase: "streaming" as const, session_id: "s1" },
+      { kind: "closed" },
+    );
+    expect(next.phase).toBe("error");
+    expect(next.errors.at(-1)?.message).toBe(CONNECTION_LOST_NOTICE);
+  });
+
+  it("leaves idle and done states untouched", () => {
+    for (const phase of ["idle", "done"] as const) {
+      const s = { ...initialState, phase };
+      expect(reduceDeliberationState(s, { kind: "closed" })).toBe(s);
+    }
+  });
+});
+
+describe("socket lifecycle epochs", () => {
+  it("drops callbacks captured by a replaced socket", () => {
+    const lifecycle = createSocketLifecycle();
+    const first = lifecycle.next();
+    const seen: string[] = [];
+    const onCloseFirst = lifecycle.guard(first, () => seen.push("closed:first"));
+
+    // A new start supersedes the first socket before its onclose fires.
+    const second = lifecycle.next();
+    const onCloseSecond = lifecycle.guard(second, () => seen.push("closed:second"));
+    onCloseFirst();
+    onCloseSecond();
+
+    expect(seen).toEqual(["closed:second"]);
+    expect(lifecycle.isCurrent(first)).toBe(false);
+    expect(lifecycle.isCurrent(second)).toBe(true);
+  });
+
+  it("reset/abort open a new epoch so a late close is ignored", () => {
+    const lifecycle = createSocketLifecycle();
+    const epoch = lifecycle.next();
+    const calls: number[] = [];
+    const onClose = lifecycle.guard(epoch, () => calls.push(epoch));
+    lifecycle.next(); // reset() / abort()
+    onClose();
+    expect(calls).toEqual([]);
   });
 });
