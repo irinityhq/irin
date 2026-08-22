@@ -282,8 +282,8 @@ fn verify_chain(
             // Unreachable while the mismatch check above precedes this (the
             // computed hash is always hex), but a corrupt row must map to the
             // documented exit, never a panic (B-11).
-            let hash_bytes = hex::decode(&event.hash)
-                .map_err(|_| (event.id, "invalid hash hex".to_string()))?;
+            let hash_bytes =
+                hex::decode(&event.hash).map_err(|_| (event.id, "invalid hash hex".to_string()))?;
             let sig_bytes = hex::decode(&event.signature)
                 .map_err(|_| (event.id, "invalid signature hex".to_string()))?;
             let sig_array: [u8; 64] = sig_bytes
