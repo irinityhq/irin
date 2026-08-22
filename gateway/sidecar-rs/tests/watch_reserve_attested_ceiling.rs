@@ -670,10 +670,3 @@ async fn registry_json_is_loadable() {
     assert!(reg.is_loaded());
     assert!(reg.get("se-cred-0001").is_some());
 }
-
-#[ignore = "v2-multiprocess: reserve must assert instance_id==writer_claim.holder before spending under a confirmed ceiling. Needs a shared-writer-identity seam OR per-tenant ledger partition first (collides with test_falsification_multiprocess_spend_cap until then). See v2 ticket. DO NOT un-ignore by adding an ownership gate to reserve in v1 — it kills the multiprocess ledger-cap proof."]
-#[tokio::test]
-async fn test_stale_claim_cannot_spend_confirmed_ceiling() {
-    // v2 acceptance criterion (intentionally unimplemented in v1). See residual in
-    // The signed spend window is part of the attested ceiling contract.
-}
