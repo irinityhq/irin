@@ -126,6 +126,29 @@ impl AuditLedger {
         old_verifying_key_bytes: Option<&[u8]>,
         ceremony_root: Option<VerifyingKey>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
+        // Initialize keys before touching the database: a missing or
+        // malformed seed must fail before any file is created or migrated.
+        // Fail closed: a ledger without an operator-held signing key produces
+        // rows nobody can verify after restart. Never generate one here.
+        let signing_key = match signing_key_bytes {
+            Some(bytes) if bytes.len() == 32 => {
+                let mut key_bytes = [0u8; 32];
+                key_bytes.copy_from_slice(bytes);
+                SigningKey::from_bytes(&key_bytes)
+            }
+            Some(bytes) => {
+                return Err(format!(
+                    "ledger signing key must be a 32-byte Ed25519 seed (got {} bytes)",
+                    bytes.len()
+                )
+                .into());
+            }
+            None => {
+                return Err("ledger signing key is required; refusing to generate an ephemeral key"
+                    .into());
+            }
+        };
+
         let conn = Connection::open(db_path).await?;
 
         // Configure connection for performance and concurrency
@@ -218,28 +241,6 @@ impl AuditLedger {
             Ok::<(), rusqlite::Error>(())
         })
         .await?;
-
-        // Initialize keys
-        // Fail closed: a ledger without an operator-held signing key produces
-        // rows nobody can verify after restart. Never generate one here.
-        let signing_key = match signing_key_bytes {
-            Some(bytes) if bytes.len() == 32 => {
-                let mut key_bytes = [0u8; 32];
-                key_bytes.copy_from_slice(bytes);
-                SigningKey::from_bytes(&key_bytes)
-            }
-            Some(bytes) => {
-                return Err(format!(
-                    "ledger signing key must be a 32-byte Ed25519 seed (got {} bytes)",
-                    bytes.len()
-                )
-                .into());
-            }
-            None => {
-                return Err("ledger signing key is required; refusing to generate an ephemeral key"
-                    .into());
-            }
-        };
 
         let verifying_key = signing_key.verifying_key();
 
@@ -925,6 +926,10 @@ mod tests {
             .err()
             .expect("short seed must be refused");
         assert!(err.to_string().contains("32-byte"), "{err}");
+        assert!(
+            !path.exists(),
+            "key validation must refuse before the database is created or migrated"
+        );
     }
 
     fn cleanup(path: &PathBuf) {
