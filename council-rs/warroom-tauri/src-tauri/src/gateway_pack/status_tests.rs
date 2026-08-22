@@ -658,6 +658,9 @@ fn compose_ls_reports_running_requires_exact_project_running() {
 
 #[test]
 fn owned_council_route_proof_records_and_clears() {
+    // `record_owned_council_route` bumps the status-cache generation;
+    // serialize with the coalescing tests above (B-17).
+    let _serial = test_env_lock();
     // Default for a fresh process: no owned child proof.
     record_owned_council_route(None);
     assert_eq!(owned_council_route(), None);
