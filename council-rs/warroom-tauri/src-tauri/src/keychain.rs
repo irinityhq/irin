@@ -1567,6 +1567,10 @@ mod isolated_keychain_live_tests {
         // Sentinel in the login keychain under the same service/account: the
         // isolated run must never read, update, or delete it.
         let sentinel = format!("login-sentinel-{}", std::process::id());
+        // Clear any inherited override first so the sentinel lands in the
+        // login keychain, then restore the caller's setting at the end.
+        let prev_isolated = std::env::var(ISOLATED_KEYCHAIN_ENV).ok();
+        std::env::remove_var(ISOLATED_KEYCHAIN_ENV);
         store.set_password(service, account, &sentinel).unwrap();
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &home);
@@ -1602,6 +1606,9 @@ mod isolated_keychain_live_tests {
         let _ = std::fs::remove_dir_all(&home);
         let login_after = store.get_password(service, account);
         let _ = store.delete_password(service, account);
+        if let Some(v) = prev_isolated {
+            std::env::set_var(ISOLATED_KEYCHAIN_ENV, v);
+        }
         result.unwrap();
         assert_eq!(
             login_after.unwrap(),
