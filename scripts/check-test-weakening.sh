@@ -333,11 +333,13 @@ for path in sorted(changed_files):
 
 # 7. Source changed, no test changed anywhere.
 src_changed = [p for p in changed_files if SOURCE_FILE.search(p) and not TEST_FILE.search(p) and p not in deleted_files]
+# Removing a skip marker (`#[ignore]`, `it.skip`) inside a test region arms a
+# test; that is a test touch, the inverse of added-skip.
 test_touched = any(TEST_FILE.search(p) for p in changed_files) or any(
     TEST_DECL.search(l) or ASSERT.search(l)
     for p in changed_files
     for l in test_lines(p)[0] + test_lines(p)[1]
-)
+) or any(SKIP.search(l) for p in changed_files for l in test_lines(p)[0])
 if src_changed and not test_touched:
     add("source-without-tests", src_changed[0], 0,
         f"{len(src_changed)} source file(s) changed, no test file or test case touched")

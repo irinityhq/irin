@@ -92,9 +92,13 @@ provision-key:
 	TIER=$${TIER:-default}; \
 	RPM=$${RPM:-600}; \
 	ADMIN=$${ADMIN_KEY:-$${BOOTSTRAP_TOKEN:-}}; \
-	curl -sf -X POST $(GW_URL)/admin/keys \
+	out="$$(curl -sf -X POST $(GW_URL)/admin/keys \
 		-H "Content-Type: application/json" \
-		-d "{\"budget_key\":\"$(BUDGET)\", \"tier\":\"$$TIER\", \"rpm\":$$RPM, \"admin_key\":\"$$ADMIN\"}" | jq . || echo "failed to provision key"
+		-d "{\"budget_key\":\"$(BUDGET)\", \"tier\":\"$$TIER\", \"rpm\":$$RPM, \"admin_key\":\"$$ADMIN\"}")" \
+		|| { echo "failed to provision key (is the stack running?)" >&2; exit 1; }; \
+	printf '%s\n' "$$out" | jq -e '(.raw_key // "") | length > 0' >/dev/null \
+		|| { echo "provisioning response carried no raw_key: $$out" >&2; exit 1; }; \
+	printf '%s\n' "$$out" | jq .
 
 # --------------------------------------------------------------------------
 # ledger-verify — Verifies the entire cryptographic hash chain of the ledger
@@ -103,7 +107,9 @@ ledger-verify:
 	@echo "Verifying cryptographic audit ledger..."
 	@KEY=$${LEDGER_ADMIN_KEY:-$${ADMIN_KEY:-}}; \
 	if [ -z "$$KEY" ]; then echo "FATAL: /ledger/verify is admin-gated (W1b: X-Admin-Key + auth.check tier==admin). Set LEDGER_ADMIN_KEY (or ADMIN_KEY) to an admin-tier key — e.g. 'make provision-key BUDGET=ops TIER=admin' and use its raw_key. BOOTSTRAP_TOKEN will NOT work (it is not a provisioned admin-tier key)."; exit 1; fi; \
-	curl -sf -H "X-Admin-Key: $$KEY" $(GW_URL)/ledger/verify | jq . || echo "failed to contact gateway (is the stack running?)"
+	out="$$(curl -sf -H "X-Admin-Key: $$KEY" $(GW_URL)/ledger/verify)" \
+		|| { echo "failed to contact gateway (is the stack running?)" >&2; exit 1; }; \
+	printf '%s\n' "$$out" | jq .
 
 validate: lint-lua check-no-openssl
 	bash test/validate.sh
@@ -152,7 +158,8 @@ lua-unit:
 	$$LUA test/credential_scrub_test.lua && \
 	$$LUA test/sse_redaction_test.lua && \
 	$$LUA test/council_transport_test.lua && \
-	$$LUA test/watch_metric_keys_test.lua
+	$$LUA test/watch_metric_keys_test.lua && \
+	$$LUA test/cost_account_test.lua
 
 smoke:
 	bash test/smoke.sh
@@ -454,7 +461,7 @@ test-rust-suites:
 	@echo "Running sidecar-rs integration test suites..."
 	@cd sidecar-rs && cargo test --locked --test watch_dispatch_live --test watch_worker --test watch_api --test watch_dispatch_keymgmt --test watch_dispatch_schema
 	@echo "Expanded for T2/T3 (ledger/chain regressions + scrub path coverage in sidecar suites):"
-	@cd sidecar-rs && cargo test --lib ledger 2>/dev/null || cargo test --test watch_dispatch_schema -- --quiet || true
+	@cd sidecar-rs && cargo test --locked --lib ledger
 	# Lua credential_scrub (T2) exercised via translator integration + smoke; add explicit lua test target in Wave2.
 
 # Arm/spend authority + falsification harness. These are the security-critical
@@ -494,7 +501,7 @@ test-triad:
 	@echo "2. Gateway Rust Suites..."
 	@$(MAKE) test-rust-suites
 	@echo "3. Gateway Clippy..."
-	@cd sidecar-rs && cargo clippy -p gateway-sidecar -- -D warnings || true
+	@cd sidecar-rs && cargo clippy -p gateway-sidecar --all-targets --locked -- -D warnings
 	@echo "4. Sentinel Triad Docs Check..."
 	@cd ../sentinel && python3 tools/check_triad_docs.py
 	@echo "5. Council Rust Suites..."
