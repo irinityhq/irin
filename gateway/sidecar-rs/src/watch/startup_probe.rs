@@ -1229,7 +1229,6 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "ARMING CHECKLIST: standing reminder of the atomic arming change-set; not a runnable assertion"]
     fn arming_checklist_is_documented() {
         assert_eq!(ARMING_CHECKLIST.len(), 4);
     }

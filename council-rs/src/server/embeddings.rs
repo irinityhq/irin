@@ -22,7 +22,11 @@ pub(crate) fn precedent_reindex_success_json(count: usize) -> serde_json::Value 
     json!({ "reindexed": count })
 }
 
-pub(super) async fn precedent_reindex() -> impl IntoResponse {
+// `Json<Value>` is a content-type guard: a cross-site simple-form POST (no
+// JSON content type) is refused with 415 before any work runs (B-10).
+pub(super) async fn precedent_reindex(
+    axum::Json(_): axum::Json<serde_json::Value>,
+) -> impl IntoResponse {
     let join = tokio::task::spawn_blocking(precedent::reindex).await;
     match join {
         Ok(Ok(count)) => axum::Json(precedent_reindex_success_json(count)).into_response(),
@@ -39,7 +43,10 @@ pub(super) async fn precedent_reindex() -> impl IntoResponse {
     }
 }
 
-pub(super) async fn embeddings_rebuild(Query(q): Query<RebuildQuery>) -> impl IntoResponse {
+pub(super) async fn embeddings_rebuild(
+    Query(q): Query<RebuildQuery>,
+    axum::Json(_): axum::Json<serde_json::Value>,
+) -> impl IntoResponse {
     // First pass through the model can take ~30s for download. Offload off
     // the request thread so axum keeps responding.
     let force = q.force;
@@ -67,5 +74,43 @@ mod precedent_reindex_tests {
     fn success_json_includes_reindexed_count() {
         let v = precedent_reindex_success_json(12);
         assert_eq!(v.get("reindexed").and_then(|x| x.as_u64()), Some(12));
+    }
+}
+
+#[cfg(test)]
+mod json_body_required_tests {
+    use super::{embeddings_rebuild, precedent_reindex};
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use tower::ServiceExt;
+
+    fn app() -> Router {
+        Router::new()
+            .route("/api/precedent/reindex", post(precedent_reindex))
+            .route("/api/embeddings/rebuild", post(embeddings_rebuild))
+    }
+
+    #[tokio::test]
+    async fn bodyless_mutations_reject_text_plain() {
+        for path in ["/api/precedent/reindex", "/api/embeddings/rebuild"] {
+            let response = app()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "text/plain")
+                        .body(Body::from("x"))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                response.status(),
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "{path} must reject a simple POST"
+            );
+        }
     }
 }
