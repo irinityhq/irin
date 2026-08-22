@@ -452,3 +452,65 @@ async fn run_with_cancel_api_default_suppresses_specops() {
     }
     dirs.cleanup();
 }
+
+/// B-07: the engine must judge the final round too. The `round_num <
+/// cabinet.rounds` gate sent the last round past the judge, so its
+/// convergence score and assessment were the skipped placeholder while the
+/// stream core judged every round.
+#[tokio::test]
+async fn engine_judges_final_round() {
+    let _guard = env_lock().await;
+    let dirs = SessionDirs::install();
+    let config = mock_config(
+        "quick",
+        2,
+        vec![
+            mock_seat("seat_a", "mock-seat-agree"),
+            mock_seat("seat_b", "mock-seat-disagree"),
+        ],
+    );
+
+    let session = deliberate::run_with_cancel(
+        &config,
+        "quick",
+        "Hello 2+2",
+        "Context",
+        Mode::TearDown,
+        true,
+        false,
+        false,
+        None,
+        "best",
+        false,
+        "mock",
+        false,
+        SessionOrigin::Api,
+        api_ctx("parent-req-final-judge"),
+        None,
+        None,
+    )
+    .await
+    .expect("two-round run");
+    dirs.cleanup();
+
+    assert_eq!(session.rounds.len(), 2);
+    let first = &session.rounds[0];
+    let last = &session.rounds[1];
+    // Polar mock seats score 0.5 from the judge; the skipped placeholder is 1.0.
+    assert!(
+        first.convergence_score < 1.0,
+        "round 1 judged (score {})",
+        first.convergence_score
+    );
+    assert_eq!(
+        last.convergence_score, first.convergence_score,
+        "final round must be judged like every other round, got score {}",
+        last.convergence_score
+    );
+    assert_eq!(last.judge_provider, first.judge_provider);
+    assert_eq!(
+        last.judge_assessment.is_some(),
+        first.judge_assessment.is_some(),
+        "final round carries a judge assessment like every other round"
+    );
+}
