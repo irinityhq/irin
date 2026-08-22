@@ -594,6 +594,33 @@ pub fn delete_arm_principal_token(store: &dyn SecretStore) -> Result<(), String>
     Ok(())
 }
 
+/// Set for the duration of the cold-launch Keychain flight. While it is set,
+/// background (presentation) probes that miss their cache return "absent"
+/// instead of reading the Keychain: every such read is a second ACL dialog for
+/// an account the flight is already loading (B-03).
+static COLD_LAUNCH_PRELOAD: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Held for the flight; dropping it (normal return or unwind) lifts the fence,
+/// so a panic inside the flight cannot leave background probes fenced forever.
+pub struct ColdLaunchPreloadFlight(());
+
+impl Drop for ColdLaunchPreloadFlight {
+    fn drop(&mut self) {
+        COLD_LAUNCH_PRELOAD.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[must_use = "the fence lifts when this guard drops"]
+pub fn begin_cold_launch_preload() -> ColdLaunchPreloadFlight {
+    COLD_LAUNCH_PRELOAD.store(true, std::sync::atomic::Ordering::SeqCst);
+    ColdLaunchPreloadFlight(())
+}
+
+pub fn cold_launch_preload_in_flight() -> bool {
+    COLD_LAUNCH_PRELOAD.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Lifecycle-scoped, presence-only observation for the background status loop.
 /// The raw bearer is never cached. Authority callers pass a live token and
 /// bypass this observation entirely.
@@ -631,6 +658,11 @@ pub fn resolve_arm_principal(
                 if let Some(present) = *observation {
                     return (present, None);
                 }
+            }
+            if cold_launch_preload_in_flight() {
+                // The flight seeds this observation; do not race it with a
+                // second Keychain read.
+                return (false, None);
             }
             let token = load_arm_principal_token(store).ok().flatten();
             seed_arm_principal_observation(token.is_some());

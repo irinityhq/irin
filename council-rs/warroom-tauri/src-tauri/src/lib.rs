@@ -1947,6 +1947,12 @@ pub fn run() {
             {
                 let auto_start_handle = app.handle().clone();
                 let packaged = is_packaged_install();
+                // Arm the fence here, synchronously in setup: the config
+                // window already exists (Tauri creates it before this hook)
+                // but no IPC can dispatch until the event loop starts after
+                // setup returns, so no background probe can slip in ahead of
+                // the flight. Dropped once the flight has seeded the caches.
+                let preload_flight = keychain::begin_cold_launch_preload();
                 tauri::async_runtime::spawn(async move {
                     // One cold-launch Keychain flight. Legacy migration returns
                     // the GW/pepper values it already read; the remaining four
@@ -1989,6 +1995,7 @@ pub fn run() {
                     } else {
                         (None, None, gateway_pack::auth_observation_generation())
                     };
+                    drop(preload_flight);
                     let mut persisted_via_gateway = false;
                     let auth_token = if packaged {
                         match load_or_create_private_config() {
