@@ -37,7 +37,7 @@ use sidecar::{
     CouncilServerProbe, GatewayChildCredentials,
 };
 use status_authority::{DesktopStatusSnapshot, Freshness};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -144,7 +144,31 @@ fn report_council_runtime_ready(port: u16) -> Result<(), String> {
     Ok(())
 }
 
+/// Set once the main War Room page has finished loading. The tray reveal
+/// must not show the window before that: an unloaded webview is a blank
+/// window (B-14). The page-load path reveals the window itself on load.
+static MAIN_PAGE_LOADED: AtomicBool = AtomicBool::new(false);
+
+/// Records a page-load event; returns whether it is the main page finishing.
+fn record_main_page_load(webview_label: &str, event: PageLoadEvent) -> bool {
+    if webview_label != "main" {
+        return false;
+    }
+    // A reload or navigation starts a new load: the tray must wait again.
+    let finished = event == PageLoadEvent::Finished;
+    MAIN_PAGE_LOADED.store(finished, Ordering::SeqCst);
+    finished
+}
+
+fn tray_may_reveal_main_window() -> bool {
+    MAIN_PAGE_LOADED.load(Ordering::SeqCst)
+}
+
 fn show_main_window(app: &AppHandle) {
+    if !tray_may_reveal_main_window() {
+        eprintln!("[tray] War Room page has not finished loading; it reveals itself on load");
+        return;
+    }
     let Some(window) = app.get_webview_window("main") else {
         eprintln!("[tray] main War Room window is unavailable");
         return;
@@ -226,6 +250,18 @@ fn stop_tracked_council_server(app: &AppHandle) {
         kill_recorded_owned_council_pid();
         let _ = wait_for_port_release(owned_port, Duration::from_secs(3));
     }
+}
+
+/// Serializes every owned-Council stop → port-wait → respawn: the Gateway
+/// Pack enable/disable/stop/uninstall handlers, `restart_sidecar`, and the
+/// governed-promote commit. Without it two concurrent lifecycle commands
+/// interleave their steps (B-13): the second stop kills the first command's
+/// fresh child, or both spawns race for one port. The pack mutation runs
+/// inside the same guard so the respawn always matches the persisted route
+/// at the moment it runs.
+fn council_lifecycle_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 #[cfg(unix)]
@@ -366,6 +402,10 @@ fn schedule_governed_promote_attempts(
                 port,
                 default_serve_port().unwrap_or(8765),
             );
+            // Same lock as the lifecycle handlers: the generation recheck
+            // inside the commit happens after we own the restart seam.
+            // Dropped at the end of this attempt, before the next sleep.
+            let _lifecycle = council_lifecycle_guard();
             match gateway_pack::promote_commit_after_stop_wait_detailed(
                 lifecycle_at_schedule,
                 || stop_tracked_council_server(&app_for_stop),
@@ -1084,17 +1124,27 @@ async fn start_council_server(
 
 /// Stop the tracked council server (best effort kill).
 #[tauri::command]
-async fn stop_council_server(
-    app: AppHandle,
-    state: State<'_, CouncilServer>,
-) -> Result<String, String> {
-    let had = state.0.lock().map_err(|e| e.to_string())?.child.is_some();
-    stop_tracked_council_server(&app);
-    if had {
-        Ok("council server stop signal sent".to_string())
-    } else {
-        Ok("no tracked council server to stop".to_string())
-    }
+async fn stop_council_server(app: AppHandle) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        // Same lifecycle guard as restart/enable/disable: a Stop that lands
+        // after restart_sidecar spawned its replacement must not kill it.
+        let _lifecycle = council_lifecycle_guard();
+        let had = app
+            .state::<CouncilServer>()
+            .0
+            .lock()
+            .map_err(|e| e.to_string())?
+            .child
+            .is_some();
+        stop_tracked_council_server(&app);
+        if had {
+            Ok("council server stop signal sent".to_string())
+        } else {
+            Ok("no tracked council server to stop".to_string())
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// Restart the council sidecar with gateway routing toggled.
@@ -1117,6 +1167,7 @@ async fn restart_sidecar(
 ) -> Result<String, String> {
     // Port-release polling blocks (up to 5s) — keep it off the async runtime.
     tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle = council_lifecycle_guard();
         if via_gateway && is_packaged_install() {
             let store = KeychainSecretStore;
             // Authority path: fresh sample; gate is spawn_capable not governed_ready.
@@ -1213,6 +1264,7 @@ async fn gateway_pack_status() -> Result<GatewayPackStatus, String> {
 async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let status = gateway_pack::enable_gateway_pack(&store)?;
         // Docker missing/down is neutral for core Direct — still recompute.
@@ -1321,6 +1373,7 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, St
 async fn gateway_pack_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let _status = gateway_pack::disable_gateway_pack(&store)?;
         let config = {
@@ -1365,6 +1418,7 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, S
 async fn gateway_pack_stop(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         // Ensure Direct config before containers stop.
         let status = gateway_pack::stop_gateway_pack(&store)?;
@@ -1442,6 +1496,7 @@ fn gateway_pack_open_watch_inbox() -> Result<String, String> {
 async fn gateway_pack_uninstall(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let _status = gateway_pack::uninstall_gateway_pack(&store)?;
         let config = {
@@ -1823,7 +1878,7 @@ pub fn run() {
             report_council_runtime_ready
         ])
         .on_page_load(|webview, payload| {
-            if !should_reveal_main_window(webview.label(), payload.event()) {
+            if !record_main_page_load(webview.label(), payload.event()) {
                 return;
             }
             let window = webview.window();
@@ -1892,6 +1947,12 @@ pub fn run() {
             {
                 let auto_start_handle = app.handle().clone();
                 let packaged = is_packaged_install();
+                // Arm the fence here, synchronously in setup: the config
+                // window already exists (Tauri creates it before this hook)
+                // but no IPC can dispatch until the event loop starts after
+                // setup returns, so no background probe can slip in ahead of
+                // the flight. Dropped once the flight has seeded the caches.
+                let preload_flight = keychain::begin_cold_launch_preload();
                 tauri::async_runtime::spawn(async move {
                     // One cold-launch Keychain flight. Legacy migration returns
                     // the GW/pepper values it already read; the remaining four
@@ -1934,6 +1995,7 @@ pub fn run() {
                     } else {
                         (None, None, gateway_pack::auth_observation_generation())
                     };
+                    drop(preload_flight);
                     let mut persisted_via_gateway = false;
                     let auth_token = if packaged {
                         match load_or_create_private_config() {
@@ -2152,7 +2214,8 @@ pub fn run() {
 #[cfg(test)]
 mod runtime_mode_tests {
     use super::{
-        desktop_runtime_config_value, desktop_runtime_mode_value, should_reveal_main_window,
+        desktop_runtime_config_value, desktop_runtime_mode_value, record_main_page_load,
+        should_reveal_main_window, tray_may_reveal_main_window,
         validate_runtime_ready_port,
     };
     use tauri::webview::PageLoadEvent;
@@ -2182,6 +2245,26 @@ mod runtime_mode_tests {
     fn runtime_ready_receipt_accepts_only_the_selected_port() {
         assert!(validate_runtime_ready_port(20_321, 20_321).is_ok());
         assert!(validate_runtime_ready_port(8_765, 20_321).is_err());
+    }
+
+    /// B-14: the tray "Open War Room" reveal is gated on the same page-load
+    /// proof as the initial reveal; before it, the window would be blank.
+    #[test]
+    fn tray_reveal_refused_until_main_page_load_finishes() {
+        super::MAIN_PAGE_LOADED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!tray_may_reveal_main_window(), "fresh process: nothing loaded");
+        assert!(!record_main_page_load("main", PageLoadEvent::Started));
+        assert!(!tray_may_reveal_main_window(), "load started is not loaded");
+        assert!(!record_main_page_load("secondary", PageLoadEvent::Finished));
+        assert!(!tray_may_reveal_main_window(), "another webview does not count");
+        assert!(record_main_page_load("main", PageLoadEvent::Finished));
+        assert!(tray_may_reveal_main_window(), "main finished: tray may reveal");
+        // A reload starts a new load; the tray waits for it to finish again.
+        assert!(!record_main_page_load("main", PageLoadEvent::Started));
+        assert!(!tray_may_reveal_main_window(), "reload started: tray waits again");
+        assert!(!record_main_page_load("secondary", PageLoadEvent::Started));
+        assert!(record_main_page_load("main", PageLoadEvent::Finished));
+        assert!(tray_may_reveal_main_window(), "reload finished: tray may reveal");
     }
 
     #[test]
@@ -2265,5 +2348,46 @@ mod council_start_phase_tests {
             "orchestrator must invoke the five phases as statements in this order \
              (AST statement order, not textual line matching)"
         );
+    }
+}
+
+#[cfg(test)]
+mod council_lifecycle_tests {
+    use super::council_lifecycle_guard;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    /// B-13: two lifecycle commands must not interleave stop → wait → spawn.
+    /// Each simulated command records its three steps with a pause between
+    /// them; without the guard the two logs interleave.
+    #[test]
+    fn lifecycle_guard_serializes_concurrent_stop_wait_spawn() {
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let handles: Vec<_> = ["enable", "disable"]
+            .into_iter()
+            .map(|name| {
+                let log = Arc::clone(&log);
+                thread::spawn(move || {
+                    let _lifecycle = council_lifecycle_guard();
+                    for step in ["stop", "wait", "spawn"] {
+                        log.lock().unwrap().push(format!("{name}:{step}"));
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 6, "both commands must complete: {log:?}");
+        for command in log.chunks(3) {
+            let owner = command[0].split(':').next().unwrap();
+            assert!(
+                command.iter().all(|entry| entry.starts_with(owner)),
+                "lifecycle steps interleaved across commands: {log:?}"
+            );
+        }
     }
 }

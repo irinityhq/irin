@@ -242,6 +242,7 @@ launch_packaged_host() {
     --stderr "$host_log" \
     --env "HOME=$TEST_HOME" \
     --env "TMPDIR=$TEST_HOME/tmp" \
+    --env "IRIN_ISOLATED_KEYCHAIN=$TEST_HOME/Library/Keychains/irin-smoke.keychain-db" \
     "$DEST_APP" &
   local launcher_pid=$!
   HOST_PID=""

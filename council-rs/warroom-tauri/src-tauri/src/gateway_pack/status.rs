@@ -192,6 +192,9 @@ pub(crate) fn seed_auth_observation_from_preloaded_key(key: Option<&str>, preloa
     let _ = commit_auth_observation(preload_generation, key_present, false);
     let authenticated = key.map(models_authenticated).unwrap_or(false);
     let _ = commit_auth_observation(preload_generation, key_present, authenticated);
+    // A Background sample taken while the flight was fenced may sit in the
+    // pack status cache (TTL); the seeded presence must win immediately.
+    invalidate_status_cache();
 }
 
 #[cfg(test)]
@@ -504,6 +507,13 @@ pub(crate) fn resolve_auth_observation(
         }
         AuthProbeMode::BackgroundCached => match cached_auth_observation() {
             Some(cached) => cached,
+            None if crate::keychain::cold_launch_preload_in_flight() => {
+                // The cold-launch flight seeds this cache when it lands. A
+                // presentation probe in that window must not re-get GW_API_KEY
+                // (a second ACL dialog), and must not commit an observation
+                // the flight would then overwrite.
+                (false, false)
+            }
             None => {
                 let key = load_gw_api_key(store).ok().flatten();
                 let present = key.is_some();

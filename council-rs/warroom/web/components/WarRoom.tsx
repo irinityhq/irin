@@ -27,7 +27,6 @@ import {
 } from "@/lib/warroom-health-label";
 import { cn } from "@/lib/cn";
 import type { Cabinet, HealthResponse } from "@/lib/types";
-import type { StartPayload } from "@/lib/ws";
 import DeliberateWorkspace from "./DeliberateWorkspace";
 import DirectFirePanel from "./DirectFirePanel";
 import DiscoverPanel from "./DiscoverPanel";
@@ -46,7 +45,7 @@ type View = "deliberate" | "direct-fire" | "history" | "outbox" | "watch" | "pat
 type ApiStatus = "loading" | "online" | "error";
 
 export default function WarRoom() {
-  const { state, start: rawStart, intervene, reset, abort } = useDeliberation();
+  const { state, start, intervene, reset, abort } = useDeliberation();
   const [view, setView] = useState<View>("deliberate");
   const [health, setHealth] = useState<HealthResponse | null>(null);
   const [gatewayPack, setGatewayPack] = useState<GatewayPackStatus | null>(null);
@@ -59,8 +58,6 @@ export default function WarRoom() {
   const [pendingCabinet, setPendingCabinet] = useState<string | null>(null);
   const [lastSessionId, setLastSessionId] = useState<string | null>(null);
   const [outboxTenant, setOutboxTenant] = useState("system");
-  const lastStartRef = useRef<StartPayload | null>(null);
-  const [hasLastStart, setHasLastStart] = useState(false);
   /**
    * Cold-start CONNECTING flag from the readiness-driven boot poller.
    * Stays true while native pack resume / Council bind is still legitimately
@@ -68,26 +65,6 @@ export default function WarRoom() {
    */
   const [bootRetryActive, setBootRetryActive] = useState(false);
   const bootPollerRef = useRef<BootHealthPollHandle | null>(null);
-
-  const start = useCallback(
-    (p: StartPayload) => {
-      lastStartRef.current = p;
-      setHasLastStart(true);
-      rawStart(p);
-    },
-    [rawStart],
-  );
-
-  const reconnect = useCallback(() => {
-    const p = lastStartRef.current;
-    if (!p) return;
-    rawStart(p);
-  }, [rawStart]);
-
-  const lastError = state.errors[state.errors.length - 1];
-  const isConnectionLoss =
-    !!lastError && lastError.message === "Connection to council bridge lost";
-  const canReconnect = isConnectionLoss && hasLastStart;
 
   const navigateToDriftReport = (reportFilename: string) => {
     setDriftInitialReport(reportFilename);
@@ -234,8 +211,6 @@ export default function WarRoom() {
               onStart={start}
               onIntervene={intervene}
               onReset={reset}
-              onReconnect={reconnect}
-              canReconnect={canReconnect}
               onViewDriftReport={navigateToDriftReport}
               onViewOutbox={(tenant) => {
                 setOutboxTenant(tenant);
