@@ -386,6 +386,7 @@ printf 'native webview Council request proof: PASS (port %s)\n' \
 # #0033 blank-window lead); the gate must not. The line lands in the failure
 # receipt via app.log. Checked after the webview has finished its Council
 # requests, so the setup task that runs the preload has completed.
+[[ -r "$tmp/app.log" ]] || { printf 'ERROR: app.log missing or unreadable; preload tripwire cannot run\n' >&2; exit 1; }
 if grep -Fq "cold-launch secret preload failed" "$tmp/app.log"; then
   printf 'ERROR: cold-launch secret preload failed (see app.log receipt)\n' >&2
   grep -F "cold-launch secret preload failed" "$tmp/app.log" >&2

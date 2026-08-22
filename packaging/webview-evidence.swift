@@ -379,6 +379,13 @@ func cmdSelftest(rejectPath: String?) throws {
   }
   print("selftest_predicate_stale_rejected=true stale=\(staleResult.stale.joined(separator: ","))")
 
+  let backendOCR = goodOCR + "\nBackend connection issue: Council is not reachable."
+  let backendResult = evaluateMarkers(in: backendOCR)
+  guard !backendResult.ok, backendResult.stale == ["BACKEND CONNECTION ISSUE"] else {
+    throw EvidenceError.usage("selftest predicate accepted backend-error chrome stale=\(backendResult.stale)")
+  }
+  print("selftest_predicate_backend_rejected=true stale=\(backendResult.stale.joined(separator: ","))")
+
   // Render a positive fixture and OCR it.
   let tmp = FileManager.default.temporaryDirectory
     .appendingPathComponent("warroom-webview-fixture-\(UUID().uuidString).png").path

@@ -237,6 +237,9 @@ launch_packaged_host() {
   if pgrep -f -x "$HOST_PATTERN" >/dev/null 2>&1; then
     die "exact packaged host is already running: $HOST"
   fi
+  # `open -o` appends: start every launch from an empty log so a tripwire
+  # never reads a previous run's lines.
+  : >"$host_log"
   open -n -F -W \
     -o "$host_log" \
     --stderr "$host_log" \
@@ -612,6 +615,8 @@ WEBVIEW_HELPER="$ROOT/packaging/webview-evidence.swift"
 [[ -f "$WEBVIEW_HELPER" ]] || die "missing webview evidence helper: $WEBVIEW_HELPER"
 command -v swift >/dev/null 2>&1 || die "swift required for webview evidence"
 capture_webview_evidence "$WEBVIEW_SHOT" "launch"
+# The preload can still fail after hydration; read the log again after capture.
+assert_no_preload_failure "$HOST_LOG" "launch"
 
 # Relaunch persistence: quit, restart, private config install_id unchanged —
 # and the relaunched window must pass the same War Room proof as the first
@@ -630,6 +635,7 @@ wait_packaged_health "$RELAUNCH_LOG" "relaunch" "$ROOT/packaging/build/smoke-hea
 assert_no_preload_failure "$RELAUNCH_LOG" "relaunch"
 wait_webview_hydrated "$RELAUNCH_LOG" "relaunch"
 capture_webview_evidence "$WEBVIEW_SHOT_RELAUNCH" "relaunch"
+assert_no_preload_failure "$RELAUNCH_LOG" "relaunch"
 INSTALL_ID2="$(python3 -c "import json;print(json.load(open('$PRIV'))['install_id'])")"
 [[ "$INSTALL_ID" == "$INSTALL_ID2" ]] || die "install_id changed across relaunch"
 log "relaunch_persistence_ok=true"
