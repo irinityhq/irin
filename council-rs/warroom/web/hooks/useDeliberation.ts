@@ -38,6 +38,13 @@ type Action =
 export const ABORT_NOTICE =
   "Local Council dispatch stopped. Requests already accepted by a provider may still finish or incur charges.";
 
+/**
+ * Shown when the bridge socket drops mid-deliberation. The proceeding is not
+ * resumed and is never replayed: a replay would be a second paid run.
+ */
+export const CONNECTION_LOST_NOTICE =
+  "Connection to council bridge lost. The proceeding was not resumed and will not be replayed; provider requests already accepted stay in the ledger. Reset to convene a new proceeding.";
+
 function emptyRound(num: number, seats: SeatRef[]): RoundRuntimeState {
   const map: Record<string, RoundRuntimeState["seats"][string]> = {};
   for (const s of seats) {
@@ -110,14 +117,14 @@ export function reduceDeliberationState(
       }
       // Otherwise the WS dropped mid-deliberation — surface as an error
       // so the UI exits the frozen streaming/paused/specops/synthesizing/
-      // connecting state and can offer reconnect.
-      const message = "Connection to council bridge lost";
+      // connecting state. No reconnect: there is no server-side resume, and
+      // re-sending the start payload would convene a second paid run.
       return {
         ...state,
         phase: "error",
         errors: [
           ...state.errors,
-          { message, ts: new Date().toISOString(), fatal: true },
+          { message: CONNECTION_LOST_NOTICE, ts: new Date().toISOString(), fatal: true },
         ],
       };
     }
