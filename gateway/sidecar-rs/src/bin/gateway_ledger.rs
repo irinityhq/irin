@@ -267,6 +267,11 @@ fn verify_chain(
             ));
         }
 
+        // A corrupt (non-hex) stored hash must map to the documented exit,
+        // never a panic or a misleading mismatch message (B-11).
+        let hash_bytes =
+            hex::decode(&event.hash).map_err(|_| (event.id, "invalid hash hex".to_string()))?;
+
         let computed = compute_hash(event);
         if event.hash != computed {
             return Err((
@@ -279,7 +284,6 @@ fn verify_chain(
         }
 
         if verify_sigs {
-            let hash_bytes = hex::decode(&event.hash).unwrap();
             let sig_bytes = hex::decode(&event.signature)
                 .map_err(|_| (event.id, "invalid signature hex".to_string()))?;
             let sig_array: [u8; 64] = sig_bytes
@@ -360,6 +364,12 @@ fn verify_chain(
 /// Fail closed when no row-signing key is configured and --hash-only was not
 /// requested. Empty ledgers still need the gate when the operator expects a
 /// signed verify (non-empty forges are the kill path; empty is harmless).
+/// First 12 characters of a key string for display. Char-based: a corrupt
+/// (non-ASCII) column must print, not panic on a mid-character byte slice.
+fn short_key(s: &str) -> String {
+    s.chars().take(12).collect()
+}
+
 fn refuse_missing_key(trust: &TrustKeys, hash_only: bool) -> Option<ExitCode> {
     if hash_only || trust.has_row_key() {
         return None;
@@ -701,7 +711,7 @@ fn cmd_fsck(
 
     println!("✅ Key trust chain:");
     for pk in &scan.signers_seen {
-        let short = &pk[..pk.len().min(12)];
+        let short = short_key(pk);
         let status = if scan.revoked_keys.contains(pk) {
             "REVOKED"
         } else {
@@ -735,7 +745,7 @@ fn cmd_fsck(
         println!("✅ All signers configured or introduced before use");
     } else {
         for (id, pk) in &scan.unintroduced_signer_events {
-            let short = &pk[..pk.len().min(12)];
+            let short = short_key(pk);
             eprintln!(
                 "❌ Event #{}: signing_key_pubkey {}... not in trusted set",
                 id, short
@@ -808,7 +818,7 @@ fn cmd_fsck(
             println!("✅ All ceremony events signed by ROOT_PUBKEY_HEX");
         } else {
             for (id, target, signer) in &root_violations {
-                let short = &signer[..signer.len().min(12)];
+                let short = short_key(signer);
                 eprintln!(
                     "❌ Event #{} ({}): not signed by root (signer={}...)",
                     id, target, short
@@ -1756,5 +1766,91 @@ mod tests {
 
         let _ = std::fs::remove_file(&db_path);
         let _ = std::fs::remove_file(&key_path);
+    }
+
+    /// B-11: a row whose stored hash column is not hex must surface as a
+    /// verification failure (exit 1), never a panic (exit 101).
+    #[test]
+    fn malformed_hash_column_fails_verification_without_panic() {
+        let (sk, pk) = keypair();
+        let trust = TrustKeys {
+            active: Some(sk.verifying_key()),
+            old: None,
+        };
+        let mut corrupt = sign_row(
+            &sk,
+            base_row(1, GENESIS_HASH, "t", r#"{"action":"corrupt"}"#, Some(&pk)),
+        );
+        corrupt.hash = "zz-not-hex".into();
+
+        let err = verify_chain(&[corrupt.clone()], &trust, false, None).unwrap_err();
+        assert_eq!(err.0, 1);
+        assert_eq!(err.1, "invalid hash hex", "unexpected err: {}", err.1);
+
+        // Real temp DB through cmd_verify: documented failure exit, not 101.
+        let db_path = std::env::temp_dir().join(format!("gw_bad_hash_{}.db", std::process::id()));
+        let _ = std::fs::remove_file(&db_path);
+        let conn_w = rusqlite::Connection::open(&db_path).unwrap();
+        conn_w
+            .execute(
+                "CREATE TABLE audit_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp INTEGER NOT NULL,
+                source TEXT NOT NULL,
+                target TEXT NOT NULL,
+                payload TEXT NOT NULL,
+                metadata TEXT NOT NULL,
+                schema_version INTEGER NOT NULL DEFAULT 1,
+                prev_hash TEXT NOT NULL,
+                hash TEXT NOT NULL UNIQUE,
+                signature TEXT NOT NULL,
+                caller_key TEXT,
+                signing_key_pubkey TEXT
+            )",
+                [],
+            )
+            .unwrap();
+        conn_w
+            .execute(
+                "INSERT INTO audit_events (id, timestamp, source, target, payload, metadata,
+                 caller_key, signing_key_pubkey, schema_version, prev_hash, hash, signature)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11)",
+                rusqlite::params![
+                    corrupt.id,
+                    corrupt.timestamp,
+                    corrupt.source,
+                    corrupt.target,
+                    corrupt.payload,
+                    corrupt.metadata,
+                    corrupt.signing_key_pubkey,
+                    corrupt.schema_version,
+                    corrupt.prev_hash,
+                    corrupt.hash,
+                    corrupt.signature,
+                ],
+            )
+            .unwrap();
+        drop(conn_w);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let v = cmd_verify(&conn, &trust, &None, false);
+        let f = cmd_fsck(&conn, &trust, &None, false);
+        assert_eq!(format!("{:?}", v), format!("{:?}", ExitCode::from(1)));
+        assert_eq!(format!("{:?}", f), format!("{:?}", ExitCode::from(1)));
+        drop(conn);
+
+        // A corrupt signing_key_pubkey whose 12th byte is mid-character used to
+        // panic in fsck's display truncation (byte slice), exit 101.
+        let conn_w = rusqlite::Connection::open(&db_path).unwrap();
+        conn_w
+            .execute(
+                "UPDATE audit_events SET signing_key_pubkey = ?1 WHERE id = 1",
+                rusqlite::params!["aaaaaaaaaaaé-not-a-key"],
+            )
+            .unwrap();
+        drop(conn_w);
+        let conn = rusqlite::Connection::open(&db_path).unwrap();
+        let f = cmd_fsck(&conn, &trust, &None, false);
+        let _ = std::fs::remove_file(&db_path);
+        assert_eq!(format!("{:?}", f), format!("{:?}", ExitCode::from(1)));
     }
 }

@@ -169,7 +169,8 @@ async fn ledger_fixture() -> (tempfile::TempDir, LedgerState, String, String) {
 
     let tmp = tempfile::TempDir::new().unwrap();
     let db_path = tmp.path().join("ledger.db");
-    let ledger = AuditLedger::new(db_path.to_str().unwrap(), None, None, None)
+    let seed = [7u8; 32];
+    let ledger = AuditLedger::new(db_path.to_str().unwrap(), Some(&seed), None, None)
         .await
         .unwrap();
 
