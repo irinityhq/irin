@@ -37,7 +37,7 @@ use sidecar::{
     CouncilServerProbe, GatewayChildCredentials,
 };
 use status_authority::{DesktopStatusSnapshot, Freshness};
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -144,7 +144,31 @@ fn report_council_runtime_ready(port: u16) -> Result<(), String> {
     Ok(())
 }
 
+/// Set once the main War Room page has finished loading. The tray reveal
+/// must not show the window before that: an unloaded webview is a blank
+/// window (B-14). The page-load path reveals the window itself on load.
+static MAIN_PAGE_LOADED: AtomicBool = AtomicBool::new(false);
+
+/// Records a page-load event; returns whether it is the main page finishing.
+fn record_main_page_load(webview_label: &str, event: PageLoadEvent) -> bool {
+    if webview_label != "main" {
+        return false;
+    }
+    // A reload or navigation starts a new load: the tray must wait again.
+    let finished = event == PageLoadEvent::Finished;
+    MAIN_PAGE_LOADED.store(finished, Ordering::SeqCst);
+    finished
+}
+
+fn tray_may_reveal_main_window() -> bool {
+    MAIN_PAGE_LOADED.load(Ordering::SeqCst)
+}
+
 fn show_main_window(app: &AppHandle) {
+    if !tray_may_reveal_main_window() {
+        eprintln!("[tray] War Room page has not finished loading; it reveals itself on load");
+        return;
+    }
     let Some(window) = app.get_webview_window("main") else {
         eprintln!("[tray] main War Room window is unavailable");
         return;
@@ -1854,7 +1878,7 @@ pub fn run() {
             report_council_runtime_ready
         ])
         .on_page_load(|webview, payload| {
-            if !should_reveal_main_window(webview.label(), payload.event()) {
+            if !record_main_page_load(webview.label(), payload.event()) {
                 return;
             }
             let window = webview.window();
@@ -2183,7 +2207,8 @@ pub fn run() {
 #[cfg(test)]
 mod runtime_mode_tests {
     use super::{
-        desktop_runtime_config_value, desktop_runtime_mode_value, should_reveal_main_window,
+        desktop_runtime_config_value, desktop_runtime_mode_value, record_main_page_load,
+        should_reveal_main_window, tray_may_reveal_main_window,
         validate_runtime_ready_port,
     };
     use tauri::webview::PageLoadEvent;
@@ -2213,6 +2238,26 @@ mod runtime_mode_tests {
     fn runtime_ready_receipt_accepts_only_the_selected_port() {
         assert!(validate_runtime_ready_port(20_321, 20_321).is_ok());
         assert!(validate_runtime_ready_port(8_765, 20_321).is_err());
+    }
+
+    /// B-14: the tray "Open War Room" reveal is gated on the same page-load
+    /// proof as the initial reveal; before it, the window would be blank.
+    #[test]
+    fn tray_reveal_refused_until_main_page_load_finishes() {
+        super::MAIN_PAGE_LOADED.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!tray_may_reveal_main_window(), "fresh process: nothing loaded");
+        assert!(!record_main_page_load("main", PageLoadEvent::Started));
+        assert!(!tray_may_reveal_main_window(), "load started is not loaded");
+        assert!(!record_main_page_load("secondary", PageLoadEvent::Finished));
+        assert!(!tray_may_reveal_main_window(), "another webview does not count");
+        assert!(record_main_page_load("main", PageLoadEvent::Finished));
+        assert!(tray_may_reveal_main_window(), "main finished: tray may reveal");
+        // A reload starts a new load; the tray waits for it to finish again.
+        assert!(!record_main_page_load("main", PageLoadEvent::Started));
+        assert!(!tray_may_reveal_main_window(), "reload started: tray waits again");
+        assert!(!record_main_page_load("secondary", PageLoadEvent::Started));
+        assert!(record_main_page_load("main", PageLoadEvent::Finished));
+        assert!(tray_may_reveal_main_window(), "reload finished: tray may reveal");
     }
 
     #[test]
