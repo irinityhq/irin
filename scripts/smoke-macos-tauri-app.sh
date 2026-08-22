@@ -295,6 +295,7 @@ env \
   -u OPENAI_API_KEY -u OPENROUTER_API_KEY -u TOGETHER_API_KEY -u XAI_API_KEY \
   open -n -F -W -o "$tmp/app.log" --stderr "$tmp/app.log" \
     --env "HOME=$tmp/home" \
+    --env "IRIN_ISOLATED_KEYCHAIN=$tmp/home/Library/Keychains/irin-smoke.keychain-db" \
     --env COUNCIL_WS_SMOKE_ONLY=1 \
     "$app" &
 launcher_pid=$!

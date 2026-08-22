@@ -17,6 +17,7 @@
 
 #[cfg(test)]
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// Stable app identity — must match tauri.conf.json `identifier`.
@@ -107,8 +108,49 @@ impl SecretStore for MemorySecretStore {
 #[derive(Default)]
 pub struct KeychainSecretStore;
 
+/// Smoke-only override: a throwaway keychain file named by
+/// `IRIN_ISOLATED_KEYCHAIN`. The packaged smokes already remap `HOME` to a
+/// disposable test-home; the Keychain is the one thing that remapping did not
+/// isolate, so an ad-hoc smoke build and the installed app fought over the
+/// same `com.irinity.irin` items under different signing identities.
+///
+/// Honored only when `HOME` is already isolated away from the session user's
+/// home and the file sits under that `HOME`, so a stray env value can never
+/// redirect an installed app's secrets.
+pub const ISOLATED_KEYCHAIN_ENV: &str = "IRIN_ISOLATED_KEYCHAIN";
+
+/// Pure guard for the isolated keychain override (platform-independent, tested).
+///
+/// Callers pass canonical paths. `Ok(None)` means "ignore the override": the
+/// process is not running under an isolated `HOME`, so an installed app with
+/// a stray env value keeps its normal login keychain. `Err` only when `HOME`
+/// is isolated and the requested file still cannot be trusted.
+pub(crate) fn validate_isolated_keychain_path(
+    path: PathBuf,
+    process_home: Option<PathBuf>,
+    session_home: Option<PathBuf>,
+) -> Result<Option<PathBuf>, String> {
+    let Some(home) = process_home else {
+        return Ok(None);
+    };
+    if session_home.as_ref() == Some(&home) {
+        return Ok(None);
+    }
+    let has_parent_dir = path
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir));
+    if has_parent_dir || !path.is_absolute() || !path.starts_with(&home) {
+        return Err(
+            "isolated keychain refused: path must be absolute, `..`-free, and under the isolated HOME"
+                .to_string(),
+        );
+    }
+    Ok(Some(path))
+}
+
 #[cfg(target_os = "macos")]
 mod macos_keychain {
+    use core_foundation::array::CFArray;
     use core_foundation::base::{CFType, TCFType};
     use core_foundation::boolean::CFBoolean;
     use core_foundation::data::CFData;
@@ -124,8 +166,9 @@ mod macos_keychain {
         errSecDuplicateItem, errSecItemNotFound, errSecParam, errSecSuccess,
     };
     use security_framework_sys::item::{
-        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecReturnData,
-        kSecUseAuthenticationUI, kSecUseAuthenticationUISkip, kSecUseKeychain, kSecValueData,
+        kSecAttrAccount, kSecAttrService, kSecClass, kSecClassGenericPassword, kSecMatchSearchList,
+        kSecReturnData, kSecUseAuthenticationUI, kSecUseAuthenticationUISkip, kSecUseKeychain,
+        kSecValueData,
     };
     use security_framework_sys::keychain_item::{
         SecItemAdd, SecItemCopyMatching, SecItemDelete, SecItemUpdate,
@@ -205,22 +248,135 @@ mod macos_keychain {
         }
     }
 
+    fn isolated_keychain_path() -> Result<Option<PathBuf>, String> {
+        let Some(raw) = std::env::var_os(super::ISOLATED_KEYCHAIN_ENV) else {
+            return Ok(None);
+        };
+        // Compare real paths: `/tmp` and `$TMPDIR` are symlinks on macOS, and a
+        // lexical `starts_with` would let `..` or a symlinked HOME escape.
+        let process_home = match std::env::var_os("HOME").map(PathBuf::from) {
+            Some(h) => Some(
+                std::fs::canonicalize(&h)
+                    .map_err(|e| format!("isolated keychain refused: HOME {}: {e}", h.display()))?,
+            ),
+            None => None,
+        };
+        let session_home = pw_dir_for_current_uid().map(|h| std::fs::canonicalize(&h).unwrap_or(h));
+        super::validate_isolated_keychain_path(
+            canonicalize_existing_prefix(PathBuf::from(raw)),
+            process_home,
+            session_home,
+        )
+    }
+
+    /// Canonicalize the longest existing ancestor (the keychain file itself
+    /// may not exist yet) and re-append the rest untouched.
+    fn canonicalize_existing_prefix(path: PathBuf) -> PathBuf {
+        let mut existing = path.as_path();
+        let mut rest: Vec<std::ffi::OsString> = Vec::new();
+        loop {
+            if let Ok(canon) = std::fs::canonicalize(existing) {
+                return rest.iter().rev().fold(canon, |acc, part| acc.join(part));
+            }
+            match (existing.file_name(), existing.parent()) {
+                (Some(name), Some(parent)) => {
+                    rest.push(name.to_os_string());
+                    existing = parent;
+                }
+                _ => return path,
+            }
+        }
+    }
+
+    /// Create-once, then open+unlock. The keychain password is random, lives
+    /// next to the file (0600) inside the disposable test-home, and guards
+    /// only the smoke's fake secrets. Serialized so two first callers cannot
+    /// race the create.
+    fn open_or_create_isolated_keychain(path: &PathBuf) -> Result<SecKeychain, String> {
+        use security_framework::os::macos::keychain::{CreateOptions, KeychainSettings};
+        use std::io::{Read, Write};
+        use std::os::unix::fs::OpenOptionsExt;
+        static CREATE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _serial = CREATE_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+
+        let pass_path = path.with_extension("pass");
+        // A pass file without its keychain is an orphan from a failed create;
+        // drop it so the retry below is not stuck on `create_new`.
+        if !path.is_file() && pass_path.is_file() {
+            std::fs::remove_file(&pass_path)
+                .map_err(|e| format!("isolated keychain orphan password file: {e}"))?;
+        }
+        if path.is_file() {
+            let pw = std::fs::read_to_string(&pass_path)
+                .map_err(|e| format!("isolated keychain password file: {e}"))?;
+            let mut kc =
+                SecKeychain::open(path).map_err(|e| format!("isolated keychain open: {e}"))?;
+            kc.unlock(Some(pw.trim()))
+                .map_err(|e| format!("isolated keychain unlock: {e}"))?;
+            return Ok(kc);
+        }
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| format!("isolated keychain dir: {e}"))?;
+        }
+        let mut raw = [0u8; 32];
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(&mut raw))
+            .map_err(|e| format!("isolated keychain password: {e}"))?;
+        let pw: String = raw.iter().map(|b| format!("{b:02x}")).collect();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&pass_path)
+            .and_then(|mut f| f.write_all(pw.as_bytes()))
+            .map_err(|e| format!("isolated keychain password file: {e}"))?;
+        let mut kc = CreateOptions::new()
+            .password(&pw)
+            .prompt_user(false)
+            .create(path)
+            .map_err(|e| format!("isolated keychain create: {e}"))?;
+        // Never auto-lock mid-smoke.
+        let mut settings = KeychainSettings::new();
+        settings.set_lock_on_sleep(false);
+        settings.set_lock_interval(None);
+        let _ = kc.set_settings(&settings);
+        Ok(kc)
+    }
+
+    /// The keychain every call in this module targets. `isolated` is true only
+    /// under the smoke override, where queries must also pin the search list;
+    /// the shipped login path keeps the default search behaviour.
+    pub(super) struct ResolvedKeychain {
+        keychain: SecKeychain,
+        isolated: bool,
+    }
+
     /// Resolve a usable keychain for this call (never logged).
     /// Prefer the session default; if absent, open the existing login keychain
     /// for the current uid only (never create/reset).
-    fn resolved_keychain() -> Result<SecKeychain, String> {
+    fn resolved_keychain() -> Result<ResolvedKeychain, String> {
         resolve_usable_keychain()
     }
 
-    fn resolve_usable_keychain() -> Result<SecKeychain, String> {
-        match SecKeychain::default() {
-            Ok(kc) => Ok(kc),
-            Err(e) if is_no_default_keychain(&e) => open_existing_login_keychain(),
+    fn resolve_usable_keychain() -> Result<ResolvedKeychain, String> {
+        if let Some(path) = isolated_keychain_path()? {
+            return open_or_create_isolated_keychain(&path).map(|keychain| ResolvedKeychain {
+                keychain,
+                isolated: true,
+            });
+        }
+        let keychain = match SecKeychain::default() {
+            Ok(kc) => kc,
+            Err(e) if is_no_default_keychain(&e) => open_existing_login_keychain()?,
             Err(_) => {
                 // Default failed for another reason — still try existing login only.
-                open_existing_login_keychain()
+                open_existing_login_keychain()?
             }
-        }
+        };
+        Ok(ResolvedKeychain {
+            keychain,
+            isolated: false,
+        })
     }
 
     /// Fail-fast preflight: usable login keychain must already exist.
@@ -274,30 +430,9 @@ mod macos_keychain {
         service: &str,
         account: &str,
         password: &[u8],
-        keychain: &SecKeychain,
+        keychain: &ResolvedKeychain,
     ) -> SfResult<()> {
-        let query = CFDictionary::from_CFType_pairs(&[
-            (
-                unsafe { CFString::wrap_under_get_rule(kSecClass) },
-                unsafe { CFString::wrap_under_get_rule(kSecClassGenericPassword).into_CFType() },
-            ),
-            (
-                unsafe { CFString::wrap_under_get_rule(kSecAttrService) },
-                CFString::from(service).into_CFType(),
-            ),
-            (
-                unsafe { CFString::wrap_under_get_rule(kSecAttrAccount) },
-                CFString::from(account).into_CFType(),
-            ),
-            (
-                unsafe { CFString::wrap_under_get_rule(kSecUseKeychain) },
-                unsafe { CFType::wrap_under_get_rule(keychain.as_CFTypeRef()) },
-            ),
-            (
-                unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
-                unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUIFail).into_CFType() },
-            ),
-        ]);
+        let query = generic_password_query(service, account, keychain, false);
         let update = CFDictionary::from_CFType_pairs(&[(
             unsafe { CFString::wrap_under_get_rule(kSecValueData) },
             CFData::from_buffer(password).into_CFType(),
@@ -315,7 +450,7 @@ mod macos_keychain {
         service: &str,
         account: &str,
         password: &[u8],
-        keychain: &SecKeychain,
+        keychain: &ResolvedKeychain,
     ) -> SfResult<()> {
         let pairs: Vec<(CFString, CFType)> = vec![
             (
@@ -339,7 +474,7 @@ mod macos_keychain {
             ),
             (
                 unsafe { CFString::wrap_under_get_rule(kSecUseKeychain) },
-                unsafe { CFType::wrap_under_get_rule(keychain.as_CFTypeRef()) },
+                unsafe { CFType::wrap_under_get_rule(keychain.keychain.as_CFTypeRef()) },
             ),
             (
                 unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
@@ -367,7 +502,7 @@ mod macos_keychain {
     fn generic_password_query(
         service: &str,
         account: &str,
-        keychain: &SecKeychain,
+        keychain: &ResolvedKeychain,
         return_data: bool,
     ) -> CFDictionary<CFString, CFType> {
         let mut pairs: Vec<(CFString, CFType)> = vec![
@@ -385,13 +520,26 @@ mod macos_keychain {
             ),
             (
                 unsafe { CFString::wrap_under_get_rule(kSecUseKeychain) },
-                unsafe { CFType::wrap_under_get_rule(keychain.as_CFTypeRef()) },
+                unsafe { CFType::wrap_under_get_rule(keychain.keychain.as_CFTypeRef()) },
             ),
             (
                 unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUI) },
                 unsafe { CFString::wrap_under_get_rule(kSecUseAuthenticationUIFail).into_CFType() },
             ),
         ];
+        if keychain.isolated {
+            // kSecUseKeychain scopes adds only; under the isolated override
+            // queries/updates/deletes must pin the search list or they fall
+            // back to the session default keychain. The shipped login path
+            // keeps the default search list unchanged.
+            pairs.push((
+                unsafe { CFString::wrap_under_get_rule(kSecMatchSearchList) },
+                CFArray::from_CFTypes(&[unsafe {
+                    CFType::wrap_under_get_rule(keychain.keychain.as_CFTypeRef())
+                }])
+                .into_CFType(),
+            ));
+        }
         if return_data {
             pairs.push((
                 unsafe { CFString::wrap_under_get_rule(kSecReturnData) },
@@ -404,7 +552,7 @@ mod macos_keychain {
     fn get_generic_password_from_keychain(
         service: &str,
         account: &str,
-        keychain: &SecKeychain,
+        keychain: &ResolvedKeychain,
     ) -> SfResult<Vec<u8>> {
         let query = generic_password_query(service, account, keychain, true);
         let mut ret: CFTypeRef = ptr::null();
@@ -425,7 +573,7 @@ mod macos_keychain {
     fn delete_generic_password_from_keychain(
         service: &str,
         account: &str,
-        keychain: &SecKeychain,
+        keychain: &ResolvedKeychain,
     ) -> SfResult<()> {
         let query = generic_password_query(service, account, keychain, false);
         let status = unsafe { SecItemDelete(query.as_concrete_TypeRef()) };
@@ -1318,5 +1466,154 @@ mod keychain_live_tests {
         store
             .delete_password(&service, AUTH_PEPPER_ACCOUNT)
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod isolated_keychain_tests {
+    use super::validate_isolated_keychain_path;
+    use std::path::PathBuf;
+
+    #[test]
+    fn isolated_keychain_ignored_when_home_is_the_session_home() {
+        let home = PathBuf::from("/Users/op");
+        let ignored = validate_isolated_keychain_path(
+            home.join("Library/Keychains/irin-smoke.keychain-db"),
+            Some(home.clone()),
+            Some(home),
+        )
+        .unwrap();
+        assert_eq!(
+            ignored, None,
+            "stray env on the session HOME must not break the login path"
+        );
+        assert_eq!(
+            validate_isolated_keychain_path(PathBuf::from("/x/y.keychain-db"), None, None).unwrap(),
+            None,
+            "no HOME means no isolated HOME"
+        );
+    }
+
+    #[test]
+    fn isolated_keychain_refused_outside_the_isolated_home() {
+        let err = validate_isolated_keychain_path(
+            PathBuf::from("/Users/op/Library/Keychains/login.keychain-db"),
+            Some(PathBuf::from("/tmp/smoke-home")),
+            Some(PathBuf::from("/Users/op")),
+        )
+        .unwrap_err();
+        assert!(err.contains("under the isolated HOME"), "{err}");
+        let err = validate_isolated_keychain_path(
+            PathBuf::from("relative.keychain-db"),
+            Some(PathBuf::from("/tmp/smoke-home")),
+            Some(PathBuf::from("/Users/op")),
+        )
+        .unwrap_err();
+        assert!(err.contains("absolute"), "{err}");
+    }
+
+    #[test]
+    fn isolated_keychain_refuses_parent_dir_escapes() {
+        let err = validate_isolated_keychain_path(
+            PathBuf::from("/tmp/smoke-home/../../Users/op/Library/Keychains/login.keychain-db"),
+            Some(PathBuf::from("/tmp/smoke-home")),
+            Some(PathBuf::from("/Users/op")),
+        )
+        .unwrap_err();
+        assert!(err.contains("`..`-free"), "{err}");
+    }
+
+    #[test]
+    fn isolated_keychain_accepted_under_an_isolated_home() {
+        let path = PathBuf::from("/tmp/smoke-home/Library/Keychains/irin-smoke.keychain-db");
+        let ok = validate_isolated_keychain_path(
+            path.clone(),
+            Some(PathBuf::from("/tmp/smoke-home")),
+            Some(PathBuf::from("/Users/op")),
+        )
+        .unwrap();
+        assert_eq!(ok, Some(path));
+    }
+}
+
+/// Live: the override creates its own keychain file under the isolated HOME
+/// and round-trips an item without touching the login keychain. Our own
+/// process created the file, so no ACL prompt is possible. `temp_dir()` is a
+/// symlink on macOS (`/var` → `/private/var`), so this also proves a
+/// symlinked HOME still matches after canonicalization, and the orphan
+/// `.pass` file planted first proves a failed create does not wedge the retry.
+#[cfg(test)]
+#[cfg(target_os = "macos")]
+mod isolated_keychain_live_tests {
+    use super::{KeychainSecretStore, SecretStore, ISOLATED_KEYCHAIN_ENV};
+
+    #[test]
+    fn isolated_keychain_round_trips_under_an_isolated_home() {
+        let _lock = crate::private_config::test_env_lock();
+        let home = std::env::temp_dir().join(format!("irin-isolated-kc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let kc = home.join("Library/Keychains/irin-smoke.keychain-db");
+        std::fs::create_dir_all(kc.parent().unwrap()).unwrap();
+        std::fs::write(kc.with_extension("pass"), "orphan").unwrap();
+        let store = KeychainSecretStore;
+        // Per-run service/account so a concurrent or interrupted run cannot
+        // touch this run's login sentinel.
+        let service = format!(
+            "com.irinity.irin.isolated-keychain-test.{}",
+            std::process::id()
+        );
+        let service = service.as_str();
+        let account = &format!("probe-{}", std::process::id());
+        // Sentinel in the login keychain under the same service/account: the
+        // isolated run must never read, update, or delete it.
+        let sentinel = format!("login-sentinel-{}", std::process::id());
+        // Clear any inherited override first so the sentinel lands in the
+        // login keychain, then restore the caller's setting at the end.
+        let prev_isolated = std::env::var(ISOLATED_KEYCHAIN_ENV).ok();
+        std::env::remove_var(ISOLATED_KEYCHAIN_ENV);
+        store.set_password(service, account, &sentinel).unwrap();
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home);
+        std::env::set_var(ISOLATED_KEYCHAIN_ENV, &kc);
+
+        let result = (|| -> Result<(), String> {
+            if store.get_password(service, account)?.is_some() {
+                return Err("isolated get saw the login keychain sentinel".into());
+            }
+            store.set_password(service, account, "v1")?;
+            if store.get_password(service, account)? != Some("v1".to_string()) {
+                return Err("get after set".into());
+            }
+            store.set_password(service, account, "v2")?;
+            if store.get_password(service, account)? != Some("v2".to_string()) {
+                return Err("get after update".into());
+            }
+            store.delete_password(service, account)?;
+            if store.get_password(service, account)?.is_some() {
+                return Err("get after delete".into());
+            }
+            if !kc.is_file() || !kc.with_extension("pass").is_file() {
+                return Err("isolated keychain files missing".into());
+            }
+            Ok(())
+        })();
+
+        std::env::remove_var(ISOLATED_KEYCHAIN_ENV);
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&home);
+        let login_after = store.get_password(service, account);
+        let _ = store.delete_password(service, account);
+        if let Some(v) = prev_isolated {
+            std::env::set_var(ISOLATED_KEYCHAIN_ENV, v);
+        }
+        result.unwrap();
+        assert_eq!(
+            login_after.unwrap(),
+            Some(sentinel),
+            "login keychain sentinel must survive the isolated set/update/delete untouched"
+        );
     }
 }

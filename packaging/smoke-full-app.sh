@@ -422,6 +422,7 @@ open -n -F -W \
   --stderr "$ROOT/packaging/build/smoke-host.log" \
   --env "HOME=$TEST_HOME" \
   --env "TMPDIR=$TEST_HOME/tmp" \
+  --env "IRIN_ISOLATED_KEYCHAIN=$TEST_HOME/Library/Keychains/irin-smoke.keychain-db" \
   "$DEST_APP" &
 LAUNCHER_PID=$!
 HOST_PID=""
@@ -574,6 +575,7 @@ log "port_released_after_quit=true"
 (
   export HOME="$TEST_HOME"
   export TMPDIR="$TEST_HOME/tmp"
+  export IRIN_ISOLATED_KEYCHAIN="$TEST_HOME/Library/Keychains/irin-smoke.keychain-db"
   "$HOST" >"$ROOT/packaging/build/smoke-host-relaunch.log" 2>&1 &
   echo $! >"$PIDFILE"
 )
