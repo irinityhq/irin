@@ -96,6 +96,8 @@ provision-key:
 		-H "Content-Type: application/json" \
 		-d "{\"budget_key\":\"$(BUDGET)\", \"tier\":\"$$TIER\", \"rpm\":$$RPM, \"admin_key\":\"$$ADMIN\"}")" \
 		|| { echo "failed to provision key (is the stack running?)" >&2; exit 1; }; \
+	printf '%s\n' "$$out" | jq -e '(.raw_key // "") | length > 0' >/dev/null \
+		|| { echo "provisioning response carried no raw_key: $$out" >&2; exit 1; }; \
 	printf '%s\n' "$$out" | jq .
 
 # --------------------------------------------------------------------------
@@ -498,7 +500,7 @@ test-triad:
 	@echo "2. Gateway Rust Suites..."
 	@$(MAKE) test-rust-suites
 	@echo "3. Gateway Clippy..."
-	@cd sidecar-rs && cargo clippy -p gateway-sidecar -- -D warnings
+	@cd sidecar-rs && cargo clippy -p gateway-sidecar --all-targets --locked -- -D warnings
 	@echo "4. Sentinel Triad Docs Check..."
 	@cd ../sentinel && python3 tools/check_triad_docs.py
 	@echo "5. Council Rust Suites..."
