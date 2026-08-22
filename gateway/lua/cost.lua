@@ -903,6 +903,7 @@ function _M.account()
         status          = ngx.status,
         capped          = capped,
         unparsed        = unparsed,
+        tokens_estimated = capped or unparsed,
         is_streaming    = is_streaming or false,
         timestamp       = ngx.localtime(),
     })

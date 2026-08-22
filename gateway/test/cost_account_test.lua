@@ -94,11 +94,14 @@ check(cache_stores == 0, "empty body never reaches cache_store")
 row = run("not json")
 check(scheduled[1] == "outbound_response", "unparseable body still schedules outbound_response")
 check(row ~= nil and row.metadata.tokens_estimated == true, "unparseable body row is marked tokens_estimated")
+check(row ~= nil and row.metadata.unparsed == true, "unparseable body row is marked unparsed")
+check(row ~= nil and row.payload.tokens_in == 10 and row.payload.tokens_out == 0, "unparseable body uses input-only estimate")
 check(cache_stores == 0, "unparseable body never reaches cache_store")
 
 row = run('{"usage":{}}')
 check(scheduled[1] == "outbound_response", "parseable body schedules outbound_response")
-check(row ~= nil and row.metadata.tokens_estimated == false and row.payload.tokens_in == 3, "parseable body keeps provider usage")
+check(row ~= nil and row.metadata.tokens_estimated == false and row.metadata.unparsed == false, "parseable body row is not marked estimated or unparsed")
+check(row ~= nil and row.payload.tokens_in == 3 and row.payload.tokens_out == 5, "parseable body keeps provider usage")
 check(cache_stores == 1, "parseable success body reaches cache_store")
 
 if failures > 0 then
