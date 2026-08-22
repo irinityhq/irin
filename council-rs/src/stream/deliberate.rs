@@ -21,6 +21,7 @@ use super::intervention::{Intervention, InterventionQueue};
 use crate::config::Config;
 use crate::engine::context::RequestContext;
 use crate::engine::deliberate::{
+    truncate_utf8,
     JudgeUsage, convergence_quality_penalty_enabled, effective_convergence_threshold,
     governed_alternative_transport_model_groups, governed_required_transport_models, judge_round,
     seat_preamble_for, should_pause_for_budget,
@@ -2385,11 +2386,7 @@ fn build_round_prompt(
             prompt.push_str(&format!("\n### Round {}\n", rnd.round_num));
             for resp in &rnd.responses {
                 if resp.seat_name != seat.name && !resp.text.is_empty() && resp.error.is_none() {
-                    let truncated = if resp.text.len() > 2000 {
-                        &resp.text[..2000]
-                    } else {
-                        &resp.text
-                    };
+                    let truncated = truncate_utf8(&resp.text, 2000);
                     prompt.push_str(&format!(
                         "**{} ({})**: {}\n\n",
                         resp.seat_name, resp.provider, truncated
@@ -2441,11 +2438,7 @@ pub(crate) async fn run_escalation(
     for rnd in rounds {
         for resp in &rnd.responses {
             if !resp.text.is_empty() && resp.error.is_none() {
-                let truncated = if resp.text.len() > 1000 {
-                    &resp.text[..1000]
-                } else {
-                    &resp.text
-                };
+                let truncated = truncate_utf8(&resp.text, 1000);
                 transcript.push_str(&format!(
                     "[{} R{}]: {}\n\n",
                     resp.seat_name, resp.round_num, truncated

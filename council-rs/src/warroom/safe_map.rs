@@ -280,13 +280,12 @@ pub fn gather_map_preview(dir_path: &str) -> Value {
         })
         .collect();
 
-    let preview_end = content.len().min(5000);
     json!({
         "directory": target.to_string_lossy(),
         "file_count": files.len(),
         "files": files.iter().take(200).collect::<Vec<_>>(),
         "total_bytes": content.len(),
-        "preview": &content[..preview_end],
+        "preview": crate::engine::deliberate::truncate_utf8(&content, 5000),
     })
 }
 

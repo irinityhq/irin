@@ -153,11 +153,17 @@ fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
     for word in text.split_whitespace() {
         // Hard-split a word longer than the line width.
         let mut word = word.to_string();
-        while word.len() > max_chars {
+        while word.chars().count() > max_chars {
             if !current.is_empty() {
                 out.push(std::mem::take(&mut current));
             }
-            let (head, tail) = word.split_at(max_chars);
+            // Split on a character index, not a byte index (B-08).
+            let split = word
+                .char_indices()
+                .nth(max_chars)
+                .map(|(i, _)| i)
+                .unwrap_or(word.len());
+            let (head, tail) = word.split_at(split);
             out.push(head.to_string());
             word = tail.to_string();
         }
@@ -376,6 +382,16 @@ fn build_pdf(pages: &[Vec<&Line>], session_id: &str) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// B-08: hard-splitting a long word must not land inside a multi-byte
+    /// character (`split_at(max_chars)` on byte length panicked).
+    #[test]
+    fn wrap_text_hard_splits_long_words_on_character_boundaries() {
+        let word = "é".repeat(20);
+        let lines = super::wrap_text(&word, 8);
+        assert_eq!(lines, vec!["é".repeat(8), "é".repeat(8), "é".repeat(4)]);
+        assert_eq!(super::wrap_text("short words only", 8), vec!["short", "words", "only"]);
+    }
+
     use super::*;
     use crate::types::SessionMode;
     use chrono::Utc;
