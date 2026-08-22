@@ -244,6 +244,9 @@ fn promote_with_held_secrets_does_not_reenter_keychain() {
 /// held secrets, this fails (legacy dispatch re-gets accounts).
 #[test]
 fn promote_pack_ready_held_secret_path_does_not_reenter_keychain() {
+    // `status_with_council_route_with_key` bumps the status-cache generation;
+    // serialize with the coalescing tests in status_tests.rs (B-17).
+    let _serial = crate::private_config::test_env_lock();
     let store = CountingSecretStore::with_seeded_pack_secrets();
     let migrated = migrate_legacy_secrets_with_values(&store);
     let key = migrated.gw_api_key.expect("seeded GW_API_KEY");

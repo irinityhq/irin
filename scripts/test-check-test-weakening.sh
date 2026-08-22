@@ -202,6 +202,32 @@ EOF
 expect_finding 'source-without-tests src/lib.rs'
 git checkout -q -- . && git clean -qfd
 
+# --- removing #[ignore] from an inline test counts as touching tests ---
+cat >src/lib.rs <<'EOF'
+pub fn add(a: u32, b: u32) -> u32 { a + b }
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn adds() { assert_eq!(super::add(1, 2), 3); assert!(true); }
+    #[test]
+    #[ignore = "standing reminder"]
+    fn armed_later() { assert_eq!(super::add(2, 2), 4); }
+}
+EOF
+git add -A && git commit -q -m ignored-base
+cat >src/lib.rs <<'EOF'
+pub fn add(a: u32, b: u32) -> u32 { a + b + 0 }
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn adds() { assert_eq!(super::add(1, 2), 3); assert!(true); }
+    #[test]
+    fn armed_later() { assert_eq!(super::add(2, 2), 4); }
+}
+EOF
+[[ "$(run_check)" == 0 ]] || { cat "$work/out.txt" >&2; fail "un-ignoring an inline test should count as test touched"; }
+git checkout -q -- . && git clean -qfd
+
 # --- docs-only change passes ---
 printf 'notes\n' >README.md
 [[ "$(run_check)" == 0 ]] || { cat "$work/out.txt" >&2; fail "docs-only change should pass"; }
