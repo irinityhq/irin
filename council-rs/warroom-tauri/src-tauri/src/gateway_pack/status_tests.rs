@@ -1192,3 +1192,40 @@ fn authority_failing_keychain_returns_unauthenticated_despite_warm_cache() {
         "authority path must return unauthenticated despite warm cached=true"
     );
 }
+
+#[test]
+fn cold_launch_preload_flight_fences_background_keychain_reads() {
+    // B-03: a presentation snapshot that lands while the cold-launch Keychain
+    // flight is still loading (ACL dialogs up) must not re-get GW_API_KEY or
+    // the arm principal. Each such read is one more dialog for the operator.
+    use crate::keychain::{
+        begin_cold_launch_preload, invalidate_arm_principal_observation, resolve_arm_principal,
+        store_arm_principal_token, ArmPrincipalProbeMode,
+    };
+    let _lock = test_env_lock();
+    invalidate_auth_observation();
+    let store = CountingKeychainStore::with_gw_key();
+    store_arm_principal_token(&store, &format!("tok_{:032x}", 3u128)).unwrap();
+    // Storing seeds presence; drop it so the probe below is a genuine miss.
+    invalidate_arm_principal_observation();
+
+    let fence = begin_cold_launch_preload();
+    let (present, _) = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    let (arm_present, arm_token) = resolve_arm_principal(&store, ArmPrincipalProbeMode::BackgroundCached);
+    assert_eq!(
+        store.get_count(),
+        0,
+        "background probes during the cold-launch flight must not read the Keychain"
+    );
+    assert!(!present, "fenced GW probe reports absent, not a fresh read");
+    assert!(
+        !arm_present && arm_token.is_none(),
+        "fenced arm probe must not load the seeded token"
+    );
+    drop(fence);
+
+    // Once the flight is over, an un-seeded miss reads exactly once again.
+    let _ = resolve_auth_observation(&store, AuthProbeMode::BackgroundCached);
+    assert_eq!(store.get_count(), 1, "post-flight miss reads once");
+    invalidate_arm_principal_observation();
+}

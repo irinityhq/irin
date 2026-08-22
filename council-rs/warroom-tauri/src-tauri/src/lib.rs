@@ -1899,6 +1899,7 @@ pub fn run() {
                     // and governed Council spawn.
                     let (launch_key, launch_secrets, preload_auth_generation) = if packaged {
                         let store = KeychainSecretStore;
+                        let _preload_flight = keychain::begin_cold_launch_preload();
                         let migrated = migrate_legacy_secrets_with_values(&store);
                         gateway_pack::invalidate_auth_observation();
                         // Capture generation with the flight so a concurrent
