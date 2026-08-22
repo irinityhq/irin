@@ -37,6 +37,7 @@ DMG="$(find "$CANDIDATE" -maxdepth 1 -type f -name '*.dmg' | head -1 || true)"
 HASHES_PATH="$CANDIDATE/HASHES.txt"
 REPORT="$CANDIDATE/logs/FULL_APP_SMOKE.txt"
 WEBVIEW_SHOT="$CANDIDATE/logs/webview-smoke.png"
+WEBVIEW_SHOT_RELAUNCH="$CANDIDATE/logs/webview-smoke-relaunch.png"
 PIDFILE="$SMOKE_ROOT/smoke-host.pid"
 SIDECAR_PIDFILE="$SMOKE_ROOT/smoke-sidecar.pid"
 TEST_HOME="$ROOT/packaging/test-home/smoke-$$"
@@ -226,6 +227,105 @@ stop_packaged_host() {
   [[ -z "$(listen_pid 8765)" ]]
 }
 
+# Launch the bundle through LaunchServices with the isolated environment and
+# resolve the exact packaged host PID (sets HOST_PID, writes PIDFILE).
+# Executing the Mach-O directly from a background shell can leave the initial
+# Tauri window unordered and invisible, so every launch — including the
+# relaunch — goes through here.
+launch_packaged_host() {
+  local host_log="$1" label="$2"
+  if pgrep -f -x "$HOST_PATTERN" >/dev/null 2>&1; then
+    die "exact packaged host is already running: $HOST"
+  fi
+  open -n -F -W \
+    -o "$host_log" \
+    --stderr "$host_log" \
+    --env "HOME=$TEST_HOME" \
+    --env "TMPDIR=$TEST_HOME/tmp" \
+    "$DEST_APP" &
+  local launcher_pid=$!
+  HOST_PID=""
+  local stable=0 pid
+  for _ in $(seq 1 40); do
+    pid="$(pgrep -f -x "$HOST_PATTERN" | head -1 || true)"
+    if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+      HOST_PID="$pid"
+      stable=$((stable + 1))
+      (( stable >= 3 )) && break
+    elif ! kill -0 "$launcher_pid" 2>/dev/null; then
+      [[ -r "$host_log" ]] && tail -80 "$host_log" | tee -a "$REPORT"
+      die "LaunchServices exited before the packaged host appeared ($label)"
+    else
+      HOST_PID=""
+      stable=0
+    fi
+    sleep 0.25
+  done
+  (( stable >= 3 )) || die "packaged host process did not remain stable ($label)"
+  echo "$HOST_PID" >"$PIDFILE"
+  log "${label}_host_pid=$HOST_PID"
+}
+
+# Wait for the packaged host to answer health on :8765.
+wait_packaged_health() {
+  local host_log="$1" label="$2" out="$3"
+  local ok=0
+  # Health may take >1s (provider presence probes); allow 5s per attempt.
+  for _ in $(seq 1 60); do
+    if curl -fsS --max-time 5 "http://127.0.0.1:8765/api/health" >"$out" 2>/dev/null; then
+      ok=1
+      break
+    fi
+    sleep 0.5
+  done
+  [[ "$ok" == 1 ]] || {
+    [[ -r "$host_log" ]] && tail -80 "$host_log" | tee -a "$REPORT"
+    die "packaged host failed to bring up Council on :8765 ($label)"
+  }
+}
+
+# The shell keeps running after a failed cold-launch Keychain preload; the
+# smoke must not. This is the #0033 blank-window lead: the line goes into the
+# report and the run is red.
+PRELOAD_FAILURE_MARK="cold-launch secret preload failed"
+assert_no_preload_failure() {
+  local host_log="$1" label="$2"
+  if grep -F -- "$PRELOAD_FAILURE_MARK" "$host_log" >/dev/null 2>&1; then
+    grep -F -- "$PRELOAD_FAILURE_MARK" "$host_log" | sed "s/^/${label}_preload_failure: /" | tee -a "$REPORT"
+    die "packaged host logged a cold-launch secret preload failure ($label)"
+  fi
+  log "${label}_preload_failure=none"
+}
+
+# Capture ONLY the packaged host's window (by PID + identity), then
+# OCR-verify War Room markers. No full-desktop fallback; fail closed.
+capture_webview_evidence() {
+  local shot="$1" label="$2"
+  log "=== webview evidence ($label) ==="
+  kill -0 "$HOST_PID" 2>/dev/null || die "packaged host pid $HOST_PID not running for webview capture ($label)"
+  # Best-effort activate the exact packaged host PID so the window is on-screen
+  # (capture still keys off PID; never activate by display name).
+  activate_unix_pid "$HOST_PID"
+  rm -f "$shot"
+  local err="$ROOT/packaging/build/webview-evidence-$label.err"
+  # Capture + marker verify. stdout is machine-readable receipt lines only (no free OCR dump).
+  if ! swift "$WEBVIEW_HELPER" capture --pid "$HOST_PID" --out "$shot" 2>"$err" \
+    | sed "s/^/${label}_/" | tee -a "$REPORT"; then
+    if [[ -s "$err" ]]; then
+      # Helper errors are marker/window status only — never dump foreign OCR text.
+      sed "s/^/${label}_webview_evidence_err: /" "$err" | tee -a "$REPORT"
+    fi
+    die "packaged War Room window capture/verify failed ($label; no desktop fallback)"
+  fi
+  [[ -f "$shot" && -s "$shot" ]] || die "webview screenshot missing after capture ($label)"
+  log "${label}_webview_screenshot=$shot"
+  log "${label}_webview_screenshot_bytes=$(wc -c <"$shot" | tr -d ' ')"
+  # Dimension receipt (deterministic local metadata).
+  if command -v sips >/dev/null 2>&1; then
+    log "${label}_webview_pixels=$(sips -g pixelWidth -g pixelHeight "$shot" 2>/dev/null | awk '/pixelWidth|pixelHeight/{print $2}' | paste -sd 'x' -)"
+  fi
+}
+
 FOREIGN_8765="$(listen_pid 8765)"
 log "foreign_8765_before=${FOREIGN_8765:-none}"
 
@@ -409,56 +509,12 @@ if [[ -n "$(listen_pid 8765)" ]]; then
   die ":8765 became busy unexpectedly"
 fi
 
-# Launch the bundle through LaunchServices. Executing the Mach-O directly from
-# a background shell can leave the initial Tauri window unordered and
-# invisible. Pass the isolated environment explicitly, then resolve the exact
-# packaged host PID before binding health, window evidence, and cleanup to it.
 HOST_PATTERN="$(printf '%s\n' "$HOST" | sed 's/[][\\.^$*+?{}()|]/\\&/g')"
-if pgrep -f -x "$HOST_PATTERN" >/dev/null 2>&1; then
-  die "exact packaged host is already running: $HOST"
-fi
-open -n -F -W \
-  -o "$ROOT/packaging/build/smoke-host.log" \
-  --stderr "$ROOT/packaging/build/smoke-host.log" \
-  --env "HOME=$TEST_HOME" \
-  --env "TMPDIR=$TEST_HOME/tmp" \
-  "$DEST_APP" &
-LAUNCHER_PID=$!
-HOST_PID=""
-stable=0
-for _ in $(seq 1 40); do
-  pid="$(pgrep -f -x "$HOST_PATTERN" | head -1 || true)"
-  if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-    HOST_PID="$pid"
-    stable=$((stable + 1))
-    (( stable >= 3 )) && break
-  elif ! kill -0 "$LAUNCHER_PID" 2>/dev/null; then
-    tail -80 "$ROOT/packaging/build/smoke-host.log" | tee -a "$REPORT" || true
-    die "LaunchServices exited before the packaged host appeared"
-  else
-    HOST_PID=""
-    stable=0
-  fi
-  sleep 0.25
-done
-(( stable >= 3 )) || die "packaged host process did not remain stable"
-echo "$HOST_PID" >"$PIDFILE"
+HOST_LOG="$ROOT/packaging/build/smoke-host.log"
+launch_packaged_host "$HOST_LOG" "launch"
 log "host_pid=$HOST_PID"
-
-ok=0
-# Health may take >1s (provider presence probes); allow 5s per attempt.
-for _ in $(seq 1 60); do
-  if curl -fsS --max-time 5 "http://127.0.0.1:8765/api/health" \
-    >"$ROOT/packaging/build/smoke-health.json" 2>/dev/null; then
-    ok=1
-    break
-  fi
-  sleep 0.5
-done
-[[ "$ok" == 1 ]] || {
-  tail -80 "$ROOT/packaging/build/smoke-host.log" | tee -a "$REPORT" || true
-  die "packaged host failed to bring up Council on :8765"
-}
+wait_packaged_health "$HOST_LOG" "launch" "$ROOT/packaging/build/smoke-health.json"
+assert_no_preload_failure "$HOST_LOG" "launch"
 
 python3 -c "
 import json,sys
@@ -533,36 +589,14 @@ avail=any(r.get('env_hint')=='$FAKE_MARKER_NAME' and r.get('available') is True 
 print('discover_marker_available=', avail)
 " | tee -a "$REPORT"
 
-# Webview evidence: capture ONLY the packaged host's window (by PID + identity),
-# then OCR-verify War Room markers. No full-desktop fallback; fail closed.
-log "=== webview evidence ==="
 WEBVIEW_HELPER="$ROOT/packaging/webview-evidence.swift"
 [[ -f "$WEBVIEW_HELPER" ]] || die "missing webview evidence helper: $WEBVIEW_HELPER"
 command -v swift >/dev/null 2>&1 || die "swift required for webview evidence"
-# Ensure the host we started is still the GUI process.
-kill -0 "$HOST_PID" 2>/dev/null || die "packaged host pid $HOST_PID not running for webview capture"
-# Best-effort activate the exact packaged host PID so the window is on-screen
-# (capture still keys off PID; never activate by display name).
-activate_unix_pid "$HOST_PID"
-rm -f "$WEBVIEW_SHOT"
-# Capture + marker verify. stdout is machine-readable receipt lines only (no free OCR dump).
-if ! swift "$WEBVIEW_HELPER" capture --pid "$HOST_PID" --out "$WEBVIEW_SHOT" 2>"$ROOT/packaging/build/webview-evidence.err" \
-  | tee -a "$REPORT"; then
-  if [[ -s "$ROOT/packaging/build/webview-evidence.err" ]]; then
-    # Helper errors are marker/window status only — never dump foreign OCR text.
-    sed 's/^/webview_evidence_err: /' "$ROOT/packaging/build/webview-evidence.err" | tee -a "$REPORT" || true
-  fi
-  die "packaged War Room window capture/verify failed (no desktop fallback)"
-fi
-[[ -f "$WEBVIEW_SHOT" && -s "$WEBVIEW_SHOT" ]] || die "webview screenshot missing after capture"
-log "webview_screenshot=$WEBVIEW_SHOT"
-log "webview_screenshot_bytes=$(wc -c <"$WEBVIEW_SHOT" | tr -d ' ')"
-# Dimension receipt (deterministic local metadata).
-if command -v sips >/dev/null 2>&1; then
-  log "webview_pixels=$(sips -g pixelWidth -g pixelHeight "$WEBVIEW_SHOT" 2>/dev/null | awk '/pixelWidth|pixelHeight/{print $2}' | paste -sd 'x' -)"
-fi
+capture_webview_evidence "$WEBVIEW_SHOT" "launch"
 
-# Relaunch persistence: quit, restart, private config install_id unchanged.
+# Relaunch persistence: quit, restart, private config install_id unchanged —
+# and the relaunched window must pass the same War Room proof as the first
+# launch (a blank relaunch window used to pass because only health was checked).
 INSTALL_ID="$(python3 -c "import json;print(json.load(open('$PRIV'))['install_id'])")"
 log "install_id_before_relaunch=$INSTALL_ID"
 if ! stop_packaged_host; then
@@ -571,21 +605,11 @@ fi
 [[ -z "$(listen_pid 8765)" ]] || die "sidecar did not release :8765 after host quit"
 log "port_released_after_quit=true"
 
-(
-  export HOME="$TEST_HOME"
-  export TMPDIR="$TEST_HOME/tmp"
-  "$HOST" >"$ROOT/packaging/build/smoke-host-relaunch.log" 2>&1 &
-  echo $! >"$PIDFILE"
-)
-ok=0
-for _ in $(seq 1 60); do
-  if curl -fsS --max-time 5 "http://127.0.0.1:8765/api/health" >/dev/null 2>&1; then
-    ok=1
-    break
-  fi
-  sleep 0.5
-done
-[[ "$ok" == 1 ]] || die "relaunch failed to restore health"
+RELAUNCH_LOG="$ROOT/packaging/build/smoke-host-relaunch.log"
+launch_packaged_host "$RELAUNCH_LOG" "relaunch"
+wait_packaged_health "$RELAUNCH_LOG" "relaunch" "$ROOT/packaging/build/smoke-health-relaunch.json"
+assert_no_preload_failure "$RELAUNCH_LOG" "relaunch"
+capture_webview_evidence "$WEBVIEW_SHOT_RELAUNCH" "relaunch"
 INSTALL_ID2="$(python3 -c "import json;print(json.load(open('$PRIV'))['install_id'])")"
 [[ "$INSTALL_ID" == "$INSTALL_ID2" ]] || die "install_id changed across relaunch"
 log "relaunch_persistence_ok=true"

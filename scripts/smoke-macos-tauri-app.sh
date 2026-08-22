@@ -381,6 +381,16 @@ done
 printf 'native webview Council request proof: PASS (port %s)\n' \
   "$IRIN_COUNCIL_PORT"
 
+# The shell keeps running after a failed cold-launch Keychain preload (the
+# #0033 blank-window lead); the gate must not. The line lands in the failure
+# receipt via app.log. Checked after the webview has finished its Council
+# requests, so the setup task that runs the preload has completed.
+if grep -Fq "cold-launch secret preload failed" "$tmp/app.log"; then
+  printf 'ERROR: cold-launch secret preload failed (see app.log receipt)\n' >&2
+  grep -F "cold-launch secret preload failed" "$tmp/app.log" >&2
+  exit 1
+fi
+
 if [[ "${IRIN_NATIVE_VISUAL:-1}" == "1" ]]; then
   proof_bin="$tmp/window-proof"
   xcrun swiftc "$ROOT/scripts/macos-window-proof.swift" -o "$proof_bin"
