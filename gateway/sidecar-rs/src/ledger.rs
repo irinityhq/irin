@@ -7,6 +7,7 @@
 // ==========================================================================
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+#[cfg(test)]
 use rand_core::OsRng;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -14,7 +15,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_rusqlite::Connection;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, error, info};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -219,16 +220,24 @@ impl AuditLedger {
         .await?;
 
         // Initialize keys
+        // Fail closed: a ledger without an operator-held signing key produces
+        // rows nobody can verify after restart. Never generate one here.
         let signing_key = match signing_key_bytes {
-            Some(bytes) => {
+            Some(bytes) if bytes.len() == 32 => {
                 let mut key_bytes = [0u8; 32];
-                key_bytes.copy_from_slice(&bytes[..32]);
+                key_bytes.copy_from_slice(bytes);
                 SigningKey::from_bytes(&key_bytes)
             }
+            Some(bytes) => {
+                return Err(format!(
+                    "ledger signing key must be a 32-byte Ed25519 seed (got {} bytes)",
+                    bytes.len()
+                )
+                .into());
+            }
             None => {
-                warn!("No Ed25519 key provided, generating an ephemeral key for the ledger");
-                let mut csprng = OsRng;
-                SigningKey::generate(&mut csprng)
+                return Err("ledger signing key is required; refusing to generate an ephemeral key"
+                    .into());
             }
         };
 
@@ -892,10 +901,30 @@ mod tests {
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_file(format!("{}-wal", path.display()));
         let _ = std::fs::remove_file(format!("{}-shm", path.display()));
-        let ledger = AuditLedger::new(path.to_str().unwrap(), None, None, None)
+        let ledger = AuditLedger::new(path.to_str().unwrap(), Some(&TEST_SEED), None, None)
             .await
             .unwrap();
         (ledger, path)
+    }
+
+    /// Deterministic test seed. Production never passes `None` (B-12).
+    const TEST_SEED: [u8; 32] = [7u8; 32];
+
+    #[tokio::test]
+    async fn audit_ledger_new_without_key_fails_closed() {
+        let path = temp_db_path("no_key_refused");
+        let _ = std::fs::remove_file(&path);
+        let err = AuditLedger::new(path.to_str().unwrap(), None, None, None)
+            .await
+            .err()
+            .expect("None signing key must be refused, not replaced by an ephemeral key");
+        assert!(err.to_string().contains("signing key is required"), "{err}");
+        let short = [1u8; 16];
+        let err = AuditLedger::new(path.to_str().unwrap(), Some(&short), None, None)
+            .await
+            .err()
+            .expect("short seed must be refused");
+        assert!(err.to_string().contains("32-byte"), "{err}");
     }
 
     fn cleanup(path: &PathBuf) {
@@ -1195,7 +1224,9 @@ mod tests {
 
         let result = std::panic::catch_unwind(|| {
             let rt = tokio::runtime::Runtime::new().unwrap();
-            rt.block_on(async { AuditLedger::new(path.to_str().unwrap(), None, None, None).await })
+            rt.block_on(async {
+                AuditLedger::new(path.to_str().unwrap(), Some(&TEST_SEED), None, None).await
+            })
         });
         assert!(result.is_err(), "should panic on old schema");
         cleanup(&path);
