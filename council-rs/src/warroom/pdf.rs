@@ -169,7 +169,7 @@ fn wrap_text(text: &str, max_chars: usize) -> Vec<String> {
         }
         if current.is_empty() {
             current = word;
-        } else if current.len() + 1 + word.len() <= max_chars {
+        } else if current.chars().count() + 1 + word.chars().count() <= max_chars {
             current.push(' ');
             current.push_str(&word);
         } else {
@@ -386,9 +386,12 @@ mod tests {
     /// character (`split_at(max_chars)` on byte length panicked).
     #[test]
     fn wrap_text_hard_splits_long_words_on_character_boundaries() {
-        let word = "é".repeat(20);
+        // Three-byte characters: a byte split at 8 lands mid-character.
+        let word = "€".repeat(20);
         let lines = super::wrap_text(&word, 8);
-        assert_eq!(lines, vec!["é".repeat(8), "é".repeat(8), "é".repeat(4)]);
+        assert_eq!(lines, vec!["€".repeat(8), "€".repeat(8), "€".repeat(4)]);
+        // Line fit is character-based too: four two-byte chars plus "abc" fit in 8.
+        assert_eq!(super::wrap_text("éééé abc", 8), vec!["éééé abc"]);
         assert_eq!(
             super::wrap_text("short words only", 8),
             vec!["short", "words", "only"]
