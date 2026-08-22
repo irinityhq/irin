@@ -1556,29 +1556,36 @@ mod isolated_keychain_live_tests {
         std::fs::create_dir_all(kc.parent().unwrap()).unwrap();
         std::fs::write(kc.with_extension("pass"), "orphan").unwrap();
         let store = KeychainSecretStore;
-        let service = "com.irinity.irin.isolated-keychain-test";
+        // Per-run service/account so a concurrent or interrupted run cannot
+        // touch this run's login sentinel.
+        let service = format!(
+            "com.irinity.irin.isolated-keychain-test.{}",
+            std::process::id()
+        );
+        let service = service.as_str();
+        let account = &format!("probe-{}", std::process::id());
         // Sentinel in the login keychain under the same service/account: the
         // isolated run must never read, update, or delete it.
         let sentinel = format!("login-sentinel-{}", std::process::id());
-        store.set_password(service, "probe", &sentinel).unwrap();
+        store.set_password(service, account, &sentinel).unwrap();
         let prev_home = std::env::var("HOME").ok();
         std::env::set_var("HOME", &home);
         std::env::set_var(ISOLATED_KEYCHAIN_ENV, &kc);
 
         let result = (|| -> Result<(), String> {
-            if store.get_password(service, "probe")?.is_some() {
+            if store.get_password(service, account)?.is_some() {
                 return Err("isolated get saw the login keychain sentinel".into());
             }
-            store.set_password(service, "probe", "v1")?;
-            if store.get_password(service, "probe")? != Some("v1".to_string()) {
+            store.set_password(service, account, "v1")?;
+            if store.get_password(service, account)? != Some("v1".to_string()) {
                 return Err("get after set".into());
             }
-            store.set_password(service, "probe", "v2")?;
-            if store.get_password(service, "probe")? != Some("v2".to_string()) {
+            store.set_password(service, account, "v2")?;
+            if store.get_password(service, account)? != Some("v2".to_string()) {
                 return Err("get after update".into());
             }
-            store.delete_password(service, "probe")?;
-            if store.get_password(service, "probe")?.is_some() {
+            store.delete_password(service, account)?;
+            if store.get_password(service, account)?.is_some() {
                 return Err("get after delete".into());
             }
             if !kc.is_file() || !kc.with_extension("pass").is_file() {
@@ -1593,8 +1600,8 @@ mod isolated_keychain_live_tests {
             None => std::env::remove_var("HOME"),
         }
         let _ = std::fs::remove_dir_all(&home);
-        let login_after = store.get_password(service, "probe");
-        let _ = store.delete_password(service, "probe");
+        let login_after = store.get_password(service, account);
+        let _ = store.delete_password(service, account);
         result.unwrap();
         assert_eq!(
             login_after.unwrap(),
