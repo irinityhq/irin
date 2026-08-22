@@ -297,6 +297,23 @@ assert_no_preload_failure() {
   log "${label}_preload_failure=none"
 }
 
+# First-run hydration (B-02): the webview reports to the shell once health
+# and cabinets both loaded; the shell prints this line. Without it the War
+# Room is the stale first launch that only a relaunch used to fix.
+HYDRATED_MARK="[runtime-config] webview Council requests ready on :8765"
+wait_webview_hydrated() {
+  local host_log="$1" label="$2" i
+  for i in $(seq 1 120); do
+    if grep -F -- "$HYDRATED_MARK" "$host_log" >/dev/null 2>&1; then
+      log "${label}_webview_hydrated=true"
+      return 0
+    fi
+    sleep 0.5
+  done
+  [[ -r "$host_log" ]] && tail -80 "$host_log" | tee -a "$REPORT"
+  die "packaged webview never reported Council health + cabinets hydrated ($label; no relaunch allowed)"
+}
+
 # Capture ONLY the packaged host's window (by PID + identity), then
 # OCR-verify War Room markers. No full-desktop fallback; fail closed.
 capture_webview_evidence() {
@@ -515,6 +532,7 @@ launch_packaged_host "$HOST_LOG" "launch"
 log "host_pid=$HOST_PID"
 wait_packaged_health "$HOST_LOG" "launch" "$ROOT/packaging/build/smoke-health.json"
 assert_no_preload_failure "$HOST_LOG" "launch"
+wait_webview_hydrated "$HOST_LOG" "launch"
 
 python3 -c "
 import json,sys
@@ -609,6 +627,7 @@ RELAUNCH_LOG="$ROOT/packaging/build/smoke-host-relaunch.log"
 launch_packaged_host "$RELAUNCH_LOG" "relaunch"
 wait_packaged_health "$RELAUNCH_LOG" "relaunch" "$ROOT/packaging/build/smoke-health-relaunch.json"
 assert_no_preload_failure "$RELAUNCH_LOG" "relaunch"
+wait_webview_hydrated "$RELAUNCH_LOG" "relaunch"
 capture_webview_evidence "$WEBVIEW_SHOT_RELAUNCH" "relaunch"
 INSTALL_ID2="$(python3 -c "import json;print(json.load(open('$PRIV'))['install_id'])")"
 [[ "$INSTALL_ID" == "$INSTALL_ID2" ]] || die "install_id changed across relaunch"

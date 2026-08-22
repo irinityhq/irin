@@ -24,6 +24,15 @@ let requiredMarkers: [String] = [
   "DIRECT FIRE",
 ]
 
+/// Stale first-launch chrome (B-02). Any hit means the War Room did not
+/// hydrate: the screenshot is refused even when the required markers pass.
+/// "Council loading…" is deliberately absent: the convene blocker shows it on
+/// a hydrated page while Discover is still loading.
+let staleMarkers: [String] = [
+  "CABINET LIST UNAVAILABLE",
+  "BACKEND CONNECTION ISSUE",
+]
+
 /// Minimum distinct required markers that must match. 3 of 4 resists partial OCR
 /// noise while rejecting unrelated desktops (e.g. a Kimi terminal pane).
 let minRequiredHits = 3
@@ -42,7 +51,8 @@ func normalizeOCR(_ text: String) -> String {
 struct MarkerResult {
   let hits: [String]
   let misses: [String]
-  var ok: Bool { hits.count >= minRequiredHits }
+  let stale: [String]
+  var ok: Bool { hits.count >= minRequiredHits && stale.isEmpty }
 }
 
 func evaluateMarkers(in ocrText: String) -> MarkerResult {
@@ -57,7 +67,8 @@ func evaluateMarkers(in ocrText: String) -> MarkerResult {
       misses.append(m)
     }
   }
-  return MarkerResult(hits: hits, misses: misses)
+  let stale = staleMarkers.filter { norm.contains(normalizeOCR($0)) }
+  return MarkerResult(hits: hits, misses: misses, stale: stale)
 }
 
 // MARK: - OCR
@@ -205,7 +216,7 @@ enum EvidenceError: Error, CustomStringConvertible {
   case noWindow(pid_t)
   case wrongWindow(String)
   case captureFailed(String)
-  case markersFailed(hits: [String], misses: [String])
+  case markersFailed(hits: [String], misses: [String], stale: [String])
   case usage(String)
 
   var description: String {
@@ -215,8 +226,8 @@ enum EvidenceError: Error, CustomStringConvertible {
     case .noWindow(let pid): return "no on-screen window for packaged host pid=\(pid)"
     case .wrongWindow(let d): return "window is not IRIN: \(d)"
     case .captureFailed(let d): return "window capture failed: \(d)"
-    case .markersFailed(let hits, let misses):
-      return "webview markers insufficient: hits=\(hits.joined(separator: ",")) misses=\(misses.joined(separator: ",")) need>=\(minRequiredHits)"
+    case .markersFailed(let hits, let misses, let stale):
+      return "webview markers insufficient: hits=\(hits.joined(separator: ",")) misses=\(misses.joined(separator: ",")) stale=\(stale.joined(separator: ",")) need>=\(minRequiredHits) and no stale"
     case .usage(let d): return d
     }
   }
@@ -259,6 +270,7 @@ func reportVerify(path: String, result: MarkerResult, dims: (Int, Int)?) {
   }
   print("webview_markers_hits=\(result.hits.joined(separator: ","))")
   print("webview_markers_misses=\(result.misses.joined(separator: ","))")
+  print("webview_stale_hits=\(result.stale.joined(separator: ","))")
   print("webview_markers_ok=\(result.ok)")
   // Deliberately do not print free-form OCR text.
 }
@@ -281,7 +293,7 @@ func cmdVerify(image: String) throws {
   let result = evaluateMarkers(in: text)
   reportVerify(path: image, result: result, dims: imageDimensions(path: image))
   if !result.ok {
-    throw EvidenceError.markersFailed(hits: result.hits, misses: result.misses)
+    throw EvidenceError.markersFailed(hits: result.hits, misses: result.misses, stale: result.stale)
   }
 }
 
@@ -359,6 +371,13 @@ func cmdSelftest(rejectPath: String?) throws {
     throw EvidenceError.usage("selftest predicate incorrectly accepted Kimi-like text")
   }
   print("selftest_predicate_bad_rejected=true hits=\(bad.hits.count)")
+
+  let staleOCR = goodOCR + "\nCabinet list unavailable. Check the backend connection above."
+  let staleResult = evaluateMarkers(in: staleOCR)
+  guard !staleResult.ok, staleResult.stale == ["CABINET LIST UNAVAILABLE"] else {
+    throw EvidenceError.usage("selftest predicate accepted stale first-launch chrome stale=\(staleResult.stale)")
+  }
+  print("selftest_predicate_stale_rejected=true stale=\(staleResult.stale.joined(separator: ","))")
 
   // Render a positive fixture and OCR it.
   let tmp = FileManager.default.temporaryDirectory
