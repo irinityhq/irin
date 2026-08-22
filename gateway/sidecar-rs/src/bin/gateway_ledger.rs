@@ -267,6 +267,11 @@ fn verify_chain(
             ));
         }
 
+        // A corrupt (non-hex) stored hash must map to the documented exit,
+        // never a panic or a misleading mismatch message (B-11).
+        let hash_bytes =
+            hex::decode(&event.hash).map_err(|_| (event.id, "invalid hash hex".to_string()))?;
+
         let computed = compute_hash(event);
         if event.hash != computed {
             return Err((
@@ -279,11 +284,6 @@ fn verify_chain(
         }
 
         if verify_sigs {
-            // Unreachable while the mismatch check above precedes this (the
-            // computed hash is always hex), but a corrupt row must map to the
-            // documented exit, never a panic (B-11).
-            let hash_bytes =
-                hex::decode(&event.hash).map_err(|_| (event.id, "invalid hash hex".to_string()))?;
             let sig_bytes = hex::decode(&event.signature)
                 .map_err(|_| (event.id, "invalid signature hex".to_string()))?;
             let sig_array: [u8; 64] = sig_bytes
@@ -1785,7 +1785,7 @@ mod tests {
 
         let err = verify_chain(&[corrupt.clone()], &trust, false, None).unwrap_err();
         assert_eq!(err.0, 1);
-        assert!(err.1.contains("hash"), "unexpected err: {}", err.1);
+        assert_eq!(err.1, "invalid hash hex", "unexpected err: {}", err.1);
 
         // Real temp DB through cmd_verify: documented failure exit, not 101.
         let db_path = std::env::temp_dir().join(format!("gw_bad_hash_{}.db", std::process::id()));
