@@ -144,8 +144,9 @@ impl AuditLedger {
                 .into());
             }
             None => {
-                return Err("ledger signing key is required; refusing to generate an ephemeral key"
-                    .into());
+                return Err(
+                    "ledger signing key is required; refusing to generate an ephemeral key".into(),
+                );
             }
         };
 
