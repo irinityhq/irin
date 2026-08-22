@@ -228,6 +228,18 @@ fn stop_tracked_council_server(app: &AppHandle) {
     }
 }
 
+/// Serializes every owned-Council stop → port-wait → respawn: the Gateway
+/// Pack enable/disable/stop/uninstall handlers, `restart_sidecar`, and the
+/// governed-promote commit. Without it two concurrent lifecycle commands
+/// interleave their steps (B-13): the second stop kills the first command's
+/// fresh child, or both spawns race for one port. The pack mutation runs
+/// inside the same guard so the respawn always matches the persisted route
+/// at the moment it runs.
+fn council_lifecycle_guard() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 #[cfg(unix)]
 fn unix_pid_alive(pid: u32) -> bool {
     if pid == 0 {
@@ -366,6 +378,10 @@ fn schedule_governed_promote_attempts(
                 port,
                 default_serve_port().unwrap_or(8765),
             );
+            // Same lock as the lifecycle handlers: the generation recheck
+            // inside the commit happens after we own the restart seam.
+            // Dropped at the end of this attempt, before the next sleep.
+            let _lifecycle = council_lifecycle_guard();
             match gateway_pack::promote_commit_after_stop_wait_detailed(
                 lifecycle_at_schedule,
                 || stop_tracked_council_server(&app_for_stop),
@@ -1117,6 +1133,7 @@ async fn restart_sidecar(
 ) -> Result<String, String> {
     // Port-release polling blocks (up to 5s) — keep it off the async runtime.
     tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle = council_lifecycle_guard();
         if via_gateway && is_packaged_install() {
             let store = KeychainSecretStore;
             // Authority path: fresh sample; gate is spawn_capable not governed_ready.
@@ -1213,6 +1230,7 @@ async fn gateway_pack_status() -> Result<GatewayPackStatus, String> {
 async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let status = gateway_pack::enable_gateway_pack(&store)?;
         // Docker missing/down is neutral for core Direct — still recompute.
@@ -1321,6 +1339,7 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, St
 async fn gateway_pack_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let _status = gateway_pack::disable_gateway_pack(&store)?;
         let config = {
@@ -1365,6 +1384,7 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, S
 async fn gateway_pack_stop(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         // Ensure Direct config before containers stop.
         let status = gateway_pack::stop_gateway_pack(&store)?;
@@ -1442,6 +1462,7 @@ fn gateway_pack_open_watch_inbox() -> Result<String, String> {
 async fn gateway_pack_uninstall(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let _status = gateway_pack::uninstall_gateway_pack(&store)?;
         let config = {
@@ -2265,5 +2286,46 @@ mod council_start_phase_tests {
             "orchestrator must invoke the five phases as statements in this order \
              (AST statement order, not textual line matching)"
         );
+    }
+}
+
+#[cfg(test)]
+mod council_lifecycle_tests {
+    use super::council_lifecycle_guard;
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    /// B-13: two lifecycle commands must not interleave stop → wait → spawn.
+    /// Each simulated command records its three steps with a pause between
+    /// them; without the guard the two logs interleave.
+    #[test]
+    fn lifecycle_guard_serializes_concurrent_stop_wait_spawn() {
+        let log = Arc::new(Mutex::new(Vec::<String>::new()));
+        let handles: Vec<_> = ["enable", "disable"]
+            .into_iter()
+            .map(|name| {
+                let log = Arc::clone(&log);
+                thread::spawn(move || {
+                    let _lifecycle = council_lifecycle_guard();
+                    for step in ["stop", "wait", "spawn"] {
+                        log.lock().unwrap().push(format!("{name}:{step}"));
+                        thread::sleep(Duration::from_millis(25));
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        let log = log.lock().unwrap();
+        assert_eq!(log.len(), 6, "both commands must complete: {log:?}");
+        for command in log.chunks(3) {
+            let owner = command[0].split(':').next().unwrap();
+            assert!(
+                command.iter().all(|entry| entry.starts_with(owner)),
+                "lifecycle steps interleaved across commands: {log:?}"
+            );
+        }
     }
 }
