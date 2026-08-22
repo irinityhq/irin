@@ -8,12 +8,11 @@ import {
   Info,
   Loader2,
   RotateCcw,
-  RotateCw,
   Scale,
   Sparkles,
   Zap,
 } from "lucide-react";
-import { cn } from "@/lib/cn";
+import { CONNECTION_LOST_NOTICE } from "@/hooks/useDeliberation";
 import { useElapsedSeconds } from "@/hooks/useElapsedSeconds";
 import { buildPhasesForLive } from "@/lib/proceeding-phases";
 import type {
@@ -43,8 +42,6 @@ export default function DeliberateWorkspace({
   onStart,
   onIntervene,
   onReset,
-  onReconnect,
-  canReconnect,
   onViewDriftReport,
   onViewOutbox,
   onViewHistory,
@@ -56,8 +53,6 @@ export default function DeliberateWorkspace({
   onStart: (p: StartPayload) => void;
   onIntervene: (p: InterventionPayload) => void;
   onReset: () => void;
-  onReconnect?: () => void;
-  canReconnect?: boolean;
   onViewDriftReport?: (reportFilename: string) => void;
   onViewOutbox?: (tenant: string) => void;
   onViewHistory?: (sessionId?: string) => void;
@@ -78,7 +73,7 @@ export default function DeliberateWorkspace({
   }
 
   if (state.phase === "error") {
-    return <DeliberateErrorShell state={state} onReset={onReset} onReconnect={onReconnect} canReconnect={canReconnect} />;
+    return <DeliberateErrorShell state={state} onReset={onReset} />;
   }
 
   return (
@@ -289,16 +284,12 @@ function StartupHeartbeat({
 function DeliberateErrorShell({
   state,
   onReset,
-  onReconnect,
-  canReconnect,
 }: {
   state: DeliberationState;
   onReset: () => void;
-  onReconnect?: () => void;
-  canReconnect?: boolean;
 }) {
   const lastError = state.errors[state.errors.length - 1];
-  const isConnectionLoss = lastError?.message === "Connection to council bridge lost";
+  const isConnectionLoss = lastError?.message === CONNECTION_LOST_NOTICE;
 
   return (
     <div className="cg-history-workspace">
@@ -326,17 +317,7 @@ function DeliberateErrorShell({
             </div>
           ))}
           <div className="flex items-center gap-3 mt-6">
-            {canReconnect && onReconnect && (
-              <button type="button" onClick={onReconnect} className="btn btn-primary">
-                <RotateCw className="w-4 h-4" />
-                Reconnect
-              </button>
-            )}
-            <button
-              type="button"
-              onClick={onReset}
-              className={cn("btn", canReconnect ? "btn-danger" : "btn-primary")}
-            >
+            <button type="button" onClick={onReset} className="btn btn-primary">
               Reset
             </button>
           </div>

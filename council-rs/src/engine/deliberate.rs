@@ -29,7 +29,9 @@ const SUSPECT_QUALITY_CONVERGENCE_PENALTY: f64 = 0.15;
 const MIN_VALID_SEAT_RESPONSES: usize = 2;
 const MIN_VALID_PARTICIPATION_RATIO: f64 = 0.80;
 
-fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+/// Byte-bounded prefix that never splits a UTF-8 character. Every
+/// user- or provider-derived truncation goes through here (B-08).
+pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
     if s.len() <= max_bytes {
         return s;
     }
@@ -564,7 +566,7 @@ async fn prepare_deliberation(
     if verbose {
         eprintln!("\n════════════════════════════════════════════════════════════");
         eprintln!("  COUNCIL: {}", cabinet.name);
-        eprintln!("  Topic: {}...", &topic[..topic.len().min(70)]);
+        eprintln!("  Topic: {}...", truncate_utf8(topic, 70));
         eprintln!(
             "  Seats: {} | Rounds: {} | Mode: {}",
             cabinet.seats.len(),
@@ -758,8 +760,10 @@ async fn execute_deliberation_rounds(
             total_cost += cost;
         }
 
-        // v9.12.0: Structured judge replaces naked float
-        let judge = if round_num < cabinet.rounds && responses.len() >= 2 {
+        // v9.12.0: Structured judge replaces naked float. Every round is
+        // judged, including the last (parity with the stream core, B-07);
+        // the round gate only decides whether convergence may stop early.
+        let judge = if responses.len() >= 2 {
             judge_round(
                 &responses,
                 topic,
@@ -1512,11 +1516,7 @@ async fn run_frame_check(
     models: &crate::types::ModelRegistry,
     req_ctx: &RequestContext,
 ) -> String {
-    let truncated = if prompt.len() > 3000 {
-        &prompt[..3000]
-    } else {
-        prompt
-    };
+    let truncated = truncate_utf8(prompt, 3000);
     let scan_prompt = format!(
         "You are a constraint auditor. Read the following deliberation \
          prompt and list every stated constraint, negation, or assumption \
@@ -2118,25 +2118,28 @@ pub(crate) fn seat_preamble_for(cabinet: &Cabinet, mode: Mode) -> &'static str {
     }
 }
 
+/// Chair system prompt when a cabinet omits `chair.system` (shipped cabinets
+/// do). Shared by the engine and stream cores (B-05).
+pub(crate) const DEFAULT_CHAIR_SYSTEM: &str = "You are the Chair — senior synthesizer of multi-model deliberation councils. \
+    Your role is to produce a definitive ruling that integrates all perspectives, identifies blind spots, \
+    and provides clear, actionable next steps. Be precise, be direct, own the decision.\n\n\
+    Sheldon validation reports (if present) use this taxonomy:\n\
+    - SUPPORTED: evidence-backed — you may build on them.\n\
+    - CONTRADICTED: directly challenged — an Act/harden verdict must flag the conflict explicitly.\n\
+    - NO_EVIDENCE: unverified assumption/local claim — treat as such, do not present as fact.";
+
 pub(crate) fn chair_system_for(cabinet: &Cabinet, mode: Mode) -> String {
     if cabinet.synthesis_mode == SynthesisMode::DirectiveProposalV1 {
         return DIRECTIVE_TRIAGE_CHAIR_SYSTEM.to_string();
     }
 
-    let default_chair_system = "You are the Chair — senior synthesizer of multi-model deliberation councils. \
-            Your role is to produce a definitive ruling that integrates all perspectives, identifies blind spots, \
-            and provides clear, actionable next steps. Be precise, be direct, own the decision.\n\n\
-            Sheldon validation reports (if present) use this taxonomy:\n\
-            - SUPPORTED: evidence-backed — you may build on them.\n\
-            - CONTRADICTED: directly challenged — an Act/harden verdict must flag the conflict explicitly.\n\
-            - NO_EVIDENCE: unverified assumption/local claim — treat as such, do not present as fact.";
     let base_chair = cabinet
         .chair
         .system
         .as_deref()
         .map(str::trim)
         .filter(|system| !system.is_empty())
-        .unwrap_or(default_chair_system);
+        .unwrap_or(DEFAULT_CHAIR_SYSTEM);
     format!("{}\n\n{}", base_chair, mode.chair_instruction())
 }
 
@@ -2443,6 +2446,21 @@ fn save_session(session: &CouncilSession) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// B-08: a cut that lands inside a multi-byte character must back off to
+    /// the previous boundary instead of panicking (`&prompt[..3000]` did).
+    #[test]
+    fn truncate_utf8_backs_off_from_mid_character_cut() {
+        // 2999 ASCII bytes, then a 3-byte character straddling byte 3000.
+        let prompt = format!("{}€tail", "a".repeat(2999));
+        assert_eq!(prompt.len(), 2999 + 3 + 4);
+        assert!(!prompt.is_char_boundary(3000));
+        let cut = truncate_utf8(&prompt, 3000);
+        assert_eq!(cut.len(), 2999);
+        assert!(cut.is_char_boundary(cut.len()));
+        assert_eq!(truncate_utf8("短い", 100), "短い");
+        assert_eq!(truncate_utf8("日本語", 4), "日");
+    }
 
     /// Serialize tests that mutate process env (cascade pin vars are global;
     /// a parallel set/remove pair can otherwise cross the assertion window).

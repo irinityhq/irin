@@ -21,9 +21,10 @@ use super::intervention::{Intervention, InterventionQueue};
 use crate::config::Config;
 use crate::engine::context::RequestContext;
 use crate::engine::deliberate::{
-    JudgeUsage, convergence_quality_penalty_enabled, effective_convergence_threshold,
-    governed_alternative_transport_model_groups, governed_required_transport_models, judge_round,
-    seat_preamble_for, should_pause_for_budget,
+    DEFAULT_CHAIR_SYSTEM, JudgeUsage, convergence_quality_penalty_enabled,
+    effective_convergence_threshold, governed_alternative_transport_model_groups,
+    governed_required_transport_models, judge_round, seat_preamble_for, should_pause_for_budget,
+    truncate_utf8,
 };
 use crate::mode::Mode;
 use crate::precedent;
@@ -2385,11 +2386,7 @@ fn build_round_prompt(
             prompt.push_str(&format!("\n### Round {}\n", rnd.round_num));
             for resp in &rnd.responses {
                 if resp.seat_name != seat.name && !resp.text.is_empty() && resp.error.is_none() {
-                    let truncated = if resp.text.len() > 2000 {
-                        &resp.text[..2000]
-                    } else {
-                        &resp.text
-                    };
+                    let truncated = truncate_utf8(&resp.text, 2000);
                     prompt.push_str(&format!(
                         "**{} ({})**: {}\n\n",
                         resp.seat_name, resp.provider, truncated
@@ -2441,11 +2438,7 @@ pub(crate) async fn run_escalation(
     for rnd in rounds {
         for resp in &rnd.responses {
             if !resp.text.is_empty() && resp.error.is_none() {
-                let truncated = if resp.text.len() > 1000 {
-                    &resp.text[..1000]
-                } else {
-                    &resp.text
-                };
+                let truncated = truncate_utf8(&resp.text, 1000);
                 transcript.push_str(&format!(
                     "[{} R{}]: {}\n\n",
                     resp.seat_name, resp.round_num, truncated
@@ -2519,13 +2512,6 @@ pub(crate) fn stream_should_await_operator_input(
     pause_after_each_round && !is_last && !early_exit
 }
 
-const DEFAULT_STREAM_CHAIR_SYSTEM: &str = "You are the adult in the room. No hedging, no both-sides-ing. \
-                      Synthesize, resolve, and decide.\n\n\
-                      Sheldon validation reports (if present) use this taxonomy:\n\
-                      - SUPPORTED: evidence-backed — you may build on them.\n\
-                      - CONTRADICTED: directly challenged — an Act/harden verdict must flag the conflict explicitly.\n\
-                      - NO_EVIDENCE: unverified assumption/local claim — treat as such, do not present as fact.";
-
 fn stream_chair_system(cabinet: &Cabinet, mode: Mode) -> String {
     let base_chair = cabinet
         .chair
@@ -2533,7 +2519,7 @@ fn stream_chair_system(cabinet: &Cabinet, mode: Mode) -> String {
         .as_deref()
         .map(str::trim)
         .filter(|system| !system.is_empty())
-        .unwrap_or(DEFAULT_STREAM_CHAIR_SYSTEM);
+        .unwrap_or(DEFAULT_CHAIR_SYSTEM);
     format!("{}\n\n{}", base_chair, mode.chair_instruction())
 }
 
@@ -2693,6 +2679,37 @@ mod tests {
         .await;
 
         assert!(event_rx.recv().await.is_none());
+    }
+
+    /// B-05: with `chair.system` omitted, empty, or whitespace (the shipped
+    /// cabinets omit it), both cores must resolve the same Chair — the
+    /// stream core used to say "adult in the room" while REST/CLI said
+    /// "senior synthesizer".
+    #[test]
+    fn engine_and_stream_share_the_default_chair_system() {
+        for system in [None, Some(String::new()), Some("   \n".to_string())] {
+            let cabinet = Cabinet {
+                hash: String::new(),
+                name: "parity".into(),
+                description: String::new(),
+                rounds: 1,
+                seats: vec![],
+                chair: crate::types::Chair {
+                    name: "chair".into(),
+                    provider: "mock".into(),
+                    model: "mock-chair".into(),
+                    system,
+                    thinking_effort: None,
+                },
+                local_code_only: false,
+                synthesis_mode: Default::default(),
+            };
+            let stream = stream_chair_system(&cabinet, Mode::Harden);
+            let engine = crate::engine::deliberate::chair_system_for(&cabinet, Mode::Harden);
+            assert_eq!(stream, engine);
+            assert!(stream.contains("senior synthesizer"), "{stream}");
+            assert!(!stream.contains("adult in the room"), "{stream}");
+        }
     }
 
     #[test]
