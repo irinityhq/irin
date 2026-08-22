@@ -2118,25 +2118,28 @@ pub(crate) fn seat_preamble_for(cabinet: &Cabinet, mode: Mode) -> &'static str {
     }
 }
 
+/// Chair system prompt when a cabinet omits `chair.system` (shipped cabinets
+/// do). Shared by the engine and stream cores (B-05).
+pub(crate) const DEFAULT_CHAIR_SYSTEM: &str = "You are the Chair — senior synthesizer of multi-model deliberation councils. \
+    Your role is to produce a definitive ruling that integrates all perspectives, identifies blind spots, \
+    and provides clear, actionable next steps. Be precise, be direct, own the decision.\n\n\
+    Sheldon validation reports (if present) use this taxonomy:\n\
+    - SUPPORTED: evidence-backed — you may build on them.\n\
+    - CONTRADICTED: directly challenged — an Act/harden verdict must flag the conflict explicitly.\n\
+    - NO_EVIDENCE: unverified assumption/local claim — treat as such, do not present as fact.";
+
 pub(crate) fn chair_system_for(cabinet: &Cabinet, mode: Mode) -> String {
     if cabinet.synthesis_mode == SynthesisMode::DirectiveProposalV1 {
         return DIRECTIVE_TRIAGE_CHAIR_SYSTEM.to_string();
     }
 
-    let default_chair_system = "You are the Chair — senior synthesizer of multi-model deliberation councils. \
-            Your role is to produce a definitive ruling that integrates all perspectives, identifies blind spots, \
-            and provides clear, actionable next steps. Be precise, be direct, own the decision.\n\n\
-            Sheldon validation reports (if present) use this taxonomy:\n\
-            - SUPPORTED: evidence-backed — you may build on them.\n\
-            - CONTRADICTED: directly challenged — an Act/harden verdict must flag the conflict explicitly.\n\
-            - NO_EVIDENCE: unverified assumption/local claim — treat as such, do not present as fact.";
     let base_chair = cabinet
         .chair
         .system
         .as_deref()
         .map(str::trim)
         .filter(|system| !system.is_empty())
-        .unwrap_or(default_chair_system);
+        .unwrap_or(DEFAULT_CHAIR_SYSTEM);
     format!("{}\n\n{}", base_chair, mode.chair_instruction())
 }
 
