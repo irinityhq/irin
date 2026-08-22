@@ -151,10 +151,12 @@ static MAIN_PAGE_LOADED: AtomicBool = AtomicBool::new(false);
 
 /// Records a page-load event; returns whether it is the main page finishing.
 fn record_main_page_load(webview_label: &str, event: PageLoadEvent) -> bool {
-    let finished = should_reveal_main_window(webview_label, event);
-    if finished {
-        MAIN_PAGE_LOADED.store(true, Ordering::SeqCst);
+    if webview_label != "main" {
+        return false;
     }
+    // A reload or navigation starts a new load: the tray must wait again.
+    let finished = event == PageLoadEvent::Finished;
+    MAIN_PAGE_LOADED.store(finished, Ordering::SeqCst);
     finished
 }
 
@@ -2250,6 +2252,12 @@ mod runtime_mode_tests {
         assert!(!tray_may_reveal_main_window(), "another webview does not count");
         assert!(record_main_page_load("main", PageLoadEvent::Finished));
         assert!(tray_may_reveal_main_window(), "main finished: tray may reveal");
+        // A reload starts a new load; the tray waits for it to finish again.
+        assert!(!record_main_page_load("main", PageLoadEvent::Started));
+        assert!(!tray_may_reveal_main_window(), "reload started: tray waits again");
+        assert!(!record_main_page_load("secondary", PageLoadEvent::Started));
+        assert!(record_main_page_load("main", PageLoadEvent::Finished));
+        assert!(tray_may_reveal_main_window(), "reload finished: tray may reveal");
     }
 
     #[test]
