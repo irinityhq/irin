@@ -508,6 +508,9 @@ mod tests {
         // Action path uses gateway_pack_status_fresh, which bumps generation
         // before probing so a warm sample cannot be acted on. Prove the
         // generation contract without running a live Docker probe.
+        // Hold the status-cache test lock: an unserialized generation bump
+        // races the single-flight coalescing tests in status_tests.rs (B-17).
+        let _serial = crate::private_config::test_env_lock();
         let before = gateway_pack::status_cache_generation_for_test();
         gateway_pack::invalidate_status_cache();
         let after = gateway_pack::status_cache_generation_for_test();
