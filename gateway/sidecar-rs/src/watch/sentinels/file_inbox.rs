@@ -11,7 +11,7 @@
 //!
 //! Lifecycle: `start_watching()` constructs and starts a PollWatcher that
 //! pushes Create events into a debounce buffer. After `debounce` elapses,
-//! the path is committed to `last_path`, which `observe()` consumes.
+//! every settled path enters a bounded FIFO queue that `observe()` consumes.
 
 use crate::watch::{
     EscalateError, Escalation, ObserveError, Sentinel, SentinelState, Tier, Urgency,
@@ -19,7 +19,7 @@ use crate::watch::{
 use async_trait::async_trait;
 use notify::{Config, Event, EventKind, PollWatcher, RecursiveMode, Watcher};
 use parking_lot::Mutex;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -37,9 +37,12 @@ pub struct FileInboxSentinel {
     /// path -> first-seen-event-time, used to deduplicate burst events
     /// during a single debounce window.
     pending: Arc<Mutex<HashMap<PathBuf, Instant>>>,
-    /// most recent path that has settled past the debounce window —
-    /// what `observe()` consumes.
-    last_path: Arc<Mutex<Option<PathBuf>>>,
+    /// Paths that have settled past the debounce window, in arrival order.
+    /// Bounded to 64 entries; `observe()` consumes one path per tick.
+    settled: Arc<Mutex<VecDeque<PathBuf>>>,
+    /// Most recent watcher-backend error, consumed by `observe()` so the
+    /// runner records a sentinel failure instead of a healthy idle tick.
+    last_error: Arc<Mutex<Option<String>>>,
     /// Channel for sending deduplicated paths from the sync watcher callback
     /// into the async debounce task on the watch-rt (fixes unbounded OS thread
     /// spawn + blocking sleep violation).
@@ -82,6 +85,59 @@ fn redact_path(p: &Path) -> String {
     format!("{:016x}.{ext}", h.finish())
 }
 
+const MAX_SETTLED_FILES: usize = 64;
+
+fn push_settled(settled: &Mutex<VecDeque<PathBuf>>, path: PathBuf) {
+    let mut settled = settled.lock();
+    if settled.len() >= MAX_SETTLED_FILES {
+        settled.pop_front();
+    }
+    settled.push_back(path);
+}
+
+fn handle_watcher_result(
+    result: notify::Result<Event>,
+    pending: &Mutex<HashMap<PathBuf, Instant>>,
+    tx: &UnboundedSender<PathBuf>,
+    last_error: &Mutex<Option<String>>,
+    name: &str,
+) {
+    match result {
+        Ok(event) => {
+            if matches!(event.kind, EventKind::Create(_)) {
+                for path in event.paths {
+                    let mut pending = pending.lock();
+                    if !pending.contains_key(&path) {
+                        pending.insert(path.clone(), Instant::now());
+                        drop(pending);
+                        match tx.send(path.clone()) {
+                            Ok(()) => tracing::trace!(
+                                sentinel = %name,
+                                file = %redact_path(&path),
+                                "file-inbox: Create event enqueued for debounce"
+                            ),
+                            Err(_) => tracing::debug!(
+                                sentinel = %name,
+                                file = %redact_path(&path),
+                                "file-inbox: Create event dropped — debouncer receiver closed"
+                            ),
+                        }
+                    }
+                }
+            }
+        }
+        Err(error) => {
+            let message = error.to_string();
+            tracing::warn!(
+                sentinel = %name,
+                error = %message,
+                "file-inbox: watcher backend error"
+            );
+            *last_error.lock() = Some(message);
+        }
+    }
+}
+
 impl FileInboxSentinel {
     pub fn new(
         name: &str,
@@ -99,7 +155,8 @@ impl FileInboxSentinel {
             debounce,
             cooldown: Duration::from_secs(5),
             pending: Arc::new(Mutex::new(HashMap::new())),
-            last_path: Arc::new(Mutex::new(None)),
+            settled: Arc::new(Mutex::new(VecDeque::new())),
+            last_error: Arc::new(Mutex::new(None)),
             debounce_tx: Some(tx),
             debounce_rx: Arc::new(Mutex::new(Some(rx))),
             // Not alive until start_watching spawns the debouncer. A sentinel
@@ -150,6 +207,7 @@ impl FileInboxSentinel {
     /// unbounded std::thread::spawn + blocking sleep per burst event.
     pub fn start_watching(&self, handle: Option<&Handle>) -> notify::Result<PollWatcher> {
         let pending = self.pending.clone();
+        let last_error = self.last_error.clone();
         let tx = self
             .debounce_tx
             .clone()
@@ -158,35 +216,8 @@ impl FileInboxSentinel {
 
         let cfg = Config::default().with_poll_interval(Duration::from_secs(1));
         let mut watcher = PollWatcher::new(
-            move |res: notify::Result<Event>| {
-                if let Ok(event) = res {
-                    if matches!(event.kind, EventKind::Create(_)) {
-                        for p in event.paths {
-                            // Deduplicate: only first event in a debounce
-                            // window matters. Send to async side for the settle.
-                            let mut pend = pending.lock();
-                            if !pend.contains_key(&p) {
-                                pend.insert(p.clone(), Instant::now());
-                                drop(pend);
-                                // Reflect the actual send outcome: a closed
-                                // receiver means the event is dropped (debouncer
-                                // gone), so don't log "enqueued" for it.
-                                match tx.send(p.clone()) {
-                                    Ok(()) => tracing::trace!(
-                                        sentinel = %cb_name,
-                                        file = %redact_path(&p),
-                                        "file-inbox: Create event enqueued for debounce"
-                                    ),
-                                    Err(_) => tracing::debug!(
-                                        sentinel = %cb_name,
-                                        file = %redact_path(&p),
-                                        "file-inbox: Create event dropped — debouncer receiver closed"
-                                    ),
-                                }
-                            }
-                        }
-                    }
-                }
+            move |result| {
+                handle_watcher_result(result, &pending, &tx, &last_error, &cb_name);
             },
             cfg,
         )?;
@@ -205,7 +236,7 @@ impl FileInboxSentinel {
         })?;
 
         let p2 = self.pending.clone();
-        let l2 = self.last_path.clone();
+        let settled = self.settled.clone();
         let d2 = self.debounce;
         let name = self.name.clone(); // trace context for the debouncer task
         let alive = self.alive.clone();
@@ -228,9 +259,9 @@ impl FileInboxSentinel {
                     tracing::trace!(
                         sentinel = %name,
                         file = %redact_path(&p),
-                        "file-inbox: settled past debounce -> last_path"
+                        "file-inbox: settled past debounce -> queue"
                     );
-                    *l2.lock() = Some(p);
+                    push_settled(&settled, p);
                 }
             });
         } else {
@@ -245,9 +276,9 @@ impl FileInboxSentinel {
                     tracing::trace!(
                         sentinel = %name,
                         file = %redact_path(&p),
-                        "file-inbox: settled past debounce -> last_path"
+                        "file-inbox: settled past debounce -> queue"
                     );
-                    *l2.lock() = Some(p);
+                    push_settled(&settled, p);
                 }
             });
         }
@@ -272,11 +303,14 @@ impl Sentinel for FileInboxSentinel {
     }
 
     async fn observe(&self) -> Result<SentinelState, ObserveError> {
-        let path = self.last_path.lock().take();
+        if let Some(error) = self.last_error.lock().take() {
+            return Err(ObserveError::TransientUpstream(error));
+        }
+        let path = self.settled.lock().pop_front();
         match path {
             None => {
                 // A genuinely dead watcher (debouncer task panicked / channel
-                // closed / never started) leaves last_path stuck None forever.
+                // closed / never started) leaves the settled queue empty forever.
                 // That is a real failure and must be loud (liveness regression / grok
                 // finding #1): report it so the runner record_failure-quarantines
                 // THIS sentinel — without it, dead is indistinguishable from idle.
@@ -453,7 +487,7 @@ mod tests {
     }
 
     // A dead or never-started
-    // debouncer (alive == false) leaves last_path stuck None forever; that is a
+    // debouncer (alive == false) leaves the settled queue empty forever; that is a
     // real failure and observe() MUST report it (Fatal) so the runner
     // record_failure-quarantines the dead sentinel, rather than masking it as
     // healthy idle. This is the structural liveness signal that prevents a
@@ -486,6 +520,36 @@ mod tests {
             .expect("start_watching ok on a valid dir");
         assert!(s.alive.load(Ordering::SeqCst), "alive after start");
         let state = s.observe().await.expect("idle observe Ok once alive");
+        assert_eq!(s.interesting(&state), None);
+    }
+
+    #[tokio::test]
+    async fn watcher_error_is_reported_once_then_idle() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = sentinel(dir.path());
+        s.alive.store(true, Ordering::SeqCst);
+
+        handle_watcher_result(
+            Err(notify::Error::generic("permission changed")),
+            &s.pending,
+            s.debounce_tx.as_ref().unwrap(),
+            &s.last_error,
+            &s.name,
+        );
+
+        let err = s
+            .observe()
+            .await
+            .expect_err("watcher callback error must fail the next tick");
+        assert!(
+            matches!(err, ObserveError::TransientUpstream(ref message) if message.contains("permission changed")),
+            "got {err:?}"
+        );
+
+        let state = s
+            .observe()
+            .await
+            .expect("reported watcher error is consumed once");
         assert_eq!(s.interesting(&state), None);
     }
 
@@ -573,6 +637,42 @@ mod tests {
         assert!(s.alive.load(Ordering::SeqCst));
     }
 
+    #[tokio::test]
+    async fn two_files_settled_in_one_window_are_observed_fifo() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let second = dir.path().join("second.txt");
+        std::fs::write(&first, b"first").unwrap();
+        std::fs::write(&second, b"second").unwrap();
+
+        let s = sentinel(dir.path());
+        let _watcher = s
+            .start_watching(Some(&Handle::current()))
+            .expect("start watcher");
+        let tx = s.debounce_tx.as_ref().unwrap();
+        tx.send(first.clone()).unwrap();
+        tx.send(second.clone()).unwrap();
+
+        for _ in 0..100 {
+            if s.settled.lock().len() == 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(s.settled.lock().len(), 2, "both files must settle");
+
+        let first_state = s.observe().await.expect("observe first settled file");
+        let second_state = s.observe().await.expect("observe second settled file");
+        assert_eq!(
+            first_state.payload["path"].as_str(),
+            Some(first.to_string_lossy().as_ref())
+        );
+        assert_eq!(
+            second_state.payload["path"].as_str(),
+            Some(second.to_string_lossy().as_ref())
+        );
+    }
+
     // Happy path intact: a pending matching file yields a path-bearing state
     // that interesting() flags for escalation.
     #[tokio::test]
@@ -581,7 +681,7 @@ mod tests {
         let file = dir.path().join("firstfire.txt");
         std::fs::write(&file, b"x").unwrap();
         let s = sentinel(dir.path());
-        *s.last_path.lock() = Some(file.clone());
+        s.settled.lock().push_back(file.clone());
         let state = s.observe().await.expect("observe Ok");
         assert_eq!(
             state.payload["path"].as_str(),
@@ -601,7 +701,7 @@ mod tests {
         let file = dir.path().join("ignore.bin");
         std::fs::write(&file, b"x").unwrap();
         let s = sentinel(dir.path());
-        *s.last_path.lock() = Some(file);
+        s.settled.lock().push_back(file);
         let state = s.observe().await.expect("observe Ok");
         assert_eq!(s.interesting(&state), None);
     }
