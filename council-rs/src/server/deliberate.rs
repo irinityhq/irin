@@ -261,6 +261,15 @@ pub(super) async fn deliberate_handler(
         .collect::<Vec<_>>()
         .join("\n");
 
+    if topic.trim().is_empty() {
+        return openai_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_request_error",
+            "empty_topic",
+            "empty topic: no string message content",
+        );
+    }
+
     let context = String::new();
 
     let cancel = CancellationToken::new();
