@@ -128,10 +128,38 @@ pub(crate) fn models_authenticated(raw_key: &str) -> bool {
     )
 }
 
+fn models_status_is_fail_closed_without_key(result: Result<(u16, String), String>) -> bool {
+    matches!(result, Ok((401 | 403, _)))
+}
+
 pub(crate) fn models_fail_closed_without_key() -> bool {
-    match http_get_status(&format!("{DESKTOP_GATEWAY_URL}/v1/models"), None) {
-        Ok((code, _)) => code == 401 || code == 403,
-        Err(_) => true,
+    models_status_is_fail_closed_without_key(http_get_status(
+        &format!("{DESKTOP_GATEWAY_URL}/v1/models"),
+        None,
+    ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::models_status_is_fail_closed_without_key;
+
+    #[test]
+    fn models_fail_closed_without_key_maps_transport_error_to_false() {
+        assert!(!models_status_is_fail_closed_without_key(Err(
+            "unreachable".to_string()
+        )));
+        assert!(models_status_is_fail_closed_without_key(Ok((
+            401,
+            String::new()
+        ))));
+        assert!(models_status_is_fail_closed_without_key(Ok((
+            403,
+            String::new()
+        ))));
+        assert!(!models_status_is_fail_closed_without_key(Ok((
+            200,
+            String::new()
+        ))));
     }
 }
 
