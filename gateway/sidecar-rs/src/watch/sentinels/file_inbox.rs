@@ -126,7 +126,12 @@ fn handle_watcher_result(
                 }
             }
         }
-        Err(error) => {
+        Err(mut error) => {
+            error.paths = error
+                .paths
+                .iter()
+                .map(|path| PathBuf::from(redact_path(path)))
+                .collect();
             let message = error.to_string();
             tracing::warn!(
                 sentinel = %name,
@@ -526,11 +531,13 @@ mod tests {
     #[tokio::test]
     async fn watcher_error_is_reported_once_then_idle() {
         let dir = tempfile::tempdir().unwrap();
+        let secret_path = dir.path().join("customer-secret.txt");
+        let redacted_path = redact_path(&secret_path);
         let s = sentinel(dir.path());
         s.alive.store(true, Ordering::SeqCst);
 
         handle_watcher_result(
-            Err(notify::Error::generic("permission changed")),
+            Err(notify::Error::generic("permission changed").add_path(secret_path.clone())),
             &s.pending,
             s.debounce_tx.as_ref().unwrap(),
             &s.last_error,
@@ -541,9 +548,15 @@ mod tests {
             .observe()
             .await
             .expect_err("watcher callback error must fail the next tick");
+        let ObserveError::TransientUpstream(message) = err else {
+            panic!("got {err:?}");
+        };
+        assert!(message.contains("permission changed"), "got {message}");
+        assert!(message.contains(&redacted_path), "got {message}");
+        assert!(!message.contains("customer-secret.txt"), "got {message}");
         assert!(
-            matches!(err, ObserveError::TransientUpstream(ref message) if message.contains("permission changed")),
-            "got {err:?}"
+            !message.contains(dir.path().to_string_lossy().as_ref()),
+            "got {message}"
         );
 
         let state = s
