@@ -68,9 +68,11 @@ async fn upgrade_status(addr: std::net::SocketAddr) -> Result<StatusCode, Status
     }
 }
 
-/// POST /api/deliberate with a valid triage body + bearer. Hits the shared
-/// deliberate semaphore after cheap validation (cabinet resolve).
-async fn post_deliberate_status(addr: std::net::SocketAddr) -> StatusCode {
+/// POST /api/deliberate with a triage body + bearer.
+async fn post_deliberate_status(
+    addr: std::net::SocketAddr,
+    messages: serde_json::Value,
+) -> StatusCode {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(10))
         .build()
@@ -80,12 +82,49 @@ async fn post_deliberate_status(addr: std::net::SocketAddr) -> StatusCode {
         .bearer_auth(TOKEN)
         .json(&serde_json::json!({
             "model": "council-triage",
-            "messages": [{"role": "user", "content": "capacity probe"}]
+            "messages": messages
         }))
         .send()
         .await
         .expect("POST /api/deliberate");
     StatusCode::from_u16(resp.status().as_u16()).expect("status code")
+}
+
+#[tokio::test]
+async fn post_deliberate_array_content_returns_400_without_taking_permit() {
+    let _guard = env_guard().await;
+    let addr = boot_council(1).await;
+
+    let (held, status) = connect_ws(addr)
+        .await
+        .expect("hold the sole deliberate permit");
+    assert_eq!(status, StatusCode::SWITCHING_PROTOCOLS);
+
+    let status = post_deliberate_status(
+        addr,
+        serde_json::json!([{
+            "role": "user",
+            "content": [{"type": "text", "text": "array topic"}]
+        }]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "empty topic validation must run before semaphore acquisition"
+    );
+
+    let status = post_deliberate_status(
+        addr,
+        serde_json::json!([{"role": "user", "content": "   "}]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "whitespace-only topic validation must run before semaphore acquisition"
+    );
+    drop(held);
 }
 
 /// N idle upgrades fill the cap; N+1 is shed with HTTP 429. Closing one
@@ -116,7 +155,11 @@ async fn ws_deliberate_route_sheds_when_cap_full_and_releases_on_close() {
     }
 
     // Cross-surface: the same semaphore must also shed HTTP POST /api/deliberate.
-    let post_status = post_deliberate_status(addr).await;
+    let post_status = post_deliberate_status(
+        addr,
+        serde_json::json!([{"role": "user", "content": "capacity probe"}]),
+    )
+    .await;
     assert_eq!(
         post_status,
         StatusCode::TOO_MANY_REQUESTS,
