@@ -113,6 +113,17 @@ async fn post_deliberate_array_content_returns_400_without_taking_permit() {
         StatusCode::BAD_REQUEST,
         "empty topic validation must run before semaphore acquisition"
     );
+
+    let status = post_deliberate_status(
+        addr,
+        serde_json::json!([{"role": "user", "content": "   "}]),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "whitespace-only topic validation must run before semaphore acquisition"
+    );
     drop(held);
 }
 

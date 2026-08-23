@@ -256,6 +256,10 @@ pub(super) async fn deliberate_handler(
         .filter_map(|m| {
             let role = m.get("role").and_then(|r| r.as_str())?;
             let content = m.get("content").and_then(|c| c.as_str())?;
+            let content = content.trim();
+            if content.is_empty() {
+                return None;
+            }
             Some(format!("[{}]: {}", role, content))
         })
         .collect::<Vec<_>>()
