@@ -1869,7 +1869,7 @@ async fn persist_phase_session(
         total_tokens: total_tok,
         total_latency_ms: total_lat,
         total_cost_usd: total_cost,
-        specops_triggered: !specops_text.is_empty(),
+        specops_triggered: !specops_text.is_empty() || specops_cost_usd > 0.0,
         specops_cost_usd,
         mode: match mode {
             Mode::TearDown => SessionMode::TearDown,

@@ -49,7 +49,7 @@ async fn mock_gateway_chat(
         "mock-claim-validator" => {
             r#"[{"claim":"UNIQUE_CONTRADICTED_CLAIM_XYZ_12345","seat":"seat_a","verdict":"CONTRADICTED","evidence_citations":["fixture evidence"],"reasoning":"priced fixture","confidence":0.95,"impact":"HIGH"}]"#
         }
-        "grok-4.3" => "Mock priced SpecOps escalation signal.",
+        "grok-4.3" => "",
         _ => "Mock response",
     };
     axum::Json(serde_json::json!({
@@ -1018,6 +1018,7 @@ async fn stream_auto_specops_cost_counts_once() {
         .expect("done cumulative spend");
     let session = saved_session(&dirs);
     assert_eq!(session["specops_cost_usd"].as_f64(), Some(20.0));
+    assert_eq!(session["specops_triggered"].as_bool(), Some(true));
     assert_eq!(session["total_cost_usd"].as_f64(), Some(100.0));
     assert_eq!(done_spend, 100.0, "auto SpecOps cost must count once");
 
