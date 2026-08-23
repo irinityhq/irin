@@ -19,6 +19,87 @@ use council_rs::types::{Cabinet, Chair, RoleCascadeStep, RoleDefinition, RolesCo
 use tokio::sync::{Mutex, MutexGuard, mpsc};
 use tokio_util::sync::CancellationToken;
 
+static MOCK_GATEWAY_ADDR: OnceLock<std::net::SocketAddr> = OnceLock::new();
+
+async fn mock_gateway_models() -> axum::Json<serde_json::Value> {
+    axum::Json(serde_json::json!({
+        "object": "list",
+        "data": [
+            {"id": "mock-seat-agree", "ready": true, "transports": ["mock", "grok_hermes"]},
+            {"id": "mock-seat-disagree", "ready": true, "transports": ["mock", "grok_hermes"]},
+            {"id": "mock-gated-seat", "ready": true, "transports": ["mock", "grok_hermes"]},
+            {"id": "mock-chair", "ready": true, "transports": ["mock", "grok_hermes"]},
+            {"id": "mock-role", "ready": true, "transports": ["mock"]},
+            {"id": "mock-claim-validator", "ready": true, "transports": ["mock"]},
+            {"id": "grok-4.3", "ready": true, "transports": ["grok_hermes"]}
+        ]
+    }))
+}
+
+async fn mock_gateway_chat(
+    axum::Json(body): axum::Json<serde_json::Value>,
+) -> axum::Json<serde_json::Value> {
+    let model = body["model"].as_str().unwrap_or("mock-model");
+    let content = match model {
+        "mock-seat-agree" => "I agree and support this approach.",
+        "mock-seat-disagree" => "I disagree and reject this approach.",
+        "mock-gated-seat" => {
+            "Seat analysis states UNIQUE_CONTRADICTED_CLAIM_XYZ_12345 with certainty."
+        }
+        "mock-claim-validator" => {
+            r#"[{"claim":"UNIQUE_CONTRADICTED_CLAIM_XYZ_12345","seat":"seat_a","verdict":"CONTRADICTED","evidence_citations":["fixture evidence"],"reasoning":"priced fixture","confidence":0.95,"impact":"HIGH"}]"#
+        }
+        "grok-4.3" => "Mock priced SpecOps escalation signal.",
+        _ => "Mock response",
+    };
+    axum::Json(serde_json::json!({
+        "id": "chatcmpl-stream-spend-test",
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": content},
+            "finish_reason": "stop"
+        }],
+        "usage": {"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20}
+    }))
+}
+
+fn install_mock_gateway() {
+    let addr = MOCK_GATEWAY_ADDR.get_or_init(|| {
+        let (addr_tx, addr_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("mock Gateway runtime");
+            runtime.block_on(async move {
+                let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+                    .await
+                    .expect("bind mock Gateway");
+                addr_tx
+                    .send(listener.local_addr().expect("mock Gateway address"))
+                    .expect("publish mock Gateway address");
+                let app = axum::Router::new()
+                    .route("/health", axum::routing::get(|| async { "ok" }))
+                    .route("/v1/models", axum::routing::get(mock_gateway_models))
+                    .route(
+                        "/v1/chat/completions",
+                        axum::routing::post(mock_gateway_chat),
+                    );
+                axum::serve(listener, app)
+                    .await
+                    .expect("serve mock Gateway");
+            });
+        });
+        addr_rx.recv().expect("receive mock Gateway address")
+    });
+    unsafe {
+        std::env::set_var("GATEWAY_URL", format!("http://{addr}"));
+        std::env::set_var("GW_API_KEY", "stream-spend-test-key");
+    }
+}
+
 /// Serialize tests that mutate process env (sessions dir, evidence switches).
 async fn env_lock() -> MutexGuard<'static, ()> {
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -96,10 +177,13 @@ fn priced_mock_models() -> council_rs::types::ModelRegistry {
     for id in [
         "mock-seat-agree",
         "mock-seat-disagree",
+        "mock-gated-seat",
         "mock-chair",
         "mock-role",
         "mock-claim-validator",
         "mock-model",
+        "grok-4.3",
+        "hermes-cli-grok-4.3",
     ] {
         models.insert(
             id.into(),
@@ -146,6 +230,21 @@ impl SessionDirs {
     fn cleanup(self) {
         let _ = fs::remove_dir_all(&self.root);
     }
+}
+
+fn saved_session(dirs: &SessionDirs) -> serde_json::Value {
+    let path = fs::read_dir(dirs.root.join("sessions"))
+        .expect("read sessions dir")
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .find(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("council_") && name.ends_with(".json"))
+        })
+        .expect("saved session");
+    serde_json::from_slice(&fs::read(path).expect("read saved session"))
+        .expect("parse saved session")
 }
 
 /// Base StreamConfig for no-spend mock multi-round characterization.
@@ -616,6 +715,71 @@ async fn stream_budget_cap_ends_after_round_one_with_budget_paused() {
     dirs.cleanup();
 }
 
+#[tokio::test]
+async fn stream_round_two_budget_stop_keeps_full_evidence_for_chair() {
+    let _guard = env_lock().await;
+    let dirs = SessionDirs::install();
+
+    let cabinet = mock_cabinet(
+        "stream-round-two-budget",
+        3,
+        vec![
+            mock_seat("seat_a", "mock-gated-seat"),
+            mock_seat("seat_b", "mock-seat-disagree"),
+        ],
+    );
+    let mut stream = base_stream(cabinet);
+    stream.validate = true;
+    stream.validate_gate = true;
+    // Round 2 crosses this cap only when prior-round seat cost is included.
+    stream.budget_max_usd = Some(115.0);
+
+    let events = tokio::time::timeout(
+        Duration::from_secs(60),
+        run_stream(stream, InterventionQueue::new(), CancellationToken::new()),
+    )
+    .await
+    .expect("round-two budget stream timed out");
+
+    assert_eq!(count_type(&events, "round_started"), 2);
+    let budget = events
+        .iter()
+        .find(|event| event.event_type == "budget_paused")
+        .expect("round 2 must pause for budget");
+    assert_eq!(budget.data["round_num"].as_u64(), Some(2));
+    assert_eq!(budget.data["total_cost_usd"].as_f64(), Some(120.0));
+
+    let session = saved_session(&dirs);
+    let round_two = session["rounds"]
+        .as_array()
+        .and_then(|rounds| rounds.get(1))
+        .expect("saved round 2");
+    assert_eq!(
+        round_two["converged"].as_bool(),
+        Some(false),
+        "round 2 must terminate only for budget; round={round_two:?}"
+    );
+    assert!(
+        round_two["validation_report"].is_array(),
+        "round 2 must carry the validator report; round={round_two:?}"
+    );
+    let seat_a = round_two["responses"]
+        .as_array()
+        .and_then(|responses| {
+            responses
+                .iter()
+                .find(|response| response["seat_name"] == "seat_a")
+        })
+        .expect("round 2 seat_a response");
+    let text = seat_a["text"].as_str().expect("round 2 seat text");
+    assert_eq!(
+        text, "Seat analysis states UNIQUE_CONTRADICTED_CLAIM_XYZ_12345 with certainty.",
+        "budget-terminating round must reach the Chair un-gated"
+    );
+
+    dirs.cleanup();
+}
+
 /// Pause after round 1 → operator Continue → round 2 → done.
 #[tokio::test]
 async fn stream_pause_resume_continue_runs_remaining_rounds() {
@@ -706,6 +870,157 @@ async fn stream_pause_resume_continue_runs_remaining_rounds() {
         .expect("second round_started");
     assert!(await_i < recv_i, "pause before receive: {types:?}");
     assert!(recv_i < r2, "receive before round 2: {types:?}");
+
+    dirs.cleanup();
+}
+
+#[tokio::test]
+async fn stream_manual_specops_cost_counts_toward_spend_and_saved_session() {
+    let _guard = env_lock().await;
+    let dirs = SessionDirs::install();
+    install_mock_gateway();
+
+    let mut cabinet = mock_cabinet(
+        "stream-manual-specops-cost",
+        2,
+        vec![
+            mock_seat("seat_a", "mock-seat-agree"),
+            mock_seat("seat_b", "mock-seat-disagree"),
+        ],
+    );
+    for seat in &mut cabinet.seats {
+        seat.provider = "grok_hermes".into();
+    }
+    cabinet.chair.provider = "grok_hermes".into();
+    let mut stream = base_stream(cabinet);
+    stream.pause_after_each_round = true;
+    stream.via_gateway = Some(true);
+
+    let config = Arc::new(mock_config());
+    let (event_tx, mut event_rx) = mpsc::channel(256);
+    let interventions = InterventionQueue::new();
+    let tx = interventions.sender();
+    let cancel = CancellationToken::new();
+    let cancel_run = cancel.clone();
+    let handle = tokio::spawn(async move {
+        deliberate::run(config, stream, event_tx, interventions, cancel_run).await;
+    });
+
+    let mut events = Vec::new();
+    let mut pauses = 0;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            cancel.cancel();
+            panic!(
+                "manual SpecOps timed out; events={:?}",
+                event_types(&events)
+            );
+        }
+        match tokio::time::timeout(remaining, event_rx.recv()).await {
+            Ok(Some(event)) => {
+                if event.event_type == "awaiting_input" {
+                    let action = if pauses == 0 {
+                        Intervention::EscalateSpecops
+                    } else {
+                        Intervention::EndEarly
+                    };
+                    tx.send(action).await.expect("send intervention");
+                    pauses += 1;
+                }
+                events.push(event);
+            }
+            Ok(None) => break,
+            Err(_) => {
+                cancel.cancel();
+                panic!(
+                    "manual SpecOps timed out waiting for events; events={:?}",
+                    event_types(&events)
+                );
+            }
+        }
+    }
+    handle.await.expect("run task");
+
+    assert_eq!(
+        pauses,
+        2,
+        "manual escalation must re-pause; events={:?}",
+        events
+            .iter()
+            .map(|event| (&event.event_type, &event.data))
+            .collect::<Vec<_>>()
+    );
+    let signal = events
+        .iter()
+        .find(|event| event.event_type == "specops_signal")
+        .expect("manual SpecOps signal");
+    let signal_cost = signal.data["cost_usd"]
+        .as_f64()
+        .expect("manual SpecOps cost");
+    assert!(signal_cost > 0.0, "signal={:?}", signal.data);
+
+    let done_spend = events
+        .iter()
+        .find(|event| event.event_type == "done")
+        .and_then(|event| event.data["cumulative_spend_usd"].as_f64())
+        .expect("done cumulative spend");
+    let session = saved_session(&dirs);
+    let saved_specops_cost = session["specops_cost_usd"]
+        .as_f64()
+        .expect("saved SpecOps cost");
+    assert_eq!(saved_specops_cost, signal_cost);
+    assert_eq!(done_spend, session["total_cost_usd"].as_f64().unwrap());
+
+    dirs.cleanup();
+}
+
+#[tokio::test]
+async fn stream_auto_specops_cost_counts_once() {
+    let _guard = env_lock().await;
+    let dirs = SessionDirs::install();
+    install_mock_gateway();
+
+    let mut cabinet = mock_cabinet(
+        "stream-auto-specops-cost",
+        1,
+        vec![
+            mock_seat("seat_a", "mock-seat-agree"),
+            mock_seat("seat_b", "mock-seat-disagree"),
+        ],
+    );
+    for seat in &mut cabinet.seats {
+        seat.provider = "grok_hermes".into();
+    }
+    cabinet.chair.provider = "grok_hermes".into();
+    let mut stream = base_stream(cabinet);
+    stream.via_gateway = Some(true);
+    stream.auto_specops_threshold = 1.0;
+
+    let events = tokio::time::timeout(
+        Duration::from_secs(60),
+        run_stream(stream, InterventionQueue::new(), CancellationToken::new()),
+    )
+    .await
+    .expect("auto SpecOps stream timed out");
+
+    let signal_cost = events
+        .iter()
+        .find(|event| event.event_type == "specops_signal")
+        .and_then(|event| event.data["cost_usd"].as_f64())
+        .expect("priced auto SpecOps signal");
+    assert_eq!(signal_cost, 20.0);
+
+    let done_spend = events
+        .iter()
+        .find(|event| event.event_type == "done")
+        .and_then(|event| event.data["cumulative_spend_usd"].as_f64())
+        .expect("done cumulative spend");
+    let session = saved_session(&dirs);
+    assert_eq!(session["specops_cost_usd"].as_f64(), Some(20.0));
+    assert_eq!(session["total_cost_usd"].as_f64(), Some(100.0));
+    assert_eq!(done_spend, 100.0, "auto SpecOps cost must count once");
 
     dirs.cleanup();
 }

@@ -273,6 +273,7 @@ async fn run_stream_phases(ready: StreamRunReady, interventions: &mut Interventi
         let PhaseRoundOutcome {
             all_rounds,
             manual_specops_signal,
+            mut specops_cost_usd,
             budget_paused,
             validator_cost_usd,
             judge_usage,
@@ -300,19 +301,20 @@ async fn run_stream_phases(ready: StreamRunReady, interventions: &mut Interventi
             // Do NOT break here.
         }
 
-        let Some((specops_text, specops_tokens)) = run_auto_specops_if_needed(
-            &ready,
-            &session_id,
-            topic,
-            &all_rounds,
-            &manual_specops_signal,
-            &available_set,
-            &mut accum.cumulative_spend,
-        )
-        .await
+        let Some((specops_text, specops_tokens, auto_specops_cost_usd)) =
+            run_auto_specops_if_needed(
+                &ready,
+                &session_id,
+                topic,
+                &all_rounds,
+                &manual_specops_signal,
+                &available_set,
+            )
+            .await
         else {
             return;
         };
+        specops_cost_usd += auto_specops_cost_usd;
 
         let phase_final_conv = all_rounds
             .last()
@@ -345,6 +347,7 @@ async fn run_stream_phases(ready: StreamRunReady, interventions: &mut Interventi
             &synth,
             &specops_text,
             specops_tokens,
+            specops_cost_usd,
             validator_cost_usd,
             &judge_usage,
             budget_paused,
@@ -424,6 +427,7 @@ impl RunAccum {
 struct PhaseRoundOutcome {
     all_rounds: Vec<RoundResult>,
     manual_specops_signal: String,
+    specops_cost_usd: f64,
     budget_paused: bool,
     validator_cost_usd: f64,
     judge_usage: JudgeUsage,
@@ -1169,6 +1173,7 @@ async fn run_round_operator_pause(
     live_seats: &mut [Seat],
     all_rounds: &[RoundResult],
     manual_specops_signal: &mut String,
+    specops_cost_usd: &mut f64,
     available_set: &std::collections::HashSet<&str>,
 ) -> Option<RoundOperatorControl> {
     let StreamRunReady {
@@ -1348,6 +1353,7 @@ async fn run_round_operator_pause(
                 ))
                 .await;
 
+            *specops_cost_usd += sig.cost_usd;
             let sig_text = sig.text.clone();
             *manual_specops_signal = sig_text.clone();
             *extra_context = format!("INTERVENTION ({}): {}", esc_mode, sig_text);
@@ -1430,6 +1436,7 @@ async fn run_phase_rounds(
     let mut all_rounds: Vec<RoundResult> = Vec::new();
     let mut extra_context = String::new();
     let mut manual_specops_signal = String::new();
+    let mut specops_cost_usd = 0.0;
     let mut early_exit = false;
     let mut budget_paused = false;
     let mut validator_cost_usd = 0.0;
@@ -1493,7 +1500,12 @@ async fn run_phase_rounds(
             round_num,
             rounds_planned,
             responses,
-            cumulative_spend,
+            cumulative_spend
+                + all_rounds
+                    .iter()
+                    .flat_map(|round| &round.responses)
+                    .map(|response| response.cost_usd)
+                    .sum::<f64>(),
             &evidence_cache,
             &mut validator_cost_usd,
             &mut judge_usage,
@@ -1566,6 +1578,7 @@ async fn run_phase_rounds(
             &mut live_seats,
             &all_rounds,
             &mut manual_specops_signal,
+            &mut specops_cost_usd,
             available_set,
         )
         .await
@@ -1579,6 +1592,7 @@ async fn run_phase_rounds(
     Some(PhaseRoundOutcome {
         all_rounds,
         manual_specops_signal,
+        specops_cost_usd,
         budget_paused,
         validator_cost_usd,
         judge_usage,
@@ -1595,8 +1609,7 @@ async fn run_auto_specops_if_needed(
     all_rounds: &[RoundResult],
     manual_specops_signal: &str,
     available_set: &std::collections::HashSet<&str>,
-    cumulative_spend: &mut f64,
-) -> Option<(String, u32)> {
+) -> Option<(String, u32, f64)> {
     let StreamRunReady {
         config,
         stream_config,
@@ -1617,6 +1630,7 @@ async fn run_auto_specops_if_needed(
         .map(|r| r.convergence_score)
         .unwrap_or(1.0);
     let mut specops_tokens: u32 = 0;
+    let mut specops_cost_usd = 0.0;
     let wants_auto_specops = specops_text.is_empty()
         && phase_final_conv < stream_config.auto_specops_threshold
         && available_set.contains("grok");
@@ -1673,13 +1687,13 @@ async fn run_auto_specops_if_needed(
             .await;
         specops_text = sig.text;
         specops_tokens = sig.tokens_in.saturating_add(sig.tokens_out);
-        *cumulative_spend += sig.cost_usd;
+        specops_cost_usd = sig.cost_usd;
     }
 
     // A chair cannot synthesize an empty deliberation. Partial seat
     // participation remains valid, but zero usable responses is a failed
 
-    Some((specops_text, specops_tokens))
+    Some((specops_text, specops_tokens, specops_cost_usd))
 }
 /// Usable-response gate + chair synthesis, with synthesis events.
 #[allow(clippy::too_many_arguments)] // stage extraction of monobody captures
@@ -1799,6 +1813,7 @@ async fn persist_phase_session(
     synth: &StreamChairResult,
     specops_text: &str,
     specops_tokens: u32,
+    specops_cost_usd: f64,
     validator_cost_usd: f64,
     judge_usage: &JudgeUsage,
     budget_paused: bool,
@@ -1840,6 +1855,7 @@ async fn persist_phase_session(
         .map(|r| r.cost_usd)
         .sum::<f64>()
         + synth.cost_usd
+        + specops_cost_usd
         + validator_cost_usd
         + judge_usage.cost_usd;
 
@@ -1854,7 +1870,7 @@ async fn persist_phase_session(
         total_latency_ms: total_lat,
         total_cost_usd: total_cost,
         specops_triggered: !specops_text.is_empty(),
-        specops_cost_usd: 0.0,
+        specops_cost_usd,
         mode: match mode {
             Mode::TearDown => SessionMode::TearDown,
             Mode::Pathfind => SessionMode::Pathfind,
