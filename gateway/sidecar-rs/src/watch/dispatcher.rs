@@ -3569,17 +3569,24 @@ mod tests {
 /// Arm the P0-A crash seam for the current test process.
 /// Uses env var so the flag is visible to library code and test code in the same process
 /// (avoids static duplication issues between integration test binary and the linked lib).
+#[cfg(any(test, feature = "test-helpers"))]
 pub fn arm_crash_after_triage() {
     eprintln!("[test seam] arm_crash_after_triage (setting env for seam)");
     std::env::set_var("GATEWAY_TEST_CRASH_AFTER_TRIAGE", "1");
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 fn should_crash_after_triage() -> bool {
     if std::env::var("GATEWAY_TEST_CRASH_AFTER_TRIAGE").is_ok() {
         eprintln!("[test seam] should_crash_after_triage: env set, will crash and clear");
         std::env::remove_var("GATEWAY_TEST_CRASH_AFTER_TRIAGE");
         return true;
     }
+    false
+}
+
+#[cfg(not(any(test, feature = "test-helpers")))]
+const fn should_crash_after_triage() -> bool {
     false
 }
 
