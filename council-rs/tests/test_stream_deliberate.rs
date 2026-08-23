@@ -25,10 +25,10 @@ async fn mock_gateway_models() -> axum::Json<serde_json::Value> {
     axum::Json(serde_json::json!({
         "object": "list",
         "data": [
-            {"id": "mock-seat-agree", "ready": true, "transports": ["mock", "grok_hermes"]},
-            {"id": "mock-seat-disagree", "ready": true, "transports": ["mock", "grok_hermes"]},
-            {"id": "mock-gated-seat", "ready": true, "transports": ["mock", "grok_hermes"]},
-            {"id": "mock-chair", "ready": true, "transports": ["mock", "grok_hermes"]},
+            {"id": "mock-seat-agree", "ready": true, "transports": ["mock", "grok"]},
+            {"id": "mock-seat-disagree", "ready": true, "transports": ["mock", "grok"]},
+            {"id": "mock-gated-seat", "ready": true, "transports": ["mock", "grok"]},
+            {"id": "mock-chair", "ready": true, "transports": ["mock", "grok"]},
             {"id": "mock-role", "ready": true, "transports": ["mock"]},
             {"id": "mock-claim-validator", "ready": true, "transports": ["mock"]},
             {"id": "grok-4.3", "ready": true, "transports": ["grok_hermes"]}
@@ -183,7 +183,6 @@ fn priced_mock_models() -> council_rs::types::ModelRegistry {
         "mock-claim-validator",
         "mock-model",
         "grok-4.3",
-        "hermes-cli-grok-4.3",
     ] {
         models.insert(
             id.into(),
@@ -889,9 +888,9 @@ async fn stream_manual_specops_cost_counts_toward_spend_and_saved_session() {
         ],
     );
     for seat in &mut cabinet.seats {
-        seat.provider = "grok_hermes".into();
+        seat.provider = "grok".into();
     }
-    cabinet.chair.provider = "grok_hermes".into();
+    cabinet.chair.provider = "grok".into();
     let mut stream = base_stream(cabinet);
     stream.pause_after_each_round = true;
     stream.via_gateway = Some(true);
@@ -991,9 +990,9 @@ async fn stream_auto_specops_cost_counts_once() {
         ],
     );
     for seat in &mut cabinet.seats {
-        seat.provider = "grok_hermes".into();
+        seat.provider = "grok".into();
     }
-    cabinet.chair.provider = "grok_hermes".into();
+    cabinet.chair.provider = "grok".into();
     let mut stream = base_stream(cabinet);
     stream.via_gateway = Some(true);
     stream.auto_specops_threshold = 1.0;
