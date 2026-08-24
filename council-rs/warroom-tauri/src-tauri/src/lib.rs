@@ -802,12 +802,6 @@ fn respawn_council_fenced(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Council start phases — named extraction of try_start_council_server_with_credentials.
-// Ordering and authority checks are unchanged; each phase is a pure move of
-// the prior sequential block into a domain-named function.
-// ---------------------------------------------------------------------------
-
 /// Phase 1 product: port + packaging identity for this start attempt.
 struct CouncilStartPlan {
     port: u16,
@@ -1738,14 +1732,10 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<DesktopStatusSnapshot,
     .map_err(|e| e.to_string())?
 }
 
-// ---------------------------------------------------------------------------
-// Touch ID product control
-//
-// The renderer can only trigger these fixed workflows and read the non-secret
-// status projection. Helper invocation, the Secure Enclave signature, the
-// arm-principal bearer, and stage/confirm/disarm stay native. Nothing runs at
-// launch.
-// ---------------------------------------------------------------------------
+// Touch ID product control: the renderer can only trigger these fixed
+// workflows and read the non-secret status projection. Helper invocation, the
+// Secure Enclave signature, the arm-principal bearer, and stage/confirm/disarm
+// stay native. Nothing runs at launch.
 
 /// Fresh pack readiness for enroll/arm ceremonies — never uses presentation
 /// sticky. Presentation readiness lives in `status_authority` (single sticky).

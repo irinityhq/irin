@@ -1179,8 +1179,6 @@ mod tests {
         assert!(validate_tailscale_cli_path(&listed).is_ok());
     }
 
-    // --- CLI selection (ProjectMem #0040) ------------------------------------
-
     #[test]
     fn default_allowlist_order_is_app_then_homebrew_then_usr_local() {
         assert_eq!(

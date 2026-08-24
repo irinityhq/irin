@@ -513,8 +513,6 @@ export interface DeliberationState {
   tier?: string;
 }
 
-// ───────── Phase 2: Gen 10 intelligence types ─────────
-
 export interface PrecedentMatchSemantic extends PrecedentMatch {
   /** Legacy pure-cosine similarity from the pre-unified semantic preview. */
   similarity?: number;
@@ -670,7 +668,7 @@ export interface WeeklySummary {
   error?: string;
 }
 
-// ───────── Phase 6: CLI parity types ─────────
+// CLI parity types.
 
 /**
  * One provider row from `GET /api/discover` (feature contract).
@@ -698,8 +696,6 @@ export interface DiscoverResponse {
   log: string[];
 }
 
-// ───────── N03: session clusters ─────────
-
 /**
  * One cluster from `GET /api/clusters` (Phase 9 N03). Hand-rolled k-means over
  * the existing session embedding index; `top_terms` come from a tf-idf-ish
@@ -720,8 +716,6 @@ export interface ClustersResponse {
   generated_at: string;
 }
 
-// ───────── N04: intervention prediction ─────────
-
 /**
  * `GET /api/interventions/predict` (Phase 9 N04). Backend trains at request
  * time from intervention_log.jsonl. `method` is "logreg" when >= 30 usable
@@ -732,8 +726,6 @@ export interface InterventionPrediction {
   method: "logreg" | "frequency";
   n_samples: number;
 }
-
-// ───────── Meta-review types ─────────
 
 export interface MetaReviewResult {
   report_path?: string;

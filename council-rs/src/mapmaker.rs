@@ -55,7 +55,6 @@ pub fn gather(dir_path: &str, quiet: bool) -> String {
     // Sort by size (smallest first — more files in budget)
     files.sort_by_key(|f| std::fs::metadata(f).map(|m| m.len()).unwrap_or(u64::MAX));
 
-    // Build context within budget
     let mut parts = Vec::new();
     let mut total_bytes: usize = 0;
     let mut included: usize = 0;

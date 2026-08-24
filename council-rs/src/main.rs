@@ -542,7 +542,6 @@ async fn main() -> Result<()> {
         provider::init_gateway(true, cli.sensitivity.clone());
     }
 
-    // Load configuration
     let mut config = Config::load(&cli.base_dir)?;
 
     // If --cabinet looks like a file path, load it as an external cabinet.

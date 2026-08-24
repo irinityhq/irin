@@ -187,7 +187,7 @@ pub fn decide_proxy_injection(adapter_ready: bool, token_present: bool) -> bool 
     adapter_ready && token_present
 }
 
-// --- Per-IP token bucket (Python proxy_limits.py parity) -------------------------
+// Per-IP token bucket; limits match Python's proxy_limits.py.
 
 /// Deterministic token bucket. Clock is caller-supplied seconds for testability.
 #[derive(Debug, Clone)]
@@ -486,8 +486,6 @@ pub fn empty_proxy_compose_pairs() -> Vec<(String, String)> {
     .map(|k| (k.to_string(), String::new()))
     .collect()
 }
-
-// --- Process-owned adapter state ------------------------------------------------
 
 struct RunningAdapter {
     kind: AdapterKind,

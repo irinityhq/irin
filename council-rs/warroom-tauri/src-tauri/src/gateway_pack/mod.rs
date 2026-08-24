@@ -22,8 +22,6 @@ mod status;
 mod types;
 mod watch_profile;
 
-// --- Public surface (unchanged from monolithic mod.rs) ---
-
 pub use types::{GatewayPackState, GatewayPackStatus, SUPPORT_MATRIX_SUMMARY};
 
 pub(crate) use status::seed_auth_observation_from_preloaded_key;

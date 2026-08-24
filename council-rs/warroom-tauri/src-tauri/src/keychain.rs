@@ -1383,7 +1383,6 @@ mod keychain_live_tests {
         let key1 = format!("gw_{}", "e".repeat(32));
         let key2 = format!("gw_{}", "f".repeat(32));
         let store = KeychainSecretStore;
-        // create
         store.set_password(&service, account, &key1).unwrap();
         let got = store.get_password(&service, account).unwrap().unwrap();
         assert_eq!(got, key1);
@@ -1391,7 +1390,6 @@ mod keychain_live_tests {
         store.set_password(&service, account, &key2).unwrap();
         let got2 = store.get_password(&service, account).unwrap().unwrap();
         assert_eq!(got2, key2);
-        // delete
         store.delete_password(&service, account).unwrap();
         assert!(store.get_password(&service, account).unwrap().is_none());
         // Never print key1/key2/got.

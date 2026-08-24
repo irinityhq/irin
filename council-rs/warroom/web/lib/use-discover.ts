@@ -296,7 +296,7 @@ export function unsupportedGatewayTransportReason(
   return `Gateway has no adapter for transport${unsupported.length === 1 ? "" : "s"}: ${unsupported.join(", ")}. Choose a Gateway-supported transport or use Direct mode.`;
 }
 
-// --- Test seams (deterministic unit coverage for cache / retry / listeners) ---
+// Test seams: deterministic coverage for cache, retry, and listeners.
 
 /** Reset module cache, in-flight, listeners, and optional fetch deps. */
 export function __resetDiscoverForTests(deps: DiscoverFetchDeps | null = null): void {

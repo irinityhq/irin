@@ -525,11 +525,10 @@ async fn send_request(
         req = req.header("X-Sovereign-Mode", "true");
     }
 
-    // Phase 0.5 §6.5 (P0 #5): X-Parent-Request-Id threads the council session
-    // through to seat calls so the Gateway ledger can attribute seat cost to
-    // its wrapper. Only emitted when present (non-empty) — CLI/warroom
-    // callers pass an empty string and the header is skipped, preserving the
-    // existing single-call wire shape.
+    // X-Parent-Request-Id threads the council session through to seat calls so
+    // the Gateway ledger can attribute seat cost to its wrapper. Emitted only
+    // when non-empty — CLI/warroom callers pass an empty string and the header
+    // is skipped, keeping the single-call wire shape.
     if !parent_request_id.is_empty() {
         req = req.header("X-Parent-Request-Id", parent_request_id);
     }

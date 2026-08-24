@@ -334,10 +334,6 @@ data: [DONE]
     }
 }
 
-// ---------------------------------------------------------------------------
-// v0.3 Open Surface: Librarian Identity / Memory Context & Commit Proposals
-// ---------------------------------------------------------------------------
-
 /// Context supplied to deliberations (Identity + Memory) per tenant.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct LibrarianContext {

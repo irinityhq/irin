@@ -634,7 +634,7 @@ fn apply_gui_login_path_sets_path_env_only() {
     assert!(out.status.success());
 }
 
-// --- Finding 1: per-IP token bucket (Python proxy_limits.py parity) -------------
+// Per-IP token bucket; limits match Python's proxy_limits.py.
 
 #[test]
 fn token_bucket_burst_then_deny() {

@@ -145,8 +145,6 @@ pub(super) async fn drift_weekly_history(Query(q): Query<WeeklyHistoryQuery>) ->
     }))
 }
 
-// ───── Mapmaker briefs / map preview ──────────────────────────
-
 #[cfg(test)]
 mod json_body_required_tests {
     use super::{DriftRunBody, WeeklyRunBody, drift_run, drift_weekly_run};

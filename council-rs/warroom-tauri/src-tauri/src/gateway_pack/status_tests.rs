@@ -673,14 +673,12 @@ fn owned_council_route_proof_records_and_clears() {
     assert_eq!(owned_council_route(), None);
 }
 
-// ---------------------------------------------------------------------------
 // Auth-observation cache: the status background loop must not re-read
 // GW_API_KEY from Keychain every 5s tick. These tests exercise the cache via
 // `resolve_auth_observation` directly (with_test_status_probe short-circuits
 // before gateway_pack_status_uncached, so it cannot observe Keychain reads).
 // `models_authenticated` returns false in the test env (no Docker/gateway),
 // which is fine — these tests prove *read-count* behavior, not auth results.
-// ---------------------------------------------------------------------------
 
 /// Records Keychain get order without logging secret values. Mirrors the
 /// pattern in launch_tests.rs so status-loop read counts are observable.
@@ -960,11 +958,7 @@ fn auth_observation_concurrent_misses_cannot_double_commit() {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Reviewer-requested tests (Issue 3): prove the authority/background contract
-// boundary holds. These are the three scenarios the reviewer identified as gaps
-// in the first iteration.
-// ---------------------------------------------------------------------------
+// These tests prove the authority/background contract boundary holds.
 
 /// Issue 1 proof: cached presentation auth cannot influence the authority path.
 ///
@@ -1085,13 +1079,11 @@ fn stale_generation_cannot_repopulate_observation() {
     );
 }
 
-// ---------------------------------------------------------------------------
-// P1 regression: authority path must return unauthenticated when the key is
-// absent or the Keychain read fails, even if the background cache holds a warm
-// authenticated=true. This is the exact failure path the reviewer identified:
-// gateway_pack_status_fresh converts Ok(None)/Err to AuthorityLive(None), and
-// resolve_auth_observation must NOT fall through to the cache.
-// ---------------------------------------------------------------------------
+// The authority path must return unauthenticated when the key is absent or the
+// Keychain read fails, even if the background cache holds a warm
+// authenticated=true: gateway_pack_status_fresh converts Ok(None)/Err to
+// AuthorityLive(None), and resolve_auth_observation must NOT fall through to
+// the cache.
 
 /// SecretStore whose get_password always returns Err (simulates Keychain ACL
 /// failure / unreadable item).

@@ -176,8 +176,6 @@ pub(super) async fn precedent_search(Query(q): Query<PrecedentQuery>) -> impl In
     axum::Json(body).into_response()
 }
 
-// ───── Session lineage / fork ─────────────────────────────────
-
 #[derive(Deserialize)]
 pub(super) struct ForkBody {
     #[serde(default)]
@@ -268,8 +266,6 @@ pub(super) async fn session_diff(Path((a, b)): Path<(String, String)>) -> impl I
     axum::Json(warroom::lineage::diff_synthesis(&parent_v, &child_v)).into_response()
 }
 
-// ───── Interventions / patterns ───────────────────────────────
-
 #[derive(Deserialize)]
 pub(super) struct InterventionsQuery {
     days: Option<i64>,
@@ -330,8 +326,6 @@ pub(super) async fn clusters_get() -> impl IntoResponse {
         });
     axum::Json(result)
 }
-
-// ───── Drift reports ──────────────────────────────────────────
 
 #[cfg(test)]
 mod normalize_index_entry_tests {

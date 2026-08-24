@@ -78,5 +78,3 @@ pub(super) async fn mapmaker_run(
     }
     axum::Json(result).into_response()
 }
-
-// ───── Embeddings ─────────────────────────────────────────────

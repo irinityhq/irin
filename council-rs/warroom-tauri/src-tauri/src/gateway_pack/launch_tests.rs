@@ -484,7 +484,7 @@ fn promote_early_window_bounds_resume_calls() {
     assert!(!promote_may_call_resume(0, 4, true));
 }
 
-// --- PR4 characterization: launch outcomes (secret snapshot, lifecycle fence, Direct) ---
+// Launch outcomes: secret snapshot, lifecycle fence, Direct.
 
 /// One LaunchSecrets snapshot per flight is reused for adapters + compose secret
 /// env without re-entering Keychain for proxy/watch/pepper accounts.

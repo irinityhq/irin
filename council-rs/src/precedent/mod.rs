@@ -11,8 +11,6 @@ use anyhow::{Context, Result};
 use std::io::{BufRead, Write};
 use std::path::PathBuf;
 
-// ─── Paths ───────────────────────────────────────────────────────────
-
 fn sessions_dir() -> PathBuf {
     std::env::var("COUNCIL_SESSIONS_DIR")
         .map(PathBuf::from)
@@ -22,8 +20,6 @@ fn sessions_dir() -> PathBuf {
 fn index_path() -> PathBuf {
     sessions_dir().join("index.jsonl")
 }
-
-// ─── Index loading ───────────────────────────────────────────────────
 
 /// Load the full precedent index from disk.
 pub fn load_index() -> Vec<PrecedentEntry> {
@@ -45,8 +41,6 @@ pub fn load_index() -> Vec<PrecedentEntry> {
         .collect()
 }
 
-// ─── Unified retrieval ───────────────────────────────────────────────
-//
 // One ranker for every surface: War Room preview (`GET /api/precedent`),
 // CLI `--recall`, engine injection (CLI + stream), stream `precedent_loaded`,
 // and the persisted `session.precedent_ids`. Within a deliberation run, the
@@ -238,8 +232,6 @@ pub fn rank(
     receipt
 }
 
-// ─── Index append ────────────────────────────────────────────────────
-
 /// Append a new entry to the precedent index.
 pub fn index_append(entry: &PrecedentEntry) -> Result<()> {
     let path = index_path();
@@ -323,8 +315,6 @@ pub fn index_session(session: &CouncilSession) -> Result<()> {
     index_append(&entry)
 }
 
-// ─── Reindex ─────────────────────────────────────────────────────────
-
 /// Rebuild the entire index from session JSON files.
 /// Equivalent to Python's reindex_sessions.
 pub fn reindex() -> Result<usize> {
@@ -351,7 +341,6 @@ pub fn reindex() -> Result<usize> {
     // Sort by timestamp
     entries.sort_by_key(|e| e.timestamp.clone());
 
-    // Write fresh index
     let path = index_path();
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -365,8 +354,6 @@ pub fn reindex() -> Result<usize> {
 
     Ok(entries.len())
 }
-
-// ─── Flight recorder ─────────────────────────────────────────────────
 
 /// Write a flight-recorder markdown summary to runs/.
 pub fn write_flight_record(session: &CouncilSession) -> Result<String> {
@@ -435,8 +422,6 @@ pub(crate) fn flight_record_markdown(session: &CouncilSession) -> String {
     md
 }
 
-// ─── Precedent injection ─────────────────────────────────────────────
-
 /// Format a retrieval receipt for injection into round prompts (Cold Eyes:
 /// injected R2+, not R1 — see engine/deliberate.rs). Citator style: every
 /// hit carries its session id, score, and why-matched so seats can affirm,
@@ -481,8 +466,6 @@ pub fn format_for_injection(receipt: &RetrievalReceipt) -> String {
     );
     text
 }
-
-// ─── Internal helpers ────────────────────────────────────────────────
 
 fn truncate_at_char_boundary(s: &str, max_bytes: usize) -> String {
     if s.len() <= max_bytes {
