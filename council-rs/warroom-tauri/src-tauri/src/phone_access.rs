@@ -577,7 +577,10 @@ pub fn phone_access_enable_on_port(
                 gateway_pack_enabled,
             }));
         }
-        if already_owns_selected && ownership_now.gateway_routes == gateway_pack_enabled {
+        if already_owns_selected
+            && ownership_now.gateway_routes == gateway_pack_enabled
+            && owned_serve.handlers.len() == owned_routes.len()
+        {
             return Ok(phone_access_status(
                 runner,
                 gateway_pack_enabled,
@@ -645,7 +648,8 @@ pub fn phone_access_enable_on_port(
         );
     }
     let expected = irin_serve_routes(gateway_pack_enabled);
-    if !handlers_match_routes(&serve.handlers, &expected) {
+    if !handlers_match_routes(&serve.handlers, &expected) || serve.handlers.len() != expected.len()
+    {
         ownership.interrupted = true;
         ownership.enabled = false;
         save_ownership(&ownership)?;
@@ -1186,10 +1190,7 @@ mod tests {
             Some("http://127.0.0.1:8765")
         );
         assert_eq!(expected_proxy_for_path("/watch", false), None);
-        assert_eq!(
-            expected_proxy_for_path("/watch", true),
-            Some("http://127.0.0.1:18080/watch")
-        );
+        assert_eq!(expected_proxy_for_path("/watch", true), None);
     }
 
     /// Fake runner for enable/disable pure sequencing without a host binary.
@@ -1311,6 +1312,83 @@ mod tests {
         let err = phone_access_enable(&runner, false, false).unwrap_err();
         assert!(err.contains("not authenticated-ready"), "{err}");
         assert!(runner.log.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn legacy_watch_status_and_disable_tears_down_stale_route() {
+        let _g = test_env_lock();
+        let tmp = std::env::temp_dir().join(format!(
+            "phone-legacy-watch-{}-{}",
+            std::process::id(),
+            unix_now()
+        ));
+        let _ = fs::remove_dir_all(&tmp);
+        fs::create_dir_all(&tmp).unwrap();
+        let prev = std::env::var(APP_SUPPORT_ROOT_ENV).ok();
+        std::env::set_var(APP_SUPPORT_ROOT_ENV, &tmp);
+
+        save_ownership(&OwnershipRecord {
+            enabled: true,
+            gateway_routes: true,
+            https_port: 8443,
+            ..OwnershipRecord::default()
+        })
+        .unwrap();
+        write_atomic_0600(
+            prior_status_path().as_path(),
+            br#"{"Web":{},"TCP":{},"AllowFunnel":{}}"#,
+        )
+        .unwrap();
+
+        let status_json =
+            r#"{"BackendState":"Running","Self":{"DNSName":"phone.example.ts.net."}}"#;
+        let legacy_owned = r#"{
+          "TCP":{"8443":{"HTTPS":true}},
+          "Web":{"phone.example.ts.net:8443":{"Handlers":{
+            "/":{"Proxy":"http://127.0.0.1:8765"},
+            "/health":{"Proxy":"http://127.0.0.1:18080/health"},
+            "/watch":{"Proxy":"http://127.0.0.1:18080/watch"}
+          }}}
+        }"#;
+        let empty = r#"{"Web":{},"TCP":{},"AllowFunnel":{}}"#;
+
+        let status_runner = ScriptedRunner::new(vec![
+            ("status --json".into(), Ok(status_json.into())),
+            ("serve status --json".into(), Ok(legacy_owned.into())),
+        ]);
+        let status = phone_access_status(&status_runner, true, true);
+        assert_eq!(status.state, PhoneAccessState::Ready);
+
+        let runner = ScriptedRunner::new(vec![
+            ("serve status --json".into(), Ok(legacy_owned.into())),
+            (
+                "serve --bg --yes --https=8443 --set-path=/health off".into(),
+                Ok(String::new()),
+            ),
+            (
+                "serve --bg --yes --https=8443 --set-path=/watch off".into(),
+                Ok(String::new()),
+            ),
+            (
+                "serve --bg --yes --https=8443 off".into(),
+                Ok(String::new()),
+            ),
+            ("serve status --json".into(), Ok(empty.into())),
+            ("status --json".into(), Ok(status_json.into())),
+            ("serve status --json".into(), Ok(empty.into())),
+        ]);
+        let status = phone_access_disable(&runner, true, true).unwrap();
+        assert_eq!(status.state, PhoneAccessState::Off);
+        assert!(runner.log.lock().unwrap().iter().any(|args| {
+            args.iter().any(|arg| arg == "--set-path=/watch")
+                && args.last().map(String::as_str) == Some("off")
+        }));
+
+        match prev {
+            Some(value) => std::env::set_var(APP_SUPPORT_ROOT_ENV, value),
+            None => std::env::remove_var(APP_SUPPORT_ROOT_ENV),
+        }
+        let _ = fs::remove_dir_all(&tmp);
     }
 
     #[test]
