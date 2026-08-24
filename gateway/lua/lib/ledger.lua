@@ -25,8 +25,9 @@
 --   * Every accepted request emits exactly ONE open-end event
 --     (request_received) + exactly ONE terminating event (one of:
 --     guard_input/blocked, cache_check/hit, route_decide/rejected,
---     budget_check/blocked, policy_evaluate/blocked, outbound_response).
---   * The 6 terminators are mutually exclusive — pick exactly one.
+--     budget_check/blocked, policy_evaluate/blocked, request_rejected,
+--     outbound_response).
+--   * The 7 terminators are mutually exclusive — pick exactly one.
 --   * Therefore a single request schedules AT MOST 2 ledger timers, not 6.
 --   * Each timer runs once and exits (retries happen inside the closure
 --     via ngx.sleep, not via re-scheduling).

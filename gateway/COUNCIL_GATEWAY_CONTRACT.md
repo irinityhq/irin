@@ -259,6 +259,7 @@ non-repudiation.
 | `route_decide` | `rejected` | `{ request_id }` (e.g., unknown model) |
 | `budget_check` | `blocked` | `{ request_id, budget_key }` |
 | `policy_evaluate` | `blocked` | `{ request_id, provider, level }` |
+| `request_rejected` | `rejected` | `{ request_id, status, error_code }` |
 | `outbound_response` | (no decision) | `{ request_id, tokens_in, tokens_out, cached_in, cost_usd, latency_ms, status, response_body_sha256, response_size_bytes, kind? }` |
 | `outbound_batch` | (no decision) | `{ request_id, batch_op, status, response_body_sha256, response_size_bytes }` |
 | `council_replay` | `replay` | `{ request_id, kind: "council_replay", council_session_id, idempotency_key, raw_body_sha256, response_body_sha256, original_request_id, wrapper_cost_usd, latency_ms, status }` |

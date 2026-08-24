@@ -70,26 +70,47 @@ local function check(cond, msg)
     if cond then print("  ok   - " .. msg) else failures = failures + 1; print("  FAIL - " .. msg) end
 end
 
-local function run(native_body)
+local function run_record(record, native_body, error_code, status)
     scheduled, recorded, cache_stores = {}, {}, 0
+    ngx.status = status or 200
     ngx.ctx = {
-        gw = { record = {
-            provider = "openai", request_id = "r1", raw_body = string.rep("x", 40),
-            pricing = { input = 1, output = 1 }, budget_key = "default",
-            caller_key = "k", alias = "gpt", resolved_model = "gpt-test", t0 = 1,
-        } },
+        gw = { record = record },
         gw_response_buf_native = native_body,
+        gw_error_code = error_code,
     }
     cost.account()
     return recorded[1]
 end
 
+local function run(native_body)
+    return run_record({
+        provider = "openai", request_id = "r1", raw_body = string.rep("x", 40),
+        pricing = { input = 1, output = 1 }, budget_key = "default",
+        caller_key = "k", alias = "gpt", resolved_model = "gpt-test", t0 = 1,
+    }, native_body)
+end
+
 local row = run("")
-check(scheduled[1] == "outbound_response", "empty body still schedules outbound_response")
+check(scheduled[1] == "outbound_response" and #scheduled == 1,
+    "empty body schedules exactly one outbound_response")
 check(row ~= nil and row.metadata.tokens_estimated == true, "empty body row is marked tokens_estimated")
 check(row ~= nil and row.metadata.unparsed == true, "empty body row is marked unparsed")
 check(row ~= nil and row.payload.tokens_in == 10 and row.payload.tokens_out == 0, "empty body uses input-only estimate")
 check(cache_stores == 0, "empty body never reaches cache_store")
+
+row = run_record({ request_id = "rejected-1", t0 = 1 }, nil, "ERR_TEST_REJECTED", 422)
+check(scheduled[1] == "request_rejected" and #scheduled == 1,
+    "unrouted request schedules exactly one request_rejected")
+check(row ~= nil and row.payload.request_id == "rejected-1" and row.payload.status == 422,
+    "request_rejected carries request id and response status")
+check(row ~= nil and row.payload.error_code == "ERR_TEST_REJECTED",
+    "request_rejected carries the handler error code")
+check(row ~= nil and row.metadata.action == "request_rejected",
+    "request_rejected records the terminating action")
+
+row = run_record({ request_id = "rejected-2", chain_terminated = true, t0 = 1 },
+    nil, "ERR_ALREADY_TERMINATED")
+check(#scheduled == 0 and row == nil, "already terminated unrouted request schedules nothing")
 
 row = run("not json")
 check(scheduled[1] == "outbound_response", "unparseable body still schedules outbound_response")

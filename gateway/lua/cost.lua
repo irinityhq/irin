@@ -661,10 +661,29 @@ function _M.account()
 
     local latency_ms = math.floor((ngx.now() - (record.t0 or ngx.now())) * 1000)
 
-    -- Requests that errored before route resolution (e.g., unknown model →
-    -- 400, guard block → 403) never reached an upstream provider. There is
-    -- nothing to outcome-report, ledger as outbound_response, or cache.
+    -- Requests that errored before route resolution never reached an upstream
+    -- provider. Close any still-open request chain here; routes that already
+    -- wrote a specific terminator set chain_terminated and remain untouched.
     if not record.provider then
+        if record.request_id and not record.chain_terminated then
+            local fb_request_id = record.request_id
+            local fb_status     = ngx.status
+            local fb_error_code = ngx.ctx.gw_error_code
+            local fb_caller_key = record.caller_key
+            record.chain_terminated = true
+            ledger_schedule("request_rejected", fb_request_id, function(premature)
+                if premature then return end
+                ledger_record("gateway", "client", {
+                    request_id = fb_request_id,
+                    status     = fb_status,
+                    error_code = fb_error_code,
+                }, {
+                    action     = "request_rejected",
+                    decision   = "rejected",
+                    request_id = fb_request_id,
+                }, fb_caller_key)
+            end)
+        end
         return
     end
 
@@ -999,57 +1018,6 @@ function _M.account()
     elseif record.parent_council_request_id and record.parent_council_request_id ~= "" then
         fb_council_kind       = "leaf"
         fb_parent_council_req = record.parent_council_request_id
-    end
-
-    -- Council cleanup is now scheduled early in account() (G-4 fix) so the
-    -- early-return on parse failure doesn't leak the concurrency slot. The
-    -- block below is the legacy site, preserved as a no-op fallback in case
-    -- some success-path field set after the early-block run influenced the
-    -- store payload. With `council_cleanup_scheduled` set, it's skipped.
-    -- P2-B: same client-abort short-circuit as the early-cleanup block
-    -- at line ~702. The on_abort handler in router.lua releases the slot
-    -- synchronously, so this legacy fallback site must also skip.
-    if record.provider == "council" and record.council_locked
-       and not record.council_cleanup_scheduled
-       and not record.council_aborted then
-        local council_caller_ns = record.council_caller_ns
-            or (record.caller_key ~= "" and record.caller_key)
-            or record.budget_key or "default"
-        local council_body = record.council_response_body or normalized_body
-        local cleanup_success = is_success
-        if cleanup_success and (not council_body or #council_body < 2) then
-            ngx.log(ngx.ERR, "council_idem_store skipped: empty response body for ",
-                    record.request_id or "?")
-            cleanup_success = false
-        end
-        -- P0-2: prefer the full snapshot captured at header_filter time
-        -- (record.council_response_headers) over the sparse 3-header fallback.
-        -- The snapshot gives a wire-byte-equal replay; the fallback is kept
-        -- for code paths that bypassed the header_filter capture (e.g. an
-        -- upstream parse error short-circuiting before headers were stamped).
-        local council_headers = record.council_response_headers or {
-            ["X-Council-Session-Id"] = record.council_session_id or "",
-            ["X-Total-Cost-Usd"]     = record.council_total_cost
-                                       and string.format("%.4f", record.council_total_cost) or "",
-            ["X-Chair-Tokens"]       = ngx.var.upstream_http_x_chair_tokens or "",
-        }
-        -- P0-3: stamp owner_request_id + response_body_sha256 so future
-        -- replays of this Idempotency-Key carry `original_request_id` +
-        -- `response_body_sha256` in their `council_replay` ledger rows.
-        local council_resp_sha = council_body
-            and hash.body_sha256_hex(council_body) or ""
-        schedule_council_cleanup(
-            council_caller_ns,
-            record.council_idem_key,
-            record.council_body_sha,
-            cleanup_success,
-            council_body,
-            council_headers,
-            record.request_id,
-            council_resp_sha,
-            record.council_grant_id  -- FIX-1: exact-slot unlock
-        )
-        record.council_cleanup_scheduled = true
     end
 
     if ngx.ctx.gw_credentials_redacted then

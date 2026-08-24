@@ -75,6 +75,7 @@ local _M = {}
 --- @param err_type string|nil Error type (OpenAI-compatible)
 --- @param err_code string|nil Stable error code for metrics/alerting
 local function json_error(status, message, err_type, err_code)
+    ngx.ctx.gw_error_code = err_code
     ngx.status = status
     ngx.header["Content-Type"] = "application/json"
     local error_obj = {
@@ -793,6 +794,7 @@ function _M.route()
         local denied_alias = record.alias
         local denied_req_id = record.request_id
         local denied_caller = record.caller_key
+        record.chain_terminated = true
         ledger_schedule("route_decide", denied_req_id, function(premature)
             if premature then return end
             ledger_record("gateway", denied_alias, { request_id = denied_req_id }, {
@@ -842,6 +844,7 @@ function _M.route()
             local guard_reason     = guard_result.blocked_reason
             local guard_req_id     = record.request_id
             local guard_caller_key = record.caller_key
+            record.chain_terminated = true
             ledger_schedule("guard_input", guard_req_id, function(premature)
                 if premature then return end
                 ledger_record("gateway", guard_alias, {
@@ -948,6 +951,7 @@ function _M.route()
         local fb_role_hit     = record.council_role
         local fb_provider     = cached_provider
         local fb_caller_hit   = record.caller_key
+        record.chain_terminated = true
         ledger_schedule("cache_check", fb_req_id_hit, function(premature)
             if premature then return end
             ledger_record(fb_provider, "client", {
@@ -1022,6 +1026,7 @@ function _M.route()
         local unavailable_req_id = record.request_id
         local unavailable_caller = record.caller_key
         local unavailable_sens   = record.sensitivity
+        record.chain_terminated = true
         ledger_schedule("route_decide", unavailable_req_id, function(premature)
             if premature then return end
             ledger_record("gateway", unavailable_alias, {
@@ -1045,6 +1050,7 @@ function _M.route()
         local fb_req_id_rej   = record.request_id
         local fb_sens_rej     = record.sensitivity
         local fb_caller_rej   = record.caller_key
+        record.chain_terminated = true
         ledger_schedule("route_decide", fb_req_id_rej, function(premature)
             if premature then return end
             ledger_record("gateway", fb_alias_rej, {
@@ -1068,6 +1074,7 @@ function _M.route()
             local fb_alias = record.alias
             local fb_req_id = record.request_id
             local fb_caller = record.caller_key
+            record.chain_terminated = true
             ledger_schedule("route_decide", fb_req_id, function(premature)
                 if premature then return end
                 ledger_record("gateway", fb_alias, { request_id = fb_req_id }, {
@@ -1091,6 +1098,7 @@ function _M.route()
             local fb_alias = record.alias
             local fb_req_id = record.request_id
             local fb_caller = record.caller_key
+            record.chain_terminated = true
             ledger_schedule("route_decide", fb_req_id, function(premature)
                 if premature then return end
                 ledger_record("gateway", fb_alias, { request_id = fb_req_id }, {
@@ -1152,6 +1160,7 @@ function _M.route()
             local fb_req_id_b     = record.request_id
             local fb_reason_b     = budget_result.reason
             local fb_caller_b     = record.caller_key
+            record.chain_terminated = true
             ledger_schedule("budget_check", fb_req_id_b, function(premature)
                 if premature then return end
                 ledger_record("gateway", fb_alias_b, {
@@ -1187,6 +1196,7 @@ function _M.route()
         local fb_reason_p    = policy_result.reason
         local fb_sens_p      = record.sensitivity
         local fb_caller_p    = record.caller_key
+        record.chain_terminated = true
         ledger_schedule("policy_evaluate", fb_req_id_p, function(premature)
             if premature then return end
             ledger_record("gateway", fb_alias_p, {
