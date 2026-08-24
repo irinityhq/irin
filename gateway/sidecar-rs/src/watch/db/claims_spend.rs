@@ -210,8 +210,10 @@ impl WatchDb {
         let retry_backoff_ms = Self::RETRY_BACKOFF_MS;
         // Resolve the registry OUTSIDE the SQLite closure (boot static / override).
         let registry = registry_override.or_else(crate::watch::attest::boot_registry);
+        let dispatch = tracing::dispatcher::get_default(Clone::clone);
         self.conn
             .call(move |conn| -> Result<Option<PendingClaim>, rusqlite::Error> {
+                let _dispatch_guard = tracing::dispatcher::set_default(&dispatch);
                 let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
 
                 let now_ms = std::time::SystemTime::now()
@@ -300,7 +302,8 @@ impl WatchDb {
                         ) {
                             // Narrow-only ceiling, in i64 cents, off the SIGNED cap.
                             Ok(signed_cap_cents) => signed_cap_cents.min(ambient_cents),
-                            Err(_refusal) => {
+                            Err(refusal) => {
+                                tracing::warn!(reason = %refusal, "arm reserve refused");
                                 tx.rollback()?;
                                 return Ok(None);
                             }
