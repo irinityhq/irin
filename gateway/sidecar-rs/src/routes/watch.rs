@@ -171,9 +171,7 @@ pub(super) async fn watch_list_outbox(
     watch::api::list_outbox_json(
         state.watch_db.clone(),
         tenant,
-        status,
-        cursor,
-        limit,
+        (status, cursor, limit),
         state.watch_admin_token.clone(),
         bearer,
         &state.watch_canary_tenant,
