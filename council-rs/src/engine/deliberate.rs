@@ -2268,20 +2268,6 @@ fn provider_provenance_error_context(
         .unwrap_or_default()
 }
 
-/// Chair synthesis — final ruling.
-///
-/// Phase 0.5 §4.7 (P0 #1): returns `ChairResult { text, tokens_in, tokens_out,
-/// cost_usd }` instead of the bare text. Caller threads chair_cost into
-/// `total_cost_usd` and populates the `chair_tokens_{in,out}` fields on
-/// `CouncilSession` so the `/api/deliberate` response can emit them in
-/// `usage.completion_tokens` + `X-Chair-Tokens`.
-///
-/// output-fidelity invariant (the invariant): full raw transcript
-/// (all prior round responses.text) is passed to chair prompt for synthesis; the
-/// complete chair.text (raw, incl. any fence for proposal.v1) is stored verbatim
-/// in session.synthesis for the sessions/*.json. Raw chatter never enters
-/// envelope_json_canonical (gateway outbox guard + dispatcher parse only the fenced
-/// proposal.v1). Non-goal per contract: no change to finish_reason behavior.
 /// Build the Chair user prompt shared by engine and stream deliberation paths.
 pub fn build_chair_prompt(
     topic: &str,
@@ -2402,6 +2388,20 @@ pub fn build_chair_prompt(
     prompt
 }
 
+/// Chair synthesis — final ruling.
+///
+/// Phase 0.5 §4.7 (P0 #1): returns `ChairResult { text, tokens_in, tokens_out,
+/// cost_usd }` instead of the bare text. Caller threads chair_cost into
+/// `total_cost_usd` and populates the `chair_tokens_{in,out}` fields on
+/// `CouncilSession` so the `/api/deliberate` response can emit them in
+/// `usage.completion_tokens` + `X-Chair-Tokens`.
+///
+/// output-fidelity invariant (the invariant): full raw transcript
+/// (all prior round responses.text) is passed to chair prompt for synthesis; the
+/// complete chair.text (raw, incl. any fence for proposal.v1) is stored verbatim
+/// in session.synthesis for the sessions/*.json. Raw chatter never enters
+/// envelope_json_canonical (gateway outbox guard + dispatcher parse only the fenced
+/// proposal.v1). Non-goal per contract: no change to finish_reason behavior.
 #[allow(clippy::too_many_arguments)]
 async fn synthesize(
     config: &Config,
