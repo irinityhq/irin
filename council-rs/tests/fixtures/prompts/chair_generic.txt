@@ -35,4 +35,3 @@ You may incorporate, challenge, or overrule this signal.
 ## Sheldon Validator Report (AUTHORITATIVE GROUND TRUTH)
 
 --- END AUTHORITATIVE VALIDATOR REPORT ---
-

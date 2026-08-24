@@ -63,7 +63,11 @@ fn generic_chair_prompt_is_golden() {
         false,
     );
 
-    assert_eq!(prompt, include_str!("fixtures/prompts/chair_generic.txt"));
+    // git diff --check forbids a blank line at fixture EOF; append the prompt's final newline here.
+    assert_eq!(
+        prompt,
+        concat!(include_str!("fixtures/prompts/chair_generic.txt"), "\n")
+    );
 }
 
 #[test]
@@ -79,5 +83,9 @@ fn directive_fence_chair_prompt_matches_prechange_capture() {
         true,
     );
 
-    assert_eq!(prompt, include_str!("fixtures/prompts/chair_fence.txt"));
+    // git diff --check forbids a blank line at fixture EOF; append the prompt's final newline here.
+    assert_eq!(
+        prompt,
+        concat!(include_str!("fixtures/prompts/chair_fence.txt"), "\n")
+    );
 }

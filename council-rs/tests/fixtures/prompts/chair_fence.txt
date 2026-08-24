@@ -47,4 +47,3 @@ SpecOps saw the same risk.
 ## Sheldon Validator Report (AUTHORITATIVE GROUND TRUTH)
 
 --- END AUTHORITATIVE VALIDATOR REPORT ---
-
