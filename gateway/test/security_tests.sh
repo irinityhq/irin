@@ -42,6 +42,31 @@ fail() { echo -e "${RED}FAIL${NC}: $1"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 skip() { echo -e "${YELLOW}SKIP${NC}: $1"; SKIP_COUNT=$((SKIP_COUNT + 1)); }
 section() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
 
+SIDECAR_STOPPED=0
+restart_sidecar() {
+    if [ "$SIDECAR_STOPPED" = "1" ]; then
+        if ! docker compose start sidecar >/dev/null; then
+            fail "Sidecar restart failed"
+            return 1
+        fi
+
+        local attempt=0
+        while [ "$attempt" -lt 20 ]; do
+            if docker compose exec -T sidecar wget -q -O /dev/null \
+                http://127.0.0.1:9000/health >/dev/null 2>&1; then
+                SIDECAR_STOPPED=0
+                return 0
+            fi
+            attempt=$((attempt + 1))
+            sleep 1
+        done
+
+        fail "Sidecar health did not recover after restart"
+        return 1
+    fi
+}
+trap restart_sidecar EXIT
+
 # Auth helper — uses GW_TEST_KEY if present, otherwise sends an obviously
 # fake key (which lets us still exercise the auth-rejection path). Tests
 # that REQUIRE a valid key should branch on $GW_TEST_KEY directly.
@@ -499,6 +524,66 @@ case "$CODE" in
     500|502|504) fail "5g. CRLF in header crashed gateway (${CODE})" ;;
     *)           assert_not_internal_error "$CODE" "5g. CRLF in header" ;;
 esac
+
+# ==========================================================================
+# 6. TOTAL SIDECAR OUTAGE
+# A total outage fails closed at sidecar-backed auth before routing. The
+# post-auth route/policy fail-closed behavior for a partial outage is proven by
+# test/sidecar_failclosed_test.lua; the existing S-07 tests cover the exact
+# Council-transport carve-out after successful auth.
+# ==========================================================================
+section "6. Total Sidecar Outage"
+
+assert_outage_refused_without_completion() {
+    local response="$1" code="$2" label="$3"
+    case "$code" in
+        401|503) pass "$label — refused fail-closed (${code})" ;;
+        *)       fail "$label — ${code} (expected 401 or 503)" ;;
+    esac
+    if printf '%s' "$response" | grep -qiE 'X-Routed-Provider:|"choices"[[:space:]]*:|"output"[[:space:]]*:'; then
+        fail "$label — provider response or completion body leaked through outage"
+    else
+        pass "$label — no provider response or completion body"
+    fi
+}
+
+if docker compose stop sidecar >/dev/null; then
+    SIDECAR_STOPPED=1
+    OUTAGE_KEY="${GW_TEST_KEY:-gw_sidecar_outage_probe}"
+
+    RESPONSE=$(curl -sS -i --max-time 10 -w $'\n__STATUS__:%{http_code}' \
+      -X POST "${GW_URL}/v1/chat/completions" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${OUTAGE_KEY}" \
+      -d '{"model":"fast","messages":[{"role":"user","content":"outage"}]}' || true)
+    CODE="${RESPONSE##*__STATUS__:}"
+    assert_outage_refused_without_completion "$RESPONSE" "$CODE" \
+        "6a. No transport header during total outage"
+
+    RESPONSE=$(curl -sS -i --max-time 10 -w $'\n__STATUS__:%{http_code}' \
+      -X POST "${GW_URL}/v1/chat/completions" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${OUTAGE_KEY}" \
+      -H "X-Council-Transport-ID: grok_api" \
+      -d '{"model":"fast","messages":[{"role":"user","content":"outage"}]}' || true)
+    CODE="${RESPONSE##*__STATUS__:}"
+    assert_outage_refused_without_completion "$RESPONSE" "$CODE" \
+        "6b. Exact transport header during total outage"
+
+    RESPONSE=$(curl -sS -i --max-time 10 -w $'\n__STATUS__:%{http_code}' \
+      -X POST "${GW_URL}/v1/chat/completions" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${OUTAGE_KEY}" \
+      -H "X-Sensitivity-Level: RED" \
+      -d '{"model":"fast","messages":[{"role":"user","content":"outage"}]}' || true)
+    CODE="${RESPONSE##*__STATUS__:}"
+    assert_outage_refused_without_completion "$RESPONSE" "$CODE" \
+        "6c. RED sensitivity during total outage"
+
+    restart_sidecar
+else
+    fail "6. Could not stop sidecar container for outage vectors"
+fi
 
 # ==========================================================================
 echo ""
