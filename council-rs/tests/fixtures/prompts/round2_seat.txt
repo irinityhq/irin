@@ -1,0 +1,28 @@
+BUDGET SIGNAL
+
+---
+
+## Prior Council Precedent
+
+Prior precedent.
+---
+
+OPERATOR INTERVENTION:
+Operator asks for scope.
+
+---
+
+TOPIC: Should IRIN act?
+
+YOUR MOST RECENT ANALYSIS:
+Evidence supports a narrow read-only review.
+
+FULL DELIBERATION HISTORY:
+────────────────────────────────────────
+
+### Round 1
+**Reviewer (grok)**: Peer analysis challenges the timing.
+
+────────────────────────────────────────
+
+This is round 2. Considering the full history, refine your analysis. Where do you agree? Where do you push back? What new insight emerges?
