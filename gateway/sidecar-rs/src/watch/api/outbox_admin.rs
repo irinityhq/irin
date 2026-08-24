@@ -28,10 +28,13 @@ use super::helpers::{
 /// `GET /watch/outbox/{tenant}?status=&limit=` — tenant-scoped list (newest first).
 /// Returns the rows plus the canonical + signature fields needed for UI-side
 /// Ed25519 verification against the pubkey from /watch/outbox/pubkey.
+#[allow(clippy::too_many_arguments)] // stable outbox-list handler API; mirrors router state fields plus the caller credential pair.
 pub async fn list_outbox_json(
     db: Arc<WatchDb>,
     tenant: String,
-    params: (Option<String>, Option<String>, i64),
+    status: Option<String>,
+    cursor: Option<String>,
+    limit: i64,
     admin_token: String,
     bearer: Option<String>,
     canary_tenant: &str,
@@ -50,7 +53,6 @@ pub async fn list_outbox_json(
     if let Some(resp) = assert_canary_tenant(&tenant, canary_tenant) {
         return resp;
     }
-    let (status, cursor, limit) = params;
     let requested_limit = limit.clamp(1, 200);
     let cursor_tuple = match cursor.as_deref().map(decode_outbox_cursor).transpose() {
         Ok(c) => c,

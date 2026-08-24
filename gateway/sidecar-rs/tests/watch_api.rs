@@ -2037,7 +2037,9 @@ fn outbox_router(state: OutboxState) -> Router {
                     list_outbox_json(
                         s.db,
                         tenant,
-                        (status, cursor, limit),
+                        status,
+                        cursor,
+                        limit,
                         s.admin_token.clone(),
                         Some(s.admin_token),
                         &canary,
@@ -2071,7 +2073,7 @@ fn outbox_router(state: OutboxState) -> Router {
             get(
                 |State(s): State<OutboxState>, Path(tenant): Path<String>| async move {
                     let canary = s.canary_tenant.clone();
-                    list_outbox_json(s.db, tenant, (None, None, 1), s.admin_token, None, &canary)
+                    list_outbox_json(s.db, tenant, None, None, 1, s.admin_token, None, &canary)
                         .await
                 },
             ),
@@ -2152,7 +2154,9 @@ fn outbox_router(state: OutboxState) -> Router {
                     list_outbox_json(
                         s.db,
                         tenant,
-                        (None, None, 50),
+                        None,
+                        None,
+                        50,
                         s.admin_token,
                         bearer,
                         &canary,
@@ -3308,7 +3312,9 @@ async fn t1_outbox_unauthed_list_is_401() {
     let resp = list_outbox_json(
         db,
         "sovereign".to_string(),
-        (None, None, 50),
+        None,
+        None,
+        50,
         "super-secret".to_string(),
         None,
         "sovereign",
