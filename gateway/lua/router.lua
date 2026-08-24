@@ -33,6 +33,12 @@ local council_transport = require "lib.council_transport"
 -- `sidecar\.` never appears inside an `ngx.timer.at` body.
 local ledger_record   = ledger.record_with_retry
 local ledger_schedule = ledger.schedule
+
+local function schedule_terminator(record, action, request_id, fn)
+    local ok = ledger_schedule(action, request_id, fn)
+    if ok then record.chain_terminated = true end
+    return ok
+end
 -- P2-B: pin sidecar.council_unlock at module load so the ngx.on_abort
 -- handler registered below holds a function pointer, not a table lookup.
 -- The abort closure fires AFTER the access phase exits — same hot-reload
@@ -794,8 +800,7 @@ function _M.route()
         local denied_alias = record.alias
         local denied_req_id = record.request_id
         local denied_caller = record.caller_key
-        record.chain_terminated = true
-        ledger_schedule("route_decide", denied_req_id, function(premature)
+        schedule_terminator(record, "route_decide", denied_req_id, function(premature)
             if premature then return end
             ledger_record("gateway", denied_alias, { request_id = denied_req_id }, {
                 action = "route_decide",
@@ -844,8 +849,7 @@ function _M.route()
             local guard_reason     = guard_result.blocked_reason
             local guard_req_id     = record.request_id
             local guard_caller_key = record.caller_key
-            record.chain_terminated = true
-            ledger_schedule("guard_input", guard_req_id, function(premature)
+            schedule_terminator(record, "guard_input", guard_req_id, function(premature)
                 if premature then return end
                 ledger_record("gateway", guard_alias, {
                     request_id = guard_req_id,
@@ -951,8 +955,7 @@ function _M.route()
         local fb_role_hit     = record.council_role
         local fb_provider     = cached_provider
         local fb_caller_hit   = record.caller_key
-        record.chain_terminated = true
-        ledger_schedule("cache_check", fb_req_id_hit, function(premature)
+        schedule_terminator(record, "cache_check", fb_req_id_hit, function(premature)
             if premature then return end
             ledger_record(fb_provider, "client", {
                 request_id           = fb_req_id_hit,
@@ -1026,8 +1029,7 @@ function _M.route()
         local unavailable_req_id = record.request_id
         local unavailable_caller = record.caller_key
         local unavailable_sens   = record.sensitivity
-        record.chain_terminated = true
-        ledger_schedule("route_decide", unavailable_req_id, function(premature)
+        schedule_terminator(record, "route_decide", unavailable_req_id, function(premature)
             if premature then return end
             ledger_record("gateway", unavailable_alias, {
                 request_id = unavailable_req_id,
@@ -1050,8 +1052,7 @@ function _M.route()
         local fb_req_id_rej   = record.request_id
         local fb_sens_rej     = record.sensitivity
         local fb_caller_rej   = record.caller_key
-        record.chain_terminated = true
-        ledger_schedule("route_decide", fb_req_id_rej, function(premature)
+        schedule_terminator(record, "route_decide", fb_req_id_rej, function(premature)
             if premature then return end
             ledger_record("gateway", fb_alias_rej, {
                 request_id = fb_req_id_rej,
@@ -1074,8 +1075,7 @@ function _M.route()
             local fb_alias = record.alias
             local fb_req_id = record.request_id
             local fb_caller = record.caller_key
-            record.chain_terminated = true
-            ledger_schedule("route_decide", fb_req_id, function(premature)
+            schedule_terminator(record, "route_decide", fb_req_id, function(premature)
                 if premature then return end
                 ledger_record("gateway", fb_alias, { request_id = fb_req_id }, {
                     action = "route_decide",
@@ -1098,8 +1098,7 @@ function _M.route()
             local fb_alias = record.alias
             local fb_req_id = record.request_id
             local fb_caller = record.caller_key
-            record.chain_terminated = true
-            ledger_schedule("route_decide", fb_req_id, function(premature)
+            schedule_terminator(record, "route_decide", fb_req_id, function(premature)
                 if premature then return end
                 ledger_record("gateway", fb_alias, { request_id = fb_req_id }, {
                     action = "route_decide",
@@ -1160,8 +1159,7 @@ function _M.route()
             local fb_req_id_b     = record.request_id
             local fb_reason_b     = budget_result.reason
             local fb_caller_b     = record.caller_key
-            record.chain_terminated = true
-            ledger_schedule("budget_check", fb_req_id_b, function(premature)
+            schedule_terminator(record, "budget_check", fb_req_id_b, function(premature)
                 if premature then return end
                 ledger_record("gateway", fb_alias_b, {
                     request_id = fb_req_id_b,
@@ -1196,8 +1194,7 @@ function _M.route()
         local fb_reason_p    = policy_result.reason
         local fb_sens_p      = record.sensitivity
         local fb_caller_p    = record.caller_key
-        record.chain_terminated = true
-        ledger_schedule("policy_evaluate", fb_req_id_p, function(premature)
+        schedule_terminator(record, "policy_evaluate", fb_req_id_p, function(premature)
             if premature then return end
             ledger_record("gateway", fb_alias_p, {
                 request_id = fb_req_id_p,

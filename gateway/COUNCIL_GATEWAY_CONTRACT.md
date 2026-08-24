@@ -250,7 +250,7 @@ bytes. It is a **one-way hash, not content** — the gateway has no
 opinion on the body, but signs a fingerprint of what was received for
 non-repudiation.
 
-### Terminating events (exactly one fires per accepted request)
+### Terminating events (exactly one fires per opened chain)
 
 | Action | Decision | Payload includes |
 |---|---|---|
@@ -264,8 +264,10 @@ non-repudiation.
 | `outbound_batch` | (no decision) | `{ request_id, batch_op, status, response_body_sha256, response_size_bytes }` |
 | `council_replay` | `replay` | `{ request_id, kind: "council_replay", council_session_id, idempotency_key, raw_body_sha256, response_body_sha256, original_request_id, wrapper_cost_usd, latency_ms, status }` |
 
-The `batch_received` action is the open-end equivalent for `/v1/batches`
-requests (mirrors `request_received`).
+The first seven actions terminate ordinary `request_received` chains.
+`request_rejected` covers ordinary requests that fail before provider
+resolution. `outbound_batch` terminates `batch_received` chains, and
+`council_replay` terminates replay chains.
 
 `response_body_sha256` hashes the **post-translate wire bytes** — what
 the client actually received, not the upstream native body. This is

@@ -670,8 +670,7 @@ function _M.account()
             local fb_status     = ngx.status
             local fb_error_code = ngx.ctx.gw_error_code
             local fb_caller_key = record.caller_key
-            record.chain_terminated = true
-            ledger_schedule("request_rejected", fb_request_id, function(premature)
+            local scheduled_ok = ledger_schedule("request_rejected", fb_request_id, function(premature)
                 if premature then return end
                 ledger_record("gateway", "client", {
                     request_id = fb_request_id,
@@ -683,6 +682,7 @@ function _M.account()
                     request_id = fb_request_id,
                 }, fb_caller_key)
             end)
+            if scheduled_ok then record.chain_terminated = true end
         end
         return
     end

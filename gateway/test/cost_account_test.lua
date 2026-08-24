@@ -6,6 +6,11 @@ package.path = "./?.lua;./lua/?.lua;" .. package.path
 
 local scheduled, recorded, cache_stores = {}, {}, 0
 
+local function working_timer_at(_, fn)
+    fn(false)
+    return true
+end
+
 package.preload["cjson.safe"] = function()
     return {
         decode = function(s)
@@ -41,8 +46,10 @@ package.preload["lib.ledger"] = function()
             recorded[#recorded + 1] = { payload = payload, metadata = metadata }
         end,
         schedule = function(action, request_id, fn)
-            scheduled[#scheduled + 1] = action
-            fn(false)
+            return ngx.timer.at(0, function(premature)
+                scheduled[#scheduled + 1] = action
+                fn(premature)
+            end)
         end,
     }
 end
@@ -59,7 +66,7 @@ _G.ngx = {
     shared = {},
     var = {},
     header = {},
-    timer = { at = function(_, fn) fn(false) end },
+    timer = { at = working_timer_at },
     ctx = {},
 }
 
@@ -70,8 +77,9 @@ local function check(cond, msg)
     if cond then print("  ok   - " .. msg) else failures = failures + 1; print("  FAIL - " .. msg) end
 end
 
-local function run_record(record, native_body, error_code, status)
+local function run_record(record, native_body, error_code, status, timer_at)
     scheduled, recorded, cache_stores = {}, {}, 0
+    ngx.timer.at = timer_at or working_timer_at
     ngx.status = status or 200
     ngx.ctx = {
         gw = { record = record },
@@ -107,6 +115,16 @@ check(row ~= nil and row.payload.error_code == "ERR_TEST_REJECTED",
     "request_rejected carries the handler error code")
 check(row ~= nil and row.metadata.action == "request_rejected",
     "request_rejected records the terminating action")
+
+local retry_record = { request_id = "rejected-retry", t0 = 1 }
+row = run_record(retry_record, nil, "ERR_TIMER_REJECTED", 503,
+    function() return nil, "timer pool full" end)
+check(retry_record.chain_terminated ~= true and #scheduled == 0 and row == nil,
+    "timer rejection leaves the unrouted request unterminated")
+row = run_record(retry_record, nil, "ERR_TIMER_REJECTED", 503)
+check(retry_record.chain_terminated == true and scheduled[1] == "request_rejected"
+        and #scheduled == 1 and row ~= nil,
+    "working scheduler can terminate the request after a timer rejection")
 
 row = run_record({ request_id = "rejected-2", chain_terminated = true, t0 = 1 },
     nil, "ERR_ALREADY_TERMINATED")
