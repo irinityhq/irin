@@ -53,11 +53,9 @@ pub(crate) fn has_usable_seat_response(rounds: &[RoundResult]) -> bool {
 /// BATS Wedge 1: Lightweight budget tracker injection.
 /// Fetches real-time daily remaining from hermes-budget-guard.sh (respects caps, no bypass).
 /// Returns (formatted_signal, tier).
-/// Optional task_id for per-task logging into spend sqlite (zero-cost marker for traceability).
-pub fn fetch_budget_signal(profile: Option<&str>, task_id: Option<&str>) -> (String, String) {
+pub fn fetch_budget_signal(profile: Option<&str>, _task_id: Option<&str>) -> (String, String) {
     let profile = profile.unwrap_or("default");
-    // Overridable for non-default installs; absent guard falls through to the
-    // graceful defaults below.
+    // Overridable for non-default installs; an absent or failing guard emits no signal.
     let guard = std::env::var("HERMES_BUDGET_GUARD_SCRIPT").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_default();
         format!("{home}/.hermes/scripts/hermes-budget-guard.sh")
@@ -85,23 +83,9 @@ pub fn fetch_budget_signal(profile: Option<&str>, task_id: Option<&str>) -> (Str
                     p = v.trim().parse().unwrap_or(0);
                 }
             }
-            // Per-task logging marker
-            if let Some(tid) = task_id {
-                let db = std::env::var("HERMES_BUDGET_DB").unwrap_or_else(|_| {
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    format!("{home}/.hermes/budget.db")
-                });
-                let _ = Command::new("sqlite3")
-                    .arg(&db)
-                    .arg(format!(
-                        "INSERT OR IGNORE INTO spend (profile, cost_usd, task_id, day) VALUES ('{}', 0.0, '{}', date('now'));",
-                        profile, tid
-                    ))
-                    .output();
-            }
             (rem, sp, c, p)
         }
-        _ => (7.0, 0.0, 7.0, 0),
+        _ => return (String::new(), "UNKNOWN".to_string()),
     };
 
     let tier = if pct >= 90 || remaining < 0.5 {
