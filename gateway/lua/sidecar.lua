@@ -353,10 +353,11 @@ end
 --- Post-flight: record actual cost against budget.
 -- @param budget_key  string  Per-user/per-org budget key
 -- @param actual_cost number  Actual cost in USD
-function _M.budget_record(budget_key, actual_cost)
+function _M.budget_record(budget_key, actual_cost, estimated_cost)
     local result, err = sidecar_post("/budget/record", {
-        budget_key  = budget_key,
-        actual_cost = actual_cost,
+        budget_key     = budget_key,
+        actual_cost    = actual_cost,
+        estimated_cost = estimated_cost or 0,
     })
     if err then
         ngx.log(ngx.WARN, "sidecar: budget record failed: ", err)

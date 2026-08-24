@@ -4,7 +4,7 @@
 -- and the request left no ledger row. Run from gateway/: `make lua-unit`.
 package.path = "./?.lua;./lua/?.lua;" .. package.path
 
-local scheduled, recorded, cache_stores = {}, {}, 0
+local scheduled, recorded, budget_records, cache_stores = {}, {}, {}, 0
 
 local function working_timer_at(_, fn)
     fn(false)
@@ -33,7 +33,12 @@ package.preload["translator"] = function() return { TRANSLATOR_VERSION = "test" 
 package.preload["sidecar"] = function()
     local noop = function() end
     return {
-        route_outcome = noop, budget_record = noop,
+        route_outcome = noop,
+        budget_record = function(key, actual, estimate)
+            budget_records[#budget_records + 1] = {
+                key = key, actual = actual, estimate = estimate,
+            }
+        end,
         cache_store = function() cache_stores = cache_stores + 1 end,
         council_unlock = noop, council_idempotency_store = noop,
         council_idempotency_fail = noop, council_stats = noop, watch_stats = noop,
@@ -78,7 +83,7 @@ local function check(cond, msg)
 end
 
 local function run_record(record, native_body, error_code, status, timer_at)
-    scheduled, recorded, cache_stores = {}, {}, 0
+    scheduled, recorded, budget_records, cache_stores = {}, {}, {}, 0
     ngx.timer.at = timer_at or working_timer_at
     ngx.status = status or 200
     ngx.ctx = {
@@ -94,6 +99,7 @@ local function run(native_body)
     return run_record({
         provider = "openai", request_id = "r1", raw_body = string.rep("x", 40),
         pricing = { input = 1, output = 1 }, budget_key = "default",
+        budget_estimated_usd = 0.05,
         caller_key = "k", alias = "gpt", resolved_model = "gpt-test", t0 = 1,
     }, native_body)
 end
@@ -105,8 +111,15 @@ check(row ~= nil and row.metadata.tokens_estimated == true, "empty body row is m
 check(row ~= nil and row.metadata.unparsed == true, "empty body row is marked unparsed")
 check(row ~= nil and row.payload.tokens_in == 10 and row.payload.tokens_out == 0, "empty body uses input-only estimate")
 check(cache_stores == 0, "empty body never reaches cache_store")
+check(#budget_records == 1 and budget_records[1].key == "default"
+        and math.abs(budget_records[1].actual - 0.00001) < 0.0000001
+        and budget_records[1].estimate == 0.05,
+    "empty body settles its estimate to the calculated actual cost")
 
-row = run_record({ request_id = "rejected-1", t0 = 1 }, nil, "ERR_TEST_REJECTED", 422)
+row = run_record({
+    request_id = "rejected-1", budget_key = "team-a",
+    budget_estimated_usd = 0.05, t0 = 1,
+}, nil, "ERR_TEST_REJECTED", 422)
 check(scheduled[1] == "request_rejected" and #scheduled == 1,
     "unrouted request schedules exactly one request_rejected")
 check(row ~= nil and row.payload.request_id == "rejected-1" and row.payload.status == 422,
@@ -115,6 +128,25 @@ check(row ~= nil and row.payload.error_code == "ERR_TEST_REJECTED",
     "request_rejected carries the handler error code")
 check(row ~= nil and row.metadata.action == "request_rejected",
     "request_rejected records the terminating action")
+check(#budget_records == 1 and budget_records[1].key == "team-a"
+        and budget_records[1].actual == 0 and budget_records[1].estimate == 0.05,
+    "unrouted request releases its budget estimate with zero actual cost")
+
+row = run_record({
+    request_id = "budget-check-rejected", budget_key = "team-a", t0 = 1,
+}, nil, "ERR_BUDGET_EXCEEDED", 429)
+check(#budget_records == 0,
+    "rejected budget check without a retained estimate schedules no budget record")
+
+row = run_record({
+    request_id = "budget-release-timer-rejected",
+    budget_key = "team-a",
+    budget_estimated_usd = 0.05,
+    t0 = 1,
+}, nil, "ERR_POLICY_VIOLATION", 403,
+    function() return nil, "timer pool full" end)
+check(#budget_records == 0,
+    "rejected budget release timer schedules no budget record")
 
 local retry_record = { request_id = "rejected-retry", t0 = 1 }
 row = run_record(retry_record, nil, "ERR_TIMER_REJECTED", 503,

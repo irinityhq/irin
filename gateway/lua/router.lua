@@ -382,6 +382,9 @@ local function route_batch(headers, raw_body)
     -- recorded when the caller fetches /output and the JSONL is parsed.
     if record.budget_key and record.budget_key ~= "default" then
         local budget_result = sidecar.budget_check(record.budget_key, 0)
+        if budget_result and budget_result.allowed then
+            record.budget_estimated_usd = 0
+        end
         if budget_result and not budget_result.allowed then
             local fb_bk      = record.budget_key
             local fb_reason  = budget_result.reason
@@ -1150,6 +1153,9 @@ function _M.route()
         local estimated_cost = ((pricing.output or 0) * 1000) / 1000000  -- 1K output tokens
 
         local budget_result = sidecar.budget_check(record.budget_key, estimated_cost)
+        if budget_result and budget_result.allowed then
+            record.budget_estimated_usd = estimated_cost
+        end
         if budget_result and not budget_result.allowed then
             ngx.log(ngx.WARN, "router: budget exceeded for key=", record.budget_key,
                     " reason=", budget_result.reason or "")
