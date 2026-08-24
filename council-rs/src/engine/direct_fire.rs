@@ -3,13 +3,19 @@
 //! One source of truth for the five direct-fire personas, shared by:
 //! - the CLI handlers (`--contrarian`, `--munger`, `--kiss-review`,
 //!   `--specops`, `--premortem`) in main.rs
-//! - streaming escalations (`stream::deliberate::run_escalation`)
+//! - council and streaming escalations (`run_escalation`)
 //! - the WS `direct_fire` single-shot path (feature contract)
 //!
 //! Transport IDs are explicit: Grok personas use the Hermes OAuth adapter and
 //! KISS uses the Claude Code subscription CLI.
 
-use crate::types::SessionMode;
+use serde::{Deserialize, Serialize};
+
+use crate::config::Config;
+use crate::engine::context::RequestContext;
+use crate::engine::deliberate::truncate_utf8;
+use crate::provider;
+use crate::types::{RoundResult, SessionMode};
 
 /// A direct-fire persona: system prompt + provider/model assignment.
 #[derive(Debug)]
@@ -97,6 +103,78 @@ pub fn build_prompt(topic: &str, context: &str) -> String {
         topic.to_string()
     } else {
         format!("{}\n\n---\n\n{}", context.trim(), topic)
+    }
+}
+
+/// Escalation result (SpecOps, Munger, Contrarian, KISS).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct EscalationResult {
+    pub text: String,
+    pub model: String,
+    pub latency_ms: u64,
+    pub cost_usd: f64,
+    pub tokens_in: u32,
+    pub tokens_out: u32,
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+/// Run an escalation (SpecOps swarm, Munger, Contrarian, KISS, or Premortem).
+pub(crate) async fn run_escalation(
+    config: &Config,
+    topic: &str,
+    rounds: &[RoundResult],
+    mode: &str,
+    req_ctx: &RequestContext,
+) -> EscalationResult {
+    // Build transcript from all rounds
+    let mut transcript = String::new();
+    for rnd in rounds {
+        for resp in &rnd.responses {
+            if !resp.text.is_empty() && resp.error.is_none() {
+                let truncated = truncate_utf8(&resp.text, 1000);
+                transcript.push_str(&format!(
+                    "[{} R{}]: {}\n\n",
+                    resp.seat_name, resp.round_num, truncated
+                ));
+            }
+        }
+    }
+
+    // Shared persona specs (engine::direct_fire) — same prompts/providers as
+    // the CLI direct-fire handlers, single source of truth.
+    let (system, provider_name, model) = match spec(mode) {
+        Some(spec) => (spec.system, spec.provider, spec.model),
+        None => ("Analyze and provide your verdict.", "grok", ""),
+    };
+
+    let prompt = if transcript.is_empty() {
+        topic.to_string()
+    } else {
+        format!(
+            "TOPIC: {}\n\nDELIBERATION TRANSCRIPT:\n{}\n\n---\n\n\
+             Cut through the noise. What is the ONE thing that actually matters? \
+             Give me the signal, not the framework. One paragraph max.",
+            topic, transcript
+        )
+    };
+
+    let resp = provider::ask_with_context(provider_name, &prompt, system, model, req_ctx).await;
+    let cost =
+        config
+            .models
+            .estimate_cost(&resp.model, resp.tokens_in, resp.tokens_out, resp.cached_in);
+
+    EscalationResult {
+        text: resp.text,
+        model: resp.model,
+        latency_ms: resp.latency_ms,
+        cost_usd: cost,
+        tokens_in: resp.tokens_in,
+        tokens_out: resp.tokens_out,
+        mode: mode.to_string(),
+        error: resp.error,
     }
 }
 

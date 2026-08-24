@@ -1,9 +1,5 @@
-//! Streaming deliberation — the core async generator.
-//!
-//! Re-orchestrates the engine's deliberation loop to yield StreamEvents
-//! via a tokio mpsc channel.
-//! Includes pause/resume, intervention handling, SpecOps escalation,
-//! and the race-condition fix (re-pause after escalation).
+//! REST and CLI deliberation use `crate::engine::deliberate::run_with_cancel`.
+//! WebSocket deliberation uses `crate::stream::deliberate::run`, which imports engine helpers and adds events, pause/resume, and interventions.
 
 use chrono::Utc;
 use serde_json::json;
@@ -25,7 +21,7 @@ use crate::engine::deliberate::{
     convergence_quality_penalty_enabled, effective_convergence_threshold,
     governed_alternative_transport_model_groups, governed_required_transport_models,
     has_usable_seat_response, judge_round, save_session, seat_preamble_for,
-    should_pause_for_budget, truncate_utf8,
+    should_pause_for_budget,
 };
 use crate::mode::Mode;
 use crate::precedent;
@@ -265,7 +261,6 @@ async fn run_stream_phases(ready: StreamRunReady, interventions: &mut Interventi
             mode,
             &precedent_text,
             accum.cumulative_spend,
-            &available_set,
         )
         .await
         else {
@@ -1175,7 +1170,6 @@ async fn run_round_operator_pause(
     all_rounds: &[RoundResult],
     manual_specops_signal: &mut String,
     specops_cost_usd: &mut f64,
-    available_set: &std::collections::HashSet<&str>,
 ) -> Option<RoundOperatorControl> {
     let StreamRunReady {
         config,
@@ -1334,13 +1328,8 @@ async fn run_round_operator_pause(
             // Run escalation
             let Some(sig) = until_cancelled(
                 &cancel,
-                run_escalation(
-                    &config,
-                    topic,
-                    all_rounds,
-                    esc_mode,
-                    available_set,
-                    &req_ctx,
+                crate::engine::direct_fire::run_escalation(
+                    &config, topic, all_rounds, esc_mode, &req_ctx,
                 ),
             )
             .await
@@ -1418,7 +1407,6 @@ async fn run_phase_rounds(
     mode: Mode,
     precedent_text: &str,
     cumulative_spend: f64,
-    available_set: &std::collections::HashSet<&str>,
 ) -> Option<PhaseRoundOutcome> {
     let StreamRunReady {
         stream_config,
@@ -1580,7 +1568,6 @@ async fn run_phase_rounds(
             &all_rounds,
             &mut manual_specops_signal,
             &mut specops_cost_usd,
-            available_set,
         )
         .await
         {
@@ -1667,12 +1654,11 @@ async fn run_auto_specops_if_needed(
             .await;
         let Some(sig) = until_cancelled(
             &cancel,
-            run_escalation(
+            crate::engine::direct_fire::run_escalation(
                 &config,
                 topic,
                 &all_rounds,
                 "specops",
-                &available_set,
                 &req_ctx,
             ),
         )
@@ -2338,81 +2324,6 @@ async fn emit_round_divergence(
 }
 
 // Convergence judge now shared from crate::engine::deliberate::judge_round
-
-/// Escalation result (SpecOps, Munger, Contrarian, KISS).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub(crate) struct EscalationResult {
-    pub text: String,
-    pub model: String,
-    pub latency_ms: u64,
-    pub cost_usd: f64,
-    pub tokens_in: u32,
-    pub tokens_out: u32,
-    pub mode: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-use serde::{Deserialize, Serialize};
-
-/// Run an escalation (SpecOps swarm, Munger, Contrarian, KISS, or Premortem).
-pub(crate) async fn run_escalation(
-    config: &Config,
-    topic: &str,
-    rounds: &[RoundResult],
-    mode: &str,
-    _available: &std::collections::HashSet<&str>,
-    req_ctx: &RequestContext,
-) -> EscalationResult {
-    // Build transcript from all rounds
-    let mut transcript = String::new();
-    for rnd in rounds {
-        for resp in &rnd.responses {
-            if !resp.text.is_empty() && resp.error.is_none() {
-                let truncated = truncate_utf8(&resp.text, 1000);
-                transcript.push_str(&format!(
-                    "[{} R{}]: {}\n\n",
-                    resp.seat_name, resp.round_num, truncated
-                ));
-            }
-        }
-    }
-
-    // Shared persona specs (engine::direct_fire) — same prompts/providers as
-    // the CLI direct-fire handlers, single source of truth.
-    let (system, provider_name, model) = match crate::engine::direct_fire::spec(mode) {
-        Some(spec) => (spec.system, spec.provider, spec.model),
-        None => ("Analyze and provide your verdict.", "grok", ""),
-    };
-
-    let prompt = if transcript.is_empty() {
-        topic.to_string()
-    } else {
-        format!(
-            "TOPIC: {}\n\nDELIBERATION TRANSCRIPT:\n{}\n\n---\n\n\
-             Cut through the noise. What is the ONE thing that actually matters? \
-             Give me the signal, not the framework. One paragraph max.",
-            topic, transcript
-        )
-    };
-
-    let resp = provider::ask_with_context(provider_name, &prompt, system, model, req_ctx).await;
-    let cost =
-        config
-            .models
-            .estimate_cost(&resp.model, resp.tokens_in, resp.tokens_out, resp.cached_in);
-
-    EscalationResult {
-        text: resp.text,
-        model: resp.model,
-        latency_ms: resp.latency_ms,
-        cost_usd: cost,
-        tokens_in: resp.tokens_in,
-        tokens_out: resp.tokens_out,
-        mode: mode.to_string(),
-        error: resp.error,
-    }
-}
 
 /// Chair synthesis for streaming mode.
 struct StreamChairResult {
