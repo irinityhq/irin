@@ -211,7 +211,10 @@ pub(super) async fn session_lineage(Path(id): Path<String>) -> impl IntoResponse
 /// downloadable PDF. 404 when the session is unknown. The PDF is a hand-rolled
 /// paginated text document (no new crate); the browser receives it as an
 /// attachment `council_<id>.pdf` (works in the Tauri webview too).
-pub(super) async fn session_export_pdf(Path(id): Path<String>) -> Response {
+pub(super) async fn session_export_pdf(
+    Path(id): Path<String>,
+    axum::Json(_): axum::Json<serde_json::Value>,
+) -> Response {
     // load_session does sync FS reads — offload per the spawn_blocking
     // convention used by precedent_search / embeddings_rebuild.
     let id_for_load = id.clone();
@@ -391,7 +394,7 @@ mod normalize_index_entry_tests {
 
 #[cfg(test)]
 mod json_body_required_tests {
-    use super::session_fork;
+    use super::{session_export_pdf, session_fork};
     use crate::config::Config;
     use crate::librarian;
     use crate::server::AppState;
@@ -439,6 +442,27 @@ mod json_body_required_tests {
             response.status(),
             StatusCode::UNSUPPORTED_MEDIA_TYPE,
             "session_fork must reject a simple POST"
+        );
+    }
+
+    #[tokio::test]
+    async fn session_export_pdf_rejects_text_plain() {
+        let app = Router::new().route("/api/sessions/{id}/export/pdf", post(session_export_pdf));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/sessions/nonexistent/export/pdf")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("x"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "session_export_pdf must reject a simple POST"
         );
     }
 }

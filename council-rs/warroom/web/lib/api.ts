@@ -142,7 +142,8 @@ export const api = {
   exportSessionPdf: async (id: string): Promise<Blob> => {
     const res = await fetch(`${getApiBase()}/api/sessions/${id}/export/pdf`, {
       method: "POST",
-      headers: authHeaders(),
+      headers: authHeaders({ "Content-Type": "application/json" }),
+      body: "{}",
     });
     if (!res.ok) {
       const detail = await parseApiErrorBody(res);
