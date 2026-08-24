@@ -132,6 +132,12 @@ check(#budget_records == 1 and budget_records[1].key == "team-a"
         and budget_records[1].actual == 0 and budget_records[1].estimate == 0.05,
     "unrouted request releases its budget estimate with zero actual cost")
 
+row = run_record({
+    request_id = "budget-check-rejected", budget_key = "team-a", t0 = 1,
+}, nil, "ERR_BUDGET_EXCEEDED", 429)
+check(#budget_records == 0,
+    "rejected budget check without a retained estimate schedules no budget record")
+
 local retry_record = { request_id = "rejected-retry", t0 = 1 }
 row = run_record(retry_record, nil, "ERR_TIMER_REJECTED", 503,
     function() return nil, "timer pool full" end)
