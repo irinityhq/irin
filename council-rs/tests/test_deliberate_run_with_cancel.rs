@@ -218,6 +218,43 @@ fn api_ctx(parent: &str) -> RequestContext {
 }
 
 #[tokio::test]
+async fn budget_signal_empty_on_guard_miss() {
+    let _guard = env_lock().await;
+    let previous_guard = std::env::var_os("HERMES_BUDGET_GUARD_SCRIPT");
+    let missing_guard = tempfile::tempdir()
+        .unwrap()
+        .path()
+        .join("missing-budget-guard");
+    unsafe {
+        std::env::set_var("HERMES_BUDGET_GUARD_SCRIPT", &missing_guard);
+    }
+
+    let (signal, tier) = deliberate::fetch_budget_signal(Some("default"), Some("test-task"));
+
+    unsafe {
+        match previous_guard {
+            Some(value) => std::env::set_var("HERMES_BUDGET_GUARD_SCRIPT", value),
+            None => std::env::remove_var("HERMES_BUDGET_GUARD_SCRIPT"),
+        }
+    }
+    let prompt = deliberate::build_round_prompt(
+        "Budget guard miss",
+        "",
+        "",
+        "",
+        &[],
+        &signal,
+        &mock_seat("seat_a", "mock-model"),
+        1,
+    );
+
+    assert!(signal.is_empty(), "guard miss must emit no budget signal");
+    assert_eq!(tier, "UNKNOWN");
+    assert!(!prompt.contains("REMAINING_USD"));
+    assert!(!prompt.contains("$7"));
+}
+
+#[tokio::test]
 async fn run_with_cancel_all_failed_seats_skips_chair_and_writes_partial() {
     let _guard = env_lock().await;
     let dirs = SessionDirs::install();
