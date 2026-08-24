@@ -267,6 +267,7 @@ async fn export_pdf_returns_pdf_for_fixture_and_404_for_unknown() {
             "http://{addr}/api/sessions/deadbeef0001/export/pdf"
         ))
         .bearer_auth(TOKEN)
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
@@ -296,6 +297,7 @@ async fn export_pdf_returns_pdf_for_fixture_and_404_for_unknown() {
     let resp = c
         .post(format!("http://{addr}/api/sessions/nope/export/pdf"))
         .bearer_auth(TOKEN)
+        .json(&json!({}))
         .send()
         .await
         .unwrap();
