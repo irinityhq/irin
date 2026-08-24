@@ -572,52 +572,45 @@ fn evaluate_promote_flight_aborts_on_lifecycle_bump() {
 }
 
 
-/// Scheduler commit boundary: generation bump during stop/port-wait must not
-/// invoke governed start (Codex residual — fence after wait, before spawn).
+/// The Tauri respawn seam refuses the stale intended spawn when generation
+/// advances during stop, then enters its post-stop recovery exactly once.
 #[test]
-fn promote_commit_aborts_if_generation_bumps_during_stop_wait() {
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    let _g = lifecycle_gen_test_lock();
-
-    let at = pack_lifecycle_generation();
-    let started = AtomicBool::new(false);
-    let stop_calls = AtomicUsize::new(0);
-    let wait_calls = AtomicUsize::new(0);
-
-    let result = promote_commit_after_stop_wait_detailed(
-        at,
-        || {
-            stop_calls.fetch_add(1, Ordering::SeqCst);
-            // Simulate a pack transition advancing generation during stop.
-            bump_pack_lifecycle_generation();
-        },
-        || {
-            wait_calls.fetch_add(1, Ordering::SeqCst);
-        },
-        || {
-            started.store(true, Ordering::SeqCst);
-            Ok("must-not-run".into())
-        },
-    );
-
-    assert_eq!(result, Err(PromoteCommitError::LifecycleChangedAfterStop));
-    assert_eq!(stop_calls.load(Ordering::SeqCst), 1, "stop must run");
-    assert_eq!(wait_calls.load(Ordering::SeqCst), 1, "wait must run");
-    assert!(
-        !started.load(Ordering::SeqCst),
-        "governed start must not run after generation bump in stop/wait gap"
-    );
-}
-
-/// Happy commit path: matching generation after stop/wait allows spawn.
-#[test]
-fn promote_commit_proceeds_when_generation_stable() {
+fn respawn_council_fenced_core_refuses_stale_spawn_after_stop_bump() {
     use std::sync::atomic::{AtomicUsize, Ordering};
     let _g = lifecycle_gen_test_lock();
 
     let at = pack_lifecycle_generation();
     let spawn_calls = AtomicUsize::new(0);
-    let result = promote_commit_after_stop_wait_detailed(
+    let recovery_calls = AtomicUsize::new(0);
+    let result = crate::respawn_council_fenced_core(
+        at,
+        || bump_pack_lifecycle_generation(),
+        || {},
+        || {
+            spawn_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("stale-spawn".into())
+        },
+        || {
+            recovery_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("recovered".into())
+        },
+    );
+
+    assert_eq!(result, Ok("recovered".into()));
+    assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
+    assert_eq!(recovery_calls.load(Ordering::SeqCst), 1);
+}
+
+/// Stable generation reaches the intended spawn once and never recovers.
+#[test]
+fn respawn_council_fenced_core_spawns_once_when_generation_is_stable() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let _g = lifecycle_gen_test_lock();
+
+    let at = pack_lifecycle_generation();
+    let spawn_calls = AtomicUsize::new(0);
+    let recovery_calls = AtomicUsize::new(0);
+    let result = crate::respawn_council_fenced_core(
         at,
         || {},
         || {},
@@ -625,9 +618,15 @@ fn promote_commit_proceeds_when_generation_stable() {
             spawn_calls.fetch_add(1, Ordering::SeqCst);
             Ok("governed-ok".into())
         },
+        || {
+            recovery_calls.fetch_add(1, Ordering::SeqCst);
+            Ok("must-not-recover".into())
+        },
     );
+
     assert_eq!(result, Ok("governed-ok".into()));
     assert_eq!(spawn_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recovery_calls.load(Ordering::SeqCst), 0);
 }
 
 /// Post-pack generation mismatch is AbortLifecycleChanged, never WaitNotReady
@@ -769,22 +768,24 @@ fn promote_commit_early_aborts_before_stop_when_generation_stale() {
 
 /// A Watch-Sentinels profile update bumps the same pack generation without the
 /// Council lifecycle lock. If it lands after Enable mutates the pack but before
-/// spawn, the stale respawn is refused and the handler recomputes status.
+/// spawn, the Tauri helper refuses the stale spawn, recovers, and the handler's
+/// success branch returns the recomputed status snapshot.
 #[test]
-fn watch_profile_bump_between_enable_and_spawn_refuses_spawn_and_recomputes_status() {
+fn watch_profile_bump_between_enable_and_spawn_returns_recomputed_snapshot() {
     use std::sync::{
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         mpsc,
     };
 
     let _g = lifecycle_gen_test_lock();
     let lifecycle_after_enable = pack_lifecycle_generation();
     let spawn_calls = AtomicUsize::new(0);
-    let status_recomputed = AtomicBool::new(false);
+    let recovery_calls = AtomicUsize::new(0);
+    let recompute_calls = AtomicUsize::new(0);
     let (bump_tx, bump_rx) = mpsc::sync_channel(0);
     let (bumped_tx, bumped_rx) = mpsc::sync_channel(0);
 
-    let result = std::thread::scope(|scope| {
+    let snapshot = std::thread::scope(|scope| {
         scope.spawn(move || {
             bump_rx.recv().expect("respawn reached stop");
             // gateway_pack_set_watch_sentinels reaches this same generation bump.
@@ -792,7 +793,7 @@ fn watch_profile_bump_between_enable_and_spawn_refuses_spawn_and_recomputes_stat
             bumped_tx.send(()).expect("report lifecycle bump");
         });
 
-        let result = promote_commit_after_stop_wait_detailed(
+        let respawned = crate::respawn_council_fenced_core(
             lifecycle_after_enable,
             || {
                 bump_tx.send(()).expect("request lifecycle bump");
@@ -801,14 +802,25 @@ fn watch_profile_bump_between_enable_and_spawn_refuses_spawn_and_recomputes_stat
             || {},
             || {
                 spawn_calls.fetch_add(1, Ordering::SeqCst);
-                Ok("must-not-run".into())
+                Ok("stale-spawn".into())
+            },
+            || {
+                recovery_calls.fetch_add(1, Ordering::SeqCst);
+                Ok("fresh-recovery".into())
             },
         );
-        status_recomputed.store(true, Ordering::SeqCst);
-        result
+
+        match respawned {
+            Ok(_) => {
+                recompute_calls.fetch_add(1, Ordering::SeqCst);
+                "recomputed-snapshot"
+            }
+            Err(error) => panic!("enable-style success path failed: {error:?}"),
+        }
     });
 
-    assert_eq!(result, Err(PromoteCommitError::LifecycleChangedAfterStop));
+    assert_eq!(snapshot, "recomputed-snapshot");
     assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
-    assert!(status_recomputed.load(Ordering::SeqCst));
+    assert_eq!(recovery_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(recompute_calls.load(Ordering::SeqCst), 1);
 }
