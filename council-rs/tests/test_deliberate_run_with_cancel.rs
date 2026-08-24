@@ -4,7 +4,9 @@
 //! No live providers — mock seats/roles only; env isolated per test.
 
 use std::collections::HashMap;
+use std::ffi::OsString;
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
@@ -124,6 +126,69 @@ impl SessionDirs {
     }
 }
 
+struct FailingGeminiCli {
+    root: PathBuf,
+    call_log: PathBuf,
+    previous_path: Option<OsString>,
+    previous_log: Option<OsString>,
+}
+
+impl FailingGeminiCli {
+    fn install() -> Self {
+        let root = tempfile::tempdir().expect("tempdir").keep();
+        let binary = root.join("gemini");
+        let call_log = root.join("calls.log");
+        fs::write(
+            &binary,
+            "#!/bin/sh\nif [ \"${1:-}\" = \"--version\" ]; then exit 0; fi\nprintf 'call\\n' >> \"$COUNCIL_TEST_PROVIDER_CALL_LOG\"\nexit 1\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&binary).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&binary, permissions).unwrap();
+
+        let previous_path = std::env::var_os("PATH");
+        let previous_log = std::env::var_os("COUNCIL_TEST_PROVIDER_CALL_LOG");
+        let mut paths = vec![root.clone()];
+        if let Some(path) = &previous_path {
+            paths.extend(std::env::split_paths(path));
+        }
+        unsafe {
+            std::env::set_var("PATH", std::env::join_paths(paths).unwrap());
+            std::env::set_var("COUNCIL_TEST_PROVIDER_CALL_LOG", &call_log);
+        }
+
+        Self {
+            root,
+            call_log,
+            previous_path,
+            previous_log,
+        }
+    }
+
+    fn call_count(&self) -> usize {
+        fs::read_to_string(&self.call_log)
+            .map(|calls| calls.lines().count())
+            .unwrap_or(0)
+    }
+}
+
+impl Drop for FailingGeminiCli {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.previous_path {
+                Some(path) => std::env::set_var("PATH", path),
+                None => std::env::remove_var("PATH"),
+            }
+            match &self.previous_log {
+                Some(path) => std::env::set_var("COUNCIL_TEST_PROVIDER_CALL_LOG", path),
+                None => std::env::remove_var("COUNCIL_TEST_PROVIDER_CALL_LOG"),
+            }
+        }
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 fn list_json(dir: &Path) -> Vec<PathBuf> {
     if !dir.exists() {
         return vec![];
@@ -150,6 +215,107 @@ fn api_ctx(parent: &str) -> RequestContext {
         council_auto_escalate: false,
         ..Default::default()
     }
+}
+
+#[tokio::test]
+async fn run_with_cancel_all_failed_seats_skips_chair_and_writes_partial() {
+    let _guard = env_lock().await;
+    let dirs = SessionDirs::install();
+    let provider = FailingGeminiCli::install();
+    let mut config = mock_config(
+        "all-fail",
+        1,
+        vec![
+            mock_seat("seat_a", "mock-seat-a"),
+            mock_seat("seat_b", "mock-seat-b"),
+        ],
+    );
+    let cabinet = config.cabinets.get_mut("all-fail").unwrap();
+    for seat in &mut cabinet.seats {
+        seat.provider = "gemini_cli".into();
+    }
+    cabinet.chair.provider = "gemini_cli".into();
+
+    let err = deliberate::run_with_cancel(
+        &config,
+        "all-fail",
+        "all providers fail",
+        "Context",
+        Mode::TearDown,
+        true,
+        false,
+        false,
+        None,
+        "best",
+        false,
+        "mock",
+        false,
+        SessionOrigin::Api,
+        api_ctx("parent-req-all-fail"),
+        None,
+        None,
+    )
+    .await
+    .expect_err("zero usable seat responses must fail before chair synthesis");
+
+    assert!(err.to_string().contains("all seats failed"), "{err:#}");
+    assert_eq!(
+        provider.call_count(),
+        2,
+        "chair transport must not be called"
+    );
+    assert!(list_json(&dirs.sessions).is_empty());
+    let partials = list_json(&dirs.sessions.join("_cancelled"));
+    assert_eq!(partials.len(), 1, "failed cabinet writes one partial");
+    let partial = load_session(&partials[0]);
+    assert!(partial["synthesis"].is_null());
+    assert_eq!(partial["chair_cost_usd"], 0.0);
+
+    dirs.cleanup();
+}
+
+#[tokio::test]
+async fn run_with_cancel_unavailable_provider_fails_before_any_seat_call() {
+    let _guard = env_lock().await;
+    let dirs = SessionDirs::install();
+    let provider = FailingGeminiCli::install();
+    let mut config = mock_config("unavailable", 1, vec![mock_seat("seat_a", "mock-seat-a")]);
+    let cabinet = config.cabinets.get_mut("unavailable").unwrap();
+    cabinet.seats[0].provider = "gemini_cli".into();
+    cabinet.chair.provider = "nope".into();
+
+    let err = deliberate::run_with_cancel(
+        &config,
+        "unavailable",
+        "unavailable provider",
+        "Context",
+        Mode::TearDown,
+        true,
+        false,
+        false,
+        None,
+        "best",
+        false,
+        "mock",
+        false,
+        SessionOrigin::Api,
+        api_ctx("parent-req-unavailable"),
+        None,
+        None,
+    )
+    .await
+    .expect_err("unavailable chair must fail before seat fan-out");
+
+    assert!(
+        err.to_string()
+            .contains("provider unavailable: Chair (nope)"),
+        "{err:#}"
+    );
+    assert_eq!(provider.call_count(), 0, "no seat transport may run");
+    assert!(list_json(&dirs.sessions).is_empty());
+    assert!(list_json(&dirs.sessions.join("_cancelled")).is_empty());
+
+    dirs.cleanup();
 }
 
 #[tokio::test]

@@ -23,8 +23,8 @@ use crate::engine::context::RequestContext;
 use crate::engine::deliberate::{
     DEFAULT_CHAIR_SYSTEM, JudgeUsage, convergence_quality_penalty_enabled,
     effective_convergence_threshold, governed_alternative_transport_model_groups,
-    governed_required_transport_models, judge_round, seat_preamble_for, should_pause_for_budget,
-    truncate_utf8,
+    governed_required_transport_models, has_usable_seat_response, judge_round, seat_preamble_for,
+    should_pause_for_budget, truncate_utf8,
 };
 use crate::mode::Mode;
 use crate::precedent;
@@ -2510,13 +2510,6 @@ struct StreamChairResult {
     provider_provenance: Option<ProviderProvenance>,
     gateway_provenance: Option<crate::types::GatewayProvenance>,
     error: Option<String>,
-}
-
-fn has_usable_seat_response(rounds: &[RoundResult]) -> bool {
-    rounds
-        .iter()
-        .flat_map(|round| &round.responses)
-        .any(|response| response.error.is_none() && !response.text.trim().is_empty())
 }
 
 /// Whether the stream should block on operator input after a round.
