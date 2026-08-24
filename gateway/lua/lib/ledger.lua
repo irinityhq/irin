@@ -22,12 +22,15 @@
 --
 -- Timer-pool capacity math (per the audit-chain schema in
 -- COUNCIL_GATEWAY_CONTRACT.md):
---   * Every accepted request emits exactly ONE open-end event
+--   * Every ordinary accepted request emits exactly ONE open-end event
 --     (request_received) + exactly ONE terminating event (one of:
 --     guard_input/blocked, cache_check/hit, route_decide/rejected,
---     budget_check/blocked, policy_evaluate/blocked, outbound_response).
---   * The 6 terminators are mutually exclusive — pick exactly one.
---   * Therefore a single request schedules AT MOST 2 ledger timers, not 6.
+--     budget_check/blocked, policy_evaluate/blocked, request_rejected,
+--     outbound_response).
+--   * These 7 ordinary-request terminators are mutually exclusive.
+--     Replay chains terminate via council_replay; batch_received chains
+--     terminate via outbound_batch.
+--   * Therefore a single ordinary request schedules AT MOST 2 ledger timers.
 --   * Each timer runs once and exits (retries happen inside the closure
 --     via ngx.sleep, not via re-scheduling).
 --   * At RPS = 100, peak in-flight ledger timers ≈ 2 × 100 × MAX_BACKOFF_SUM
