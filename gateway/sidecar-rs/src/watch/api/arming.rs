@@ -1543,16 +1543,30 @@ pub async fn admin_arm_status_json(
         // Lease: the persisted attested ceiling. An expired row is reported as
         // expired (0 remaining), never silently as "still armed" — the caller
         // renders a fail-closed state and the reserve gate refuses anyway.
-        if let Ok(Some(row)) = db.get_active_arm().await {
-            view.armed_exp_at_ms = Some(row.exp_at_ms);
-            view.armed_expires_in_ms = Some((row.exp_at_ms - now_ms).max(0) as u64);
+        match db.get_active_arm().await {
+            Ok(Some(row)) => {
+                view.armed_exp_at_ms = Some(row.exp_at_ms);
+                view.armed_expires_in_ms = Some((row.exp_at_ms - now_ms).max(0) as u64);
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(error = %error, "arm status active-arm read failed");
+                quarantine.bump_audit_infra_errors();
+            }
         }
         // Open ceremony: only the deadline and the rehearsal flag cross the
         // boundary — never `challenge_bytes`.
-        if let Ok(Some(pending)) = db.get_arm_pending(now_ms).await {
-            view.staged = true;
-            view.stage_expires_in_ms = Some((pending.exp_at_ms - now_ms).max(0) as u64);
-            view.stage_rehearsal = pending.rehearsal;
+        match db.get_arm_pending(now_ms).await {
+            Ok(Some(pending)) => {
+                view.staged = true;
+                view.stage_expires_in_ms = Some((pending.exp_at_ms - now_ms).max(0) as u64);
+                view.stage_rehearsal = pending.rehearsal;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(error = %error, "arm status pending-stage read failed");
+                quarantine.bump_audit_infra_errors();
+            }
         }
     }
 

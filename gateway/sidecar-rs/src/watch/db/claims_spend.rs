@@ -300,7 +300,8 @@ impl WatchDb {
                         ) {
                             // Narrow-only ceiling, in i64 cents, off the SIGNED cap.
                             Ok(signed_cap_cents) => signed_cap_cents.min(ambient_cents),
-                            Err(_refusal) => {
+                            Err(refusal) => {
+                                tracing::warn!(reason = %refusal, "arm reserve refused");
                                 tx.rollback()?;
                                 return Ok(None);
                             }

@@ -32,6 +32,26 @@ const FAR_FUTURE_MS: i64 = i64::MAX;
 /// must equal that. Helpers stamp it; manual upsert sites compute it inline.
 const WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
 
+#[derive(Clone, Default)]
+struct CapturedLogs(Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedLogs {
+    fn text(&self) -> String {
+        String::from_utf8(self.0.lock().unwrap().clone()).unwrap()
+    }
+}
+
 async fn fresh_db() -> (tempfile::TempDir, WatchDb) {
     let tmp = tempfile::tempdir().unwrap();
     let db = WatchDb::open(&tmp.path().join("reserve.db")).await.unwrap();
@@ -72,6 +92,17 @@ async fn claim(db: &WatchDb) -> Option<gateway_sidecar::watch::db::PendingClaim>
 /// reserve refuses. Proves the column is no longer the anchor.
 #[tokio::test]
 async fn forged_active_arm_garbage_signature_refused() {
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .without_time()
+        .with_max_level(tracing::Level::WARN)
+        .with_writer({
+            let logs = logs.clone();
+            move || logs.clone()
+        })
+        .finish();
+    tracing::subscriber::set_global_default(subscriber).unwrap();
+
     let (_tmp, db) = fresh_db().await;
     publish_test_boot_registry();
     let content = ArmContent {
@@ -108,6 +139,11 @@ async fn forged_active_arm_garbage_signature_refused() {
     assert!(
         claim(&db).await.is_none(),
         "a forged arm with no valid signature must be refused by the reserve"
+    );
+    let logs = logs.text();
+    assert!(
+        logs.contains("arm reserve refused"),
+        "reserve refusal must be logged; got {logs:?}"
     );
 }
 

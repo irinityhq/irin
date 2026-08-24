@@ -972,6 +972,30 @@ async fn test_arm_status_is_a_projection_with_no_ceremony_material() {
     );
 }
 
+/// A failed durable-state read stays fail-closed, but is loud through the
+/// audit-infrastructure counter.
+#[tokio::test]
+async fn test_arm_status_db_error_is_unarmed_and_counted() {
+    let (tmp, _db, quarantine, router) = fixture_attest("alice:tok_alpha_0001").await;
+    rusqlite::Connection::open(tmp.path().join("watch_arm_router.db"))
+        .unwrap()
+        .execute_batch("DROP TABLE active_arm")
+        .unwrap();
+
+    let resp = router
+        .oneshot(get(
+            "/watch/admin/producer/arm/status",
+            Some("alice:tok_alpha_0001"),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v = body_json(resp).await;
+    assert_eq!(v["armed"], serde_json::json!(false));
+    assert!(v["armed_exp_at_ms"].is_null());
+    assert_eq!(quarantine.audit_infra_errors_total(), 1);
+}
+
 /// An open stage is visible as a deadline only — never as its challenge.
 #[tokio::test]
 async fn test_arm_status_reports_an_open_stage_without_the_challenge() {
