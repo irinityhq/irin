@@ -422,6 +422,10 @@ pub(super) async fn deliberate_handler(
         }
     }
 
+    if let Err(e) = crate::precedent::index_session(&session) {
+        eprintln!("⚠️  Precedent indexing failed: {e}");
+    }
+
     // Token math — sum seat tokens across every round + chair tokens.
     let (seat_in, seat_out) = session
         .rounds

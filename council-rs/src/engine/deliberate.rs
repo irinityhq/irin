@@ -12,6 +12,7 @@ use anyhow::Result;
 use chrono::Utc;
 use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
 use std::process::Command;
 use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
@@ -1177,7 +1178,10 @@ async fn synthesize_and_persist(
         topic: crate::scrub::redact(topic),
         cabinet_name: cabinet_name.to_string(),
         rounds: rounds.rounds,
-        synthesis: Some(crate::scrub::redact(&chair.text)),
+        synthesis: Some({
+            let text = crate::scrub::redact(&chair.text);
+            crate::librarian::redaction::redact_secrets(&text).0
+        }),
         synthesis_model: Some(chair.model),
         total_tokens: rounds.total_tokens,
         total_latency_ms: rounds.total_latency_ms,
@@ -1742,7 +1746,8 @@ async fn fan_out(
                 provider::ask_with_context(&prov, &prompt, &system, &model, &ctx).await
             };
             SeatResponse::from_provider(&seat_name, &prov, round_num, resp, |s| {
-                crate::scrub::redact(s)
+                let text = crate::scrub::redact(s);
+                crate::librarian::redaction::redact_secrets(&text).0
             })
         });
     }
@@ -2471,10 +2476,10 @@ fn write_cancelled_partial(
 /// Raw multi-round chatter stays here; never leaks to signed canonical (enforced upstream in gateway).
 /// See precedent::flight_record_markdown for the "preview-only" labeling on human summaries.
 /// Persistence changes must never allow raw provider output to leak into canonical artifacts.
-fn save_session(session: &CouncilSession) -> Result<()> {
+pub(crate) fn save_session(session: &CouncilSession) -> Result<PathBuf> {
     let sessions_dir = std::env::var("COUNCIL_SESSIONS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("sessions"));
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("sessions"));
 
     std::fs::create_dir_all(&sessions_dir)?;
 
@@ -2487,7 +2492,7 @@ fn save_session(session: &CouncilSession) -> Result<()> {
     let json = serde_json::to_string_pretty(session)?;
     std::fs::write(&path, json)?;
 
-    Ok(())
+    Ok(path)
 }
 
 #[cfg(test)]

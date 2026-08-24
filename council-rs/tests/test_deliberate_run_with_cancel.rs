@@ -319,6 +319,69 @@ async fn run_with_cancel_unavailable_provider_fails_before_any_seat_call() {
 }
 
 #[tokio::test]
+async fn run_with_cancel_redacts_seat_and_chair_secrets_without_indexing() {
+    const MOCK_SLACK_TOKEN: &str = concat!("xoxb-", "0000000000FAKEFIXTURE");
+
+    let _guard = env_lock().await;
+    let dirs = SessionDirs::install();
+    let mut config = mock_config(
+        "redaction",
+        1,
+        vec![mock_seat("seat_a", "mock-slack-token")],
+    );
+    config.cabinets.get_mut("redaction").unwrap().chair.model = "mock-slack-token".into();
+
+    deliberate::run_with_cancel(
+        &config,
+        "redaction",
+        "redact mock provider secret",
+        "Context",
+        Mode::TearDown,
+        true,
+        false,
+        false,
+        None,
+        "best",
+        false,
+        "mock",
+        false,
+        SessionOrigin::Api,
+        api_ctx("parent-req-redaction"),
+        None,
+        None,
+    )
+    .await
+    .expect("redaction run");
+
+    let saved = list_json(&dirs.sessions);
+    assert_eq!(saved.len(), 1, "exactly one canonical session file");
+    let body = fs::read_to_string(&saved[0]).unwrap();
+    assert!(
+        !body.contains(MOCK_SLACK_TOKEN),
+        "secret reached session file"
+    );
+    assert!(
+        body.contains("[REDACTED:secret]"),
+        "secret was not redacted"
+    );
+    let disk = load_session(&saved[0]);
+    let seat_text = disk["rounds"][0]["responses"][0]["text"]
+        .as_str()
+        .expect("persisted seat text");
+    assert!(!seat_text.contains(MOCK_SLACK_TOKEN));
+    assert!(seat_text.contains("[REDACTED:secret]"));
+    let synthesis = disk["synthesis"].as_str().expect("persisted synthesis");
+    assert!(!synthesis.contains(MOCK_SLACK_TOKEN));
+    assert!(synthesis.contains("[REDACTED:secret]"));
+    assert!(
+        !dirs.sessions.join("index.jsonl").exists(),
+        "engine persistence must remain write-only"
+    );
+
+    dirs.cleanup();
+}
+
+#[tokio::test]
 async fn run_with_cancel_happy_path_binds_session_contract() {
     let _guard = env_lock().await;
     let dirs = SessionDirs::install();

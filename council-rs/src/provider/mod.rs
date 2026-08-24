@@ -538,6 +538,7 @@ pub async fn ask_with_opts_and_context(
                     "Seat analysis states UNIQUE_CONTRADICTED_CLAIM_XYZ_12345 with certainty."
                         .to_string()
                 }
+                "mock-slack-token" => concat!("xoxb-", "0000000000FAKEFIXTURE").to_string(),
                 // Opposite polarity fixtures so the keyword judge does not
                 // early-converge a multi-round characterization run.
                 "mock-seat-agree" => "I agree and support this approach.".to_string(),
