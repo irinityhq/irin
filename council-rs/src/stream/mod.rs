@@ -1,8 +1,5 @@
-//! Streaming deliberation.
-//!
-//! This module implements the async event protocol for WebSocket consumption.
-//! It re-orchestrates the engine's deliberation loop to yield structured events
-//! with pause/resume semantics and operator intervention support.
+//! REST and CLI deliberation use `crate::engine::deliberate::run_with_cancel`.
+//! WebSocket deliberation uses `crate::stream::deliberate::run`, which imports engine helpers and adds events, pause/resume, and interventions.
 
 pub mod deliberate;
 pub mod events;

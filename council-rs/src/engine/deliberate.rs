@@ -1107,13 +1107,11 @@ async fn maybe_escalate_specops(
         if verbose {
             eprintln!("   ⚠️  Convergence low. Triggering SpecOps escalation.");
         }
-        let available_set = std::collections::HashSet::new();
-        let sig = crate::stream::deliberate::run_escalation(
+        let sig = crate::engine::direct_fire::run_escalation(
             config,
             topic,
             &rounds.rounds,
             "specops",
-            &available_set,
             &prepared.req_ctx,
         )
         .await;
