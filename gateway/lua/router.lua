@@ -1174,41 +1174,38 @@ function _M.route()
     -- =====================================================================
     -- STEP 5: Policy — sensitivity firewall
     -- =====================================================================
-    if record.last_user_content then
-        local policy_result = sidecar.policy_evaluate(
-            model_cfg.provider, record.last_user_content, record.sensitivity)
-        if policy_result and not policy_result.allowed and not policy_result.dry_run then
-            ngx.log(ngx.WARN, "router: policy blocked — provider=", model_cfg.provider,
-                    " level=", policy_result.level or "?",
-                    " signals=", cjson.encode(policy_result.detected_signals))
+    local policy_result = sidecar.policy_evaluate(model_cfg.provider, record.sensitivity)
+    if policy_result and not policy_result.allowed and not policy_result.dry_run then
+        ngx.log(ngx.WARN, "router: policy blocked — provider=", model_cfg.provider,
+                " level=", policy_result.level or "?",
+                " signals=", cjson.encode(policy_result.detected_signals))
 
-            local fb_alias_p     = record.alias
-            local fb_req_id_p    = record.request_id
-            local fb_provider    = model_cfg.provider
-            local fb_level       = policy_result.level
-            local fb_reason_p    = policy_result.reason
-            local fb_sens_p      = record.sensitivity
-            local fb_caller_p    = record.caller_key
-            ledger_schedule("policy_evaluate", fb_req_id_p, function(premature)
-                if premature then return end
-                ledger_record("gateway", fb_alias_p, {
-                    request_id = fb_req_id_p,
-                    provider   = fb_provider,
-                    level      = fb_level,
-                }, {
-                    action      = "policy_evaluate",
-                    decision    = "blocked",
-                    request_id  = fb_req_id_p,
-                    provider    = fb_provider,
-                    sensitivity = fb_sens_p,
-                    reason      = fb_reason_p,
-                }, fb_caller_p)
-            end)
+        local fb_alias_p     = record.alias
+        local fb_req_id_p    = record.request_id
+        local fb_provider    = model_cfg.provider
+        local fb_level       = policy_result.level
+        local fb_reason_p    = policy_result.reason
+        local fb_sens_p      = record.sensitivity
+        local fb_caller_p    = record.caller_key
+        ledger_schedule("policy_evaluate", fb_req_id_p, function(premature)
+            if premature then return end
+            ledger_record("gateway", fb_alias_p, {
+                request_id = fb_req_id_p,
+                provider   = fb_provider,
+                level      = fb_level,
+            }, {
+                action      = "policy_evaluate",
+                decision    = "blocked",
+                request_id  = fb_req_id_p,
+                provider    = fb_provider,
+                sensitivity = fb_sens_p,
+                reason      = fb_reason_p,
+            }, fb_caller_p)
+        end)
 
-            return json_error(403, "content sensitivity policy violation: " ..
-                    (policy_result.reason or "provider not allowed at detected sensitivity level"),
-                    "policy_violation", "ERR_POLICY_VIOLATION")
-        end
+        return json_error(403, "sensitivity policy violation: " ..
+                (policy_result.reason or "provider not allowed at caller sensitivity level"),
+                "policy_violation", "ERR_POLICY_VIOLATION")
     end
 
     -- =====================================================================

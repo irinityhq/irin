@@ -525,6 +525,10 @@ case "$CODE" in
     *)           assert_not_internal_error "$CODE" "5g. CRLF in header" ;;
 esac
 
+# Policy enforcement is proven by the gateway-sidecar Rust tests
+# sovereign_level_enforces_provider_allowlist and dry_run_env_enforces_only_exact_one.
+# Live RED requests smart-route to sovereign providers before the firewall.
+
 # ==========================================================================
 # 6. TOTAL SIDECAR OUTAGE
 # A total outage fails closed at sidecar-backed auth before routing. The

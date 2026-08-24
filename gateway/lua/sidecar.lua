@@ -378,17 +378,15 @@ local CONTRACT_TO_POLICY_LEVEL = {
     RED    = "SOVEREIGN",
 }
 
---- Evaluate content sensitivity and check provider allowance.
+--- Check the caller-declared sensitivity level against the provider allowance.
 -- @param provider  string  Target provider name
--- @param content   string  Request content (kept for legacy detection path)
 -- @param level     string|nil  Contract-level verdict ("GREEN"|"YELLOW"|"RED");
 --                              translated to the policy enum here.
 -- @return table|nil  Policy result (allowed, level, detected_signals, dry_run)
 -- @return string|nil Error
-function _M.policy_evaluate(provider, content, level)
+function _M.policy_evaluate(provider, level)
     local req = {
         provider = provider,
-        content  = content,
     }
     if level and level ~= "" then
         req.sensitivity_level = CONTRACT_TO_POLICY_LEVEL[level:upper()]

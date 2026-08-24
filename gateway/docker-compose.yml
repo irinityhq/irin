@@ -114,6 +114,7 @@ services:
       # - ROOT_PUBKEY_HEX=${ROOT_PUBKEY_HEX:-}
       - GATEWAY_DURABLE=${GATEWAY_DURABLE:-0}
       - GATEWAY_STATE_DB_PATH=/var/lib/sidecar/gateway.db
+      - GW_POLICY_ENFORCE=${GW_POLICY_ENFORCE:-0}
       - DECON_CONFIG_PATH=/conf/decon_config.json
       - AUTH_CONFIG_PATH=${AUTH_CONFIG_PATH:-/var/lib/sidecar/auth_keys.json}
       - IP_POLICY_PATH=/conf/ip_policy.json

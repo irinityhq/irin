@@ -12,18 +12,13 @@ pub(super) struct PolicyEvalRequest {
     provider: String,
     #[serde(default)]
     sensitivity_level: Option<policy::SensitivityLevel>,
-    #[serde(default)]
-    content: Option<String>,
 }
 
 pub(super) async fn policy_evaluate(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     Json(req): Json<PolicyEvalRequest>,
 ) -> impl IntoResponse {
-    let decision =
-        state
-            .policy
-            .evaluate(&req.provider, req.sensitivity_level, req.content.as_deref());
+    let decision = state.policy.evaluate(&req.provider, req.sensitivity_level);
     if !decision.allowed {
         (
             StatusCode::FORBIDDEN,

@@ -39,7 +39,7 @@ local function check(condition, message)
     end
 end
 
-local policy, policy_err = sidecar.policy_evaluate("openai", "hello", "RED")
+local policy, policy_err = sidecar.policy_evaluate("openai", "RED")
 check(policy_err == nil, "policy transport failure is encoded as a decision")
 check(policy ~= nil and policy.allowed == false, "policy transport failure denies")
 check(policy ~= nil and policy.dry_run == false, "policy transport failure is enforced")
