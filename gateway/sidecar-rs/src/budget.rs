@@ -254,8 +254,15 @@ impl BudgetEnforcer {
     }
 
     /// Record actual spend AFTER a successful response.
-    pub async fn record(&self, budget_key: &str, actual_cost: f64) -> BudgetStatus {
-        let new_spent = self.increment_spend(budget_key, actual_cost).await;
+    pub async fn record(
+        &self,
+        budget_key: &str,
+        actual_cost: f64,
+        estimated_cost: f64,
+    ) -> BudgetStatus {
+        let new_spent = self
+            .increment_spend(budget_key, actual_cost, estimated_cost)
+            .await;
         let limit = self.limit_for_key(budget_key).await;
         let (_, req_count) = self.get_spend(budget_key).await;
 
@@ -328,7 +335,7 @@ impl BudgetEnforcer {
         (0.0, 0)
     }
 
-    async fn increment_spend(&self, key: &str, amount: f64) -> f64 {
+    async fn increment_spend(&self, key: &str, amount: f64, estimated_cost: f64) -> f64 {
         let redis_key = format!("budget:spend:{}", key);
         let count_key = format!("budget:count:{}", key);
 
@@ -382,12 +389,12 @@ impl BudgetEnforcer {
                 .call(move |c| {
                     c.execute(
                         "INSERT INTO budget_state (key, spent_usd, request_count, updated_at)
-                     VALUES (?1, ?2, 1, ?3)
+                     VALUES (?1, ?2, 1, ?4)
                      ON CONFLICT(key) DO UPDATE SET
-                       spent_usd = spent_usd + ?2,
+                       spent_usd = MAX(0, spent_usd - ?3 + ?2),
                        request_count = request_count + 1,
-                       updated_at = ?3",
-                        rusqlite::params![k, amount, now],
+                       updated_at = ?4",
+                        rusqlite::params![k, amount, estimated_cost, now],
                     )?;
                     let total: f64 = c.query_row(
                         "SELECT spent_usd FROM budget_state WHERE key = ?1",
@@ -494,10 +501,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sqlite_record_settles_reserved_estimate_to_actual() {
+        let enforcer = sqlite_enforcer().await;
+        let check = enforcer.check("settle-actual", 0.05).await;
+        assert!(check.allowed);
+
+        let status = enforcer.record("settle-actual", 0.02, 0.05).await;
+        assert!((status.spent_usd - 0.02).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
+    async fn sqlite_record_releases_reserved_estimate_without_actual_cost() {
+        let enforcer = sqlite_enforcer().await;
+        let check = enforcer.check("settle-zero", 0.05).await;
+        assert!(check.allowed);
+
+        let status = enforcer.record("settle-zero", 0.0, 0.05).await;
+        assert!(status.spent_usd.abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
     async fn records_and_tracks_spend() {
         let enforcer = sqlite_enforcer().await;
-        enforcer.record("test-key", 1.50).await;
-        enforcer.record("test-key", 2.00).await;
+        enforcer.record("test-key", 1.50, 0.0).await;
+        enforcer.record("test-key", 2.00, 0.0).await;
 
         let result = enforcer.check("test-key", 0.01).await;
         assert!(result.allowed);
@@ -506,10 +533,16 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_record_ignores_estimate() {
+        let status = default_enforcer().record("mem-only", 1.25, 99.0).await;
+        assert!((status.spent_usd - 1.25).abs() < f64::EPSILON);
+    }
+
+    #[tokio::test]
     async fn blocks_when_exceeded() {
         let enforcer = sqlite_enforcer().await;
         // Spend the whole budget
-        enforcer.record("test-key", 10.00).await;
+        enforcer.record("test-key", 10.00, 0.0).await;
 
         let result = enforcer.check("test-key", 0.01).await;
         assert!(!result.allowed);
@@ -520,7 +553,7 @@ mod tests {
     #[tokio::test]
     async fn blocks_when_would_exceed() {
         let enforcer = sqlite_enforcer().await;
-        enforcer.record("test-key", 9.50).await;
+        enforcer.record("test-key", 9.50, 0.0).await;
 
         let result = enforcer.check("test-key", 1.00).await;
         assert!(!result.allowed);
@@ -533,7 +566,7 @@ mod tests {
         config.key_limits.insert("premium".to_string(), 100.0);
         let enforcer = sqlite_enforcer_with_config(config).await; // reuse helper with custom config
 
-        enforcer.record("premium", 50.0).await;
+        enforcer.record("premium", 50.0, 0.0).await;
         let result = enforcer.check("premium", 1.0).await;
         assert!(result.allowed);
         assert_eq!(result.status.limit_usd, 100.0);
@@ -542,7 +575,7 @@ mod tests {
     #[tokio::test]
     async fn reset_clears_spend() {
         let enforcer = default_enforcer(); // keep no-store for this one (reset currently only clears redis/mem, not sqlite table)
-        enforcer.record("test-key", 10.0).await;
+        enforcer.record("test-key", 10.0, 0.0).await;
 
         let result = enforcer.check("test-key", 0.01).await;
         assert!(!result.allowed);
@@ -560,7 +593,7 @@ mod tests {
     #[tokio::test]
     async fn runtime_limit_update() {
         let enforcer = sqlite_enforcer().await;
-        enforcer.record("test-key", 9.0).await;
+        enforcer.record("test-key", 9.0, 0.0).await;
 
         // Would fail with default $10 limit
         let result = enforcer.check("test-key", 2.0).await;
@@ -596,7 +629,7 @@ mod tests {
 
         tokio::time::timeout(
             Duration::from_secs(2),
-            enforcer.record("unreachable-redis", 3.5),
+            enforcer.record("unreachable-redis", 3.5, 99.0),
         )
         .await
         .expect("record must complete promptly");
@@ -617,10 +650,12 @@ mod tests {
         let enforcer = BudgetEnforcer::new(BudgetConfig::default(), Some(&url));
 
         let start = std::time::Instant::now();
-        let status =
-            tokio::time::timeout(Duration::from_secs(3), enforcer.record("slow-redis", 2.5))
-                .await
-                .expect("record must use bounded Redis timeout and fall back");
+        let status = tokio::time::timeout(
+            Duration::from_secs(3),
+            enforcer.record("slow-redis", 2.5, 99.0),
+        )
+        .await
+        .expect("record must use bounded Redis timeout and fall back");
         assert!((status.spent_usd - 2.5).abs() < 0.01);
 
         let result =

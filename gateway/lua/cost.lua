@@ -665,6 +665,14 @@ function _M.account()
     -- provider. Close any still-open request chain here; routes that already
     -- wrote a specific terminator set chain_terminated and remain untouched.
     if not record.provider then
+        if record.budget_estimated_usd ~= nil then
+            local fb_budget_key = record.budget_key or "default"
+            local fb_estimated_cost = record.budget_estimated_usd
+            ngx.timer.at(0, function(premature)
+                if premature then return end
+                sidecar_budget_record(fb_budget_key, 0, fb_estimated_cost)
+            end)
+        end
         if record.request_id and not record.chain_terminated then
             local fb_request_id = record.request_id
             local fb_status     = ngx.status
@@ -964,8 +972,9 @@ function _M.account()
     local is_success = ngx.status >= 200 and ngx.status < 400
 
     local fb_provider       = record.provider
-    local fb_budget_key     = record.budget_key
+    local fb_budget_key     = record.budget_key or "default"
     local fb_cost_usd       = cost_usd
+    local fb_estimated_cost = record.budget_estimated_usd
     local fb_alias          = record.alias
     local fb_raw_body       = record.raw_body
     local fb_request_id     = record.request_id
@@ -1046,8 +1055,8 @@ function _M.account()
         )
 
         -- Record actual spend against budget
-        if fb_budget_key and fb_budget_key ~= "default" and fb_cost_usd > 0 then
-            sidecar_budget_record(fb_budget_key, fb_cost_usd)
+        if fb_estimated_cost ~= nil then
+            sidecar_budget_record(fb_budget_key, fb_cost_usd, fb_estimated_cost)
         end
 
         -- Record outbound LLM response in Audit Ledger (with retry).

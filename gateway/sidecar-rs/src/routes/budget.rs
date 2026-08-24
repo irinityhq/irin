@@ -17,6 +17,8 @@ pub(super) struct BudgetCheckRequest {
 pub(super) struct BudgetRecordRequest {
     budget_key: String,
     actual_cost: f64,
+    #[serde(default)]
+    estimated_cost: Option<f64>,
 }
 
 pub(super) async fn budget_check(
@@ -46,6 +48,13 @@ pub(super) async fn budget_record(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     Json(req): Json<BudgetRecordRequest>,
 ) -> impl IntoResponse {
-    let status = state.budget.record(&req.budget_key, req.actual_cost).await;
+    let status = state
+        .budget
+        .record(
+            &req.budget_key,
+            req.actual_cost,
+            req.estimated_cost.unwrap_or(0.0),
+        )
+        .await;
     Json(serde_json::to_value(&status).unwrap())
 }
