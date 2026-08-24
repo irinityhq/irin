@@ -10,7 +10,7 @@
 
 use anyhow::Result;
 use chrono::Utc;
-use std::collections::hash_map::DefaultHasher;
+use std::collections::{HashSet, hash_map::DefaultHasher};
 use std::hash::{Hash, Hasher};
 use std::process::Command;
 use tokio::task::JoinSet;
@@ -40,6 +40,13 @@ pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
         end -= 1;
     }
     &s[..end]
+}
+
+pub(crate) fn has_usable_seat_response(rounds: &[RoundResult]) -> bool {
+    rounds
+        .iter()
+        .flat_map(|round| &round.responses)
+        .any(|response| response.error.is_none() && !response.text.trim().is_empty())
 }
 
 /// BATS Wedge 1: Lightweight budget tracker injection.
@@ -561,6 +568,29 @@ async fn prepare_deliberation(
         {
             anyhow::bail!("Governed Gateway preflight failed: {error}");
         }
+    }
+
+    let available = provider::check_providers_with_gateway(effective_via_gateway);
+    let available_set: HashSet<&str> = available
+        .iter()
+        .filter(|(_, ok)| *ok)
+        .map(|(name, _)| *name)
+        .collect();
+    let unavailable_seats: Vec<&Seat> = cabinet
+        .seats
+        .iter()
+        .filter(|seat| !available_set.contains(seat.provider.as_str()))
+        .collect();
+    let chair_unavailable = !available_set.contains(cabinet.chair.provider.as_str());
+    if !unavailable_seats.is_empty() || chair_unavailable {
+        let mut missing = unavailable_seats
+            .iter()
+            .map(|seat| format!("{} ({})", seat.name, seat.provider))
+            .collect::<Vec<_>>();
+        if chair_unavailable {
+            missing.push(format!("Chair ({})", cabinet.chair.provider));
+        }
+        anyhow::bail!("provider unavailable: {}", missing.join(", "));
     }
 
     if verbose {
@@ -1094,6 +1124,23 @@ async fn synthesize_and_persist(
     origin: SessionOrigin,
     worker_provenance: Option<sovereign_protocol::types::WorkerProvenanceGuard>,
 ) -> Result<CouncilSession> {
+    if !has_usable_seat_response(&rounds.rounds) {
+        write_cancelled_partial(
+            &prepared.session_id,
+            cabinet_name,
+            topic,
+            tier,
+            &rounds.rounds,
+            origin,
+            rounds.total_tokens,
+            rounds.total_latency_ms,
+            rounds.total_cost,
+            verbose,
+            prepared.req_ctx.parent_request_id.clone(),
+        );
+        anyhow::bail!("all seats failed: synthesis not attempted");
+    }
+
     // Chair synthesis
     if verbose {
         eprintln!("── Synthesis ────────────────────────────────────────────");
