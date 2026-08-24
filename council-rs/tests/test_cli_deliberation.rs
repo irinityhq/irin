@@ -347,6 +347,13 @@ async fn cli_full_deliberation_prints_indexes_and_flight_records() {
         index_body.contains("CLI happy path topic"),
         "index must include topic"
     );
+    let session_id = disk["session_id"].as_str().unwrap();
+    let indexed = index_body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|entry| entry["id"] == session_id)
+        .count();
+    assert_eq!(indexed, 1, "CLI must index the session exactly once");
 
     let flights = list_with_ext(&dirs.runs, "md");
     assert_eq!(flights.len(), 1, "exactly one flight record");

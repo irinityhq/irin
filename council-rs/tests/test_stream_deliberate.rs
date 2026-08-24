@@ -514,6 +514,31 @@ async fn stream_multi_round_emits_ordered_public_events_and_done() {
         "pause_after_each_round=false must skip operator pause"
     );
 
+    let disk = saved_session(&dirs);
+    let session_id = disk["session_id"].as_str().unwrap();
+    let saved_events = events
+        .iter()
+        .filter(|event| {
+            event.event_type == "session_saved"
+                && event.data["session_id"] == session_id
+                && event.data["path"]
+                    .as_str()
+                    .is_some_and(|path| !path.is_empty())
+        })
+        .count();
+    assert_eq!(
+        saved_events, 1,
+        "session_saved must be emitted exactly once"
+    );
+
+    let index_body = fs::read_to_string(dirs.root.join("sessions/index.jsonl")).unwrap();
+    let indexed = index_body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .filter(|entry| entry["id"] == session_id)
+        .count();
+    assert_eq!(indexed, 1, "stream must index the session exactly once");
+
     dirs.cleanup();
 }
 

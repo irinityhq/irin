@@ -23,8 +23,8 @@ use crate::engine::context::RequestContext;
 use crate::engine::deliberate::{
     DEFAULT_CHAIR_SYSTEM, JudgeUsage, convergence_quality_penalty_enabled,
     effective_convergence_threshold, governed_alternative_transport_model_groups,
-    governed_required_transport_models, has_usable_seat_response, judge_round, seat_preamble_for,
-    should_pause_for_budget, truncate_utf8,
+    governed_required_transport_models, has_usable_seat_response, judge_round, save_session,
+    seat_preamble_for, should_pause_for_budget, truncate_utf8,
 };
 use crate::mode::Mode;
 use crate::precedent;
@@ -1910,7 +1910,7 @@ async fn persist_phase_session(
 
     // Save session
     let save_path = match save_session(&session) {
-        Ok(p) => p,
+        Ok(path) => Some(path),
         Err(e) => {
             let _ = event_tx
                 .send(StreamEvent::error(
@@ -1919,12 +1919,13 @@ async fn persist_phase_session(
                     false,
                 ))
                 .await;
-            String::new()
+            None
         }
     };
-    if !save_path.is_empty() {
+    if let Some(path) = save_path {
+        let path = path.to_string_lossy();
         let _ = event_tx
-            .send(StreamEvent::session_saved(&session_id, &save_path))
+            .send(StreamEvent::session_saved(&session_id, &path))
             .await;
     }
 
@@ -2245,6 +2246,7 @@ async fn run_direct_fire(
 
     match save_session(&session) {
         Ok(path) => {
+            let path = path.to_string_lossy();
             let _ = event_tx
                 .send(StreamEvent::session_saved(&session_id, &path))
                 .await;
@@ -2635,33 +2637,6 @@ async fn synthesize(
         gateway_provenance: resp.gateway_provenance,
         error,
     }
-}
-
-/// Save session to sessions/ directory. Returns path string.
-///
-/// output-fidelity invariant:
-/// "full-fidelity raw chat transcripts in sessions/*.json... strictly limit
-/// envelope_json_canonical to the parsed, fenced JSON directive proposal."
-/// Identical to engine save_session: full CouncilSession via serde (no clip on raw seat/chair text or metadata).
-/// War Room streaming path. Human previews labeled in precedent::flight_record_markdown.
-/// Non-goal: no change to provider finish_reason or broad streaming.
-fn save_session(session: &CouncilSession) -> anyhow::Result<String> {
-    let dir = std::env::var("COUNCIL_SESSIONS_DIR")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("sessions"));
-
-    std::fs::create_dir_all(&dir)?;
-
-    let filename = format!(
-        "council_{}_{}.json",
-        Utc::now().format("%Y%m%d_%H%M%S"),
-        session.session_id
-    );
-    let path = dir.join(&filename);
-    let json = serde_json::to_string_pretty(session)?;
-    std::fs::write(&path, json)?;
-
-    Ok(path.to_string_lossy().to_string())
 }
 
 #[cfg(test)]
