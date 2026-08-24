@@ -40,8 +40,6 @@ import os
 import re
 import sys
 
-# --- version extractors ----------------------------------------------------
-
 _PACKAGE_HEADER = re.compile(r"^\s*\[package\]\s*$")
 _NEXT_SECTION = re.compile(r"^\s*\[")
 _VERSION_LINE = re.compile(r'^\s*version\s*=\s*"([^"]+)"')
@@ -104,9 +102,6 @@ def consumer_version(cargo_toml_path):
         f"no sovereign-protocol dependency with an explicit version found in "
         f"{cargo_toml_path}"
     )
-
-
-# --- path resolution -------------------------------------------------------
 
 
 def default_paths():

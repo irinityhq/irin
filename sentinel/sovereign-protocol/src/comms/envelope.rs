@@ -306,8 +306,6 @@ impl<'de> Deserialize<'de> for CommsEnvelope {
     }
 }
 
-// ----- helpers -----
-
 fn random_id_hex32() -> String {
     use rand_core::{OsRng, RngCore};
     let mut bytes = [0u8; 16];
@@ -371,8 +369,6 @@ mod tests {
         assert_eq!(id.len(), 32);
         assert!(id.chars().all(|c| c.is_ascii_hexdigit()));
     }
-
-    // ----- T33: build() -> Result -----
 
     fn full_builder() -> CommsEnvelopeBuilder {
         CommsEnvelope::builder(EnvelopeKind::Escalation)

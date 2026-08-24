@@ -6,10 +6,6 @@
 
 use serde::{Deserialize, Serialize};
 
-// ---------------------------------------------------------------------------
-// Gateway Provenance (Phase 0: Council → Gateway)
-// ---------------------------------------------------------------------------
-
 /// Provenance data from Gateway routing. Captured from response headers
 /// when Council routes calls through Gateway (--via-gateway).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -125,10 +121,6 @@ impl ProviderProvenance {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Provider Response (unified shape from every provider client)
-// ---------------------------------------------------------------------------
-
 /// Response from any LLM provider. Every provider client must return this shape.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderResponse {
@@ -175,10 +167,6 @@ impl ProviderResponse {
         self
     }
 }
-
-// ---------------------------------------------------------------------------
-// Deliberation Types
-// ---------------------------------------------------------------------------
 
 /// A single seat's response in a round.
 /// Pre-Gen-9.6 (Python) sessions don't carry `cached_in` / `cost_usd`; default
