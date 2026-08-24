@@ -191,5 +191,66 @@
       "stop_condition": "on_success",
       "return_expectation": "structured"
     }
+  },
+  {
+    "name": "top_key_note",
+    "fault": "single fault: an unlisted extra top-level 'note' key outside the closed keyset",
+    "tenant": "sovereign",
+    "expect": "reject",
+    "reason_substring": "unexpected top-level key",
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Act",
+      "in_response_to": "esc-golden-0010",
+      "rationale": "golden vector: unlisted note top key must be rejected",
+      "job": "read.inbox",
+      "scope": {
+        "tenant": "sovereign",
+        "subject": "inbox/item-1",
+        "allowed_actions": ["read"]
+      },
+      "stop_condition": "on_success",
+      "return_expectation": "structured",
+      "note": "unlisted metadata"
+    }
+  },
+  {
+    "name": "scope_key_region",
+    "fault": "single fault: an unlisted extra scope-level 'region' key outside the closed keyset",
+    "tenant": "sovereign",
+    "expect": "reject",
+    "reason_substring": "unexpected scope key",
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Act",
+      "in_response_to": "esc-golden-0011",
+      "rationale": "golden vector: unlisted scope region must be rejected",
+      "job": "read.inbox",
+      "scope": {
+        "tenant": "sovereign",
+        "subject": "inbox/item-1",
+        "allowed_actions": ["read"],
+        "region": "us-central"
+      },
+      "stop_condition": "on_success",
+      "return_expectation": "structured"
+    }
+  },
+  {
+    "name": "dismiss_top_key_note",
+    "fault": "single fault: Dismiss carries an unlisted extra top-level 'note' key outside the closed keyset",
+    "tenant": "sovereign",
+    "expect": "reject",
+    "reason_substring": "unexpected top-level key",
+    "proposal": {
+      "schema": "irin.directive.proposal.v1",
+      "authority": "recommend",
+      "verdict": "Dismiss",
+      "in_response_to": "esc-golden-0012",
+      "rationale": "golden vector: Dismiss with unlisted note top key must be rejected",
+      "note": "unlisted metadata"
+    }
   }
 ]
