@@ -40,7 +40,7 @@ pub const HTTPS_PORT: u16 = DEFAULT_HTTPS_PORT;
 pub const HTTPS_PORT_ENV: &str = "IRIN_TAILSCALE_HTTPS_PORT";
 
 pub const COUNCIL_LOOPBACK: &str = "http://127.0.0.1:8765";
-pub const GATEWAY_WATCH_TARGET: &str = "http://127.0.0.1:18080/watch";
+pub const LEGACY_GATEWAY_WATCH_TARGET: &str = "http://127.0.0.1:18080/watch";
 pub const GATEWAY_HEALTH_TARGET: &str = "http://127.0.0.1:18080/health";
 
 /// Resolve the HTTPS port IRIN should own. Invalid or empty overrides fall
@@ -72,10 +72,6 @@ pub fn irin_serve_routes(gateway_pack_enabled: bool) -> Vec<ServeRoute> {
         target: COUNCIL_LOOPBACK,
     }];
     if gateway_pack_enabled {
-        routes.push(ServeRoute {
-            path: "/watch",
-            target: GATEWAY_WATCH_TARGET,
-        });
         routes.push(ServeRoute {
             path: "/health",
             target: GATEWAY_HEALTH_TARGET,
@@ -164,6 +160,12 @@ pub fn serve_disable_all_args(gateway_pack_enabled: bool) -> Vec<Vec<String>> {
 /// Disable argvs for an explicit HTTPS port (non-root first, root last).
 pub fn serve_disable_all_args_for_port(gateway_pack_enabled: bool, port: u16) -> Vec<Vec<String>> {
     let mut routes = irin_serve_routes(gateway_pack_enabled);
+    if gateway_pack_enabled {
+        routes.push(ServeRoute {
+            path: "/watch",
+            target: LEGACY_GATEWAY_WATCH_TARGET,
+        });
+    }
     // Turn off nested paths before the root handler.
     routes.sort_by(|a, b| {
         let a_root = a.path == "/";
@@ -594,20 +596,36 @@ pub fn tailnet_https_url(dns_name: &str, https_port: u16) -> String {
     }
 }
 
-/// True when observed handlers exactly match the expected IRIN route table
-/// (same paths and proxy targets; no extras).
+fn is_legacy_gateway_watch(handler: &ObservedHandler) -> bool {
+    handler.path == "/watch"
+        && normalize_proxy(&handler.proxy) == normalize_proxy(LEGACY_GATEWAY_WATCH_TARGET)
+}
+
+fn gateway_routes_expected(expected: &[ServeRoute]) -> bool {
+    expected.iter().any(|route| {
+        route.path == "/health"
+            && normalize_proxy(route.target) == normalize_proxy(GATEWAY_HEALTH_TARGET)
+    })
+}
+
+/// True when observed handlers match the expected IRIN route table.
+///
+/// Gateway-owned tables also tolerate the exact legacy `/watch` handler so an
+/// older publication can be disabled or re-applied instead of becoming stuck.
 pub fn handlers_match_routes(observed: &[ObservedHandler], expected: &[ServeRoute]) -> bool {
-    if observed.len() != expected.len() {
-        return false;
-    }
+    let allow_legacy_watch = gateway_routes_expected(expected);
     let mut obs: Vec<_> = observed
         .iter()
-        .map(|h| (h.path.as_str(), normalize_proxy(&h.proxy)))
+        .filter(|handler| !(allow_legacy_watch && is_legacy_gateway_watch(handler)))
+        .map(|handler| (handler.path.as_str(), normalize_proxy(&handler.proxy)))
         .collect();
+    if obs.len() != expected.len() {
+        return false;
+    }
     obs.sort_by(|a, b| a.0.cmp(b.0));
     let mut exp: Vec<_> = expected
         .iter()
-        .map(|r| (r.path, normalize_proxy(r.target)))
+        .map(|route| (route.path, normalize_proxy(route.target)))
         .collect();
     exp.sort_by(|a, b| a.0.cmp(b.0));
     obs == exp
@@ -617,13 +635,16 @@ pub fn handlers_match_routes(observed: &[ObservedHandler], expected: &[ServeRout
 ///
 /// Used only to recover an interrupted partial apply. An empty or partial set
 /// is safe to disable when durable ownership proves the expected route shape;
-/// any extra path or changed target fails closed.
+/// any extra path or changed target fails closed. The exact legacy `/watch`
+/// handler is accepted only for a Gateway-owned table so teardown can remove it.
 pub fn handlers_are_route_subset(observed: &[ObservedHandler], expected: &[ServeRoute]) -> bool {
+    let allow_legacy_watch = gateway_routes_expected(expected);
     observed.iter().all(|handler| {
-        expected.iter().any(|route| {
-            handler.path == route.path
-                && normalize_proxy(&handler.proxy) == normalize_proxy(route.target)
-        })
+        (allow_legacy_watch && is_legacy_gateway_watch(handler))
+            || expected.iter().any(|route| {
+                handler.path == route.path
+                    && normalize_proxy(&handler.proxy) == normalize_proxy(route.target)
+            })
     })
 }
 
@@ -777,8 +798,8 @@ mod tests {
     #[test]
     fn route_table_includes_gateway_paths_when_enabled() {
         let routes = irin_serve_routes(true);
-        assert_eq!(routes.len(), 3);
-        assert!(routes.iter().any(|r| r.path == "/watch"));
+        assert_eq!(routes.len(), 2);
+        assert!(!routes.iter().any(|r| r.path == "/watch"));
         assert!(routes.iter().any(|r| r.path == "/health"));
         assert!(routes
             .iter()
@@ -806,15 +827,14 @@ mod tests {
     }
 
     #[test]
-    fn apply_argv_watch_uses_set_path() {
-        let args = serve_apply_route_args(&ServeRoute {
-            path: "/watch",
-            target: GATEWAY_WATCH_TARGET,
-        });
-        assert!(args.iter().any(|a| a == "--set-path=/watch"));
-        assert!(args.iter().any(|a| a == "--https=8443"));
-        assert!(args.ends_with(&[GATEWAY_WATCH_TARGET.to_string()]));
-        assert!(!argv_contains_funnel(&args));
+    fn apply_argv_never_publishes_legacy_watch() {
+        let all = serve_apply_all_args(true);
+        assert_eq!(all.len(), 2);
+        assert!(!all.iter().flatten().any(|arg| arg == "--set-path=/watch"));
+        assert!(!all
+            .iter()
+            .flatten()
+            .any(|arg| arg == LEGACY_GATEWAY_WATCH_TARGET));
     }
 
     #[test]
@@ -824,12 +844,12 @@ mod tests {
             target: COUNCIL_LOOPBACK,
         });
         assert_eq!(root, vec!["serve", "--bg", "--yes", "--https=8443", "off"]);
-        let watch = serve_disable_route_args(&ServeRoute {
+        let legacy_watch = serve_disable_route_args(&ServeRoute {
             path: "/watch",
-            target: GATEWAY_WATCH_TARGET,
+            target: LEGACY_GATEWAY_WATCH_TARGET,
         });
         assert_eq!(
-            watch,
+            legacy_watch,
             vec![
                 "serve",
                 "--bg",
@@ -839,6 +859,7 @@ mod tests {
                 "off"
             ]
         );
+        assert!(serve_disable_all_args(true).contains(&legacy_watch));
         for args in serve_disable_all_args(true) {
             assert!(args.iter().any(|a| a == "off"));
             assert!(!argv_contains_serve_reset(&args));
@@ -1111,6 +1132,14 @@ mod tests {
             proxy: COUNCIL_LOOPBACK.into(),
         }];
         assert!(handlers_are_route_subset(&partial, &expected));
+        let legacy_partial = vec![
+            partial[0].clone(),
+            ObservedHandler {
+                path: "/watch".into(),
+                proxy: LEGACY_GATEWAY_WATCH_TARGET.into(),
+            },
+        ];
+        assert!(handlers_are_route_subset(&legacy_partial, &expected));
         assert!(handlers_are_route_subset(&[], &expected));
         assert!(!handlers_are_route_subset(
             &[ObservedHandler {
