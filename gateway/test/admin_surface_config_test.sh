@@ -4,8 +4,18 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 NGINX="$ROOT/nginx.conf"
 
-if grep -Eq '^[[:space:]]*location[[:space:]]+(\^~[[:space:]]+)?/admin/[[:space:]]*\{' "$NGINX"; then
-  echo "FAIL: prefix /admin/ nginx location found" >&2
+if ! awk '
+  /^[[:space:]]*location[[:space:]]/ && /(^|[^[:alnum:]_\/])\/admin\// {
+    allowed = ($1 == "location" && $2 == "=" &&
+               ($3 == "/admin/keys" || $3 == "/admin/keys/revoke") &&
+               $4 == "{" && NF == 4)
+    if (!allowed) {
+      print "FAIL: unexpected /admin/ nginx location: " $0 > "/dev/stderr"
+      invalid = 1
+    }
+  }
+  END { exit invalid }
+' "$NGINX"; then
   exit 1
 fi
 
