@@ -28,20 +28,22 @@ use super::helpers::{
 /// `GET /watch/outbox/{tenant}?status=&limit=` — tenant-scoped list (newest first).
 /// Returns the rows plus the canonical + signature fields needed for UI-side
 /// Ed25519 verification against the pubkey from /watch/outbox/pubkey.
+#[allow(clippy::too_many_arguments)] // stable outbox-list handler API; mirrors router state fields plus the caller credential pair.
 pub async fn list_outbox_json(
     db: Arc<WatchDb>,
     tenant: String,
     status: Option<String>,
     cursor: Option<String>,
     limit: i64,
-    authed: bool,
+    admin_token: String,
+    bearer: Option<String>,
     canary_tenant: &str,
 ) -> Response {
     // Admin-only (Invariant, Option 3): reject unauthed BEFORE
     // any tenant/cursor/store lookup. No store read on the unauthed path → a
     // 401-vs-403/404 status-differential oracle is structurally impossible, and
     // no projection / cadence / count is exposed. Constant 401, no tenant echo.
-    if !authed {
+    if !admin_token_matches(&admin_token, bearer.as_deref()) {
         return problem(
             StatusCode::UNAUTHORIZED,
             "unauthorized",
@@ -109,13 +111,14 @@ pub async fn get_outbox_json(
     db: Arc<WatchDb>,
     tenant: String,
     id: String,
-    authed: bool,
+    admin_token: String,
+    bearer: Option<String>,
     canary_tenant: &str,
 ) -> Response {
     // Admin-only (Invariant, Option 3): reject unauthed BEFORE
     // any tenant/id/store lookup, so no 401-vs-403/404 oracle and no projection
     // leak. Constant 401, no tenant/id echo.
-    if !authed {
+    if !admin_token_matches(&admin_token, bearer.as_deref()) {
         return problem(
             StatusCode::UNAUTHORIZED,
             "unauthorized",

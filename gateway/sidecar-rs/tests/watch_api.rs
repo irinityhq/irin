@@ -2034,7 +2034,17 @@ fn outbox_router(state: OutboxState) -> Router {
                     let cursor = q.get("cursor").cloned();
                     let limit = q.get("limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(50);
                     let canary = s.canary_tenant.clone();
-                    list_outbox_json(s.db, tenant, status, cursor, limit, true, &canary).await
+                    list_outbox_json(
+                        s.db,
+                        tenant,
+                        status,
+                        cursor,
+                        limit,
+                        s.admin_token.clone(),
+                        Some(s.admin_token),
+                        &canary,
+                    )
+                    .await
                 },
             ),
         )
@@ -2044,7 +2054,15 @@ fn outbox_router(state: OutboxState) -> Router {
                 |State(s): State<OutboxState>,
                  Path((tenant, id)): Path<(String, String)>| async move {
                     let canary = s.canary_tenant.clone();
-                    get_outbox_json(s.db, tenant, id, true, &canary).await
+                    get_outbox_json(
+                        s.db,
+                        tenant,
+                        id,
+                        s.admin_token.clone(),
+                        Some(s.admin_token),
+                        &canary,
+                    )
+                    .await
                 },
             ),
         )
@@ -2055,7 +2073,8 @@ fn outbox_router(state: OutboxState) -> Router {
             get(
                 |State(s): State<OutboxState>, Path(tenant): Path<String>| async move {
                     let canary = s.canary_tenant.clone();
-                    list_outbox_json(s.db, tenant, None, None, 1, false, &canary).await
+                    list_outbox_json(s.db, tenant, None, None, 1, s.admin_token, None, &canary)
+                        .await
                 },
             ),
         )
@@ -2123,18 +2142,26 @@ fn outbox_router(state: OutboxState) -> Router {
                 },
             ),
         )
-        // T1 fix proof: a "list authed" route that computes `authed` exactly the
-        // way main.rs now does (SHA-256 + constant-time compare of the bearer
-        // against the admin token) — a junk bearer fails the compare and gets a
-        // 401 (outbox reads are admin-only; no public projection fallback).
+        // A-12 proof: the caller passes the configured token and raw bearer to
+        // the library handler. The handler owns the constant-time auth gate, so
+        // a junk bearer gets 401 before any tenant or store lookup.
         .route(
             "/watch/outbox/{tenant}/authed-list",
             get(
                 |State(s): State<OutboxState>, Path(tenant): Path<String>, headers: axum::http::HeaderMap| async move {
                     let bearer = headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|s| s.strip_prefix("Bearer ")).map(|s| s.to_string());
-                    let authed = ct_admin_token_matches(&s.admin_token, bearer.as_deref());
                     let canary = s.canary_tenant.clone();
-                    list_outbox_json(s.db, tenant, None, None, 50, authed, &canary).await
+                    list_outbox_json(
+                        s.db,
+                        tenant,
+                        None,
+                        None,
+                        50,
+                        s.admin_token,
+                        bearer,
+                        &canary,
+                    )
+                    .await
                 },
             ),
         )
@@ -2149,29 +2176,6 @@ fn outbox_router(state: OutboxState) -> Router {
             ),
         )
         .with_state(state)
-}
-
-/// Test-side replica of `watch::api::admin_token_matches` (which is `pub(crate)`
-/// and so not reachable from this integration-test crate). Same algorithm:
-/// reject a bearer longer than 128 bytes before hashing, SHA-256 both sides to
-/// a fixed-width digest, constant-time compare; empty configured token and a
-/// missing bearer both fail closed. This mirrors EXACTLY what main.rs computes
-/// for `authed` on the read routes — keep the length guard in lockstep with prod.
-fn ct_admin_token_matches(expected: &str, provided: Option<&str>) -> bool {
-    use sha2::{Digest, Sha256};
-    use subtle::ConstantTimeEq;
-    if expected.is_empty() {
-        return false;
-    }
-    let Some(given) = provided else {
-        return false;
-    };
-    if given.len() > 128 {
-        return false;
-    }
-    let expected_digest = Sha256::digest(expected.as_bytes());
-    let given_digest = Sha256::digest(given.as_bytes());
-    expected_digest.ct_eq(&given_digest).into()
 }
 
 fn pct_encode_query_value(raw: &str) -> String {
@@ -3276,7 +3280,8 @@ async fn t1_outbox_unauthed_single_get_is_401() {
         db,
         "sovereign".to_string(),
         "any-id".to_string(),
-        false,
+        "super-secret".to_string(),
+        None,
         "sovereign",
     )
     .await;
@@ -3310,7 +3315,8 @@ async fn t1_outbox_unauthed_list_is_401() {
         None,
         None,
         50,
-        false,
+        "super-secret".to_string(),
+        None,
         "sovereign",
     )
     .await;

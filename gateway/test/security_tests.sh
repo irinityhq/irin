@@ -525,6 +525,66 @@ case "$CODE" in
     *)           assert_not_internal_error "$CODE" "5g. CRLF in header" ;;
 esac
 
+# 5h. Unknown /admin paths must terminate at nginx, not reach the sidecar.
+ADMIN_UNKNOWN_RESPONSE=$(curl -sS --max-time 10 -w $'\n__STATUS__:%{http_code}' \
+  -X POST "${GW_URL}/admin/not-a-route" \
+  -H "Content-Type: application/json" \
+  -d '{}')
+ADMIN_UNKNOWN_CODE="${ADMIN_UNKNOWN_RESPONSE##*__STATUS__:}"
+ADMIN_UNKNOWN_BODY="${ADMIN_UNKNOWN_RESPONSE%$'\n__STATUS__:'*}"
+[ "$ADMIN_UNKNOWN_CODE" = "404" ] \
+    && pass "5h. Unknown /admin path → nginx 404" \
+    || fail "5h. Unknown /admin path → ${ADMIN_UNKNOWN_CODE} (expected nginx 404)"
+if printf '%s' "$ADMIN_UNKNOWN_BODY" | grep -Eq '^[[:space:]]*[\{\[]'; then
+    fail "5h. Unknown /admin path returned a sidecar JSON body"
+else
+    pass "5h. Unknown /admin path returned no sidecar JSON body"
+fi
+
+# 5i. The exact admin key routes must provision and clean up through the sidecar.
+ADMIN_PROVISION_TOKEN="${GW_ADMIN_KEY:-${ADMIN_KEY:-${BOOTSTRAP_TOKEN:-}}}"
+if [ -n "$ADMIN_PROVISION_TOKEN" ] && command -v jq >/dev/null 2>&1; then
+    ADMIN_PROVISION_RESPONSE=$(curl -sS --max-time 10 -w $'\n__STATUS__:%{http_code}' \
+      -X POST "${GW_URL}/admin/keys" \
+      -H "Content-Type: application/json" \
+      -d "{\"budget_key\":\"security_admin_surface_$$\",\"tier\":\"default\",\"rpm\":1,\"admin_key\":\"${ADMIN_PROVISION_TOKEN}\"}")
+    ADMIN_PROVISION_CODE="${ADMIN_PROVISION_RESPONSE##*__STATUS__:}"
+    ADMIN_PROVISION_BODY="${ADMIN_PROVISION_RESPONSE%$'\n__STATUS__:'*}"
+    ADMIN_PROVISION_KEY_ID=$(printf '%s' "$ADMIN_PROVISION_BODY" \
+      | jq -r '.key_id // empty' 2>/dev/null || true)
+    if { [ "$ADMIN_PROVISION_CODE" = "200" ] || [ "$ADMIN_PROVISION_CODE" = "201" ]; } \
+      && [ -n "$ADMIN_PROVISION_KEY_ID" ] \
+      && printf '%s' "$ADMIN_PROVISION_BODY" | jq -e '(.raw_key // "") | length > 0' >/dev/null 2>&1; then
+        pass "5i. Exact /admin/keys route provisions through the sidecar"
+    else
+        fail "5i. Exact /admin/keys route did not provision (${ADMIN_PROVISION_CODE})"
+    fi
+
+    if [ -n "$ADMIN_PROVISION_KEY_ID" ]; then
+        ADMIN_REVOKE_RESPONSE=$(curl -sS --max-time 10 -w $'\n__STATUS__:%{http_code}' \
+          -X POST "${GW_URL}/admin/keys/revoke" \
+          -H "Content-Type: application/json" \
+          -d "$(jq -cn --arg key_id "$ADMIN_PROVISION_KEY_ID" --arg admin_key "$ADMIN_PROVISION_TOKEN" \
+            '{key_id: $key_id, admin_key: $admin_key}')")
+        ADMIN_REVOKE_CODE="${ADMIN_REVOKE_RESPONSE##*__STATUS__:}"
+        ADMIN_REVOKE_BODY="${ADMIN_REVOKE_RESPONSE%$'\n__STATUS__:'*}"
+        if [ "$ADMIN_REVOKE_CODE" = "200" ] \
+          && printf '%s' "$ADMIN_REVOKE_BODY" \
+            | jq -e --arg key_id "$ADMIN_PROVISION_KEY_ID" \
+              '.revoked == true and .key_id == $key_id' >/dev/null 2>&1; then
+            pass "5i. Exact /admin/keys/revoke route revokes the provisioned key"
+        else
+            fail "5i. Exact /admin/keys/revoke route did not revoke (${ADMIN_REVOKE_CODE})"
+        fi
+    else
+        fail "5i. Provision response omitted key_id; test key could not be revoked"
+    fi
+else
+    skip "5i. Exact admin key routes — needs GW_ADMIN_KEY, ADMIN_KEY, or BOOTSTRAP_TOKEN and jq"
+fi
+unset ADMIN_PROVISION_TOKEN ADMIN_PROVISION_KEY_ID ADMIN_PROVISION_BODY ADMIN_PROVISION_RESPONSE
+unset ADMIN_REVOKE_CODE ADMIN_REVOKE_BODY ADMIN_REVOKE_RESPONSE
+
 # Policy enforcement is proven by the gateway-sidecar Rust tests
 # sovereign_level_enforces_provider_allowlist and dry_run_env_enforces_only_exact_one.
 # Live RED requests smart-route to sovereign providers before the firewall.

@@ -168,14 +168,14 @@ pub(super) async fn watch_list_outbox(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(|s| s.to_string());
-    let authed = watch::api::admin_token_matches(&state.watch_admin_token, bearer.as_deref());
     watch::api::list_outbox_json(
         state.watch_db.clone(),
         tenant,
         status,
         cursor,
         limit,
-        authed,
+        state.watch_admin_token.clone(),
+        bearer,
         &state.watch_canary_tenant,
     )
     .await
@@ -195,12 +195,12 @@ pub(super) async fn watch_get_outbox(
         .and_then(|v| v.to_str().ok())
         .and_then(|s| s.strip_prefix("Bearer "))
         .map(|s| s.to_string());
-    let authed = watch::api::admin_token_matches(&state.watch_admin_token, bearer.as_deref());
     watch::api::get_outbox_json(
         state.watch_db.clone(),
         tenant,
         id,
-        authed,
+        state.watch_admin_token.clone(),
+        bearer,
         &state.watch_canary_tenant,
     )
     .await
