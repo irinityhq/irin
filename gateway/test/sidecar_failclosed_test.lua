@@ -44,6 +44,8 @@ check(policy_err == nil, "policy transport failure is encoded as a decision")
 check(policy ~= nil and policy.allowed == false, "policy transport failure denies")
 check(policy ~= nil and policy.dry_run == false, "policy transport failure is enforced")
 check(policy ~= nil and policy.level == "RED", "policy transport failure preserves level")
+check(policy ~= nil and policy.reason == "sidecar unreachable",
+      "policy transport failure preserves the fail-closed reason")
 
 local routing, route_err = sidecar.route_decide("fast", {}, nil, "GREEN", false)
 check(routing == nil, "route transport failure has no routing decision")

@@ -45,9 +45,24 @@ section() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
 SIDECAR_STOPPED=0
 restart_sidecar() {
     if [ "$SIDECAR_STOPPED" = "1" ]; then
-        docker compose start sidecar >/dev/null 2>&1 || true
-        SIDECAR_STOPPED=0
-        sleep 2
+        if ! docker compose start sidecar >/dev/null; then
+            fail "Sidecar restart failed"
+            return 1
+        fi
+
+        local attempt=0
+        while [ "$attempt" -lt 20 ]; do
+            if docker compose exec -T sidecar wget -q -O /dev/null \
+                http://127.0.0.1:9000/health >/dev/null 2>&1; then
+                SIDECAR_STOPPED=0
+                return 0
+            fi
+            attempt=$((attempt + 1))
+            sleep 1
+        done
+
+        fail "Sidecar health did not recover after restart"
+        return 1
     fi
 }
 trap restart_sidecar EXIT
