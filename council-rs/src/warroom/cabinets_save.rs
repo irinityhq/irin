@@ -33,6 +33,7 @@ static TMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 /// only strategy consistent with "never overwrite a built-in, but re-saving a
 /// saved cabinet is fine". Update when checking in a new cabinet YAML.
 pub const EMBEDDED_CABINET_KEYS: &[&str] = &[
+    "checklist-duo",
     "code-verify",
     "duo",
     "freeride",
@@ -41,6 +42,7 @@ pub const EMBEDDED_CABINET_KEYS: &[&str] = &[
     "reflection",
     "sovereign",
     "standard",
+    "starter-nvidia",
     "triad-architecture",
     "triad-debugging",
     "triad-product",
@@ -194,8 +196,43 @@ chair:
     }
 
     #[test]
+    fn embedded_keys_match_tracked_cabinet_dir() {
+        use std::collections::BTreeSet;
+
+        let cabinet_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("cabinets");
+        let tracked = std::fs::read_dir(cabinet_dir)
+            .unwrap()
+            .filter_map(|entry| {
+                let path = entry.ok()?.path();
+                if path.extension()?.to_str()? != "yaml" {
+                    return None;
+                }
+                let stem = path.file_stem()?.to_str()?.to_owned();
+                is_valid_cabinet_name(&stem).then_some(stem)
+            })
+            .collect::<BTreeSet<_>>();
+        let embedded = EMBEDDED_CABINET_KEYS
+            .iter()
+            .map(|key| (*key).to_owned())
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            tracked, embedded,
+            "every valid tracked cabinet must be protected"
+        );
+        assert!(!is_valid_cabinet_name("triage.canary-novertex"));
+    }
+
+    #[test]
     fn embedded_keys_cannot_be_overwritten() {
-        for key in ["standard", "warroom", "triad-strategy", "quick"] {
+        for key in [
+            "standard",
+            "warroom",
+            "triad-strategy",
+            "quick",
+            "checklist-duo",
+            "starter-nvidia",
+        ] {
             assert!(
                 matches!(
                     validate_save_request(key, VALID_YAML),
@@ -204,6 +241,10 @@ chair:
                 "embedded key {key:?} must be rejected"
             );
         }
+        assert!(matches!(
+            validate_save_request("triage.canary-novertex", VALID_YAML),
+            Err(SaveError::InvalidName)
+        ));
     }
 
     #[test]
