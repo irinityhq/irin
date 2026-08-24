@@ -647,6 +647,161 @@ fn try_start_council_server(
     )
 }
 
+fn respawn_council_fenced_core(
+    lifecycle_at_intent: u64,
+    stop: impl FnOnce(),
+    wait_port: impl FnOnce(),
+    start: impl FnOnce() -> Result<String, String>,
+    recover_after_stop: impl FnOnce() -> Result<String, gateway_pack::PromoteCommitError>,
+) -> Result<String, gateway_pack::PromoteCommitError> {
+    match gateway_pack::promote_commit_after_stop_wait_detailed(
+        lifecycle_at_intent,
+        stop,
+        wait_port,
+        start,
+    ) {
+        Err(gateway_pack::PromoteCommitError::LifecycleChangedAfterStop) => recover_after_stop(),
+        result => result,
+    }
+}
+
+fn respawn_council_fenced(
+    app: &AppHandle,
+    lifecycle_at_intent: u64,
+    port: Option<u16>,
+    auth_token: Option<&str>,
+    governed: Option<bool>,
+    librarian_base: Option<&str>,
+) -> Result<String, gateway_pack::PromoteCommitError> {
+    let wait_port = gateway_pack::promote_port_release_target(
+        port,
+        default_serve_port().unwrap_or(8765),
+    );
+    match respawn_council_fenced_core(
+        lifecycle_at_intent,
+        || stop_tracked_council_server(app),
+        || {
+            let _ = wait_for_port_release(wait_port, Duration::from_secs(5));
+        },
+        || try_start_council_server(app, port, auth_token, governed, librarian_base),
+        || Err(gateway_pack::PromoteCommitError::LifecycleChangedAfterStop),
+    ) {
+        Err(gateway_pack::PromoteCommitError::LifecycleChangedBeforeStop) => {
+            let _ = app.emit(
+                "council-log",
+                "[system] council-respawn: pack lifecycle changed before stop; leaving Council untouched",
+            );
+            Err(gateway_pack::PromoteCommitError::LifecycleChangedBeforeStop)
+        }
+        Err(gateway_pack::PromoteCommitError::LifecycleChangedAfterStop) => {
+            let persisted_via_gateway = load_or_create_private_config()
+                .map(|config| config.via_gateway_default)
+                .unwrap_or(false);
+            match gateway_pack::promote_after_stop_lifecycle_recovery(persisted_via_gateway) {
+                gateway_pack::AfterStopLifecycleRecovery::AttemptGovernedFresh => {
+                    let _ = app.emit(
+                        "council-log",
+                        "[system] council-respawn: lifecycle changed after stop; attempting fresh governed start (no held secrets)",
+                    );
+                    match try_start_council_server(
+                        app,
+                        port,
+                        auth_token,
+                        Some(true),
+                        librarian_base,
+                    ) {
+                        Ok(message) => {
+                            let _ = app.emit(
+                                "council-log",
+                                format!(
+                                    "[system] council-respawn: fresh governed start ok: {message}"
+                                ),
+                            );
+                            Ok(message)
+                        }
+                        Err(governed_error) => {
+                            let _ = app.emit(
+                                "council-log",
+                                format!(
+                                    "[system] council-respawn: fresh governed start failed ({governed_error}); restoring Direct"
+                                ),
+                            );
+                            let recovered = match try_start_council_server(
+                                app,
+                                port,
+                                auth_token,
+                                Some(false),
+                                librarian_base,
+                            ) {
+                                Ok(message) => {
+                                    let _ = app.emit(
+                                        "council-log",
+                                        format!(
+                                            "[system] council-respawn: Council restored in Direct mode: {message}"
+                                        ),
+                                    );
+                                    Ok(message)
+                                }
+                                Err(direct_error) => {
+                                    let _ = app.emit(
+                                        "council-log",
+                                        format!(
+                                            "[system] council-respawn: Direct restart failed after lifecycle abort: {direct_error}. Core War Room is down; start Council manually."
+                                        ),
+                                    );
+                                    Err(gateway_pack::PromoteCommitError::SpawnFailed(format!(
+                                        "fresh governed start failed: {governed_error}; Direct restart failed: {direct_error}"
+                                    )))
+                                }
+                            };
+                            schedule_governed_promote_attempts(
+                                app.clone(),
+                                auth_token.map(str::to_string),
+                                None,
+                                None,
+                            );
+                            recovered
+                        }
+                    }
+                }
+                gateway_pack::AfterStopLifecycleRecovery::RestoreDirect => {
+                    let _ = app.emit(
+                        "council-log",
+                        "[system] council-respawn: pack no longer enabled after stop; restoring Direct",
+                    );
+                    match try_start_council_server(
+                        app,
+                        port,
+                        auth_token,
+                        Some(false),
+                        librarian_base,
+                    ) {
+                        Ok(message) => {
+                            let _ = app.emit(
+                                "council-log",
+                                format!(
+                                    "[system] council-respawn: Council restored in Direct mode: {message}"
+                                ),
+                            );
+                            Ok(message)
+                        }
+                        Err(direct_error) => {
+                            let _ = app.emit(
+                                "council-log",
+                                format!(
+                                    "[system] council-respawn: Direct restart failed after lifecycle abort: {direct_error}. Core War Room is down; start Council manually."
+                                ),
+                            );
+                            Err(gateway_pack::PromoteCommitError::SpawnFailed(direct_error))
+                        }
+                    }
+                }
+            }
+        }
+        result => result,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Council start phases — named extraction of try_start_council_server_with_credentials.
 // Ordering and authority checks are unchanged; each phase is a pure move of
@@ -1181,6 +1336,7 @@ async fn restart_sidecar(
                 ));
             }
         }
+        let lifecycle_at_intent = gateway_pack::pack_lifecycle_generation();
 
         let config = {
             let state = app.state::<SpawnConfigCache>();
@@ -1220,27 +1376,23 @@ async fn restart_sidecar(
                 }
             }
         }
-        stop_tracked_council_server(&app);
-        if had_child {
-            // kill() returns before the OS releases the listener; wait so the
-            // respawn does not lose the bind race on the configured port.
-            if !wait_for_port_release(port, Duration::from_secs(5)) {
-                let _ = app.emit(
-                    "council-log",
-                    format!(
-                        "[system] restart: port {port} still busy after 5s; spawning anyway"
-                    ),
-                );
-            }
-        }
-
-        try_start_council_server(
+        respawn_council_fenced(
             &app,
+            lifecycle_at_intent,
             Some(port),
             config.auth_token.as_deref(),
             Some(via_gateway),
             librarian_base.as_deref().or(config.librarian_base.as_deref()),
         )
+        .map_err(|error| match error {
+            gateway_pack::PromoteCommitError::LifecycleChangedBeforeStop => {
+                "Council restart cancelled: Gateway Pack lifecycle changed before stop".to_string()
+            }
+            gateway_pack::PromoteCommitError::LifecycleChangedAfterStop => {
+                unreachable!("respawn_council_fenced handles post-stop recovery")
+            }
+            gateway_pack::PromoteCommitError::SpawnFailed(error) => error,
+        })
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1267,6 +1419,7 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, St
         let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let status = gateway_pack::enable_gateway_pack(&store)?;
+        let lifecycle_at_intent = gateway_pack::pack_lifecycle_generation();
         // Docker missing/down is neutral for core Direct — still recompute.
         if matches!(
             status.state,
@@ -1294,10 +1447,9 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, St
             let _ = gateway_pack::status_with_council_route(&store, false, false);
             return Ok(status_authority::recompute(&app2, Freshness::Action));
         }
-        stop_tracked_council_server(&app2);
-        let _ = wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
-        match try_start_council_server(
+        match respawn_council_fenced(
             &app2,
+            lifecycle_at_intent,
             None,
             config.auth_token.as_deref(),
             Some(true),
@@ -1305,10 +1457,21 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, St
         ) {
             Ok(msg) => {
                 let _ = app2.emit("council-log", format!("[system] gateway enable: {msg}"));
-                let _ = gateway_pack::status_with_council_route(&store, true, false);
+                let owned_route = gateway_pack::owned_council_route();
+                let _ = gateway_pack::status_with_council_route(
+                    &store,
+                    owned_route == Some(true),
+                    owned_route == Some(false),
+                );
                 Ok(status_authority::recompute(&app2, Freshness::Action))
             }
-            Err(e) => {
+            Err(gateway_pack::PromoteCommitError::LifecycleChangedBeforeStop) => {
+                Ok(status_authority::recompute(&app2, Freshness::Action))
+            }
+            Err(gateway_pack::PromoteCommitError::LifecycleChangedAfterStop) => {
+                unreachable!("respawn_council_fenced handles post-stop recovery")
+            }
+            Err(gateway_pack::PromoteCommitError::SpawnFailed(e)) => {
                 let _ = app2.emit(
                     "council-log",
                     format!("[system] gateway enable: council governed restart failed: {e}"),
@@ -1376,6 +1539,7 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, S
         let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let _status = gateway_pack::disable_gateway_pack(&store)?;
+        let lifecycle_at_intent = gateway_pack::pack_lifecycle_generation();
         let config = {
             let state = app2.state::<SpawnConfigCache>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -1387,22 +1551,38 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, S
             guard.child.is_some()
         };
         if had_child {
-            stop_tracked_council_server(&app2);
-            let _ =
-                wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
-            try_start_council_server(
+            let owned_route = match respawn_council_fenced(
                 &app2,
+                lifecycle_at_intent,
                 None,
                 config.auth_token.as_deref(),
                 Some(false),
                 config.librarian_base.as_deref(),
-            )
-            .map_err(|e| format!("Gateway disabled but Council Direct restart failed: {e}"))?;
-            let _ = app2.emit(
-                "council-log",
-                "[system] gateway disable: Council restarted in Direct mode",
+            ) {
+                Ok(_) => gateway_pack::owned_council_route(),
+                Err(gateway_pack::PromoteCommitError::LifecycleChangedBeforeStop) => {
+                    return Ok(status_authority::recompute(&app2, Freshness::Action));
+                }
+                Err(gateway_pack::PromoteCommitError::LifecycleChangedAfterStop) => {
+                    unreachable!("respawn_council_fenced handles post-stop recovery")
+                }
+                Err(gateway_pack::PromoteCommitError::SpawnFailed(error)) => {
+                    return Err(format!(
+                        "Gateway disabled but Council Direct restart failed: {error}"
+                    ));
+                }
+            };
+            if owned_route == Some(false) {
+                let _ = app2.emit(
+                    "council-log",
+                    "[system] gateway disable: Council restarted in Direct mode",
+                );
+            }
+            let _ = gateway_pack::status_with_council_route(
+                &store,
+                owned_route == Some(true),
+                owned_route == Some(false),
             );
-            let _ = gateway_pack::status_with_council_route(&store, false, true);
         } else {
             let _ = gateway_pack::status_with_council_route(&store, false, true);
         }
@@ -1422,6 +1602,7 @@ async fn gateway_pack_stop(app: AppHandle) -> Result<DesktopStatusSnapshot, Stri
         let store = KeychainSecretStore;
         // Ensure Direct config before containers stop.
         let status = gateway_pack::stop_gateway_pack(&store)?;
+        let lifecycle_at_intent = gateway_pack::pack_lifecycle_generation();
         let config = {
             let state = app2.state::<SpawnConfigCache>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -1432,24 +1613,42 @@ async fn gateway_pack_stop(app: AppHandle) -> Result<DesktopStatusSnapshot, Stri
             let guard = state.0.lock().map_err(|e| e.to_string())?;
             guard.child.is_some()
         };
-        if had_child {
-            stop_tracked_council_server(&app2);
-            let _ =
-                wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
-            try_start_council_server(
+        let owned_route = if had_child {
+            match respawn_council_fenced(
                 &app2,
+                lifecycle_at_intent,
                 None,
                 config.auth_token.as_deref(),
                 Some(false),
                 config.librarian_base.as_deref(),
+            ) {
+                Ok(_) => gateway_pack::owned_council_route(),
+                Err(gateway_pack::PromoteCommitError::LifecycleChangedBeforeStop) => {
+                    return Ok(status_authority::recompute(&app2, Freshness::Action));
+                }
+                Err(gateway_pack::PromoteCommitError::LifecycleChangedAfterStop) => {
+                    unreachable!("respawn_council_fenced handles post-stop recovery")
+                }
+                Err(gateway_pack::PromoteCommitError::SpawnFailed(error)) => {
+                    gateway_pack::lifecycle_stage("stop_handler_complete", "error");
+                    return Err(format!(
+                        "Gateway pack stopped but Council Direct restart failed: {error}"
+                    ));
+                }
+            }
+        } else {
+            None
+        };
+        let mut st = if had_child {
+            gateway_pack::status_with_council_route(
+                &store,
+                owned_route == Some(true),
+                owned_route == Some(false),
             )
-            .map_err(|e| {
-                gateway_pack::lifecycle_stage("stop_handler_complete", "error");
-                format!("Gateway pack stopped but Council Direct restart failed: {e}")
-            })?;
-        }
-        let mut st = gateway_pack::status_with_council_route(&store, false, true);
-        if status.docker == "ready" {
+        } else {
+            gateway_pack::status_with_council_route(&store, false, true)
+        };
+        if status.docker == "ready" && owned_route == Some(false) {
             st.message = "Gateway pack stopped; Council is in Direct mode.".into();
         }
         gateway_pack::lifecycle_stage("stop_handler_complete", "ok");
@@ -1499,6 +1698,7 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<DesktopStatusSnapshot,
         let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let _status = gateway_pack::uninstall_gateway_pack(&store)?;
+        let lifecycle_at_intent = gateway_pack::pack_lifecycle_generation();
         let config = {
             let state = app2.state::<SpawnConfigCache>();
             let guard = state.0.lock().map_err(|e| e.to_string())?;
@@ -1510,19 +1710,27 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<DesktopStatusSnapshot,
             guard.child.is_some()
         };
         if had_child {
-            stop_tracked_council_server(&app2);
-            let _ =
-                wait_for_port_release(default_serve_port().unwrap_or(8765), Duration::from_secs(5));
-            try_start_council_server(
+            match respawn_council_fenced(
                 &app2,
+                lifecycle_at_intent,
                 None,
                 config.auth_token.as_deref(),
                 Some(false),
                 config.librarian_base.as_deref(),
-            )
-            .map_err(|e| {
-                format!("Gateway pack uninstalled but Council Direct restart failed: {e}")
-            })?;
+            ) {
+                Ok(_) => {}
+                Err(gateway_pack::PromoteCommitError::LifecycleChangedBeforeStop) => {
+                    return Ok(status_authority::recompute(&app2, Freshness::Action));
+                }
+                Err(gateway_pack::PromoteCommitError::LifecycleChangedAfterStop) => {
+                    unreachable!("respawn_council_fenced handles post-stop recovery")
+                }
+                Err(gateway_pack::PromoteCommitError::SpawnFailed(error)) => {
+                    return Err(format!(
+                        "Gateway pack uninstalled but Council Direct restart failed: {error}"
+                    ));
+                }
+            }
         }
         Ok(status_authority::recompute(&app2, Freshness::Action))
     })
