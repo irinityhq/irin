@@ -394,7 +394,16 @@ function _M.policy_evaluate(provider, content, level)
         req.sensitivity_level = CONTRACT_TO_POLICY_LEVEL[level:upper()]
             or level:upper()
     end
-    return sidecar_post("/policy/evaluate", req)
+    local result, err = sidecar_post("/policy/evaluate", req)
+    if err then
+        return {
+            allowed = false,
+            dry_run = false,
+            level = level,
+            reason = "sidecar unreachable",
+        }, nil
+    end
+    return result, nil
 end
 
 -- ---------------------------------------------------------------------------

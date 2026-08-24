@@ -122,7 +122,7 @@ HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" -X POST "${GW_URL}/v1/chat/co
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer ${GW_TEST_KEY}" \
   -d '{"model":"nonexistent-model","messages":[{"role":"user","content":"test"}]}')
-[ "$HTTP_CODE" = "400" ] && pass "Unknown model → 400" || fail "Unknown model → ${HTTP_CODE}"
+[ "$HTTP_CODE" = "503" ] && pass "Unknown model → 503 (routing unavailable)" || fail "Unknown model → ${HTTP_CODE}"
 
 # --- 5. Metrics endpoint ---
 echo "5. Metrics endpoint..."

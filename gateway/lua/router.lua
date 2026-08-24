@@ -10,8 +10,7 @@
 --   6. Translate — convert body to provider-native format (Rosetta layer)
 --   7. → proxy_pass to resolved provider
 --
--- Fallback: If sidecar is unreachable, falls back to direct routing
--- via config.resolve_model() (the pre-sidecar path).
+-- Sidecar unreachable after auth -> 503 (exact Council transports excepted).
 --
 -- All providers supported via universal translator.
 -- ==========================================================================
@@ -1018,10 +1017,25 @@ function _M.route()
             model_cfg, resolved_name = config.resolve_model(record.alias)
         end
     else
-        -- Sidecar unavailable — fallback to direct Lua routing
-        ngx.log(ngx.WARN, "router: sidecar route failed (", route_err or "unknown",
-                "), using direct routing")
-        model_cfg, resolved_name = config.resolve_model(record.alias)
+        ngx.log(ngx.WARN, "router: sidecar route failed: ", route_err or "unknown")
+        local unavailable_alias  = record.alias
+        local unavailable_req_id = record.request_id
+        local unavailable_caller = record.caller_key
+        local unavailable_sens   = record.sensitivity
+        ledger_schedule("route_decide", unavailable_req_id, function(premature)
+            if premature then return end
+            ledger_record("gateway", unavailable_alias, {
+                request_id = unavailable_req_id,
+            }, {
+                action      = "route_decide",
+                decision    = "rejected",
+                request_id  = unavailable_req_id,
+                reason      = "sidecar_unreachable",
+                sensitivity = unavailable_sens,
+            }, unavailable_caller)
+        end)
+        return json_error(503, "sovereign routing unavailable",
+            "service_unavailable", "ERR_ROUTE_UNAVAILABLE")
     end
 
     if not model_cfg then
