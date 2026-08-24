@@ -689,7 +689,7 @@ fn respawn_council_fenced(
         Err(gateway_pack::PromoteCommitError::LifecycleChangedBeforeStop) => {
             let _ = app.emit(
                 "council-log",
-                "[system] governed-promote: pack lifecycle changed before stop; aborting held-secret flight",
+                "[system] council-respawn: pack lifecycle changed before stop; leaving Council untouched",
             );
             Err(gateway_pack::PromoteCommitError::LifecycleChangedBeforeStop)
         }
@@ -701,7 +701,7 @@ fn respawn_council_fenced(
                 gateway_pack::AfterStopLifecycleRecovery::AttemptGovernedFresh => {
                     let _ = app.emit(
                         "council-log",
-                        "[system] governed-promote: lifecycle changed after stop; attempting fresh governed start (no held secrets)",
+                        "[system] council-respawn: lifecycle changed after stop; attempting fresh governed start (no held secrets)",
                     );
                     match try_start_council_server(
                         app,
@@ -714,7 +714,7 @@ fn respawn_council_fenced(
                             let _ = app.emit(
                                 "council-log",
                                 format!(
-                                    "[system] governed-promote: fresh governed start ok: {message}"
+                                    "[system] council-respawn: fresh governed start ok: {message}"
                                 ),
                             );
                             Ok(message)
@@ -723,7 +723,7 @@ fn respawn_council_fenced(
                             let _ = app.emit(
                                 "council-log",
                                 format!(
-                                    "[system] governed-promote: fresh governed start failed ({governed_error}); restoring Direct"
+                                    "[system] council-respawn: fresh governed start failed ({governed_error}); restoring Direct"
                                 ),
                             );
                             let recovered = match try_start_council_server(
@@ -737,7 +737,7 @@ fn respawn_council_fenced(
                                     let _ = app.emit(
                                         "council-log",
                                         format!(
-                                            "[system] governed-promote: Council restored in Direct mode: {message}"
+                                            "[system] council-respawn: Council restored in Direct mode: {message}"
                                         ),
                                     );
                                     Ok(message)
@@ -746,7 +746,7 @@ fn respawn_council_fenced(
                                     let _ = app.emit(
                                         "council-log",
                                         format!(
-                                            "[system] governed-promote: Direct restart failed after lifecycle abort: {direct_error}. Core War Room is down; start Council manually."
+                                            "[system] council-respawn: Direct restart failed after lifecycle abort: {direct_error}. Core War Room is down; start Council manually."
                                         ),
                                     );
                                     Err(gateway_pack::PromoteCommitError::SpawnFailed(format!(
@@ -767,7 +767,7 @@ fn respawn_council_fenced(
                 gateway_pack::AfterStopLifecycleRecovery::RestoreDirect => {
                     let _ = app.emit(
                         "council-log",
-                        "[system] governed-promote: pack no longer enabled after stop; restoring Direct",
+                        "[system] council-respawn: pack no longer enabled after stop; restoring Direct",
                     );
                     match try_start_council_server(
                         app,
@@ -780,7 +780,7 @@ fn respawn_council_fenced(
                             let _ = app.emit(
                                 "council-log",
                                 format!(
-                                    "[system] governed-promote: Council restored in Direct mode: {message}"
+                                    "[system] council-respawn: Council restored in Direct mode: {message}"
                                 ),
                             );
                             Ok(message)
@@ -789,7 +789,7 @@ fn respawn_council_fenced(
                             let _ = app.emit(
                                 "council-log",
                                 format!(
-                                    "[system] governed-promote: Direct restart failed after lifecycle abort: {direct_error}. Core War Room is down; start Council manually."
+                                    "[system] council-respawn: Direct restart failed after lifecycle abort: {direct_error}. Core War Room is down; start Council manually."
                                 ),
                             );
                             Err(gateway_pack::PromoteCommitError::SpawnFailed(direct_error))
