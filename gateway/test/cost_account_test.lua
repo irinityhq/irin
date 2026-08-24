@@ -138,6 +138,16 @@ row = run_record({
 check(#budget_records == 0,
     "rejected budget check without a retained estimate schedules no budget record")
 
+row = run_record({
+    request_id = "budget-release-timer-rejected",
+    budget_key = "team-a",
+    budget_estimated_usd = 0.05,
+    t0 = 1,
+}, nil, "ERR_POLICY_VIOLATION", 403,
+    function() return nil, "timer pool full" end)
+check(#budget_records == 0,
+    "rejected budget release timer schedules no budget record")
+
 local retry_record = { request_id = "rejected-retry", t0 = 1 }
 row = run_record(retry_record, nil, "ERR_TIMER_REJECTED", 503,
     function() return nil, "timer pool full" end)

@@ -668,10 +668,17 @@ function _M.account()
         if record.budget_estimated_usd ~= nil then
             local fb_budget_key = record.budget_key or "default"
             local fb_estimated_cost = record.budget_estimated_usd
-            ngx.timer.at(0, function(premature)
+            local ok, terr = ngx.timer.at(0, function(premature)
                 if premature then return end
                 sidecar_budget_record(fb_budget_key, 0, fb_estimated_cost)
             end)
+            if not ok then
+                ngx.log(ngx.ERR,
+                    "cost: budget release timer rejected; estimate remains reserved",
+                    " budget_key=", fb_budget_key,
+                    " estimate_usd=", fb_estimated_cost,
+                    " error=", terr or "unknown")
+            end
         end
         if record.request_id and not record.chain_terminated then
             local fb_request_id = record.request_id
