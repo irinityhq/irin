@@ -525,6 +525,28 @@ case "$CODE" in
     *)           assert_not_internal_error "$CODE" "5g. CRLF in header" ;;
 esac
 
+# 5h. Enforced policy rejects RED traffic to a cloud transport. Exact transport
+# keeps routing from replacing the cloud alias with the sovereign provider before
+# the policy firewall runs.
+if [ "${GW_POLICY_ENFORCE:-0}" = "1" ] && [ -n "${GW_TEST_KEY:-}" ]; then
+    RESPONSE=$(curl -sS -w $'\n__STATUS__:%{http_code}' \
+      -X POST "${GW_URL}/v1/chat/completions" \
+      -H "Content-Type: application/json" \
+      -H "Authorization: Bearer ${GW_TEST_KEY}" \
+      -H "X-Sensitivity-Level: RED" \
+      -H "X-Council-Transport-ID: grok_api" \
+      -d '{"model":"fast","messages":[{"role":"user","content":"policy enforcement"}]}' || true)
+    CODE="${RESPONSE##*__STATUS__:}"
+    BODY="${RESPONSE%__STATUS__:*}"
+    if [ "$CODE" = "403" ] && printf '%s' "$BODY" | grep -q '"type":"policy_violation"'; then
+        pass "5h. Enforced RED cloud request denied by policy (403)"
+    else
+        fail "5h. Enforced RED cloud request — ${CODE} without policy_violation"
+    fi
+else
+    skip "5h. Enforced RED cloud request (requires GW_POLICY_ENFORCE=1 and GW_TEST_KEY)"
+fi
+
 # ==========================================================================
 # 6. TOTAL SIDECAR OUTAGE
 # A total outage fails closed at sidecar-backed auth before routing. The

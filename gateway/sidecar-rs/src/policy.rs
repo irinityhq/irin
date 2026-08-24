@@ -7,20 +7,16 @@
 //   INTERNAL   — trusted providers only (self-hosted, contractual)
 //   PUBLIC     — any provider allowed
 //
-// The firewall classifies requests by:
-//   1. Explicit header (X-Sensitivity-Level)
-//   2. Content analysis (PII patterns, code signatures)
-//   3. Default policy (configurable)
+// The firewall checks the caller-declared X-Sensitivity-Level against the
+// configured provider allowlist. Missing levels default to GREEN/PUBLIC.
 //
 // In DRY-RUN mode, the firewall logs decisions but does not block.
 // This enables shadow-mode validation before enforcing.
 // ==========================================================================
 
-use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
-use std::sync::LazyLock;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 // ---------------------------------------------------------------------------
 // Types
@@ -63,19 +59,18 @@ pub struct PolicyConfig {
     pub internal_providers: HashSet<String>,
     /// All providers (SOVEREIGN + RESTRICTED + INTERNAL + external)
     pub public_providers: HashSet<String>,
-    /// Whether to aggressively block on PII detection
-    #[serde(default)]
-    pub block_on_pii: bool,
-    /// Whether to block if jailbreak signals are detected
-    #[serde(default)]
-    pub block_jailbreaks: bool,
+}
+
+fn dry_run_from_env(v: Option<&str>) -> bool {
+    !matches!(v, Some("1"))
 }
 
 impl Default for PolicyConfig {
     fn default() -> Self {
+        let dry_run = dry_run_from_env(std::env::var("GW_POLICY_ENFORCE").ok().as_deref());
         Self {
             default_level: SensitivityLevel::Public,
-            dry_run: true, // Start in dry-run for safety
+            dry_run,
             sovereign_providers: HashSet::from([
                 "local".to_string(),
                 "librarian".to_string(),
@@ -126,54 +121,9 @@ impl Default for PolicyConfig {
                 "vertex".to_string(),
                 "chaos".to_string(),
             ]),
-            block_on_pii: false,
-            block_jailbreaks: true,
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// PII / sensitivity signal detection
-// ---------------------------------------------------------------------------
-
-static PII_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-    vec![
-        (Regex::new(r"\b\d{3}-\d{2}-\d{4}\b").unwrap(), "ssn_pattern"),
-        (
-            Regex::new(r"\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b").unwrap(),
-            "credit_card_pattern",
-        ),
-        (
-            Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").unwrap(),
-            "email_address",
-        ),
-        (
-            Regex::new(r"(?i)(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*\S+").unwrap(),
-            "credential_leak",
-        ),
-        (
-            Regex::new(r"(?i)(ssn|social\s+security|date\s+of\s+birth|dob)\s*[:=]").unwrap(),
-            "pii_field_label",
-        ),
-        (
-            Regex::new(r"-----BEGIN\s+(RSA\s+)?PRIVATE\s+KEY-----").unwrap(),
-            "private_key",
-        ),
-        (
-            Regex::new(r"(?i)(HIPAA|PHI|protected\s+health\s+information)").unwrap(),
-            "health_data_signal",
-        ),
-    ]
-});
-
-static JAILBREAK_PATTERNS: LazyLock<Vec<(Regex, &'static str)>> = LazyLock::new(|| {
-    vec![
-        (
-            Regex::new(r"(?i)(jailbreak|DAN\s*mode|developer\s*mode|god\s*mode|unrestricted\s*mode|ignore\s+all\s+previous\s+instructions|bypassing|unfiltered|no\s+moderation|without\s+rules)").unwrap(),
-            "jailbreak_signal",
-        ),
-    ]
-});
 
 // ---------------------------------------------------------------------------
 // Policy Firewall
@@ -193,66 +143,28 @@ impl PolicyFirewall {
         Self { config }
     }
 
-    /// Evaluate whether a request to `provider` is allowed given the
-    /// sensitivity level (from header or auto-detected).
-    #[tracing::instrument(skip(self, content), fields(provider = provider))]
+    /// Evaluate whether `provider` is allowed at the caller-declared level.
+    #[tracing::instrument(skip(self), fields(provider = provider))]
     pub fn evaluate(
         &self,
         provider: &str,
-        explicit_level: Option<SensitivityLevel>,
-        content: Option<&str>,
+        sensitivity_level: Option<SensitivityLevel>,
     ) -> PolicyDecision {
         let mut signals = Vec::new();
-
-        // 1. Determine sensitivity level
-        let level = if let Some(explicit) = explicit_level {
+        let level = sensitivity_level.unwrap_or(self.config.default_level);
+        if let Some(explicit) = sensitivity_level {
             signals.push(format!("explicit_header:{:?}", explicit));
-            explicit
-        } else if let Some(text) = content {
-            self.detect_sensitivity(text, &mut signals)
-        } else {
-            self.config.default_level
-        };
-
-        if let Some(text) = content {
-            for (pattern, name) in JAILBREAK_PATTERNS.iter() {
-                if pattern.is_match(text) && !signals.contains(&name.to_string()) {
-                    signals.push(name.to_string());
-                }
-            }
         }
 
-        // 2. Check provider against level
         let allowed_providers = match level {
             SensitivityLevel::Sovereign => &self.config.sovereign_providers,
             SensitivityLevel::Restricted => &self.config.restricted_providers,
             SensitivityLevel::Internal => &self.config.internal_providers,
             SensitivityLevel::Public => &self.config.public_providers,
         };
-
-        let mut provider_allowed = allowed_providers.contains(provider);
-        let mut block_reason = String::new();
-
-        if self.config.block_on_pii
-            && !signals.is_empty()
-            && signals
-                .iter()
-                .any(|s| s != "jailbreak_signal" && !s.starts_with("explicit_header"))
-        {
-            provider_allowed = false;
-            block_reason = "PII detected and block_on_pii is enabled".to_string();
-        }
-
-        if self.config.block_jailbreaks && signals.contains(&"jailbreak_signal".to_string()) {
-            provider_allowed = false;
-            block_reason = "Jailbreak pattern detected and block_jailbreaks is enabled".to_string();
-        }
-
-        // 3. Construct decision
+        let provider_allowed = allowed_providers.contains(provider);
         let reason = if provider_allowed {
             String::new()
-        } else if !block_reason.is_empty() {
-            block_reason
         } else {
             format!(
                 "provider '{}' not allowed at {:?} sensitivity level",
@@ -260,12 +172,10 @@ impl PolicyFirewall {
             )
         };
 
-        // In dry-run, log but allow
         let effective_allowed = if self.config.dry_run && !provider_allowed {
             warn!(
                 provider,
                 level = ?level,
-                signals = ?signals,
                 "policy firewall: WOULD BLOCK (dry-run mode)"
             );
             true
@@ -288,44 +198,6 @@ impl PolicyFirewall {
             dry_run: self.config.dry_run && !provider_allowed,
             detected_signals: signals,
         }
-    }
-
-    /// Auto-detect sensitivity level from content.
-    /// Any PII signal → INTERNAL. Private keys / health data → SOVEREIGN.
-    fn detect_sensitivity(&self, content: &str, signals: &mut Vec<String>) -> SensitivityLevel {
-        let mut max_level = self.config.default_level;
-
-        for (pattern, name) in PII_PATTERNS.iter() {
-            if pattern.is_match(content) {
-                signals.push(name.to_string());
-
-                match *name {
-                    "private_key" | "health_data_signal" => {
-                        max_level = SensitivityLevel::Sovereign;
-                    }
-                    "ssn_pattern" | "credit_card_pattern" | "credential_leak" => {
-                        if !matches!(max_level, SensitivityLevel::Sovereign) {
-                            max_level = SensitivityLevel::Restricted;
-                        }
-                    }
-                    _ => {
-                        if matches!(max_level, SensitivityLevel::Public) {
-                            max_level = SensitivityLevel::Internal;
-                        }
-                    }
-                }
-            }
-        }
-
-        if !signals.is_empty() {
-            debug!(
-                signals = ?signals,
-                level = ?max_level,
-                "auto-detected sensitivity"
-            );
-        }
-
-        max_level
     }
 
     /// Check if dry-run mode is active
@@ -352,93 +224,49 @@ mod tests {
     }
 
     #[test]
-    fn public_provider_allowed_at_public() {
-        let fw = firewall(false);
-        let decision = fw.evaluate("xai", Some(SensitivityLevel::Public), None);
-        assert!(decision.allowed);
+    fn dry_run_env_enforces_only_exact_one() {
+        assert!(!dry_run_from_env(Some("1")));
+        assert!(dry_run_from_env(None));
+        assert!(dry_run_from_env(Some("0")));
+        assert!(dry_run_from_env(Some("true")));
     }
 
     #[test]
-    fn public_provider_blocked_at_sovereign() {
+    fn missing_level_defaults_to_public() {
+        let decision = firewall(false).evaluate("xai", None);
+        assert!(decision.allowed);
+        assert_eq!(decision.level, SensitivityLevel::Public);
+    }
+
+    #[test]
+    fn sovereign_level_enforces_provider_allowlist() {
         let fw = firewall(false);
-        let decision = fw.evaluate("openai", Some(SensitivityLevel::Sovereign), None);
-        assert!(!decision.allowed);
-        assert!(decision.reason.contains("not allowed"));
+
+        let cloud = fw.evaluate("openai", Some(SensitivityLevel::Sovereign));
+        assert!(!cloud.allowed);
+        assert!(cloud.reason.contains("not allowed"));
+
+        let sovereign = fw.evaluate("local", Some(SensitivityLevel::Sovereign));
+        assert!(sovereign.allowed);
     }
 
     #[test]
     fn local_provider_allowed_at_all_levels() {
         let fw = firewall(false);
 
-        let d1 = fw.evaluate("local", Some(SensitivityLevel::Public), None);
-        let d2 = fw.evaluate("local", Some(SensitivityLevel::Internal), None);
-        let d3 = fw.evaluate("local", Some(SensitivityLevel::Sovereign), None);
+        let public = fw.evaluate("local", Some(SensitivityLevel::Public));
+        let internal = fw.evaluate("local", Some(SensitivityLevel::Internal));
+        let sovereign = fw.evaluate("local", Some(SensitivityLevel::Sovereign));
 
-        assert!(d1.allowed);
-        assert!(d2.allowed);
-        assert!(d3.allowed);
+        assert!(public.allowed);
+        assert!(internal.allowed);
+        assert!(sovereign.allowed);
     }
 
     #[test]
     fn dry_run_allows_but_flags() {
-        let fw = firewall(true);
-        let decision = fw.evaluate("nvidia", Some(SensitivityLevel::Sovereign), None);
-        // Dry-run should allow even though nvidia isn't in sovereign_providers
+        let decision = firewall(true).evaluate("nvidia", Some(SensitivityLevel::Sovereign));
         assert!(decision.allowed);
         assert!(decision.dry_run);
-    }
-
-    #[test]
-    fn auto_detect_ssn() {
-        let fw = firewall(false);
-        let content = "My SSN is 123-45-6789 please process this";
-        let decision = fw.evaluate("xai", None, Some(content));
-        // SSN → RESTRICTED, xai not in restricted_providers → blocked
-        assert!(!decision.allowed);
-        assert_eq!(decision.level, SensitivityLevel::Restricted);
-        assert!(decision
-            .detected_signals
-            .contains(&"ssn_pattern".to_string()));
-    }
-
-    #[test]
-    fn auto_detect_private_key() {
-        let fw = firewall(false);
-        let content = "-----BEGIN PRIVATE KEY-----\nMIIEvg...";
-        let decision = fw.evaluate("openai", None, Some(content));
-        // Private key → SOVEREIGN, openai not in sovereign_providers → blocked
-        assert!(!decision.allowed);
-        assert_eq!(decision.level, SensitivityLevel::Sovereign);
-    }
-
-    #[test]
-    fn auto_detect_credential() {
-        let fw = firewall(false);
-        let content = "Here's my api_key: sk-abc123def456 for the service";
-        let decision = fw.evaluate("openai-dedicated", None, Some(content));
-        // Credential → RESTRICTED, openai-dedicated IS in restricted_providers → allowed
-        assert!(decision.allowed);
-        assert_eq!(decision.level, SensitivityLevel::Restricted);
-    }
-
-    #[test]
-    fn clean_content_uses_default() {
-        let fw = firewall(false);
-        let content = "What is the weather like today?";
-        let decision = fw.evaluate("nvidia", None, Some(content));
-        // No signals → default (PUBLIC), nvidia is in public_providers → allowed
-        assert!(decision.allowed);
-        assert_eq!(decision.level, SensitivityLevel::Public);
-    }
-
-    #[test]
-    fn explicit_header_overrides_detection() {
-        let fw = firewall(false);
-        // Content has PII but header says PUBLIC
-        let content = "My SSN is 123-45-6789";
-        let decision = fw.evaluate("xai", Some(SensitivityLevel::Public), Some(content));
-        // Explicit header wins
-        assert!(decision.allowed);
-        assert_eq!(decision.level, SensitivityLevel::Public);
     }
 }
