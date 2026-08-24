@@ -515,7 +515,33 @@ pass "symlink lexically under store but physically outside is refused"
 # become unavailable rather than Candidate verified).
 STUB_BIN="$(mktemp -d "$TEST_HOME/stub-bin.XXXXXX")"
 REAL_GIT="$(command -v git)"
-printf '#!/bin/sh\nexit 1\n' >"$STUB_BIN/gh"
+cat >"$STUB_BIN/gh" <<'EOF'
+#!/bin/sh
+fixture="${IRIN_CANDIDATE_STATUS_TEST_GH_FIXTURE:-}"
+if [ -n "$fixture" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = "--jq" ]; then
+      printf '{"status":"completed","conclusion":"success"}\n'
+      exit 0
+    fi
+  done
+fi
+case "$fixture" in
+  later_failure)
+    cat <<'JSON'
+{"check_runs":[{"name":"CI required","status":"completed","conclusion":"success","started_at":"2026-08-24T10:00:00Z","completed_at":"2026-08-24T10:05:00Z"},{"name":"ci / CI required","status":"completed","conclusion":"failure","started_at":"2026-08-24T11:00:00Z","completed_at":"2026-08-24T11:05:00Z"}]}
+JSON
+    ;;
+  latest_in_progress)
+    cat <<'JSON'
+{"check_runs":[{"name":"CI required","status":"completed","conclusion":"success","started_at":"2026-08-24T10:00:00Z","completed_at":"2026-08-24T10:05:00Z"},{"name":"CI required","status":"in_progress","conclusion":null,"started_at":"2026-08-24T11:00:00Z","completed_at":null}]}
+JSON
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+EOF
 cat >"$STUB_BIN/git" <<EOF
 #!/bin/sh
 for a in "\$@"; do
@@ -527,6 +553,28 @@ done
 exec "$REAL_GIT" "\$@"
 EOF
 chmod +x "$STUB_BIN/gh" "$STUB_BIN/git"
+
+assert_live_ci_false() {
+  local fixture="$1" label="$2" out ci tier
+  out="$(
+    env -u IRIN_CANDIDATE_STATUS_CI_REQUIRED \
+      PATH="$STUB_BIN:$PATH" \
+      IRIN_CANDIDATE_STATUS_HERMETIC=1 \
+      IRIN_CANDIDATE_STATUS_SOURCE_ON_MAIN=true \
+      IRIN_CANDIDATE_STATUS_TEST_GH_FIXTURE="$fixture" \
+      IRIN_CANDIDATE_ROOT="$IRIN_CANDIDATE_ROOT" \
+      "$STATUS" --candidate "$DEST" --json
+  )"
+  ci="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["checks"]["ci_required_green"])')"
+  tier="$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("tier") or "")')"
+  [[ "$ci" == "false" ]] || fail "$label must report CI required false (got $ci)"
+  [[ -z "$tier" ]] || fail "$label must stay below Candidate verified (got $tier)"
+  pass "$label leaves candidate below Candidate verified"
+}
+
+assert_live_ci_false "later_failure" "later CI required failure beats earlier success"
+assert_live_ci_false "latest_in_progress" "latest in-progress CI required run fails closed"
+
 set +e
 out="$(
   PATH="$STUB_BIN:$PATH" \

@@ -176,7 +176,7 @@ check_source_on_main() {
 }
 
 check_ci_required_green() {
-  local sha="$1" override owner_repo api_out conclusion
+  local sha="$1" override owner_repo api_out run_state
   override="${IRIN_CANDIDATE_STATUS_CI_REQUIRED:-}"
   if [[ -n "$override" ]] && hermetic_overrides_allowed; then
     case "$override" in
@@ -197,16 +197,19 @@ check_ci_required_green() {
   # Accept both the nested workflow name ("ci / CI required") and any bare
   # "CI required" context so PR tips and older commits both resolve.
   if api_out="$(gh api "repos/${owner_repo}/commits/${sha}/check-runs?per_page=100" \
-      --jq '[.check_runs[] | select(.name == "CI required" or .name == "ci / CI required")] | if length == 0 then empty else (map(select(.conclusion == "success")) + .)[0] | {status, conclusion} end' \
       2>/dev/null)"; then
     if [[ -z "$api_out" || "$api_out" == "null" ]]; then
       printf 'unavailable'
       return 0
     fi
-    conclusion="$(printf '%s' "$api_out" | python3 -c \
-      'import json,sys; d=json.load(sys.stdin); print(d.get("conclusion") or "")' 2>/dev/null || true)"
-    case "$conclusion" in
-      success) printf 'true' ;;
+    if ! run_state="$(printf '%s' "$api_out" | python3 -c \
+      'import json,sys; d=json.load(sys.stdin); runs=[r for r in d.get("check_runs", []) if r.get("name") in ("CI required", "ci / CI required")]; latest=max(runs, key=lambda r: (r.get("completed_at") or r.get("started_at") or "", r.get("started_at") or ""), default=None); print("" if latest is None else "{}\t{}".format(latest.get("status") or "", latest.get("conclusion") or ""))' 2>/dev/null)"; then
+      printf 'unavailable'
+      return 0
+    fi
+    case "$run_state" in
+      $'completed\tsuccess') printf 'true' ;;
+      "") printf 'unavailable' ;;
       *) printf 'false' ;;
     esac
     return 0
