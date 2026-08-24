@@ -1,5 +1,4 @@
-// ==========================================================================
-// unified_config.rs — Optional single-file YAML config (Phase 5 item 4).
+// unified_config.rs — optional single-file YAML config.
 //
 // When `GATEWAY_CONFIG_PATH` is set and points at a readable YAML file,
 // this module parses it into a `UnifiedConfig` whose sections override
@@ -22,7 +21,6 @@
 // `/var/lib/sidecar/derived`). Lua reads those derived files via the
 // `MODELS_JSON_PATH` / `SHAPE_LIMITS_PATH` env vars in compose. This
 // keeps the Lua hot path JSON-only.
-// ==========================================================================
 
 use serde::Deserialize;
 use std::path::{Path, PathBuf};

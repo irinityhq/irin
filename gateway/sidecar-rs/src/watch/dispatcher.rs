@@ -678,9 +678,7 @@ pub fn extract_council_triage_headers(
     h
 }
 
-// ==========================================================================
-// Live Dispatcher Claim (Phase 3b.1) — claim queued/failed -> council_response_staged
-// ==========================================================================
+// Live dispatcher claim: queued/failed -> council_response_staged.
 //
 // Narrow seam only:
 // - Claim one row (status 'queued' or 'failed') using composite (tenant, id).
@@ -691,8 +689,7 @@ pub fn extract_council_triage_headers(
 // - Never touches 'council_response_staged' rows (crash safety).
 // - Router (not this code) owns council_idem. No direct council_idem calls.
 //
-// Later phases will consume 'council_response_staged' via boot hydration recovery
-// or a separate outbox writer.
+// 'council_response_staged' rows are consumed by boot hydration recovery.
 
 use async_trait::async_trait;
 
@@ -1847,7 +1844,6 @@ where
         tracing::info!("live dispatcher loop started (enabled=true)");
 
         loop {
-            // Check for shutdown before doing work
             if shutdown_rx.try_recv().is_ok() {
                 tracing::info!("live dispatcher loop received shutdown");
                 break;
@@ -1899,10 +1895,6 @@ where
 
     Some((handle, shutdown_tx))
 }
-
-// ==========================================================================
-// Boot Hydration Sweep (Phase 3a.5 — tight seam around recovery)
-// ==========================================================================
 
 pub const BOOT_HYDRATION_DEADLINE_MS: u64 = 30_000;
 pub const BOOT_HYDRATION_FETCH_BATCH_SIZE: u32 = 50;
@@ -2813,9 +2805,8 @@ fn persist_signed_directive_tx(
 
     tx.commit()?;
 
-    // === Audit-event bridging for hydration recovery (the seam) ===
     // Emit the recovery-specific escalation event before the helper events so
-    // the eventual persisted audit chain matches AC-21c:
+    // the persisted audit chain orders as
     // escalation_recovered_resume_outbox -> directive_staged.
     audit_sink.push(WatchPhase3AuditEvent::EscalationRecoveredResumeOutbox {
         escalation_id: escalation_id.to_string(),
@@ -3373,8 +3364,6 @@ mod tests {
         assert_ne!(h1.get("idempotency-key"), h2.get("idempotency-key"));
     }
 
-    // ----- D8: escalation-id sanitization before header construction -----
-
     /// Golden path: the live producer's `causal-<hex>` ids are `[a-z0-9-]` and
     /// must pass through byte-for-byte (no hashing, no surprise rewrite).
     #[test]
@@ -3451,8 +3440,6 @@ mod tests {
             "tenant leg intact, esc leg hashed"
         );
     }
-
-    // ----- Fix C: dup-key intake gate before signing (parse_proposal_body) -----
 
     /// (a) A top-level duplicate key (`{"a":1,"a":2}`) must be REJECTED at intake.
     /// serde_json::from_str alone would last-wins-collapse this to `{"a":2}`, so the
@@ -3531,8 +3518,6 @@ mod tests {
             "malformed fenced slice must surface as Json, got: {err:?}"
         );
     }
-
-    // ----- Fix B: finite-guard helper non-finite -> Err branch (the dead-letter trigger) -----
 
     /// The non-finite -> Err branch of insert_finite_f64 is what drives the signing-boundary
     /// dead-letter in recover_council_response_staged. Assert directly that NaN / +Inf / -Inf

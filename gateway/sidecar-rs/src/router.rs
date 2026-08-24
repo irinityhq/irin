@@ -1,7 +1,6 @@
 // ==========================================================================
 // router.rs — Quality-weighted smart routing engine.
 //
-// Port of the legacy model_router.py scoring system.
 // Routes requests to the optimal backend based on 4 dimensions:
 //
 //   Score = (quality_w × quality)
@@ -20,9 +19,7 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 use tracing::{debug, info, warn};
 
-// ---------------------------------------------------------------------------
-// Configuration types (loaded from models.json)
-// ---------------------------------------------------------------------------
+// Configuration types, loaded from models.json.
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ModelDef {
@@ -74,10 +71,6 @@ pub struct CapabilityDef {
     pub is_code_specialist: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Task classification
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskType {
@@ -94,12 +87,10 @@ pub enum TaskType {
 impl TaskType {
     /// Classify a request based on messages content and parameters.
     pub fn classify(body: &serde_json::Value) -> Self {
-        // Check for tool_choice or tools → ToolUse
         if body.get("tools").is_some() || body.get("tool_choice").is_some() {
             return TaskType::ToolUse;
         }
 
-        // Check for image content → Vision
         if let Some(messages) = body.get("messages").and_then(|m| m.as_array()) {
             for msg in messages {
                 if let Some(content) = msg.get("content") {
@@ -186,10 +177,6 @@ impl TaskType {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Routing strategy — controls how the scorer prioritizes dimensions
-// ---------------------------------------------------------------------------
-
 /// Routing strategy selectable per-request via body or X-Routing-Strategy header.
 ///
 ///   quality  — best model for the job, cost is secondary
@@ -219,10 +206,6 @@ impl RoutingStrategy {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Scoring weights per task type × routing strategy
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy)]
 pub struct ScoringWeights {
     pub quality: f64,
@@ -234,7 +217,6 @@ pub struct ScoringWeights {
 impl ScoringWeights {
     /// Base weights per task type, then shifted by routing strategy.
     pub fn for_task(task: TaskType, strategy: RoutingStrategy) -> Self {
-        // Start with task-specific base weights
         let base = match task {
             TaskType::Coding => ScoringWeights {
                 quality: 0.50,
@@ -305,13 +287,9 @@ impl ScoringWeights {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Per-family health tracking
-//
-// Health is tracked per (provider, family) tuple instead of per-provider.
-// This prevents one model family's rate limits (e.g., deepseek-v4 on NIM)
-// from circuit-breaking unrelated families (e.g., qwen3.5 on NIM).
-// ---------------------------------------------------------------------------
+// Health is tracked per (provider, family) tuple, not per-provider: one model
+// family's rate limits (e.g. deepseek-v4 on NIM) must not circuit-break
+// unrelated families (e.g. qwen3.5 on NIM).
 
 /// Key for per-family health tracking: (provider, family).
 /// If a model has no family, the provider name is used as the family.
@@ -393,10 +371,6 @@ impl ProviderHealth {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Scored result
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize)]
 pub struct RoutingDecision {
     pub model_id: String,
@@ -422,10 +396,8 @@ pub struct ScoreBreakdown {
     pub risk_component: f64,
 }
 
-// ---------------------------------------------------------------------------
-// Quality floor constants — per task type, minimum quality to be eligible.
-// Models below this floor are excluded from scoring (hard prefilter).
-// ---------------------------------------------------------------------------
+// Minimum quality per task type: models below this floor are excluded from
+// scoring by a hard prefilter.
 
 fn quality_floor(task: TaskType) -> f64 {
     match task {
@@ -436,10 +408,6 @@ fn quality_floor(task: TaskType) -> f64 {
         TaskType::Conversation | TaskType::General => 0.75,
     }
 }
-
-// ---------------------------------------------------------------------------
-// Smart Router
-// ---------------------------------------------------------------------------
 
 pub struct SmartRouter {
     models: Vec<ModelDef>,
@@ -489,7 +457,6 @@ impl SmartRouter {
             return Err("'models' must be an array or object".to_string());
         };
 
-        // Build alias map
         let mut aliases = HashMap::new();
 
         // First, register model IDs themselves
@@ -623,7 +590,6 @@ impl SmartRouter {
                 let family_health = health.get(&hk).cloned().unwrap_or_default();
 
                 if !family_health.available {
-                    // Check for fallback
                     if let Some(ref fallback_id) = model.fallback {
                         if let Some(fb_model) = self.models.iter().find(|m| m.id == *fallback_id) {
                             let fb_hk = health_key_for(fb_model);
@@ -840,10 +806,6 @@ impl ScoreBreakdown {
         self.quality_component - self.latency_component - self.cost_component - self.risk_component
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

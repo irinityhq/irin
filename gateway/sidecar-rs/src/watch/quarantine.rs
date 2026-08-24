@@ -1169,11 +1169,11 @@ impl QuarantineState {
 
         // Phase 1 — mutate in-memory state under the lock. The hard-kill
         // transition is decided here but the `rec.hard_killed_at` write is
-        // deferred until phase 2's DB persistence succeeds (T33.6 P0-2):
-        // if we set it in-memory before the DB write, a crash between the
-        // two leaves the OCC silent — fire_pipeline thinks the sentinel is
-        // hard-killed but the OCC in insert_fire would accept fires.
-        // DB-first then memory mirrors the T32 admin-clear pattern.
+        // deferred until phase 2's DB persistence succeeds: if we set it
+        // in-memory before the DB write, a crash between the two leaves the
+        // OCC silent — fire_pipeline thinks the sentinel is hard-killed but
+        // the OCC in insert_fire would accept fires. DB-first then memory
+        // mirrors the admin-clear path.
         let needs_db_hard_kill_persist = {
             let mut recs = self.records.lock();
             let key = (tenant.to_string(), sentinel.to_string());
@@ -1252,8 +1252,8 @@ impl QuarantineState {
         // unit tests in tests/watch_quarantine.rs that use
         // `new_in_memory(...)` expect `rec.hard_killed_at` to be set after
         // the 5th cycle without any DB plumbing. If `db` is Some and the
-        // write fails: bump `persist_failures_total` (T33.P1-D, exposed
-        // via /watch/stats → gw_watch_persist_failures_total), warn, and
+        // write fails: bump `persist_failures_total` (exposed via
+        // /watch/stats → gw_watch_persist_failures_total), warn, and
         // signal phase 3 to set `pending_hard_kill_persist` so the safety
         // ladder fails closed via `is_blocked` until the next successful
         // persist.

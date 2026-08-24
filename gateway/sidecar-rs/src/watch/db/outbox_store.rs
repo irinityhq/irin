@@ -321,12 +321,11 @@ impl WatchDb {
             .await;
     }
 
-    // -------------------------------------------------------------------------
-    // Phase 1 CDC / transactional-outbox weld (P0-2/4, plan §5 Step 2, producer-seam §2/3)
-    // All outside hot audit path (insert_fire / fire_pipeline). Consumer dedup is source
-    // of truth for exactly-once. Boot re-scan uses same helpers (idempotent).
-    // C11 derivation happens in caller (sweep) using safe_tenant_token + causal (read-only refs).
-    // -------------------------------------------------------------------------
+    // CDC / transactional-outbox weld. All of it sits outside the hot audit path
+    // (insert_fire / fire_pipeline). Consumer dedup is the source of truth for
+    // exactly-once; boot re-scan reuses these same idempotent helpers. C11
+    // derivation happens in the caller (sweep) using safe_tenant_token + causal
+    // (read-only refs).
 
     /// Insert (or dedup) a pending escalation from a committed watch_fires row.
     /// Uses ON CONFLICT (tenant, sentinel_name, causal_fire_id) DO NOTHING.

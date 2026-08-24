@@ -898,10 +898,9 @@ pub async fn pending_retry_tick(
     }
 }
 
-// ============================================================================
-// Phase 1 CDC sweep (modeled exactly on pending_retry_loop / _tick per contract)
-// Separate task, ticker Skip, shutdown watch, bounded per-record, outside hot path.
-// D7 the invariant: watch_fires.envelope_json remains the immutable raw
+// CDC sweep (mirrors pending_retry_loop / _tick): separate task, ticker Skip,
+// shutdown watch, bounded per-record, outside the hot path.
+// The invariant: watch_fires.envelope_json remains the immutable raw
 // sentinel Escalation audit payload, but new CDC-produced pending_escalations
 // rows default to an irin.comms.v0.1 EnvelopeWrapper. Compatibility shim:
 // WATCH_CDC_EMIT_COMMS_ENVELOPE=0|false|legacy|raw preserves legacy raw enqueue
@@ -916,9 +915,7 @@ pub async fn pending_retry_tick(
 // The council-triage consumer still treats envelope_json as untrusted data and
 // takes id/tenant from pending_escalations columns (build_council_triage_user_prompt).
 // Dedup is causal (ON CONFLICT in db helper). Boot re-scan on first tick (idempotent).
-// Obs: sweep lag in logs + (future gauge); mpsc drop precedent noted in ticker.
-// Gate default-OFF enforced at spawn site + harness.
-// ============================================================================
+// The producer gate is default-OFF, enforced at the spawn site.
 
 /// Consecutive genuine-DB-error count on the SAME fire before the CDC producer
 /// skips it (advances the cursor past it) instead of retrying forever. Bounds
@@ -1341,8 +1338,6 @@ mod poison_tests {
         assert!(tripped, "3 consecutive failures must trip the poison skip");
     }
 
-    // ----- F6: transient-vs-deterministic error classification -----
-
     fn sqlite_failure(primary_code: i32) -> anyhow::Error {
         anyhow::Error::new(tokio_rusqlite::Error::Error(
             rusqlite::Error::SqliteFailure(rusqlite::ffi::Error::new(primary_code), None),
@@ -1396,8 +1391,6 @@ mod poison_tests {
         let e = anyhow::Error::new(tokio_rusqlite::Error::<rusqlite::Error>::ConnectionClosed);
         assert!(cdc_error_is_transient(&e));
     }
-
-    // ----- A0: CDC producer gate is default-OFF (council blind-spot #1) -----
 
     /// The CDC sweep is spawned only when `has_db() && is_producer_gate_armed()`.
     /// This proves the gate predicate is OFF by default: it arms ONLY when the

@@ -1,5 +1,5 @@
 // ==========================================================================
-// council.rs — Council endpoint state for Phase 0.5.
+// council.rs — Council endpoint state.
 //
 // Owns per-key concurrency and idempotency state for `/v1/chat/completions`
 // requests targeting `council-*` models. The Lua layer makes UDS POSTs to
@@ -89,10 +89,6 @@ pub const IDEM_CAPACITY: usize = 10_000;
 /// Chair synthesis + multi-seat outputs can be large; entry count alone is
 /// insufficient. We admit until this soft limit then evict oldest.
 pub const IDEM_MAX_BYTES: usize = 64 * 1024 * 1024; // 64 MiB
-
-// ---------------------------------------------------------------------------
-// State
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub enum IdemState {
@@ -404,9 +400,7 @@ impl Default for CouncilState {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Concurrency: /council/lock + /council/unlock
-// ---------------------------------------------------------------------------
+// Concurrency: /council/lock + /council/unlock.
 
 #[derive(serde::Deserialize)]
 pub struct LockReq {
@@ -510,9 +504,7 @@ pub(crate) async fn council_unlock(
     Json(Ack {})
 }
 
-// ---------------------------------------------------------------------------
-// Stats: GET /council/stats
-// ---------------------------------------------------------------------------
+// Stats: GET /council/stats.
 
 /// Snapshot of council-state counters + current concurrency, scraped by the
 /// Lua-side Prometheus poller. Counters monotonically
@@ -609,9 +601,7 @@ pub(crate) fn spawn_active_sweeper(state: Arc<AppState>) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Idempotency: peek / claim / store / fail
-// ---------------------------------------------------------------------------
+// Idempotency: peek / claim / store / fail.
 
 #[derive(serde::Deserialize)]
 pub struct IdemReq {
@@ -999,10 +989,6 @@ pub(crate) async fn council_idem_fail(
     Json(Ack {})
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1312,7 +1298,7 @@ mod tests {
         );
     }
 
-    // ----- D5c: boot-time rehydration of the Stored LRU (P0-2 read side) -----
+    // Boot-time rehydration of the Stored LRU from the durable mirror.
 
     fn now_ms_test() -> i64 {
         std::time::SystemTime::now()

@@ -18,10 +18,6 @@ use rand_core::{OsRng, RngCore};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CeremonyPurpose {
@@ -59,9 +55,7 @@ pub struct KeyRevokePayload {
     pub envelope_signature_hex: String,
 }
 
-// ---------------------------------------------------------------------------
-// Envelope preimage — length-prefixed, domain-separated
-// ---------------------------------------------------------------------------
+// Envelope preimages are length-prefixed and domain-separated.
 
 fn introduce_preimage(new_pubkey_hex: &str, purpose: &str, signer_pubkey_hex: &str) -> Vec<u8> {
     let tag = b"GW-INTRODUCE-v1\0";
@@ -91,10 +85,6 @@ fn revoke_preimage(revoked_pubkey_hex: &str, reason: &str, signer_pubkey_hex: &s
     );
     [tag.as_slice(), body.as_bytes()].concat()
 }
-
-// ---------------------------------------------------------------------------
-// Signing
-// ---------------------------------------------------------------------------
 
 /// Sign a key_introduce ceremony. `new_key` is the introduced *public* key
 /// (never a signing seed) so the ledger cannot persist private material as
@@ -142,10 +132,6 @@ pub fn sign_revoke(
         envelope_signature_hex: hex::encode(sig.to_bytes()),
     }
 }
-
-// ---------------------------------------------------------------------------
-// Verification
-// ---------------------------------------------------------------------------
 
 pub fn verify_introduce(payload: &KeyIntroducePayload, expected_signer: &VerifyingKey) -> bool {
     let preimage = introduce_preimage(
@@ -345,19 +331,11 @@ pub fn validate_revoke_for_trust(
     Ok(payload.revoked_pubkey_hex)
 }
 
-// ---------------------------------------------------------------------------
-// Key generation
-// ---------------------------------------------------------------------------
-
 pub fn generate_keypair() -> (SigningKey, [u8; 32]) {
     let key = SigningKey::generate(&mut rand_core::OsRng);
     let bytes = key.to_bytes();
     (key, bytes)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -689,7 +667,7 @@ mod tests {
 }
 
 // ==========================================================================
-// Phase 3 — Directive Signing Key (single-file atomic identity)
+// Directive signing key — single-file atomic identity.
 // ==========================================================================
 
 #[allow(dead_code)]
@@ -1001,14 +979,14 @@ impl DirectiveSigningKey {
 }
 
 // ==========================================================================
-// Pre-seal W2 — Worker-leg directive provenance verification.
+// Worker-leg directive provenance verification.
 //
 // The fire chain ends: council-triage proposal → DirectiveSigningKey
 // signs the JCS-canonical envelope → row persisted to directive_outbox
-// (envelope_json_canonical + signature_b64 + signing_kid). Before W2 the
-// worker claimed a row and executed WITHOUT verifying that signature, so a
-// forged/tampered directive_outbox row (anything with DB/UDS access, or a
-// future bug) would be executed as if Council had authorized it.
+// (envelope_json_canonical + signature_b64 + signing_kid). The worker must
+// verify that signature before executing a claimed row; otherwise a forged or
+// tampered directive_outbox row (anything with DB/UDS access) executes as if
+// Council had authorized it.
 //
 // `verify_directive_envelope` is the exact inverse of
 // `DirectiveSigningKey::sign_directive_envelope`: it verifies the stored

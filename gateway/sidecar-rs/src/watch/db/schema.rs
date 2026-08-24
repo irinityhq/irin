@@ -475,7 +475,7 @@ impl WatchDb {
             .call(|conn| {
                 let schema = schema_v1();
                 conn.execute_batch(&schema)?;
-                // Phase 1 weld (additive, idempotent): ensure causal_fire_id column + dedup index
+                // Additive, idempotent: ensure causal_fire_id column + dedup index
                 // for upgraded DBs (fresh DBs get it from SCHEMA_V1 CREATE + INDEX above).
                 // Uses table_info guard (no "ADD COLUMN IF NOT EXISTS" in this SQLite).
                 // Matches design: nullable for legacy row compat; producer always sets for new.

@@ -1080,8 +1080,6 @@ mod tests {
         ));
     }
 
-    // ---- FIX D/E: closed keyset + verb allowlist (proposal-fence) ----
-
     #[test]
     fn validate_rejects_unknown_top_level_key() {
         let p = serde_json::json!({

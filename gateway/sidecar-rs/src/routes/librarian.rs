@@ -5,10 +5,6 @@ use std::sync::Arc;
 
 use crate::AppState;
 
-// ---------------------------------------------------------------------------
-// Librarian v0.3 Proxy Handlers
-// ---------------------------------------------------------------------------
-
 pub(super) async fn librarian_commit(
     axum::extract::State(state): axum::extract::State<Arc<AppState>>,
     axum::extract::Json(payload): axum::extract::Json<serde_json::Value>,

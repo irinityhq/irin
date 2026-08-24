@@ -500,16 +500,14 @@ impl AttestKeyRegistry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// B4 (spec §4.2 + §5) — ES256 verification. DER is the ONLY wire format for
+// ES256 verification (spec §4.2 + §5). DER is the ONLY wire format for
 // signatures (`Signature::from_der`; raw r||s fails DER parse — one form, no
 // fallback). se-p256 verifies straight over the stored challenge bytes
 // (ECDSA-SHA256, matching CryptoKit's `signature(for:)`); fido2-es256
 // reconstructs the CTAP composition `authenticatorData || SHA-256(challenge)`
 // and additionally checks the UP (user-presence) flag bit and extracts the
-// signature counter for strict-increase enforcement (counter logic keys on
-// credential_type ONLY — `1aba8e1d-445` action 6).
-// ---------------------------------------------------------------------------
+// signature counter for strict-increase enforcement. Counter logic keys on
+// credential_type ONLY.
 
 /// Successful fido2 verification carries the authenticator's signature
 /// counter (big-endian bytes 33..37 of authenticatorData).
@@ -933,10 +931,6 @@ mod tests {
         assert_ne!(bytes, again, "every stage gets a fresh nonce");
     }
 
-    // -----------------------------------------------------------------------
-    // B3 — registry loader (spec §7.2)
-    // -----------------------------------------------------------------------
-
     /// b64 of a 33-byte SEC1 compressed point (0x02 || 32 zero bytes).
     const PK_B64: &str = "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
 
@@ -1009,10 +1003,6 @@ mod tests {
         let b = AttestKeyRegistry::parse(&sorted);
         assert_eq!(a.keyset_hash(), b.keyset_hash());
     }
-
-    // -----------------------------------------------------------------------
-    // B4 — ES256 verify (spec §4.2/§5)
-    // -----------------------------------------------------------------------
 
     use p256::ecdsa::signature::Signer;
 

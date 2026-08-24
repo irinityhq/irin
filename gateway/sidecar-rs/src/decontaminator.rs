@@ -1,7 +1,6 @@
 // ==========================================================================
 // decontaminator.rs — Prompt injection detection + content sanitization.
 //
-// Port of Python decontaminator.py to Rust.
 // CRITICAL: normalize BEFORE scanning — Cyrillic homoglyph obfuscation
 // evades regex patterns if you scan raw input.
 // ==========================================================================
@@ -14,10 +13,6 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use tracing::warn;
 use unicode_normalization::UnicodeNormalization;
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,9 +58,7 @@ pub struct DecontaminationResult {
     pub cleaned_content: String,
 }
 
-// ---------------------------------------------------------------------------
-// Pattern definitions — compiled once, reused across requests
-// ---------------------------------------------------------------------------
+// Patterns are compiled once and reused across requests.
 
 struct Pattern {
     regex: Regex,
@@ -212,10 +205,6 @@ static CLEAN_HTML_ENTITY_CHAIN: LazyLock<Regex> =
 static CLEAN_URL_ENCODING_CHAIN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(%[0-9a-fA-F]{2}){5,}").unwrap());
 
-// ---------------------------------------------------------------------------
-// Zero-width characters to strip
-// ---------------------------------------------------------------------------
-
 fn is_zero_width(c: char) -> bool {
     matches!(
         c,
@@ -238,9 +227,7 @@ fn is_zero_width(c: char) -> bool {
     )
 }
 
-// ---------------------------------------------------------------------------
-// Homoglyph map — Cyrillic → ASCII
-// ---------------------------------------------------------------------------
+// Homoglyph map — Cyrillic → ASCII.
 
 fn is_homoglyph(c: char) -> bool {
     homoglyph_replace(c) != c
@@ -276,10 +263,6 @@ fn homoglyph_replace(c: char) -> char {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Excessive repetition detector
-// ---------------------------------------------------------------------------
-
 fn check_excessive_repetition(text: &str, threshold: usize) -> bool {
     let mut count = 1usize;
     let mut prev: Option<char> = None;
@@ -296,10 +279,6 @@ fn check_excessive_repetition(text: &str, threshold: usize) -> bool {
     }
     false
 }
-
-// ---------------------------------------------------------------------------
-// Base64 threat assessment
-// ---------------------------------------------------------------------------
 
 fn assess_base64_threat(b64_text: &str, depth: usize) -> f64 {
     if depth > 3 {
@@ -337,10 +316,6 @@ fn assess_base64_threat(b64_text: &str, depth: usize) -> f64 {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Content normalization
-// ---------------------------------------------------------------------------
-
 fn normalize(text: &str) -> String {
     let stripped: String = text
         .chars()
@@ -356,20 +331,12 @@ fn normalize(text: &str) -> String {
         .collect()
 }
 
-// ---------------------------------------------------------------------------
-// Hash helper
-// ---------------------------------------------------------------------------
-
 fn short_sha256(data: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(data.as_bytes());
     let hash = hasher.finalize();
     hex::encode(&hash[..8]) // 16 hex chars = 8 bytes
 }
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 const BLOCK_SEVERITY: f64 = 0.85;
 const MAX_THREATS_BEFORE_BLOCK: usize = 5;
@@ -748,10 +715,8 @@ impl InputDecontaminator {
     }
 
     fn clean(&self, content: &str) -> String {
-        // Remove null bytes
         let mut cleaned = content.replace('\x00', "");
 
-        // Remove zero-width characters
         cleaned = cleaned.chars().filter(|c| !is_zero_width(*c)).collect();
 
         // Replace homoglyphs with ASCII equivalents
@@ -918,8 +883,6 @@ mod tests {
         let r = decon().scan("hello\x1b[31mworld");
         assert!(r.threats.iter().any(|t| t.pattern == "ansi_escape_ghost"));
     }
-
-    // --- Configurable stage tests ---
 
     fn decon_with_config(config: DeconConfig) -> InputDecontaminator {
         InputDecontaminator { config }

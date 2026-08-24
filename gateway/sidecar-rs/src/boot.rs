@@ -1,5 +1,5 @@
 // ==========================================================================
-// boot — sidecar startup stages extracted from main.rs (behavior-preserving).
+// boot — sidecar startup stages.
 // ==========================================================================
 
 use std::sync::Arc;
@@ -76,12 +76,6 @@ pub(crate) fn init_telemetry() -> Option<opentelemetry_sdk::trace::SdkTracerProv
 
     otel_provider
 }
-
-// ---------------------------------------------------------------------------
-// Boot phases — named extraction of load_config_build_state_and_serve.
-// Ordering and authority checks are unchanged; each phase is a pure move of
-// the prior sequential block into a domain-named function.
-// ---------------------------------------------------------------------------
 
 /// Phase 1 product: models/router configuration resolved from env/YAML.
 struct BootConfig {
@@ -258,7 +252,6 @@ async fn initialize_authority(config: BootConfig) -> BootAuthority {
 
     let auth_service = auth::AuthService::new(auth_config_path);
 
-    // Initialize Vertex ADC token provider
     let vertex_token = vertex_auth::VertexTokenProvider::new().await;
 
     let mut sk_bytes = [0u8; 32];
@@ -876,7 +869,6 @@ async fn start_listener_and_background(hydrated: BootHydrated) -> BootServing {
     // revert is redeploying the prior binary.
     info!("attested-arm enforcement ON (reserve re-verifies the ES256 signature before real spend; no runtime bypass)");
 
-    // Start background tasks
     let state_clone = state.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(std::time::Duration::from_secs(3600)); // Every hour
@@ -918,11 +910,10 @@ async fn start_listener_and_background(hydrated: BootHydrated) -> BootServing {
     // claim). See the shutdown select! at the end of main. (No `_` prefix — it
     // is now used.)
 
-    // Solve server-spawn timing for self-probe (P0-eta residual):
-    // Spawn axum UDS router first so it is accepting (for C11 /council/* back-calls
-    // that the gateway lua will make when we POST the probe to /v1/chat/completions).
-    // Healthcheck only waits for socket file (post-bind), gateway container starts,
-    // then we probe; a short retry loop tolerates nginx spin-up.
+    // The axum UDS router must be accepting before the self-probe runs: the probe
+    // POSTs /v1/chat/completions and the gateway lua back-calls /council/* on this
+    // socket. The healthcheck only waits for the socket file (post-bind), so the
+    // probe retries briefly to tolerate nginx spin-up.
     let server_handle = tokio::spawn(async move {
         axum::serve(listener, app)
             .await
@@ -1154,17 +1145,13 @@ async fn await_shutdown(
         _worker_shutdown,
     } = serving;
 
-    // Graceful shutdown (restart regression): a Docker
-    // `compose recreate` sends SIGTERM. Previously the process only handled
-    // SIGHUP, so SIGTERM killed it WITHOUT firing the runner shutdown channel —
-    // the writer_claim_heartbeat_loop never reached its graceful-exit branch,
-    // so the writer claim was never RELEASED and the row persisted on the
-    // compose volume, bricking the next instance's producer for the stale
-    // window. Now: signal → runner.shutdown() (fires the watch channel every
-    // loop selects on, incl. the heartbeat loop's release branch) → bounded
-    // grace for the release + drain → exit. Minimal by design — not a full
-    // graceful-shutdown framework; integrated via select! without restructuring
-    // the axum::serve future.
+    // SIGTERM (a Docker `compose recreate`) must reach the runner shutdown
+    // channel, not just SIGHUP: signal → runner.shutdown() (fires the watch
+    // channel every loop selects on, including the heartbeat loop's release
+    // branch) → bounded grace for the release + drain → exit. Without it the
+    // writer claim is never RELEASED and the stale row bricks the next
+    // instance's producer. Integrated via select!, not a full graceful-shutdown
+    // framework.
     let mut sigterm = signal(SignalKind::terminate())
         .map_err(|e| anyhow::anyhow!("failed to install SIGTERM handler: {e}"))?;
     let mut sigint = signal(SignalKind::interrupt())

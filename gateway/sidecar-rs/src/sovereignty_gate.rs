@@ -1,18 +1,11 @@
-// ==========================================================================
-// sovereignty_gate.rs — Outbound values-alignment and safety gating.
+// sovereignty_gate.rs — outbound values-alignment and safety gating.
 //
-// Port of Python love_equation_v2.py to Rust.
-// Evaluates outbound AI responses against 5 core values and a risk profile.
-// Enforces the strict >= 0.8 threshold for responses.
-// ==========================================================================
+// Scores outbound AI responses against the 5 core values and a risk profile.
+// A response is allowed only at score >= SOVEREIGNTY_THRESHOLD (0.8).
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::LazyLock;
-
-// ---------------------------------------------------------------------------
-// Configuration Constants
-// ---------------------------------------------------------------------------
 
 const BETA: f64 = 0.1;
 const QUESTION_BOOST: f64 = 0.3;
@@ -23,10 +16,6 @@ const ENERGY_MIN: f64 = 1.0;
 const KAPPA_MIN: f64 = 0.0;
 const KAPPA_MAX: f64 = 1.0;
 const SOVEREIGNTY_THRESHOLD: f64 = 0.8;
-
-// ---------------------------------------------------------------------------
-// Static Data
-// ---------------------------------------------------------------------------
 
 static CORE_VALUES: &[&str] = &[
     "Trust",
@@ -132,10 +121,6 @@ static QUESTION_WORDS: &[&str] = &[
     "could", "would", "should", "will", "shall", "may", "might",
 ];
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SovereigntyScore {
     pub score: f64,           // The love derivative value (dE/dt)
@@ -146,10 +131,6 @@ pub struct SovereigntyScore {
     pub question_boost: bool, // Was question boost applied?
     pub allowed: bool,        // Enforced against SOVEREIGNTY_THRESHOLD
 }
-
-// ---------------------------------------------------------------------------
-// Logic
-// ---------------------------------------------------------------------------
 
 pub struct SovereigntyGate {
     pub beta: f64,
