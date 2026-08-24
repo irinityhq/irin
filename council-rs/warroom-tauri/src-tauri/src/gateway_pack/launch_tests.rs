@@ -588,12 +588,11 @@ fn promote_commit_aborts_if_generation_bumps_during_stop_wait() {
         at,
         || {
             stop_calls.fetch_add(1, Ordering::SeqCst);
+            // Simulate a pack transition advancing generation during stop.
+            bump_pack_lifecycle_generation();
         },
         || {
             wait_calls.fetch_add(1, Ordering::SeqCst);
-            // Simulate Enable/disable/uninstall advancing generation while
-            // the shell waits for the Direct child port to release.
-            bump_pack_lifecycle_generation();
         },
         || {
             started.store(true, Ordering::SeqCst);
@@ -613,22 +612,22 @@ fn promote_commit_aborts_if_generation_bumps_during_stop_wait() {
 /// Happy commit path: matching generation after stop/wait allows spawn.
 #[test]
 fn promote_commit_proceeds_when_generation_stable() {
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     let _g = lifecycle_gen_test_lock();
 
     let at = pack_lifecycle_generation();
-    let started = AtomicBool::new(false);
+    let spawn_calls = AtomicUsize::new(0);
     let result = promote_commit_after_stop_wait_detailed(
         at,
         || {},
         || {},
         || {
-            started.store(true, Ordering::SeqCst);
+            spawn_calls.fetch_add(1, Ordering::SeqCst);
             Ok("governed-ok".into())
         },
     );
     assert_eq!(result, Ok("governed-ok".into()));
-    assert!(started.load(Ordering::SeqCst));
+    assert_eq!(spawn_calls.load(Ordering::SeqCst), 1);
 }
 
 /// Post-pack generation mismatch is AbortLifecycleChanged, never WaitNotReady
@@ -766,4 +765,50 @@ fn promote_commit_early_aborts_before_stop_when_generation_stale() {
     assert_eq!(result, Err(PromoteCommitError::LifecycleChangedBeforeStop));
     assert_eq!(stop_calls.load(Ordering::SeqCst), 0);
     assert!(!started.load(Ordering::SeqCst));
+}
+
+/// A Watch-Sentinels profile update bumps the same pack generation without the
+/// Council lifecycle lock. If it lands after Enable mutates the pack but before
+/// spawn, the stale respawn is refused and the handler recomputes status.
+#[test]
+fn watch_profile_bump_between_enable_and_spawn_refuses_spawn_and_recomputes_status() {
+    use std::sync::{
+        atomic::{AtomicBool, AtomicUsize, Ordering},
+        mpsc,
+    };
+
+    let _g = lifecycle_gen_test_lock();
+    let lifecycle_after_enable = pack_lifecycle_generation();
+    let spawn_calls = AtomicUsize::new(0);
+    let status_recomputed = AtomicBool::new(false);
+    let (bump_tx, bump_rx) = mpsc::sync_channel(0);
+    let (bumped_tx, bumped_rx) = mpsc::sync_channel(0);
+
+    let result = std::thread::scope(|scope| {
+        scope.spawn(move || {
+            bump_rx.recv().expect("respawn reached stop");
+            // gateway_pack_set_watch_sentinels reaches this same generation bump.
+            bump_pack_lifecycle_generation();
+            bumped_tx.send(()).expect("report lifecycle bump");
+        });
+
+        let result = promote_commit_after_stop_wait_detailed(
+            lifecycle_after_enable,
+            || {
+                bump_tx.send(()).expect("request lifecycle bump");
+                bumped_rx.recv().expect("wait for lifecycle bump");
+            },
+            || {},
+            || {
+                spawn_calls.fetch_add(1, Ordering::SeqCst);
+                Ok("must-not-run".into())
+            },
+        );
+        status_recomputed.store(true, Ordering::SeqCst);
+        result
+    });
+
+    assert_eq!(result, Err(PromoteCommitError::LifecycleChangedAfterStop));
+    assert_eq!(spawn_calls.load(Ordering::SeqCst), 0);
+    assert!(status_recomputed.load(Ordering::SeqCst));
 }
