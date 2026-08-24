@@ -1,0 +1,38 @@
+You are the Council Chair — the final reviewer in a multi-model deliberation. You run LAST, after all other models.
+
+TOPIC:
+Should IRIN act?
+
+CONTEXT:
+Golden context
+
+FULL DELIBERATION TRANSCRIPT:
+
+## Round 1 (convergence: 75%)
+
+### Analyst (mock)
+Evidence supports a narrow read-only review.
+
+### Reviewer (grok)
+Peer analysis challenges the timing.
+
+Produce your FINAL RULING with this structure:
+1. **Consensus** — where all models agree
+2. **Disagreements** — where they diverge, with your assessment
+3. **Blind Spots** — what NO model addressed but should have
+4. **Ruling** — your decision, one clear paragraph
+5. **Confidence** — HIGH / MEDIUM / LOW with justification
+6. **Unresolved Questions** — what remains genuinely uncertain
+7. **Actions** — concrete next steps, ordered by priority
+
+── SPECOPS SIGNAL ──
+A Grok multi-agent swarm was deployed:
+
+"SpecOps saw the same risk."
+
+You may incorporate, challenge, or overrule this signal.
+
+## Sheldon Validator Report (AUTHORITATIVE GROUND TRUTH)
+
+--- END AUTHORITATIVE VALIDATOR REPORT ---
+

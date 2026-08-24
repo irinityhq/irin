@@ -21,10 +21,11 @@ use super::intervention::{Intervention, InterventionQueue};
 use crate::config::Config;
 use crate::engine::context::RequestContext;
 use crate::engine::deliberate::{
-    DEFAULT_CHAIR_SYSTEM, JudgeUsage, convergence_quality_penalty_enabled,
-    effective_convergence_threshold, governed_alternative_transport_model_groups,
-    governed_required_transport_models, has_usable_seat_response, judge_round, save_session,
-    seat_preamble_for, should_pause_for_budget, truncate_utf8,
+    DEFAULT_CHAIR_SYSTEM, JudgeUsage, build_chair_prompt, build_round_prompt,
+    convergence_quality_penalty_enabled, effective_convergence_threshold,
+    governed_alternative_transport_model_groups, governed_required_transport_models,
+    has_usable_seat_response, judge_round, save_session, seat_preamble_for,
+    should_pause_for_budget, truncate_utf8,
 };
 use crate::mode::Mode;
 use crate::precedent;
@@ -2336,94 +2337,6 @@ async fn emit_round_divergence(
         .await;
 }
 
-/// Build prompt for a seat in a given round.
-#[allow(clippy::too_many_arguments)]
-fn build_round_prompt(
-    topic: &str,
-    context: &str,
-    extra_context: &str,
-    precedent_text: &str,
-    prior_rounds: &[RoundResult],
-    budget_signal: &str,
-    seat: &Seat,
-    round_num: u32,
-) -> String {
-    let mut prompt = String::new();
-
-    if !budget_signal.is_empty() {
-        prompt.push_str(budget_signal);
-        prompt.push_str("\n\n---\n\n");
-    }
-
-    if round_num == 1 {
-        // Cold Eyes (v9.13.3): NO precedent in R1 — fresh exploration.
-        // Precedent enters in R2+ via cross-pollination below.
-        if !extra_context.is_empty() {
-            prompt.push_str(&format!(
-                "OPERATOR INTERVENTION:\n{}\n\n---\n\n",
-                extra_context
-            ));
-        }
-        if !context.is_empty() {
-            prompt.push_str(context);
-            prompt.push_str("\n\n---\n\n");
-        }
-        prompt.push_str(topic);
-    } else {
-        // Cold Eyes: precedent enters in R2+ cross-pollination
-        if !precedent_text.is_empty() {
-            prompt.push_str("## Prior Council Precedent\n\n");
-            prompt.push_str(precedent_text);
-            prompt.push_str("\n---\n\n");
-        }
-        // Cross-pollination: cumulative history
-        if !extra_context.is_empty() {
-            prompt.push_str(&format!(
-                "OPERATOR INTERVENTION:\n{}\n\n---\n\n",
-                extra_context
-            ));
-        }
-        prompt.push_str(&format!("TOPIC: {}\n\n", topic));
-
-        // Own prior response
-        let mut own_text = "(no prior response)".to_string();
-        for rnd in prior_rounds {
-            for resp in &rnd.responses {
-                if resp.seat_name == seat.name && !resp.text.is_empty() && resp.error.is_none() {
-                    own_text = resp.text.clone();
-                }
-            }
-        }
-        prompt.push_str(&format!("YOUR MOST RECENT ANALYSIS:\n{}\n\n", own_text));
-
-        // Other seats' responses (full history)
-        prompt.push_str("FULL DELIBERATION HISTORY:\n");
-        prompt.push_str(&"─".repeat(40));
-        prompt.push('\n');
-        for rnd in prior_rounds {
-            prompt.push_str(&format!("\n### Round {}\n", rnd.round_num));
-            for resp in &rnd.responses {
-                if resp.seat_name != seat.name && !resp.text.is_empty() && resp.error.is_none() {
-                    let truncated = truncate_utf8(&resp.text, 2000);
-                    prompt.push_str(&format!(
-                        "**{} ({})**: {}\n\n",
-                        resp.seat_name, resp.provider, truncated
-                    ));
-                }
-            }
-            crate::engine::deliberate::append_validation_context(&mut prompt, rnd);
-        }
-        prompt.push_str(&"─".repeat(40));
-        prompt.push_str(&format!(
-            "\n\nThis is round {}. Considering the full history, refine your analysis. \
-             Where do you agree? Where do you push back? What new insight emerges?",
-            round_num
-        ));
-    }
-
-    prompt
-}
-
 // Convergence judge now shared from crate::engine::deliberate::judge_round
 
 /// Escalation result (SpecOps, Munger, Contrarian, KISS).
@@ -2549,62 +2462,13 @@ async fn synthesize(
     specops_signal: &str,
     req_ctx: &RequestContext,
 ) -> StreamChairResult {
-    let mut prompt = String::from(
-        "You are the Council Chair — the final reviewer in a multi-model deliberation. \
-         You run LAST, after all other models.\n\n",
+    let prompt = build_chair_prompt(
+        topic,
+        context,
+        rounds,
+        (!specops_signal.is_empty()).then_some(specops_signal),
+        false,
     );
-
-    prompt.push_str(&format!("TOPIC:\n{}\n\n", topic));
-    if !context.is_empty() {
-        prompt.push_str(&format!("CONTEXT:\n{}\n\n", context));
-    }
-
-    prompt.push_str("FULL DELIBERATION TRANSCRIPT:\n");
-    for rnd in rounds {
-        prompt.push_str(&format!(
-            "\n## Round {} (convergence: {:.0}%)\n",
-            rnd.round_num,
-            rnd.convergence_score * 100.0
-        ));
-        for resp in &rnd.responses {
-            if !resp.text.is_empty() && resp.error.is_none() {
-                prompt.push_str(&format!(
-                    "\n### {} ({})\n{}\n",
-                    resp.seat_name, resp.provider, resp.text
-                ));
-            }
-        }
-        crate::engine::deliberate::append_validation_context(&mut prompt, rnd);
-    }
-
-    prompt.push_str(
-        "\nProduce your FINAL RULING with this structure:\n\
-         1. **Consensus** — where all models agree\n\
-         2. **Disagreements** — where they diverge, with your assessment\n\
-         3. **Blind Spots** — what NO model addressed but should have\n\
-         4. **Ruling** — your decision, one clear paragraph\n\
-         5. **Confidence** — HIGH / MEDIUM / LOW with justification\n\
-         6. **Unresolved Questions** — what remains genuinely uncertain\n\
-         7. **Actions** — concrete next steps, ordered by priority",
-    );
-
-    if !specops_signal.is_empty() {
-        prompt.push_str(&format!(
-            "\n\n── SPECOPS SIGNAL ──\n\
-             A Grok multi-agent swarm was deployed:\n\n\
-             \"{}\"\n\n\
-             You may incorporate, challenge, or overrule this signal.",
-            specops_signal
-        ));
-    }
-
-    // claim-validation path: hoist the validator report as an authoritative section for the Chair.
-    prompt.push_str("\n\n## Sheldon Validator Report (AUTHORITATIVE GROUND TRUTH)\n\n");
-    for rnd in rounds {
-        crate::engine::deliberate::append_validation_context(&mut prompt, rnd);
-    }
-    prompt.push_str("--- END AUTHORITATIVE VALIDATOR REPORT ---\n\n");
-
     let system = stream_chair_system(cabinet, mode);
 
     let resp = provider::ask_with_context(
