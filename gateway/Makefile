@@ -147,6 +147,7 @@ audit-rust:
 lint-lua:
 	bash test/lint-timer-closures.sh
 	bash test/lint-ledger-record-admin.sh
+	bash test/admin_surface_config_test.sh
 
 # Behavioral Lua unit tests (no nginx/openresty runtime needed — pure-string
 # modules). Closes the Wave-2 TODO for credential_scrub (security tripwire:

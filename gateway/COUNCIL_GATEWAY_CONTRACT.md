@@ -46,7 +46,7 @@ and decontaminator verdicts (Axis 2) into the same tamper-evident chain.
 | Surface | Access | Rationale |
 |---------|--------|-----------|
 | `/metrics` (Prometheus) | Unauthenticated, localhost-only | Standard Prometheus scrape convention. Exposes counters and histograms (no PII, no keys). Acceptable for dev; production should front with a scrape proxy or restrict via IP policy. |
-| `/admin/*`, `/auth/rotate` | Authenticated (admin_key in request body) | Proxied through nginx to sidecar. Auth enforced at sidecar level — bootstrap token or admin-tier virtual key required. |
+| `/admin/keys`, `/admin/keys/revoke`, `/auth/rotate` | Authenticated (admin_key in request body) | Proxied through nginx to sidecar. Auth enforced at sidecar level — bootstrap token or admin-tier virtual key required. |
 | `/ledger/verify`, `/ledger/export` | Authenticated (admin-tier `X-Admin-Key`); loopback-oriented | Read-only ledger verification and export require an admin-tier virtual key via `X-Admin-Key` (401 if missing/invalid, 403 if non-admin). Exact-match routes only — `/ledger/record` is not exposed through nginx. Network binding remains loopback-oriented; auth is not optional. |
 | UDS socket (`0660`) | Container-scoped | Socket permissions are owner+group read/write, world none; startup refuses an invalid mode. Both containers (gateway + sidecar) share a named volume and run as a shared group. In production with host-mounted sockets, keep `0660` with a shared group. |
 
