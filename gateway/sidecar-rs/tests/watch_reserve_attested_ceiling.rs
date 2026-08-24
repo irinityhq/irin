@@ -95,6 +95,7 @@ async fn forged_active_arm_garbage_signature_refused() {
     let logs = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
         .without_time()
+        .with_ansi(false)
         .with_max_level(tracing::Level::WARN)
         .with_writer({
             let logs = logs.clone();
