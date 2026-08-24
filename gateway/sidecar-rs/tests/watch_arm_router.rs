@@ -977,6 +977,9 @@ async fn test_arm_status_is_a_projection_with_no_ceremony_material() {
 #[tokio::test]
 async fn test_arm_status_db_error_is_unarmed_and_counted() {
     let (tmp, _db, quarantine, router) = fixture_attest("alice:tok_alpha_0001").await;
+    let (kill_tx, _kill_rx) = tokio::sync::watch::channel(false);
+    let (_ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    *quarantine.producer_kill_state.lock() = Some((kill_tx, ack_rx));
     rusqlite::Connection::open(tmp.path().join("watch_arm_router.db"))
         .unwrap()
         .execute_batch("DROP TABLE active_arm")

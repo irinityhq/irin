@@ -101,8 +101,6 @@ async fn forged_active_arm_garbage_signature_refused() {
             move || logs.clone()
         })
         .finish();
-    tracing::subscriber::set_global_default(subscriber).unwrap();
-
     let (_tmp, db) = fresh_db().await;
     publish_test_boot_registry();
     let content = ArmContent {
@@ -136,14 +134,17 @@ async fn forged_active_arm_garbage_signature_refused() {
     .await
     .unwrap();
     enqueue(&db, 1, 0).await;
+    let subscriber_guard = tracing::subscriber::set_default(subscriber);
+    let refused = claim(&db).await;
+    drop(subscriber_guard);
     assert!(
-        claim(&db).await.is_none(),
+        refused.is_none(),
         "a forged arm with no valid signature must be refused by the reserve"
     );
     let logs = logs.text();
     assert!(
-        logs.contains("arm reserve refused"),
-        "reserve refusal must be logged; got {logs:?}"
+        logs.contains("arm reserve refused") && logs.contains("reason=bad_signature"),
+        "garbage-signature reserve refusal must be logged; got {logs:?}"
     );
 }
 

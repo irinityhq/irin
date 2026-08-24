@@ -1550,6 +1550,7 @@ pub async fn admin_arm_status_json(
             }
             Ok(None) => {}
             Err(error) => {
+                view.armed = false;
                 tracing::error!(error = %error, "arm status active-arm read failed");
                 quarantine.bump_audit_infra_errors();
             }
