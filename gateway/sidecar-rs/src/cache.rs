@@ -9,11 +9,9 @@ use tracing::{debug, error, info};
 
 const REDIS_OP_TIMEOUT: Duration = Duration::from_millis(500);
 
-// ---------------------------------------------------------------------------
-// Public constants — the gateway contract pins these. Any change here
-// requires a matching change in COUNCIL_GATEWAY_CONTRACT.md AND the
-// `make contract-check` target validates they agree.
-// ---------------------------------------------------------------------------
+// The gateway contract pins the public constants below: any change here
+// requires a matching change in COUNCIL_GATEWAY_CONTRACT.md, and
+// `make contract-check` validates that the two agree.
 
 /// Cache key prefix. Bump on any change to the on-the-wire cache shape:
 ///   v1 → v2: spine refactor — raw-bytes hashing replaces re-encoded JSON.
@@ -32,10 +30,6 @@ const REDIS_OP_TIMEOUT: Duration = Duration::from_millis(500);
 ///            proxy responses have a different native response shape and
 ///            usage parser lineage than Vertex generateContent responses.
 pub const CACHE_KEY_PREFIX: &str = "gateway:cache:v5:";
-
-// ---------------------------------------------------------------------------
-// Cache Configuration & Traits
-// ---------------------------------------------------------------------------
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CacheEntry {
@@ -65,10 +59,6 @@ pub trait CacheBackend: Send + Sync {
     async fn set(&self, key: &str, entry: CacheEntry) -> Result<(), String>;
 }
 
-// ---------------------------------------------------------------------------
-// Moka (Local In-Memory) Implementation
-// ---------------------------------------------------------------------------
-
 pub struct LocalCache {
     cache: moka::future::Cache<String, CacheEntry>,
 }
@@ -94,10 +84,6 @@ impl CacheBackend for LocalCache {
         Ok(())
     }
 }
-
-// ---------------------------------------------------------------------------
-// Redis (Distributed) Implementation
-// ---------------------------------------------------------------------------
 
 pub struct RedisCache {
     client: redis::Client,
@@ -176,10 +162,7 @@ impl CacheBackend for RedisCache {
     }
 }
 
-// ---------------------------------------------------------------------------
-// SQLite (Durable) Implementation — GATEWAY_DURABLE=1
-// ---------------------------------------------------------------------------
-
+// Durable tier — active when GATEWAY_DURABLE=1.
 pub struct SqliteCache {
     conn: tokio_rusqlite::Connection,
 }
@@ -282,10 +265,6 @@ impl CacheBackend for SqliteCache {
             .map_err(|e| format!("SQLite set: {}", e))
     }
 }
-
-// ---------------------------------------------------------------------------
-// Hybrid / Gateway Cache Manager
-// ---------------------------------------------------------------------------
 
 pub struct GatewayCache {
     local: Arc<LocalCache>,
@@ -407,10 +386,7 @@ impl GatewayCache {
     }
 }
 
-// ---------------------------------------------------------------------
-// Redis 1.x degradation tests (added for redis 0.26→1.x wave)
-// Prove RedisCache degrades safely on connection failure under 1.2.x.
-// ---------------------------------------------------------------------
+// Redis degradation: RedisCache degrades safely on connection failure.
 
 #[cfg(test)]
 mod tests {

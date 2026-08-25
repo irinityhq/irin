@@ -102,7 +102,6 @@ def _chat_to_prompt(body: dict) -> tuple[str, str, str]:
             if isinstance(b, dict) and b.get("type") == "text"
         )
 
-    # Build prompt from messages
     parts = []
     for msg in body.get("messages", []):
         role = msg.get("role", "user")
@@ -305,7 +304,6 @@ class ClaudeProxyHandler(BaseHTTPRequestHandler):
             self._json_response(400, {"error": f"invalid JSON: {e}"})
             return
 
-        # Extract prompt from body
         prompt, system, model = _chat_to_prompt(body)
         max_tokens = body.get("max_tokens", 4096)
 

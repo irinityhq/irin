@@ -120,8 +120,6 @@ pub fn get_report(name: &str) -> Option<Value> {
     }))
 }
 
-// ─── Weekly summaries (read) ──────────────────────────────────────
-
 fn collect_weekly_files() -> Vec<PathBuf> {
     let dir = runs_dir();
     if !dir.exists() {
@@ -166,7 +164,7 @@ pub fn weekly_history(limit: usize) -> Vec<Value> {
         .collect()
 }
 
-// ─── drift/run — replay sessions in blind mode ────────────────────
+// Backs drift/run: replays sessions in blind mode.
 
 const STOP_WORDS: &[&str] = &[
     "the", "a", "an", "is", "are", "to", "of", "and", "or", "but", "in", "on", "for", "with", "as",
@@ -737,7 +735,7 @@ fn top_anchoring(rows: &[Value], top_n: usize) -> Vec<Value> {
     scored
 }
 
-// ─── drift/weekly/run — aggregate the last N drift reports ───────
+// Backs drift/weekly/run: aggregates the last N drift reports.
 
 pub async fn run_weekly_summary(
     config: &Arc<Config>,

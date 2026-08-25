@@ -203,9 +203,7 @@ fn rehearsal_passed_sticky() -> bool {
     REHEARSAL_PASSED_STICKY.load(Ordering::SeqCst)
 }
 
-// ---------------------------------------------------------------------------
-// Renderer-facing projection
-// ---------------------------------------------------------------------------
+// Renderer-facing projection.
 
 /// Product states for the control that sits beside Gateway in Settings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -290,10 +288,6 @@ impl TouchIdStatus {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Pure state derivation (unit-tested; no Touch ID, Docker, or network)
-// ---------------------------------------------------------------------------
 
 /// Everything the state machine is allowed to look at. Gathering these is IO;
 /// deciding from them is not, so the decision is pure and fully testable.
@@ -574,9 +568,7 @@ pub fn derive_status(inp: &TouchIdInputs) -> TouchIdStatus {
     st
 }
 
-// ---------------------------------------------------------------------------
-// Enrollment record + registry (app-owned, public material only)
-// ---------------------------------------------------------------------------
+// Enrollment record and registry: app-owned, public material only.
 
 /// One PUBLIC credential record, byte-compatible with the registry the sidecar
 /// loads and with `gateway/bin/arm-enroll` output.
@@ -712,10 +704,6 @@ fn base64_decoded_len(input: &str) -> Option<usize> {
 fn hex_lower(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
-
-// ---------------------------------------------------------------------------
-// Helper resolution and identity
-// ---------------------------------------------------------------------------
 
 /// Candidate paths for the bundled signing helper.
 ///
@@ -875,10 +863,6 @@ pub fn parse_sign_output(raw: &str, expected_credential_id: &str) -> Result<Sign
     Ok(frag)
 }
 
-// ---------------------------------------------------------------------------
-// Sidecar ceremony transport
-// ---------------------------------------------------------------------------
-
 /// The sidecar's renderer-safe status projection (mirrors `ArmStatusView`).
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ArmStatusView {
@@ -960,10 +944,6 @@ pub fn ensure_arm_principal(store: &dyn SecretStore) -> Result<String, String> {
     store_arm_principal_token(store, &token)?;
     Ok(token)
 }
-
-// ---------------------------------------------------------------------------
-// Status gathering
-// ---------------------------------------------------------------------------
 
 fn read_enrollment_record() -> Option<EnrollmentRecord> {
     let raw = std::fs::read_to_string(enrollment_record_path()).ok()?;
@@ -1163,10 +1143,6 @@ fn touch_id_status_from_inputs(inputs: TouchIdInputs) -> TouchIdStatus {
     }
     st
 }
-
-// ---------------------------------------------------------------------------
-// Ceremonies
-// ---------------------------------------------------------------------------
 
 /// Enrollment: Touch ID proves the biometric gate, the helper returns a PUBLIC
 /// credential record, and the app-owned registry is rewritten atomically.

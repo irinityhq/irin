@@ -17,10 +17,6 @@ use tokio::sync::Mutex;
 use tokio_rusqlite::Connection;
 use tracing::{debug, error, info};
 
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
 const GENESIS_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 // v3: length-prefixed hash preimage. v2's pipe-delimited format was vulnerable
 // to delimiter-collision: a field containing `|` could collide with a different
@@ -72,10 +68,6 @@ pub fn build_hash_preimage_v3(
     )
 }
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LedgerEvent {
     pub id: Option<i64>,
@@ -101,10 +93,6 @@ pub struct EventInput {
     #[serde(default)]
     pub caller_key: Option<String>,
 }
-
-// ---------------------------------------------------------------------------
-// Audit Ledger Implementation
-// ---------------------------------------------------------------------------
 
 pub struct AuditLedger {
     conn: Arc<Mutex<Connection>>,
@@ -152,14 +140,12 @@ impl AuditLedger {
 
         let conn = Connection::open(db_path).await?;
 
-        // Configure connection for performance and concurrency
         conn.call(|conn| {
             conn.pragma_update(None, "journal_mode", "WAL")?;
             conn.pragma_update(None, "synchronous", "NORMAL")?;
             conn.pragma_update(None, "busy_timeout", "5000")?;
             conn.pragma_update(None, "auto_vacuum", "FULL")?;
 
-            // Initialize schema
             conn.execute(
                 "CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -176,7 +162,6 @@ impl AuditLedger {
                 [],
             )?;
 
-            // Create index on hash for fast lookups
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_audit_events_hash ON audit_events (hash)",
                 [],
@@ -375,7 +360,6 @@ impl AuditLedger {
         );
 
         let event_result = conn_lock.call(move |conn| {
-            // Get previous hash
             let mut stmt = conn.prepare("SELECT hash FROM audit_events ORDER BY id DESC LIMIT 1")?;
             let prev_hash = match stmt.query_row([], |row| row.get::<_, String>(0)) {
                 Ok(h) => h,
@@ -1238,10 +1222,6 @@ mod tests {
         cleanup(&path);
     }
 
-    // -----------------------------------------------------------------------
-    // fsck tests
-    // -----------------------------------------------------------------------
-
     #[tokio::test]
     async fn test_fsck_clean_chain_no_ceremony_events() {
         let (ledger, path) = test_ledger("fsck_clean").await;
@@ -1367,10 +1347,8 @@ mod tests {
         cleanup(&path);
     }
 
-    // -----------------------------------------------------------------------
     // Trust-pin proofs: (a) attacker re-sign fails, (b) legacy null-pubkey,
     // (c) fsck introduce-before-use / signers ⊆ introduced ∪ configured.
-    // -----------------------------------------------------------------------
 
     /// (a) Tampered payload re-signed with attacker key + matching stored
     /// pubkey must fail verification (trust pin closes the forge path).
@@ -1560,9 +1538,7 @@ mod tests {
         cleanup(&path);
     }
 
-    // -----------------------------------------------------------------------
-    // Sidecar old-key seed derivation (must match CLI --old-key / SigningKey)
-    // -----------------------------------------------------------------------
+    // Sidecar old-key seed derivation must match CLI --old-key / SigningKey.
 
     /// A-to-B rotation: rows signed under key A (with stored pubkey) must verify
     /// when the ledger is reopened with active B and old seed A.

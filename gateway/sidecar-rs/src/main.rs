@@ -1,7 +1,6 @@
 // ==========================================================================
 // main.rs — Gateway sidecar HTTP server.
 //
-// Axum-based replacement for Python FastAPI sidecar.
 // Endpoints:
 //   POST /guard/input   — prompt injection + encoding attack scanning
 //   POST /guard/scan    — DEBUG ONLY (GATEWAY_DEBUG_GUARD_SCAN=1; 404 otherwise):
@@ -40,10 +39,6 @@ pub mod watch;
 
 use std::os::unix::fs::PermissionsExt;
 use tracing::{info, warn};
-
-// ---------------------------------------------------------------------------
-// Shared state
-// ---------------------------------------------------------------------------
 
 pub(crate) struct AppState {
     decon: decontaminator::InputDecontaminator,
@@ -93,10 +88,7 @@ pub(crate) struct AppState {
     pub librarian_base_url: String,
 }
 
-// ---------------------------------------------------------------------------
-// Ledger signing key loader
-//
-// Loads the Ed25519 signing key seed from disk. The file is exactly 32 raw
+// Loads the Ed25519 ledger signing key seed from disk. The file is exactly 32 raw
 // bytes (despite the historical `.pem` extension on the default path — the
 // extension is misleading; the contents are a raw seed, accidentally
 // compatible with `ed25519-dalek::SigningKey::from_bytes`).
@@ -106,7 +98,6 @@ pub(crate) struct AppState {
 // chain verification across restarts.
 //
 // See COUNCIL_GATEWAY_CONTRACT.md for the trust root section.
-// ---------------------------------------------------------------------------
 fn load_ledger_signing_key() -> Vec<u8> {
     let key_path = std::env::var("LEDGER_SIGNING_KEY_PATH")
         .map(std::path::PathBuf::from)
@@ -157,8 +148,7 @@ fn load_ledger_signing_key() -> Vec<u8> {
     bytes
 }
 
-// ---------------------------------------------------------------------------
-// Root verifying key loader (ROOT_PUBKEY_HEX)
+// Root verifying key loader (ROOT_PUBKEY_HEX).
 //
 // The air-gapped root signing key never reaches a running sidecar — only its
 // public counterpart is needed for verification. When `ROOT_PUBKEY_HEX` is
@@ -168,7 +158,6 @@ fn load_ledger_signing_key() -> Vec<u8> {
 // Fail-closed:
 // - absent / empty → Ok(None) (row-signer ceremony mode; warn once)
 // - present but bad length/hex/non-point → Err (refuse boot)
-// ---------------------------------------------------------------------------
 #[cfg_attr(test, allow(dead_code))]
 pub(crate) fn load_root_pubkey() -> Result<Option<ed25519_dalek::VerifyingKey>, String> {
     let hex_str = match std::env::var("ROOT_PUBKEY_HEX") {
@@ -248,10 +237,6 @@ fn load_old_ledger_key() -> Option<Vec<u8>> {
     }
     None
 }
-
-// ---------------------------------------------------------------------------
-// Entry point — orchestration outline
-// ---------------------------------------------------------------------------
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {

@@ -16,14 +16,12 @@ use super::helpers::{
     problem_with_tenant, problem_with_tenant_id,
 };
 
-// ==========================================================================
-// P1 — Directive outbox REST surface (read/list + admin ack + pubkey)
+// Directive outbox REST surface (read/list + admin ack + pubkey).
 // All handlers are deliberately narrow (take only the Arcs they need) so the
 // library crate stays buildable in isolation. Tenant scope is enforced at
 // every DB call and 404/401 is returned for cross-tenant or unauthed access.
 // Signature verification bytes are *always* the stored envelope_json_canonical
 // (never re-serialized). Ack is idempotent and returns 409 for dismissed/expired.
-// ==========================================================================
 
 /// `GET /watch/outbox/{tenant}?status=&limit=` — tenant-scoped list (newest first).
 /// Returns the rows plus the canonical + signature fields needed for UI-side

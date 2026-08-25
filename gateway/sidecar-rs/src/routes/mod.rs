@@ -1,6 +1,5 @@
 // ==========================================================================
-// routes — HTTP handlers + router assembly (moved from main.rs).
-// Pure structure extract: handler bodies and route table unchanged.
+// routes — HTTP handlers + router assembly.
 // ==========================================================================
 
 mod auth;

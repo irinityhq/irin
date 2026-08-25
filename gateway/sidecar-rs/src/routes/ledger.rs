@@ -180,8 +180,7 @@ pub(super) async fn ledger_export(
     }
 }
 
-// ---------------------------------------------------------------------------
-// W1b drift-lock (Council P1, session 2b3183af-12c).
+// Drift-lock.
 //
 // `tests/ledger_export_auth.rs` exercises the full per-handler matrix but
 // against a *copy* of the gate logic (the real handlers are private to this
@@ -189,7 +188,6 @@ pub(super) async fn ledger_export(
 // the tier check would leave that integration test green. This same-crate test
 // calls the REAL `require_admin_header` so the actual gate semantics are
 // pinned: drop the tier check and THIS test goes red.
-// ---------------------------------------------------------------------------
 #[cfg(test)]
 mod require_admin_header_tests {
     use super::*;

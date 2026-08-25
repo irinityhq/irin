@@ -79,10 +79,6 @@ impl Mode {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Mode Prompts — The soul of each mode
-// ---------------------------------------------------------------------------
-
 const TEARDOWN_PREAMBLE: &str = "\
 DELIBERATION MODE: TEAR IT DOWN
 

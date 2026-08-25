@@ -545,6 +545,4 @@ mod tests {
 
         assert_eq!(gated[1].text, "claim-Y here");
     }
-
-    // --- classify_claim unit tests (new pre-classification logic) ---
 }

@@ -76,8 +76,6 @@ pub fn cosine_similarity(a: &str, b: &str) -> Option<f64> {
     Some(dot as f64)
 }
 
-// ─── Index storage ────────────────────────────────────────────────
-
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 struct Record {
     id: String,
@@ -126,8 +124,6 @@ fn append_record(record: &Record) -> Result<()> {
     Ok(())
 }
 
-// ─── Session-index reading ────────────────────────────────────────
-
 fn load_session_index() -> Vec<Value> {
     let path = index_path();
     if !path.exists() {
@@ -171,8 +167,6 @@ fn index_text(e: &Value) -> String {
         digest
     )
 }
-
-// ─── Public API ───────────────────────────────────────────────────
 
 /// Build / extend the embeddings index.
 /// Incremental unless `force=true`. Returns a JSON summary.

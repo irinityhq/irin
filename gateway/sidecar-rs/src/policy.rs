@@ -18,10 +18,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use tracing::{info, warn};
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SensitivityLevel {
@@ -40,10 +36,6 @@ pub struct PolicyDecision {
     pub dry_run: bool,
     pub detected_signals: Vec<String>,
 }
-
-// ---------------------------------------------------------------------------
-// Provider classification
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct PolicyConfig {
@@ -125,10 +117,6 @@ impl Default for PolicyConfig {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Policy Firewall
-// ---------------------------------------------------------------------------
-
 pub struct PolicyFirewall {
     config: PolicyConfig,
 }
@@ -206,10 +194,6 @@ impl PolicyFirewall {
         self.config.dry_run
     }
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {

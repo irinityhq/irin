@@ -757,7 +757,6 @@ async fn run_round_prompts(
     } = ready;
     let frame_check_enabled = *frame_check_enabled;
 
-    // Build prompts
     let mut prompts: Vec<(String, String)> = live_seats
         .iter()
         .map(|seat| {
@@ -802,7 +801,6 @@ async fn run_round_prompts(
         }
     }
 
-    // Emit seat_started for all seats
     for seat in live_seats {
         let _ = event_tx
             .send(StreamEvent::seat_started(
@@ -1325,7 +1323,6 @@ async fn run_round_operator_pause(
                 .send(StreamEvent::specops_started(session_id, "manual", esc_mode))
                 .await;
 
-            // Run escalation
             let Some(sig) = until_cancelled(
                 &cancel,
                 crate::engine::direct_fire::run_escalation(
@@ -1895,7 +1892,6 @@ async fn persist_phase_session(
         return None;
     }
 
-    // Save session
     let save_path = match save_session(&session) {
         Ok(path) => Some(path),
         Err(e) => {

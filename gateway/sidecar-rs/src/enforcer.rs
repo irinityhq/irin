@@ -1,7 +1,6 @@
 // ==========================================================================
 // enforcer.rs — Tool authorization + path sandboxing.
 //
-// Port of Python enforcer.py to Rust.
 // Invariant: READ_ONLY compliance gate.
 //   1. Tool allowlist — reject unknown tools
 //   2. Path sandboxing — canonicalize, symlink-safe
@@ -12,10 +11,6 @@
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::{env, fs};
-
-// ---------------------------------------------------------------------------
-// Configuration
-// ---------------------------------------------------------------------------
 
 fn default_data_dir() -> PathBuf {
     PathBuf::from(env::var("GATEWAY_DATA_DIR").unwrap_or_else(|_| "/data".to_string()))
@@ -28,10 +23,6 @@ fn max_read_size() -> u64 {
         .unwrap_or(5);
     mb * 1024 * 1024
 }
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
 pub struct EnforcementResult {
@@ -78,17 +69,9 @@ impl ReadOnlyViolation {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tool allowlist
-// ---------------------------------------------------------------------------
-
 const READ_ONLY_TOOLS: &[&str] = &["fs.read", "fs.list", "sys.time"];
 
 const BLOCKED_SCHEMES: &[&str] = &["http://", "https://", "tcp://", "file://"];
-
-// ---------------------------------------------------------------------------
-// Individual checks
-// ---------------------------------------------------------------------------
 
 fn check_tool(tool_name: &str) -> Result<(), ReadOnlyViolation> {
     if !READ_ONLY_TOOLS.contains(&tool_name) {
@@ -177,10 +160,6 @@ fn check_read_size(path_str: &str, max_bytes: u64) -> Result<(), ReadOnlyViolati
         Err(_) => Ok(()), // File doesn't exist — not our problem
     }
 }
-
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
 
 /// Full enforcement gate. Returns Ok(EnforcementResult) or Err(ReadOnlyViolation).
 pub fn enforce(

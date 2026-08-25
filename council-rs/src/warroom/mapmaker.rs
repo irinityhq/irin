@@ -270,7 +270,6 @@ pub async fn run_mapmaker(
             .models
             .estimate_cost(&resp.model, resp.tokens_in, resp.tokens_out, resp.cached_in);
 
-    // Save brief
     let dir = maps_dir();
     let _ = std::fs::create_dir_all(&dir);
     let ts = Utc::now().format("%Y%m%d_%H%M%S").to_string();

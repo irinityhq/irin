@@ -17,10 +17,6 @@ use std::time::Instant;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AuthKey {
     #[serde(default)]
@@ -101,10 +97,6 @@ pub struct ProvisionResponse {
     pub budget_key: String,
     pub tier: String,
 }
-
-// ---------------------------------------------------------------------------
-// IP Policy (CIDR-based allow / deny gate)
-// ---------------------------------------------------------------------------
 
 /// CIDR list pre-parsed at deserialization/construction time. Every string
 /// entry goes through `parse_cidr_or_host` exactly once — bare IPs normalize
@@ -230,10 +222,6 @@ fn parse_cidr_or_host(entry: &str) -> Option<IpNet> {
     None
 }
 
-// ---------------------------------------------------------------------------
-// Token Bucket
-// ---------------------------------------------------------------------------
-
 pub(crate) struct TokenBucket {
     tokens: f64,
     last_update: Instant,
@@ -282,10 +270,6 @@ impl TokenBucket {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Auth Service
-// ---------------------------------------------------------------------------
 
 pub struct AuthService {
     config_path: Option<PathBuf>,
@@ -723,7 +707,6 @@ impl AuthService {
             service_role: service_role.clone(),
         };
 
-        // Load existing config, append, and save
         let (mut config, _) = self.load_config();
         // Defense-in-depth (§5.6): an existing entry with the same `key_id`
         // and a conflicting `service_role` must not be silently overwritten

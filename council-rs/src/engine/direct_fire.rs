@@ -128,7 +128,6 @@ pub(crate) async fn run_escalation(
     mode: &str,
     req_ctx: &RequestContext,
 ) -> EscalationResult {
-    // Build transcript from all rounds
     let mut transcript = String::new();
     for rnd in rounds {
         for resp in &rnd.responses {

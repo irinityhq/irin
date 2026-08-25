@@ -482,12 +482,6 @@ pub async fn run_with_cancel(
     .await
 }
 
-// ---------------------------------------------------------------------------
-// Deliberation phases — named extraction of run_with_cancel.
-// Ordering and authority checks are unchanged; each phase is a pure move of
-// the prior sequential block into a domain-named function.
-// ---------------------------------------------------------------------------
-
 /// Phase 1 product: cabinet, session identity, transport, precedent, BATS.
 struct PreparedDeliberation {
     cabinet: Cabinet,
@@ -756,7 +750,7 @@ async fn execute_deliberation_rounds(
                 .collect()
         };
 
-        // Phase 0.5 §4.5: pre-round cancel check (cheap escape before fan-out).
+        // Pre-round cancel check: cheap escape before seat fan-out.
         if let Some(c) = cancel
             && c.is_cancelled()
         {
@@ -980,9 +974,9 @@ async fn execute_deliberation_rounds(
             validation_report: validation_report.map(crate::scrub::redact_validation_report),
         });
 
-        // Phase 0.5 §4.5: post-round cancel check. Persist a partial diagnostic
-        // file with origin=ApiCancelled (private side-channel — never returned
-        // to the API response, never indexed for precedent) and bail.
+        // Post-round cancel check. Persist a partial diagnostic file with
+        // origin=ApiCancelled (private side-channel — never returned to the
+        // API response, never indexed for precedent) and bail.
         if let Some(c) = cancel
             && c.is_cancelled()
         {
@@ -1054,9 +1048,8 @@ async fn maybe_escalate_specops(
     verbose: bool,
     origin: SessionOrigin,
 ) -> RoundExecution {
-    // Phase 0.5 §4.x: SpecOps auto-escalation for non-converging runs.
-    // Now accepts grok OAuth CLI in addition to (or instead of) XAI_API_KEY.
-    // Empty XAI_API_KEY= placeholders must not count as configured.
+    // Grok counts as available via OAuth CLI or XAI_API_KEY; an empty
+    // XAI_API_KEY= placeholder does not count as configured.
     let grok_available =
         crate::provider::env_nonempty("XAI_API_KEY") || crate::provider::is_grok_cli_available();
     let enable_specops = specops_auto_escalate_enabled(
@@ -1154,9 +1147,8 @@ async fn synthesize_and_persist(
         eprintln!("── Synthesis ────────────────────────────────────────────");
     }
 
-    // Phase 0.5 §4.7 (P0 #1): synthesize() now returns ChairResult with the
-    // real chair tokens + cost. Previously the chair cost was hardcoded zero
-    // (`estimate_cost(model, 0, 0, 0)`), silently undercounting end-to-end.
+    // synthesize() reports the real chair tokens and cost; they must be folded
+    // into the run totals or the end-to-end accounting undercounts.
     let chair = synthesize(
         config,
         &prepared.cabinet,
@@ -1628,7 +1620,6 @@ async fn run_frame_check(
             return prompt.to_string();
         }
 
-        // Parse flagged assumptions
         let mut assumptions: Vec<(String, String)> = Vec::new();
         for line in result.lines() {
             let line = line.trim();
@@ -2432,11 +2423,11 @@ async fn synthesize(
 
     // Defense-in-depth across providers: empty chair text is never a valid
     // ruling — it ships "content": "" in the OpenAI envelope and silently
-    // breaks any consumer expecting a synthesis. Native provider clients used
-    // to return Ok with text="" when the upstream response had no candidate
-    // content (Gemini MAX_TOKENS with thinking budget exhausted; OpenAI-compat
-    // models with safety-empty responses). Fail-fast here so the failure
-    // surface is the API caller, not a downstream contract violation.
+    // breaks any consumer expecting a synthesis. A provider client can return
+    // Ok with text="" when the upstream response carries no candidate content
+    // (Gemini MAX_TOKENS with thinking budget exhausted; OpenAI-compat models
+    // with safety-empty responses). Fail fast here so the failure surface is
+    // the API caller, not a downstream contract violation.
     if resp.text.trim().is_empty() {
         anyhow::bail!(
             "Chair synthesis returned empty content (provider: {}, model: {}, tokens_in: {}, tokens_out: {}{})",

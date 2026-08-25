@@ -165,7 +165,7 @@ pub fn recompute(app: &AppHandle, freshness: Freshness) -> DesktopStatusSnapshot
         .map(|snapshot| snapshot.touch_id.clone());
     drop(guard);
 
-    // --- gather (serialized by computing flag + re-lock at commit) ---
+    // Gather, serialized by the computing flag; the lock is retaken at commit.
     let pack = match freshness {
         Freshness::Background => gateway_pack::gateway_pack_status(&store),
         Freshness::Action => gateway_pack::gateway_pack_status_fresh(&store),
@@ -184,7 +184,7 @@ pub fn recompute(app: &AppHandle, freshness: Freshness) -> DesktopStatusSnapshot
     let phone =
         phone_access::phone_access_status(&LiveTailscaleRunner, pack.enabled, council_ready);
 
-    // --- commit under lock ---
+    // Commit under lock.
     let mut guard = auth.state.lock().unwrap_or_else(|e| e.into_inner());
     guard.seq = guard.seq.saturating_add(1);
     let snap = DesktopStatusSnapshot {
@@ -287,10 +287,6 @@ fn council_backend_ready_for_status(app: &AppHandle) -> bool {
     // probe via the same spawn-config + build identity path when available.
     crate::council_backend_ready_probe(app)
 }
-
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
@@ -518,7 +514,6 @@ mod tests {
             after > before,
             "fresh/action sampling invalidates presentation cache ({before} → {after})"
         );
-        // Freshness discriminants used by recompute.
         assert_ne!(Freshness::Background, Freshness::Action);
         // recompute(Action) is the only path that must call status_fresh;
         // recompute(Background) uses the cached presentation path. Source

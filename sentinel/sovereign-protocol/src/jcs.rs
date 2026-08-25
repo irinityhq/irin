@@ -483,7 +483,7 @@ mod tests {
         assert_eq!(jcs(&unordered), r#"{"a":2,"m":3,"z":1}"#);
     }
 
-    // --- key ordering: UTF-16 code units, NOT Unicode-scalar (W5.1 FIX 1) ---
+    // --- key ordering: UTF-16 code units, NOT Unicode-scalar ---
 
     #[test]
     fn test_key_sort_utf16_not_scalar_e000_vs_10000() {
@@ -588,7 +588,7 @@ mod tests {
         }
     }
 
-    // --- dup-key detector: object-scoped (W5 Q4) ---
+    // --- dup-key detector: object-scoped ---
 
     #[test]
     fn test_dup_same_object_rejected() {
@@ -647,7 +647,7 @@ mod tests {
         assert!(!has_duplicate_keys(r#"{"k1":"v\"x","k2":"y"}"#));
     }
 
-    // --- non-finite guard (W5 P0, defense-in-depth at the typed boundary) ---
+    // --- non-finite guard: defense-in-depth at the typed boundary ---
 
     #[test]
     fn test_nonfinite_struct_field_rejected() {
@@ -707,7 +707,7 @@ mod tests {
         ));
     }
 
-    // --- single-pass purity trap (W5.1 P1-C: make the trap permanent) ---
+    // --- single-pass purity trap ---
 
     /// A deliberately NON-PURE `Serialize`: it emits a different value on every
     /// pass (an interior-mutable counter). This is exactly the hand-rolled,

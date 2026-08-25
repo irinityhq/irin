@@ -128,8 +128,6 @@ export const api = {
   mapmakerBrief: (name: string) =>
     get<MapmakerBrief>(`/api/mapmaker/briefs/${encodeURIComponent(name)}`),
 
-  // Phase 2 — Gen 10 intelligence
-
   embeddingsStats: () => get<EmbeddingStats>("/api/embeddings/stats"),
   embeddingsRebuild: (force = false) =>
     post<{ built: boolean; added?: number; total?: number; reason?: string }>(
@@ -185,7 +183,6 @@ export const api = {
     post<{ status: string; window: number; limit?: number }>(
       "/api/drift/run", { window, limit }),
 
-  // Phase 2.1 — weekly summary
   weeklyLatest: () => get<WeeklySummary>("/api/drift/weekly"),
   weeklyHistory: (limit = 12) =>
     get<{ summaries: WeeklySummary[] }>(
@@ -208,7 +205,7 @@ export const api = {
   },
   metaReviewLatest: () => get<MetaReviewReport>("/api/meta-review/latest"),
 
-  // Phase 6 — provider discovery (feature contract)
+  // Provider discovery (feature contract).
   discover: () => get<DiscoverResponse>("/api/discover"),
 
   // Gate 4 — Council-authenticated BFF. Gateway admin credentials never

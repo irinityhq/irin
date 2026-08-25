@@ -64,8 +64,6 @@ pub(super) async fn embeddings_rebuild(
     axum::Json(result).into_response()
 }
 
-// ───── Meta-review ───────────────────────────────────────────
-
 #[cfg(test)]
 mod precedent_reindex_tests {
     use super::precedent_reindex_success_json;

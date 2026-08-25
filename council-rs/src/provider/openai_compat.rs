@@ -580,7 +580,6 @@ pub async fn ask_streaming(
 /// crashed on `.get()` on None. In Rust, we use `.and_then()` chains that
 /// naturally handle null/missing JSON values.
 pub fn parse_chat_completions(data: Value, model: &str, latency_ms: u64) -> ProviderResponse {
-    // Check for API error
     if let Some(err) = data.get("error")
         && !err.is_null()
     {

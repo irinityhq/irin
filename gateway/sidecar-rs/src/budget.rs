@@ -26,10 +26,6 @@ use tracing::{info, warn};
 
 const REDIS_OP_TIMEOUT: Duration = Duration::from_millis(500);
 
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BudgetStatus {
     pub key: String,
@@ -54,10 +50,6 @@ struct MemBudgetEntry {
     request_count: u64,
 }
 
-// ---------------------------------------------------------------------------
-// Budget configuration
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct BudgetConfig {
     /// Default budget limit in USD if not specified per-key
@@ -77,10 +69,6 @@ impl Default for BudgetConfig {
         }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Budget Enforcer
-// ---------------------------------------------------------------------------
 
 pub struct BudgetEnforcer {
     config: RwLock<BudgetConfig>,
@@ -607,11 +595,8 @@ mod tests {
         assert_eq!(result.status.limit_usd, 20.0);
     }
 
-    // ---------------------------------------------------------------------
-    // Redis 1.x degradation tests (added for redis 0.26→1.x wave)
-    // These prove that BudgetEnforcer remains safe when the redis client
-    // cannot connect or is slow. They must pass with redis 1.2.x.
-    // ---------------------------------------------------------------------
+    // Redis degradation: BudgetEnforcer stays safe when the redis client
+    // cannot connect or is slow.
 
     #[tokio::test]
     async fn redis_unavailable_graceful_fallback_no_panic() {

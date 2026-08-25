@@ -39,10 +39,6 @@ fn default_one() -> f64 {
     1.0
 }
 
-// ---------------------------------------------------------------------------
-// Sheldon Validator (v9.13)
-// ---------------------------------------------------------------------------
-
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum ClaimVerdict {
     Supported,
@@ -205,8 +201,8 @@ pub struct CouncilSession {
     #[serde(default)]
     pub context_sources: Vec<String>,
 
-    // Phase 0.5 (§4.4): provenance tag for filtering precedent + audit trails.
-    // 260+ legacy sessions deserialize as SessionOrigin::Cli via #[serde(default)].
+    // Provenance tag for filtering precedent and audit trails. Legacy sessions
+    // without the field deserialize as SessionOrigin::Cli via #[serde(default)].
     #[serde(default)]
     pub origin: SessionOrigin,
 
@@ -217,8 +213,8 @@ pub struct CouncilSession {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gateway_sensitivity: Option<String>,
 
-    // Phase 0.5 P0 #1 (§4.7): chair token + cost plumbed through synthesize().
-    // Pre-v2.2 sessions deserialize as 0/0/0.0.
+    // Chair tokens and cost reported by synthesize(). Sessions written before
+    // these fields existed deserialize as 0/0/0.0.
     #[serde(default)]
     pub chair_tokens_in: u32,
     #[serde(default)]
@@ -300,10 +296,6 @@ pub enum SessionMode {
     Unknown,
 }
 
-// ---------------------------------------------------------------------------
-// Cabinet Configuration (loaded from YAML)
-// ---------------------------------------------------------------------------
-
 /// A deliberation seat — provider + model + system prompt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Seat {
@@ -368,9 +360,7 @@ pub struct Cabinet {
     pub synthesis_mode: SynthesisMode,
 }
 
-// ---------------------------------------------------------------------------
-// Utility roles (convergence judge, frame check) — loaded from roles.yaml
-// ---------------------------------------------------------------------------
+// Utility roles (convergence judge, frame check) load from roles.yaml.
 
 /// One step in a role cascade (provider + model + token budget).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -566,10 +556,6 @@ mod roles_config_tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Model Registry & Pricing (loaded from YAML)
-// ---------------------------------------------------------------------------
-
 /// Model pricing per MTok (million tokens).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelPricing {
@@ -664,10 +650,6 @@ impl ModelRegistry {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Precedent Index Entry
-// ---------------------------------------------------------------------------
-
 /// One line in the precedent JSONL index (v2 schema).
 /// Field names match Python's _build_index_entry output.
 /// Aliases keep older Rust-era entries parseable.
@@ -709,8 +691,8 @@ pub struct PrecedentEntry {
     pub cited_by: Vec<String>,
     #[serde(default)]
     pub challenged_by: Vec<String>,
-    // Phase 0.5 §4.4: provenance — defaults to Cli for the 260+ legacy entries.
-    // Used by `precedent::retrieve(include_api=false)` to exclude Api / ApiCancelled
+    // Provenance — entries without the field default to Cli. Used by
+    // `precedent::retrieve(include_api=false)` to exclude Api / ApiCancelled
     // sessions from precedent injection unless the caller opts in.
     #[serde(default)]
     pub origin: SessionOrigin,

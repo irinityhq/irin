@@ -606,10 +606,6 @@ async fn post_ask(
     }
 }
 
-// ---------------------------------------------------------------------------
-// v0.3 Open Surface: Librarian Identity / Memory Context & Commit Proposals
-// ---------------------------------------------------------------------------
-
 async fn get_context(
     State(_s): State<LibrarianState>,
     Path(tenant): Path<String>,
