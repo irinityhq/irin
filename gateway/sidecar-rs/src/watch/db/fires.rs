@@ -600,9 +600,10 @@ impl WatchDb {
         Ok(rows)
     }
 
-    // Outbox surface (read + admin ack), tenant-scoped only: the data seam for
-    // the REST handlers in api.rs. These methods never touch dispatcher state
-    // machine or proposal validation.
+    // Outbox surface (read + admin ack): the data seam for the REST handlers
+    // in api.rs. The REST methods are tenant-scoped; get_recent_committed_fires
+    // below is the one exception (global CDC sweep). These methods never touch
+    // dispatcher state machine or proposal validation.
 
     /// Bounded committed fires for CDC sweep / boot re-scan.
     /// When `after_id` is Some, returns rows with id > after_id ordered ASC (cursor advancement,
