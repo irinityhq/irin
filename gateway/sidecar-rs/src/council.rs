@@ -6,12 +6,20 @@
 // the six handlers below for the peek → lock → claim → store/fail sequence
 // described in spec §5.4 and §5.8.
 //
-// Storage is in-memory only in v0.1 (see startup WARN logged from main.rs):
-//   * `active`  — per-caller concurrency counter (cap = 2).
+// Storage is an in-memory working set backed by a durable write-ahead mirror
+// (`council_idem.db` via `CouncilIdemDb`) whenever `db` is wired — always in
+// production. `db = None` (unit tests, or durability disabled — see the boot.rs
+// WARN) falls back to in-memory only, where replays before this PID may bill
+// twice. The structures:
+//   * `active`  — per-caller concurrency counter (cap = 2). Process-local;
+//                 dies with the process.
 //   * `pending` — small `HashMap` of in-flight Pending reservations and
 //                 recent Failed markers. Non-evicting; protects the hot path.
+//                 Write-ahead: the durable mirror confirms before mutation.
 //   * `stored`  — bounded LRU of completed responses (IDEM_CAPACITY count +
 //                 IDEM_MAX_BYTES byte budget for large chair outputs; P1-10).
+//                 Durably mirrored: write-ahead on store, rehydrated at boot,
+//                 DB read-through on a cold peek after LRU eviction.
 //
 // `parking_lot::Mutex` is deliberate: it is non-poisoning (a panic inside the
 // guard cannot leave the data structure unusable in subsequent requests).
