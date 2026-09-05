@@ -51,38 +51,18 @@ pub(super) async fn meta_review_latest() -> impl IntoResponse {
 #[cfg(test)]
 mod json_body_required_tests {
     use super::meta_review_run;
-    use crate::config::Config;
-    use crate::librarian;
-    use crate::server::AppState;
+    use crate::server::test_support::test_app_state;
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::post;
-    use std::sync::Arc;
-    use tokio::sync::Semaphore;
     use tower::ServiceExt;
-
-    fn test_state() -> AppState {
-        AppState {
-            config: Arc::new(Config {
-                cabinets: std::collections::HashMap::new(),
-                models: crate::types::ModelRegistry {
-                    models: std::collections::HashMap::new(),
-                },
-                roles: crate::types::RolesConfig::default(),
-                tera: tera::Tera::default(),
-                base_dir: std::env::temp_dir(),
-            }),
-            librarian: librarian::routes::LibrarianState::from_env(),
-            deliberate_semaphore: Arc::new(Semaphore::new(1)),
-        }
-    }
 
     #[tokio::test]
     async fn meta_review_run_rejects_text_plain() {
         let app = Router::new()
             .route("/api/meta-review/run", post(meta_review_run))
-            .with_state(test_state());
+            .with_state(test_app_state(1));
         let response = app
             .oneshot(
                 Request::builder()

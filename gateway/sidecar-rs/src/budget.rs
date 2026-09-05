@@ -1,19 +1,4 @@
-// ==========================================================================
-// budget.rs — Per-key budget enforcement with Redis persistence.
-//
-// Tracks cumulative spend per budget key (X-Budget-Key header).
-// Hard cutoff: once a key exceeds its limit, all requests are rejected
-// until the budget is reset or increased.
-//
-// Flow (called from OpenResty via /budget/check and /budget/record):
-//   1. Lua sends X-Budget-Key + estimated cost BEFORE proxying
-//   2. Sidecar checks Redis: current_spend + estimated <= limit?
-//   3. If yes → allow, if no → reject with 429
-//   4. After response, Lua sends actual cost via /budget/record
-//   5. Sidecar atomically increments spend in Redis
-//
-// Without Redis, falls back to in-memory tracking (lost on restart).
-// ==========================================================================
+//! Per-key budget checks and spend accounting for `/budget/check` and `/budget/record`.
 
 use moka::future::Cache;
 use redis::AsyncCommands;
@@ -408,35 +393,6 @@ impl BudgetEnforcer {
 
         total
     }
-
-    /// Reset a budget key (admin operation)
-    #[allow(dead_code)]
-    pub async fn reset(&self, budget_key: &str) {
-        let redis_key = format!("budget:spend:{}", budget_key);
-        let count_key = format!("budget:count:{}", budget_key);
-
-        if let Some(ref client) = self.redis {
-            if let Ok(Ok(mut conn)) =
-                tokio::time::timeout(REDIS_OP_TIMEOUT, client.get_multiplexed_async_connection())
-                    .await
-            {
-                let _: Result<Result<(), _>, _> =
-                    tokio::time::timeout(REDIS_OP_TIMEOUT, conn.del(&[&redis_key, &count_key]))
-                        .await;
-            }
-        }
-
-        self.mem_cache.invalidate(budget_key).await;
-        info!(key = budget_key, "budget reset");
-    }
-
-    /// Update budget limit for a key at runtime
-    #[allow(dead_code)]
-    pub async fn set_limit(&self, budget_key: &str, limit_usd: f64) {
-        let mut config = self.config.write().await;
-        config.key_limits.insert(budget_key.to_string(), limit_usd);
-        info!(key = budget_key, limit = limit_usd, "budget limit updated");
-    }
 }
 
 #[cfg(test)]
@@ -558,41 +514,6 @@ mod tests {
         let result = enforcer.check("premium", 1.0).await;
         assert!(result.allowed);
         assert_eq!(result.status.limit_usd, 100.0);
-    }
-
-    #[tokio::test]
-    async fn reset_clears_spend() {
-        let enforcer = default_enforcer(); // keep no-store for this one (reset currently only clears redis/mem, not sqlite table)
-        enforcer.record("test-key", 10.0, 0.0).await;
-
-        let result = enforcer.check("test-key", 0.01).await;
-        assert!(!result.allowed);
-
-        enforcer.reset("test-key").await;
-
-        let result = enforcer.check("test-key", 0.01).await;
-        assert!(!result.allowed); // current: no-store fail-closed (reset has no sqlite arm)
-                                  // spent may not be 0; validate fail-closed reason instead of old "clears" expectation
-        assert!(
-            result.reason.contains("store unreachable") || result.reason.contains("fail-closed")
-        );
-    }
-
-    #[tokio::test]
-    async fn runtime_limit_update() {
-        let enforcer = sqlite_enforcer().await;
-        enforcer.record("test-key", 9.0, 0.0).await;
-
-        // Would fail with default $10 limit
-        let result = enforcer.check("test-key", 2.0).await;
-        assert!(!result.allowed);
-
-        // Raise limit (set_limit updates config, used by limit_for_key even with sqlite)
-        enforcer.set_limit("test-key", 20.0).await;
-
-        let result = enforcer.check("test-key", 2.0).await;
-        assert!(result.allowed);
-        assert_eq!(result.status.limit_usd, 20.0);
     }
 
     // Redis degradation: BudgetEnforcer stays safe when the redis client

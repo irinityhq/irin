@@ -79,9 +79,8 @@ pub(super) async fn discover_providers() -> Response {
 #[cfg(test)]
 mod health_router_tests {
     use super::super::{AUTH_CONFIG, AuthConfig, router};
-    use crate::config::Config;
+    use crate::server::test_support::empty_config;
     use axum::http::StatusCode;
-    use std::sync::Arc;
 
     fn install_auth(token: &str) {
         let _ = AUTH_CONFIG.get_or_init(|| AuthConfig {
@@ -89,21 +88,6 @@ mod health_router_tests {
             gateway_token: None,
             dev_no_auth: false,
         });
-    }
-
-    /// Minimal `Config` for router-level auth tests — no cabinets/models needed
-    /// because the request is rejected by `auth_middleware` before any handler
-    /// touches state.
-    fn empty_config() -> Arc<Config> {
-        Arc::new(Config {
-            cabinets: std::collections::HashMap::new(),
-            models: crate::types::ModelRegistry {
-                models: std::collections::HashMap::new(),
-            },
-            roles: crate::types::RolesConfig::default(),
-            tera: tera::Tera::default(),
-            base_dir: std::env::temp_dir(),
-        })
     }
 
     #[tokio::test]

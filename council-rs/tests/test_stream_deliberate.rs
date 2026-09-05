@@ -3,6 +3,10 @@
 //! Binds multi-round public event ordering, cancellation, and budget stop at
 //! the Rust stream entry — not a browser WebSocket fake. Mock seats/roles only.
 
+#[path = "support/deliberation.rs"]
+mod support;
+use support::{env_lock, mock_roles, mock_seat};
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
@@ -15,8 +19,8 @@ use council_rs::mode::Mode;
 use council_rs::stream::deliberate::{self, StreamConfig};
 use council_rs::stream::events::StreamEvent;
 use council_rs::stream::intervention::{Intervention, InterventionQueue};
-use council_rs::types::{Cabinet, Chair, RoleCascadeStep, RoleDefinition, RolesConfig, Seat};
-use tokio::sync::{Mutex, MutexGuard, mpsc};
+use council_rs::types::{Cabinet, Chair, Seat};
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 static MOCK_GATEWAY_ADDR: OnceLock<std::net::SocketAddr> = OnceLock::new();
@@ -97,52 +101,6 @@ fn install_mock_gateway() {
     unsafe {
         std::env::set_var("GATEWAY_URL", format!("http://{addr}"));
         std::env::set_var("GW_API_KEY", "stream-spend-test-key");
-    }
-}
-
-/// Serialize tests that mutate process env (sessions dir, evidence switches).
-async fn env_lock() -> MutexGuard<'static, ()> {
-    static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    ENV_LOCK.get_or_init(|| Mutex::new(())).lock().await
-}
-
-fn mock_step(model: &str) -> RoleCascadeStep {
-    RoleCascadeStep {
-        provider: "mock".into(),
-        model: model.into(),
-        max_tokens: 256,
-    }
-}
-
-fn mock_roles() -> RolesConfig {
-    let step = mock_step("mock-role");
-    let validator = mock_step("mock-claim-validator");
-    RolesConfig {
-        convergence_judge: RoleDefinition {
-            description: "test judge".into(),
-            cascade: vec![step.clone()],
-        },
-        frame_check: RoleDefinition {
-            description: "test frame".into(),
-            cascade: vec![step.clone()],
-        },
-        claim_validator: RoleDefinition {
-            description: "test validator".into(),
-            cascade: vec![validator],
-        },
-        scope_auditor: RoleDefinition {
-            description: "test auditor".into(),
-            cascade: vec![step],
-        },
-    }
-}
-
-fn mock_seat(name: &str, model: &str) -> Seat {
-    Seat {
-        name: name.into(),
-        provider: "mock".into(),
-        model: model.into(),
-        system: "You are a mock seat.".into(),
     }
 }
 

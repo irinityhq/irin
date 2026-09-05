@@ -8,30 +8,8 @@ import type {
 import {
   getApiBase,
   getAuthToken,
-  getGatewayBase,
   getRuntimeConfig,
-  getWsBase,
 } from "./runtime-config";
-
-/** @deprecated Use getApiBase() after runtime config is hydrated. */
-export function apiBase(): string {
-  return getApiBase();
-}
-
-/** @deprecated Use getGatewayBase() after runtime config is hydrated. */
-export function gatewayBase(): string {
-  return getGatewayBase();
-}
-
-/** @deprecated Use getWsBase() after runtime config is hydrated. */
-export function wsBase(): string {
-  return getWsBase();
-}
-
-/** WebSocket auth token (Sec-WebSocket-Protocol). */
-export function wsAuthToken(): string {
-  return getAuthToken();
-}
 
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const token = getAuthToken();
