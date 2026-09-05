@@ -148,38 +148,18 @@ pub(super) async fn drift_weekly_history(Query(q): Query<WeeklyHistoryQuery>) ->
 #[cfg(test)]
 mod json_body_required_tests {
     use super::{DriftRunBody, WeeklyRunBody, drift_run, drift_weekly_run};
-    use crate::config::Config;
-    use crate::librarian;
-    use crate::server::AppState;
+    use crate::server::test_support::test_app_state;
     use axum::Router;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
     use axum::routing::post;
-    use std::sync::Arc;
-    use tokio::sync::Semaphore;
     use tower::ServiceExt;
-
-    fn test_state() -> AppState {
-        AppState {
-            config: Arc::new(Config {
-                cabinets: std::collections::HashMap::new(),
-                models: crate::types::ModelRegistry {
-                    models: std::collections::HashMap::new(),
-                },
-                roles: crate::types::RolesConfig::default(),
-                tera: tera::Tera::default(),
-                base_dir: std::env::temp_dir(),
-            }),
-            librarian: librarian::routes::LibrarianState::from_env(),
-            deliberate_semaphore: Arc::new(Semaphore::new(1)),
-        }
-    }
 
     fn app() -> Router {
         Router::new()
             .route("/api/drift/run", post(drift_run))
             .route("/api/drift/weekly/run", post(drift_weekly_run))
-            .with_state(test_state())
+            .with_state(test_app_state(1))
     }
 
     #[tokio::test]

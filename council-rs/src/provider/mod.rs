@@ -25,6 +25,24 @@ use crate::types::ProviderResponse;
 use std::sync::OnceLock;
 use std::time::Duration;
 
+fn load_routing_yaml<T: serde::de::DeserializeOwned + Default>(
+    base_dir: &std::path::Path,
+    filename: &str,
+) -> T {
+    let path = base_dir.join(filename);
+    let content = match std::fs::read_to_string(&path) {
+        Ok(c) => c,
+        Err(_) => return T::default(),
+    };
+    match serde_yaml::from_str::<T>(&content) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("⚠️  {filename} parse error ({e}); using built-in defaults");
+            T::default()
+        }
+    }
+}
+
 static NIM_SLUG_WARNED: OnceLock<()> = OnceLock::new();
 
 /// Canonical provider slug. `nim` is a legacy alias for `nvidia` (same NIM endpoint).
@@ -411,7 +429,7 @@ pub async fn ask_with_opts_and_context(
     if provider == "grok_build" {
         return agent_cli::ask_grok(prompt, system, model).await;
     }
-    if provider == "grok_hermes" {
+    if provider == "grok_hermes" || provider == "hermes_cli" {
         let route = grok_route::resolve_hermes_seat(model).unwrap_or_else(|| {
             grok_route::HermesSeatResolution {
                 wire_model: model.trim().to_string(),
@@ -459,20 +477,6 @@ pub async fn ask_with_opts_and_context(
         return cli_resp;
     }
 
-    if provider == "hermes_cli" {
-        let route = grok_route::resolve_hermes_seat(model).unwrap_or_else(|| {
-            grok_route::HermesSeatResolution {
-                wire_model: model.trim().to_string(),
-                wire_provider: std::env::var("HERMES_SEAT_PROVIDER")
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_default(),
-                response_label: format!("hermes-cli-{}", model.trim()),
-                cabinet_model: model.trim().to_string(),
-            }
-        });
-        return hermes_cli::ask_hermes(prompt, system, &route).await;
-    }
-
     match provider.as_str() {
         // Native providers — custom API shapes
         "grok_api" => grok::ask(prompt, system, model).await,
@@ -484,7 +488,6 @@ pub async fn ask_with_opts_and_context(
             let resolved = agy_route::resolve_agy_model(model);
             agent_cli::ask_agy(prompt, system, &resolved).await
         }
-        "grok" => grok::ask(prompt, system, model).await, // deprecated (API); only reached if no grok_cli available
         "claude" => claude::ask(prompt, system, model).await,
         "gpt" => gpt::ask(prompt, system, model).await,
         "gemini" => {
@@ -504,20 +507,6 @@ pub async fn ask_with_opts_and_context(
                     ..Default::default()
                 }
             }
-        }
-        "grok_cli" => dispatch_grok_cli_seat(prompt, system, model).await,
-        "hermes_cli" => {
-            let route = grok_route::resolve_hermes_seat(model).unwrap_or_else(|| {
-                grok_route::HermesSeatResolution {
-                    wire_model: model.trim().to_string(),
-                    wire_provider: std::env::var("HERMES_SEAT_PROVIDER")
-                        .map(|s| s.trim().to_string())
-                        .unwrap_or_default(),
-                    response_label: format!("hermes-cli-{}", model.trim()),
-                    cabinet_model: model.trim().to_string(),
-                }
-            });
-            hermes_cli::ask_hermes(prompt, system, &route).await
         }
         "gemini_cli" => agent_cli::ask_gemini(prompt, system, model).await,
         "codex_cli" => agent_cli::ask_codex(prompt, system, model).await,

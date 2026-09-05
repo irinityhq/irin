@@ -3,9 +3,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { AlertTriangle, ArrowLeft, RotateCcw } from "lucide-react";
 import { useDeliberation } from "@/hooks/useDeliberation";
-import { api, apiBase } from "@/lib/api";
+import { api } from "@/lib/api";
 import {
   councilPortFromApiBase,
+  getApiBase,
   initRuntimeConfig,
   loadRuntimeConfig,
 } from "@/lib/runtime-config";
@@ -287,7 +288,7 @@ function BackendConnectionBanner({ message }: { message: string | null }) {
           Backend connection issue
         </div>
         <div className="text-xs font-mono text-fg-muted">
-          API {apiBase()}
+          API {getApiBase()}
           {message ? ` · ${message}` : ""}
         </div>
       </div>

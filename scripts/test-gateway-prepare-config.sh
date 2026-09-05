@@ -123,3 +123,37 @@ if printf '%s\n' "$dry" | grep -E 'IRIN_COMPOSE_LEDGER_KEY="[^"]*compose-ledger-
 fi
 
 printf 'gateway prepare-config tests passed\n'
+
+for entry in arm arm-rehearse fido2-rehearse-interactive arm-enroll arm-enroll-fido2 lib/runtime-env.sh; do
+  sh -n "$ROOT/gateway/bin/$entry"
+done
+python3 - "$ROOT" <<'PYTHON'
+from pathlib import Path
+import subprocess
+import sys
+
+library = str(Path(sys.argv[1]) / "gateway/bin/lib/runtime-env.sh")
+for helper, args, expected in [
+    ("curl_uds", ["-H", "X-Fixture: spaced value", "http://fixture.invalid"],
+     ["run", "--rm", "-i", "--user", "0", "-v", "fixture socket:/run/sidecar",
+      "curlimages/curl:8.12.1", "-s", "--unix-socket", "/run/sidecar/sidecar.sock",
+      "-H", "X-Fixture: spaced value", "http://fixture.invalid"]),
+    ("vol_sh", ["printf 'spaced value'", "ignored extra argument"],
+     ["run", "--rm", "-i", "--user", "0", "-v", "fixture data:/var/lib/sidecar",
+      "alpine:3.21", "sh", "-c", "printf 'spaced value'"]),
+]:
+    for status in [0, 37]:
+        script = f"""
+. "$1"
+shift
+SIDECAR_SOCKET_VOLUME='fixture socket'
+SIDECAR_DATA_VOLUME='fixture data'
+docker() {{ printf '%s\n' "$@"; printf 'fixture stderr\n' >&2; return {status}; }}
+{helper} "$@"
+"""
+        result = subprocess.run(["sh", "-eu", "-c", script, "proof", library, *args],
+                                cwd="/", capture_output=True, text=True)
+        assert (result.returncode, result.stdout, result.stderr) == (
+            status, "\n".join(expected) + "\n", "fixture stderr\n"), result
+print("arm shell helpers: argv, output, exit status and cwd checks passed")
+PYTHON

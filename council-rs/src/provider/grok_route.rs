@@ -204,18 +204,7 @@ pub fn set_base_dir(base_dir: &Path) {
 }
 
 fn load_routing_from_disk(base_dir: &Path) -> GrokRoutingFile {
-    let path = base_dir.join("grok_routing.yaml");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return GrokRoutingFile::default(),
-    };
-    match serde_yaml::from_str::<GrokRoutingFile>(&content) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("⚠️  grok_routing.yaml parse error ({e}); using built-in defaults");
-            GrokRoutingFile::default()
-        }
-    }
+    super::load_routing_yaml(base_dir, "grok_routing.yaml")
 }
 
 pub fn routing_snapshot() -> GrokRoutingFile {

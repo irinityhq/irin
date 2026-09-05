@@ -64,11 +64,6 @@ if [ "$FIDO2" != "1" ]; then
   fi
 fi
 
-curl_uds() {
-  docker run --rm -i --user 0 -v "$SIDECAR_SOCKET_VOLUME":/run/sidecar \
-    curlimages/curl:8.12.1 -s --unix-socket /run/sidecar/sidecar.sock "$@"
-}
-
 # --- Resume-first: is there an open stage? -------------------------------
 PENDING=$(curl_uds -w '\n%{http_code}' http://localhost/watch/admin/producer/arm/pending \
   -H "Authorization: Bearer sovereign-op:$TOK")

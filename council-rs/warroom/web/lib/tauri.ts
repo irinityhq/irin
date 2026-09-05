@@ -236,10 +236,6 @@ export interface DesktopStatusSnapshot {
   phone: PhoneAccessStatus;
 }
 
-export async function getTouchIdStatus(): Promise<TouchIdStatus> {
-  return invoke<TouchIdStatus>("touch_id_status");
-}
-
 export async function getDesktopStatusSnapshot(): Promise<DesktopStatusSnapshot> {
   return invoke<DesktopStatusSnapshot>("desktop_status_snapshot");
 }
@@ -285,10 +281,6 @@ export interface PhoneAccessStatus {
   funnel_present: boolean;
 }
 
-export async function getPhoneAccessStatus(): Promise<PhoneAccessStatus> {
-  return invoke<PhoneAccessStatus>("phone_access_status");
-}
-
 export async function enablePhoneAccess(): Promise<DesktopStatusSnapshot> {
   return invoke<DesktopStatusSnapshot>("phone_access_enable");
 }
@@ -311,13 +303,4 @@ export async function saveSynthesisNative(text: string): Promise<string> {
 
 export async function savePdf(data: Uint8Array, filename: string): Promise<string> {
   return invoke<string>("save_pdf", { data, filename });
-}
-
-export async function pickFile(): Promise<string | null> {
-  const picked = await invoke<string | null>("pick_file");
-  return picked ?? null;
-}
-
-export async function pingCouncil(): Promise<string> {
-  return invoke<string>("ping_council");
 }

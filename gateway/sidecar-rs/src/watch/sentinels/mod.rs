@@ -12,3 +12,18 @@ pub mod queue_depth;
 pub mod sequence_watch;
 pub mod silence;
 pub mod watch_health;
+
+fn validate_watch_db_path(path: &std::path::Path) -> anyhow::Result<()> {
+    if !path.exists() {
+        anyhow::bail!(
+            "watch.db missing or unreadable at {} — check bind mount / WATCH_DB_PATH",
+            path.display()
+        );
+    }
+    rusqlite::Connection::open_with_flags(
+        path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )
+    .map_err(|e| anyhow::anyhow!("watch.db not openable read-only at {}: {e}", path.display()))?;
+    Ok(())
+}

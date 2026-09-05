@@ -13,7 +13,7 @@ use crate::config::Config;
 use crate::engine::context::RequestContext;
 use crate::engine::deliberate::{
     CascadeCandidate, convergence_judge_candidates, frame_check_candidates, parse_judge_json,
-    provider_auth_ready,
+    provider_auth_ready, truncate_utf8,
 };
 use crate::provider;
 use crate::types::JudgeAssessment;
@@ -157,17 +157,6 @@ fn pin_candidate(
     }
 }
 
-fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
-
 fn is_valid_seat_response(resp: &SeatResponse) -> bool {
     !resp.text.trim().is_empty() && resp.error.is_none()
 }
@@ -180,47 +169,7 @@ fn build_judge_prompt(responses: &[SeatResponse], topic: &str) -> (usize, usize,
         .collect();
     let valid_count = valid.len();
 
-    let mut summaries = String::new();
-    for (i, resp) in valid.iter().enumerate() {
-        let truncated = truncate_utf8(&resp.text, 500);
-        summaries.push_str(&format!("- {}: {}\n", resp.seat_name, truncated));
-        if i >= 4 {
-            break;
-        }
-    }
-
-    let topic_snippet = truncate_utf8(topic, 300);
-    let prompt = format!(
-        "You are a convergence judge for a multi-model deliberation.\n\n\
-         ORIGINAL TOPIC:\n{}\n\n\
-         EXPECTED SEATS: {}\n\
-         VALID RESPONSES: {}\n\
-         FAILED OR EMPTY RESPONSES: {}\n\n\
-         ANALYST POSITIONS ({} valid models):\n{}\n\n\
-         Assess the deliberation and respond with ONLY this JSON object:\n\
-         {{\"convergence\": <0.0-1.0>, \"intent_aligned\": <true/false>, \
-         \"drift\": <null or \"description\">, \
-         \"quality_flag\": <null or \"thin\" or \"circular\" or \"off_topic\">, \
-         \"homogeneity_score\": <null or 0.0-1.0>, \
-         \"quick_agreement\": <null or true/false>, \
-         \"recommendation\": <\"continue\" or \"converged\" or \"escalate\" or \"reframe\">, \
-         \"confidence\": <0.0-1.0>}}\n\n\
-         Rules:\n\
-         - convergence: 0.0 = total disagreement, 1.0 = perfect consensus\n\
-         - Failed or empty responses count against convergence; do not ignore them.\n\
-         - intent_aligned: did responses address the ORIGINAL topic?\n\
-         - drift: null if no drift, otherwise describe what drifted\n\
-         - quality_flag: null unless responses are thin/circular/off_topic\n\
-         - recommendation: 'converged' if convergence >= 0.8\n\
-         - confidence: your confidence in this assessment\n\n\
-         Respond with ONLY the JSON. No explanation.",
-        topic_snippet,
-        total_count,
-        valid_count,
-        total_count.saturating_sub(valid_count),
-        valid_count,
-        summaries
-    );
+    let prompt = super::deliberate::build_judge_prompt(&valid, total_count, topic);
     (total_count, valid_count, prompt)
 }
 
@@ -568,6 +517,43 @@ pub async fn run_eval(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn judge_prompt_preserves_bytes_counts_order_and_utf8_limits() {
+        let mut responses: Vec<SeatResponse> = (0..7)
+            .map(|i| SeatResponse {
+                seat_name: format!("seat-{i}"),
+                text: if i == 0 {
+                    format!("{}😀suffix", "é".repeat(249))
+                } else {
+                    format!("position {i}")
+                },
+                ..Default::default()
+            })
+            .collect();
+        responses.insert(
+            1,
+            SeatResponse {
+                text: "  ".into(),
+                ..Default::default()
+            },
+        );
+        responses.insert(
+            3,
+            SeatResponse {
+                text: "failed position".into(),
+                error: Some("refused".into()),
+                ..Default::default()
+            },
+        );
+        let topic = format!("{}😀suffix", "é".repeat(149));
+        let (total, valid, prompt) = build_judge_prompt(&responses, &topic);
+        assert_eq!((total, valid), (9, 7));
+        assert_eq!(
+            prompt,
+            include_str!("../../tests/fixtures/prompts/judge.txt")
+        );
+    }
 
     #[test]
     fn embedded_fixtures_parse() {

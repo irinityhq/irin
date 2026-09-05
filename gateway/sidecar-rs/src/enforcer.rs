@@ -31,14 +31,6 @@ pub struct EnforcementResult {
     pub violations: Vec<String>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Clone, Serialize)]
-pub struct ViolationDetail {
-    pub reason: String,
-    pub tool: String,
-    pub arg: String,
-}
-
 #[derive(Debug)]
 pub struct ReadOnlyViolation {
     pub reason: String,
@@ -57,17 +49,6 @@ impl std::fmt::Display for ReadOnlyViolation {
 }
 
 impl std::error::Error for ReadOnlyViolation {}
-
-impl ReadOnlyViolation {
-    #[allow(dead_code)]
-    pub fn to_detail(&self) -> ViolationDetail {
-        ViolationDetail {
-            reason: self.reason.clone(),
-            tool: self.tool.clone(),
-            arg: self.arg.clone(),
-        }
-    }
-}
 
 const READ_ONLY_TOOLS: &[&str] = &["fs.read", "fs.list", "sys.time"];
 

@@ -315,11 +315,8 @@ pub(crate) fn ws_path_skips_bearer_auth(norm_path: &str) -> bool {
 mod ws_upgrade_auth_tests {
     use super::super::{AUTH_CONFIG, AuthConfig, origin_is_allowed, router};
     use super::*;
-    use crate::config::Config;
-    use crate::librarian;
+    use crate::server::test_support::{empty_config, test_app_state};
     use axum::http::{HeaderMap, HeaderValue, StatusCode};
-    use std::sync::Arc;
-    use tokio::sync::Semaphore;
 
     fn install_auth(token: &str) {
         let _ = AUTH_CONFIG.get_or_init(|| AuthConfig {
@@ -327,29 +324,6 @@ mod ws_upgrade_auth_tests {
             gateway_token: None,
             dev_no_auth: false,
         });
-    }
-
-    /// Minimal `Config` for router-level auth tests — no cabinets/models needed
-    /// because the request is rejected by `auth_middleware` before any handler
-    /// touches state.
-    fn empty_config() -> Arc<Config> {
-        Arc::new(Config {
-            cabinets: std::collections::HashMap::new(),
-            models: crate::types::ModelRegistry {
-                models: std::collections::HashMap::new(),
-            },
-            roles: crate::types::RolesConfig::default(),
-            tera: tera::Tera::default(),
-            base_dir: std::env::temp_dir(),
-        })
-    }
-
-    fn test_app_state(sem_permits: usize) -> AppState {
-        AppState {
-            config: empty_config(),
-            librarian: librarian::routes::LibrarianState::from_env(),
-            deliberate_semaphore: Arc::new(Semaphore::new(sem_permits)),
-        }
     }
 
     #[test]
