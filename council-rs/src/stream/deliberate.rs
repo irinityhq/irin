@@ -1,11 +1,9 @@
 //! REST and CLI deliberation use `crate::engine::deliberate::run_with_cancel`.
-//! WebSocket deliberation uses `crate::stream::deliberate::run`, which imports engine helpers and adds events, pause/resume, and interventions.
+//! WebSocket deliberation uses the same engine round loop, with streaming transport, events, pause/resume, and interventions.
 
 use chrono::Utc;
 use serde_json::json;
-use std::collections::hash_map::DefaultHasher;
 use std::future::Future;
-use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
@@ -17,11 +15,9 @@ use super::intervention::{Intervention, InterventionQueue};
 use crate::config::Config;
 use crate::engine::context::RequestContext;
 use crate::engine::deliberate::{
-    DEFAULT_CHAIR_SYSTEM, JudgeUsage, build_chair_prompt, build_round_prompt,
-    convergence_quality_penalty_enabled, effective_convergence_threshold,
+    DEFAULT_CHAIR_SYSTEM, JudgeUsage, build_chair_prompt,
     governed_alternative_transport_model_groups, governed_required_transport_models,
-    has_usable_seat_response, judge_round, save_session, seat_preamble_for,
-    should_pause_for_budget,
+    has_usable_seat_response, save_session, seat_preamble_for,
 };
 use crate::mode::Mode;
 use crate::precedent;
@@ -106,7 +102,7 @@ fn request_context(stream_config: &StreamConfig) -> RequestContext {
 /// Await work only while the owning WebSocket remains connected. Dropping the
 /// future stops local dispatch best-effort; an upstream provider may still
 /// finish a request it already accepted.
-async fn until_cancelled<T>(
+pub(crate) async fn until_cancelled<T>(
     cancel: &CancellationToken,
     future: impl Future<Output = T>,
 ) -> Option<T> {
@@ -370,18 +366,18 @@ async fn run_stream_phases(ready: StreamRunReady, interventions: &mut Interventi
 }
 
 /// Immutable-after-prep inputs shared by streaming stages.
-struct StreamRunReady {
-    config: Arc<Config>,
-    stream_config: StreamConfig,
-    event_tx: mpsc::Sender<StreamEvent>,
-    cancel: CancellationToken,
-    cabinet: Cabinet,
-    rounds_planned: u32,
-    frame_check_enabled: bool,
-    req_ctx: RequestContext,
-    effective_via_gateway: bool,
-    effective_sensitivity: String,
-    available: Vec<(&'static str, bool)>,
+pub(crate) struct StreamRunReady {
+    pub(crate) config: Arc<Config>,
+    pub(crate) stream_config: StreamConfig,
+    pub(crate) event_tx: mpsc::Sender<StreamEvent>,
+    pub(crate) cancel: CancellationToken,
+    pub(crate) cabinet: Cabinet,
+    pub(crate) rounds_planned: u32,
+    pub(crate) frame_check_enabled: bool,
+    pub(crate) req_ctx: RequestContext,
+    pub(crate) effective_via_gateway: bool,
+    pub(crate) effective_sensitivity: String,
+    pub(crate) available: Vec<(&'static str, bool)>,
 }
 
 /// Cumulative cross-phase state for a streaming deliberation.
@@ -718,115 +714,23 @@ async fn emit_phase_session_started(
         ))
         .await;
 }
-/// Outcome of per-round judge, divergence, Sheldon validation, and gate redaction.
-struct RoundAssessOutcome {
-    score: f64,
-    converged: bool,
-    round: RoundResult,
-}
-
 /// Control flow from the post-round operator pause.
-enum RoundOperatorControl {
+pub(crate) enum RoundOperatorControl {
     NextRound,
     BreakRounds,
-}
-
-/// Build per-seat prompts, optional R1 frame-check, emit seat_started.
-#[allow(clippy::too_many_arguments)] // stage extraction of monobody captures
-#[allow(clippy::question_mark)] // keep original let-Some/else cancel shape
-#[allow(clippy::needless_borrow)] // verbatim monobody; &ready fields are already refs
-async fn run_round_prompts(
-    ready: &StreamRunReady,
-    session_id: &str,
-    topic: &str,
-    context: &str,
-    precedent_text: &str,
-    round_num: u32,
-    live_seats: &[Seat],
-    all_rounds: &[RoundResult],
-    extra_context: &str,
-    budget_signal: &str,
-) -> Option<Vec<(String, String)>> {
-    let StreamRunReady {
-        config,
-        event_tx,
-        cancel,
-        frame_check_enabled,
-        req_ctx,
-        ..
-    } = ready;
-    let frame_check_enabled = *frame_check_enabled;
-
-    let mut prompts: Vec<(String, String)> = live_seats
-        .iter()
-        .map(|seat| {
-            let prompt = build_round_prompt(
-                topic,
-                context,
-                extra_context,
-                precedent_text,
-                all_rounds,
-                budget_signal,
-                seat,
-                round_num,
-            );
-            (seat.name.clone(), prompt)
-        })
-        .collect();
-
-    // v9.10.0: Frame check — scan R1 prompts for embedded assumptions
-    if round_num == 1 && frame_check_enabled {
-        // Run frame check on the first seat's prompt (all share the same topic base)
-        if let Some((_, first_prompt)) = prompts.first() {
-            let Some(checked) = until_cancelled(
-                &cancel,
-                crate::engine::deliberate::frame_check_prompt(
-                    first_prompt,
-                    &config.roles,
-                    &config.models,
-                    &req_ctx,
-                ),
-            )
-            .await
-            else {
-                return None;
-            };
-            if checked != *first_prompt {
-                // Frame check found assumptions — apply the warning suffix to all prompts
-                let suffix = &checked[first_prompt.len()..];
-                for (_, prompt) in prompts.iter_mut() {
-                    prompt.push_str(suffix);
-                }
-            }
-        }
-    }
-
-    for seat in live_seats {
-        let _ = event_tx
-            .send(StreamEvent::seat_started(
-                session_id,
-                round_num,
-                &seat.name,
-                &seat.provider,
-                &seat.model,
-            ))
-            .await;
-    }
-
-    Some(prompts)
 }
 
 /// Parallel seat fan-out + collect responses (N01 token streaming preserved).
 #[allow(clippy::too_many_arguments)] // stage extraction of monobody captures
 #[allow(clippy::question_mark)] // keep original let-Some/else cancel shape
 #[allow(clippy::needless_borrow)] // verbatim monobody; &ready fields are already refs
-async fn run_round_fanout(
+pub(crate) async fn run_round_fanout(
     ready: &StreamRunReady,
     session_id: &str,
     mode: Mode,
     round_num: u32,
     live_seats: &[Seat],
-    prompts: &[(String, String)],
+    prompts: &[String],
 ) -> Option<Vec<SeatResponse>> {
     let StreamRunReady {
         config,
@@ -841,7 +745,7 @@ async fn run_round_fanout(
 
     // Fan-out: all seats in parallel
     let mut set = JoinSet::new();
-    for (seat, (_, prompt)) in live_seats.iter().zip(prompts.iter()) {
+    for (seat, prompt) in live_seats.iter().zip(prompts.iter()) {
         if cancel.is_cancelled() {
             set.abort_all();
             return None;
@@ -961,199 +865,11 @@ async fn run_round_fanout(
     Some(responses)
 }
 
-/// Judge convergence, emit divergence map, Sheldon validate, P2 gate, build RoundResult.
-#[allow(clippy::too_many_arguments)] // stage extraction of monobody captures
-#[allow(clippy::question_mark)] // keep original let-Some/else cancel shape
-#[allow(clippy::needless_borrow)] // verbatim monobody; &ready fields are already refs
-async fn run_round_assess(
-    ready: &StreamRunReady,
-    session_id: &str,
-    topic: &str,
-    context: &str,
-    mode: Mode,
-    round_num: u32,
-    rounds_planned: u32,
-    mut responses: Vec<SeatResponse>,
-    cumulative_spend: f64,
-    evidence_cache: &crate::engine::sheldon::EvidenceCache,
-    validator_cost_usd: &mut f64,
-    judge_usage: &mut JudgeUsage,
-) -> Option<RoundAssessOutcome> {
-    let StreamRunReady {
-        config,
-        stream_config,
-        event_tx,
-        cancel,
-        req_ctx,
-        ..
-    } = ready;
-
-    // v9.12.0: Structured convergence judge (shared with CLI engine)
-    let _ = event_tx
-        .send(StreamEvent::info(session_id, "Scoring convergence…"))
-        .await;
-    let Some(judge) = until_cancelled(
-        &cancel,
-        judge_round(&responses, topic, &req_ctx, &config.roles, &config.models),
-    )
-    .await
-    else {
-        return None;
-    };
-    *judge_usage += judge.usage;
-    let score = judge.score;
-    let judge_prov = judge.provider;
-    let judge_assess = judge.assessment;
-    let judge_gateway_attempts = judge.gateway_attempts;
-    // Use mode's convergence_threshold as base (matching CLI engine in run_with_cancel),
-    // not auto_specops_threshold (which is for low-conv auto-specops trigger).
-    // This ensures homogeneity/quality penalties from effective_convergence_threshold
-    // are applied against the mode-intended bar (TearDown 0.8, Pathfind 0.6, Harden 0.7).
-    let base_threshold = mode.convergence_threshold();
-    let effective_threshold = effective_convergence_threshold(
-        base_threshold,
-        judge_assess.as_ref(),
-        convergence_quality_penalty_enabled(stream_config.validate),
-    );
-    let converged = score >= effective_threshold;
-
-    let _ = event_tx
-        .send(StreamEvent::convergence_scored(
-            session_id, round_num, score, converged,
-        ))
-        .await;
-
-    // N02: per-seat divergence map. Embed the seats' responses for this
-    // round and project to 2D via PCA, then emit `round_divergence`.
-    // Embedding is sync (fastembed lock + possible model download), so
-    // it runs in spawn_blocking per the async-hygiene convention. If
-    // embeddings are unavailable or there are < 2 usable seats, the
-    // event is omitted — the UI tolerates absence.
-    if until_cancelled(
-        &cancel,
-        emit_round_divergence(&event_tx, session_id, round_num, &responses),
-    )
-    .await
-    .is_none()
-    {
-        return None;
-    }
-
-    let flip_hash = judge_assess.as_ref().map(|a| {
-        let mut hasher = DefaultHasher::new();
-        format!("{}|{}", a.drift.as_deref().unwrap_or(""), a.recommendation).hash(&mut hasher);
-        format!("{:x}", hasher.finish())[..8].to_string()
-    });
-
-    // Sheldon claim validator (mirrors CLI engine/deliberate.rs)
-    // Tries full claim_validator cascade from roles.yaml until one succeeds.
-    let mut validation_report = None;
-    if stream_config.validate && round_num <= rounds_planned {
-        let claim_role = &config.roles.claim_validator; // note: stream has access via outer config
-        if crate::engine::sheldon::claim_validator_ready(claim_role, round_num) {
-            for step in &claim_role.cascade {
-                if cancel.is_cancelled() {
-                    return None;
-                }
-                let v_provider = step.provider.clone();
-                let v_model = Some(step.model.clone());
-                let vcfg = crate::engine::sheldon::ValidatorConfig {
-                    provider: v_provider.clone(),
-                    model: v_model,
-                    gate: stream_config.validate_gate,
-                    verbose: false,
-                };
-                let _ = event_tx
-                    .send(StreamEvent::info(session_id, "Validating round…"))
-                    .await;
-                let Some(val_result) = until_cancelled(
-                    &cancel,
-                    crate::engine::sheldon::validate_round(
-                        &responses,
-                        topic,
-                        context,
-                        round_num,
-                        &vcfg,
-                        &req_ctx,
-                        Some(evidence_cache),
-                    ),
-                )
-                .await
-                else {
-                    return None;
-                };
-                match val_result {
-                    crate::engine::sheldon::ValidateRoundOutcome::Ok(report, c) => {
-                        validation_report = Some(report.clone());
-                        *validator_cost_usd += c;
-                        // Gate decision moved below: see P2 early-stop handling.
-                        if let Some(ref r) = validation_report {
-                            let verdicts_json = serde_json::to_value(r).unwrap_or(json!([]));
-                            let _ = event_tx
-                                .send(StreamEvent::round_validation(
-                                    session_id,
-                                    round_num,
-                                    stream_config.validate_gate,
-                                    &verdicts_json,
-                                ))
-                                .await;
-                        }
-                        break;
-                    }
-                    crate::engine::sheldon::ValidateRoundOutcome::Skipped(_) => {
-                        break;
-                    }
-                    crate::engine::sheldon::ValidateRoundOutcome::ProviderFailed => {}
-                }
-            }
-        }
-    }
-
-    // P2: Gate redaction (responses) only on continuing intermediate rounds.
-    // On terminating rounds (planned last, or early via budget/convergence)
-    // leave responses un-gated so the Chair transcript + append_validation_context
-    // receives full evidence alongside the authoritative validation_report.
-    // Compute would-budget using post-validator spend to decide "terminating".
-    if stream_config.validate_gate && validation_report.is_some() {
-        let this_seat_cost: f64 = responses.iter().map(|r| r.cost_usd).sum();
-        let spend_at =
-            cumulative_spend + this_seat_cost + *validator_cost_usd + judge_usage.cost_usd;
-        let would_budget = should_pause_for_budget(
-            stream_config.budget_max_usd,
-            spend_at,
-            round_num,
-            rounds_planned,
-        );
-        let is_terminating = round_num >= rounds_planned || converged || would_budget;
-        if !is_terminating && let Some(ref rpt) = validation_report {
-            responses = crate::engine::sheldon::gate_responses(&responses, rpt);
-        }
-    }
-
-    Some(RoundAssessOutcome {
-        score,
-        converged,
-        round: RoundResult {
-            round_num,
-            responses,
-            convergence_score: score,
-            converged,
-            judge_provider: judge_prov,
-            judge_assessment: judge_assess,
-            judge_gateway_attempts,
-            flip_flop_hash: flip_hash,
-            // T24: claim/reasoning are raw validator output that bypasses the
-            // per-seat from_provider redaction closure — scrub before persist.
-            validation_report: validation_report.map(crate::scrub::redact_validation_report),
-        },
-    })
-}
-
 /// Pause for operator input after a round (when configured); apply interventions.
 #[allow(clippy::too_many_arguments)] // stage extraction of monobody captures
 #[allow(clippy::question_mark)] // keep original let-Some/else cancel shape
 #[allow(clippy::needless_borrow)] // verbatim monobody; &ready fields are already refs
-async fn run_round_operator_pause(
+pub(crate) async fn run_round_operator_pause(
     ready: &StreamRunReady,
     interventions: &mut InterventionQueue,
     session_id: &str,
@@ -1405,182 +1121,57 @@ async fn run_phase_rounds(
     precedent_text: &str,
     cumulative_spend: f64,
 ) -> Option<PhaseRoundOutcome> {
-    let StreamRunReady {
-        stream_config,
-        event_tx,
-        cancel,
-        cabinet,
-        rounds_planned,
-        ..
-    } = ready;
-    let rounds_planned = *rounds_planned;
-    // Re-own so spawn/clone sites match the original monobody `session_id: String`
-    // (parameter is &str only to avoid moving the caller's local).
-    let session_id = session_id.to_string();
-
-    // ── Deliberation loop ──
-    let mut all_rounds: Vec<RoundResult> = Vec::new();
-    let mut extra_context = String::new();
-    let mut manual_specops_signal = String::new();
-    let mut specops_cost_usd = 0.0;
-    let mut early_exit = false;
-    let mut budget_paused = false;
-    let mut validator_cost_usd = 0.0;
-    let mut judge_usage = JudgeUsage::default();
-
-    // Per-phase evidence cache for validate dedup (topic stable within phase).
-    let evidence_cache = crate::engine::sheldon::EvidenceCache::default();
-    let (budget_signal, _budget_tier) = crate::engine::deliberate::fetch_budget_signal(
+    use crate::engine::deliberate::{
+        PreparedDeliberation, RoundStream, execute_deliberation_rounds,
+    };
+    let (budget_signal, _) = crate::engine::deliberate::fetch_budget_signal(
         std::env::var("HERMES_PROFILE").ok().as_deref(),
-        Some(&session_id),
+        Some(session_id),
     );
-    // Working copy of seats (for swap_seat mutations)
-    let mut live_seats: Vec<Seat> = cabinet.seats.clone();
-
-    for round_num in 1..=rounds_planned {
-        if early_exit || cancel.is_cancelled() {
-            if cancel.is_cancelled() {
-                return None;
-            }
-            break;
-        }
-
-        // ── round_started ──
-        let _ = event_tx
-            .send(StreamEvent::round_started(
-                &session_id,
-                round_num,
-                rounds_planned,
-            ))
-            .await;
-
-        let Some(prompts) = run_round_prompts(
-            ready,
-            &session_id,
-            topic,
-            context,
-            precedent_text,
-            round_num,
-            &live_seats,
-            &all_rounds,
-            &extra_context,
-            &budget_signal,
-        )
-        .await
-        else {
-            return None;
-        };
-
-        let Some(responses) =
-            run_round_fanout(ready, &session_id, mode, round_num, &live_seats, &prompts).await
-        else {
-            return None;
-        };
-
-        let Some(assessed) = run_round_assess(
-            ready,
-            &session_id,
-            topic,
-            context,
-            mode,
-            round_num,
-            rounds_planned,
-            responses,
-            cumulative_spend
-                + all_rounds
-                    .iter()
-                    .flat_map(|round| &round.responses)
-                    .map(|response| response.cost_usd)
-                    .sum::<f64>(),
-            &evidence_cache,
-            &mut validator_cost_usd,
-            &mut judge_usage,
-        )
-        .await
-        else {
-            return None;
-        };
-        let RoundAssessOutcome {
-            score,
-            converged,
-            round,
-        } = assessed;
-        all_rounds.push(round);
-
-        let is_last = round_num >= rounds_planned;
-        let _ = event_tx
-            .send(StreamEvent::round_complete(
-                &session_id,
-                round_num,
-                score,
-                converged,
-                converged && !is_last,
-            ))
-            .await;
-
-        let phase_seat_cost: f64 = all_rounds
-            .iter()
-            .flat_map(|r| &r.responses)
-            .map(|r| r.cost_usd)
-            .sum();
-        let spend_at_boundary =
-            cumulative_spend + phase_seat_cost + validator_cost_usd + judge_usage.cost_usd;
-        if should_pause_for_budget(
-            stream_config.budget_max_usd,
-            spend_at_boundary,
-            round_num,
-            rounds_planned,
-        ) {
-            budget_paused = true;
-            if let Some(max) = stream_config.budget_max_usd {
-                let _ = event_tx
-                    .send(StreamEvent::budget_paused(
-                        &session_id,
-                        round_num,
-                        spend_at_boundary,
-                        max,
-                    ))
-                    .await;
-            }
-            break;
-        }
-
-        // Early convergence exit (no pause)
-        if converged && !is_last && !stream_config.pause_after_each_round {
-            break;
-        }
-
-        match run_round_operator_pause(
+    let mut cabinet = ready.cabinet.clone();
+    cabinet.rounds = ready.rounds_planned;
+    let prepared = PreparedDeliberation {
+        cabinet,
+        session_id: session_id.to_string(),
+        req_ctx: ready.req_ctx.clone(),
+        effective_via_gateway: ready.effective_via_gateway,
+        effective_sensitivity: ready.effective_sensitivity.clone(),
+        budget_signal,
+        precedent_text: precedent_text.to_string(),
+        precedent_ids: Vec::new(),
+        evidence_cache: crate::engine::sheldon::EvidenceCache::default(),
+    };
+    let out = execute_deliberation_rounds(
+        &ready.config,
+        &prepared,
+        &ready.stream_config.cabinet_name,
+        topic,
+        context,
+        mode,
+        ready.frame_check_enabled,
+        false,
+        ready.stream_config.budget_max_usd,
+        &ready.stream_config.tier,
+        ready.stream_config.validate,
+        &ready.stream_config.validate_provider,
+        ready.stream_config.validate_gate,
+        SessionOrigin::Cli,
+        None,
+        Some(RoundStream {
             ready,
             interventions,
-            &session_id,
-            topic,
-            round_num,
-            score,
-            converged,
-            is_last,
-            &mut early_exit,
-            &mut extra_context,
-            &mut live_seats,
-            &all_rounds,
-            &mut manual_specops_signal,
-            &mut specops_cost_usd,
-        )
-        .await
-        {
-            None => return None,
-            Some(RoundOperatorControl::BreakRounds) => break,
-            Some(RoundOperatorControl::NextRound) => {}
-        }
-    }
-
+        }),
+        cumulative_spend,
+    )
+    .await
+    .ok()?;
     Some(PhaseRoundOutcome {
-        all_rounds,
-        manual_specops_signal,
-        specops_cost_usd,
-        budget_paused,
-        validator_cost_usd,
-        judge_usage,
+        all_rounds: out.rounds,
+        manual_specops_signal: out.manual_specops_signal,
+        specops_cost_usd: out.specops_cost_usd,
+        budget_paused: out.budget_paused,
+        validator_cost_usd: out.validator_cost_usd,
+        judge_usage: out.judge_usage,
     })
 }
 /// Auto SpecOps when convergence is below threshold (manual signal wins if set).
@@ -2288,7 +1879,7 @@ async fn run_direct_fire(
 /// event with their 2D PCA projection. Silently omits the event when there are
 /// fewer than two usable (non-empty, non-errored) responses or when embeddings
 /// are unavailable.
-async fn emit_round_divergence(
+pub(crate) async fn emit_round_divergence(
     event_tx: &mpsc::Sender<StreamEvent>,
     session_id: &str,
     round_num: u32,
@@ -2628,7 +2219,7 @@ mod tests {
             system: "test".into(),
         };
 
-        let prompt = build_round_prompt(
+        let prompt = crate::engine::deliberate::build_round_prompt(
             "test topic",
             "",
             "",

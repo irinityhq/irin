@@ -1110,3 +1110,88 @@ async fn stream_zero_budget_ends_after_round_one_with_budget_paused() {
 
     dirs.cleanup();
 }
+
+// B-06: the REST/CLI and WS entry points must stop on the same budget boundary
+// and preserve the terminating round's full evidence for the Chair.
+#[tokio::test]
+async fn b06_engine_and_stream_hold_round_budget_and_evidence_contract() {
+    let _guard = env_lock().await;
+    for (budget, expected_rounds) in [(None, 3), (Some(0.0), 1), (Some(115.0), 2)] {
+        let dirs = SessionDirs::install();
+        let cabinet = mock_cabinet(
+            "b06-round-contract",
+            3,
+            vec![
+                mock_seat("seat_a", "mock-gated-seat"),
+                mock_seat("seat_b", "mock-seat-disagree"),
+            ],
+        );
+        let mut stream = base_stream(cabinet.clone());
+        stream.validate = true;
+        stream.validate_gate = true;
+        stream.budget_max_usd = budget;
+        let events = run_stream(stream, InterventionQueue::new(), CancellationToken::new()).await;
+        assert_eq!(count_type(&events, "round_complete"), expected_rounds);
+        assert_eq!(count_type(&events, "done"), 1);
+        let streamed = saved_session(&dirs);
+        let mut config = mock_config();
+        config.cabinets.insert(cabinet.name.clone(), cabinet);
+        let engine = council_rs::engine::deliberate::run_with_cancel(
+            &config,
+            "b06-round-contract",
+            "stream characterization topic",
+            "Context",
+            Mode::TearDown,
+            true,
+            false,
+            false,
+            budget,
+            "best",
+            true,
+            "mock",
+            true,
+            council_rs::types::SessionOrigin::Api,
+            council_rs::engine::context::RequestContext {
+                via_gateway: Some(false),
+                ..Default::default()
+            },
+            None,
+            None,
+        )
+        .await
+        .expect("engine contract run");
+        assert_eq!(engine.rounds.len(), expected_rounds);
+        let engine = serde_json::to_value(engine).unwrap();
+        for session in [&engine, &streamed] {
+            let rounds = session["rounds"].as_array().unwrap();
+            let last = rounds.last().unwrap();
+            assert_eq!(last["converged"], false);
+            assert!(last["validation_report"].is_array());
+            let seat = last["responses"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|response| response["seat_name"] == "seat_a")
+                .unwrap();
+            assert_eq!(
+                seat["text"],
+                "Seat analysis states UNIQUE_CONTRADICTED_CLAIM_XYZ_12345 with certainty."
+            );
+            if budget.is_some() {
+                assert_eq!(session["budget"]["paused"], true);
+            } else {
+                assert!(session["budget"].is_null());
+            }
+        }
+        for (a, b) in engine["rounds"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(streamed["rounds"].as_array().unwrap())
+        {
+            assert_eq!(a["convergence_score"], b["convergence_score"]);
+            assert_eq!(a["validation_report"], b["validation_report"]);
+        }
+        dirs.cleanup();
+    }
+}
