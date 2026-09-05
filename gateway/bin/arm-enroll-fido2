@@ -21,11 +21,6 @@ SIDECAR_DATA_VOLUME=$(irin_sidecar_data_volume)
 . bin/lib/fido2.sh
 FIDO2_PYTHON="$(resolve_fido2_python)" || exit 1
 
-vol_sh() {
-  docker run --rm -i --user 0 -v "$SIDECAR_DATA_VOLUME":/var/lib/sidecar \
-    alpine:3.21 sh -c "$1"
-}
-
 if [ -z "${FIDO2_PIN:-}" ]; then
   printf 'FIDO2 PIN: ' >&2
   read -r FIDO2_PIN

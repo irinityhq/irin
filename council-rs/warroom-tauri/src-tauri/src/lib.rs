@@ -1271,10 +1271,18 @@ async fn start_council_server(
     )
 }
 
+async fn blocking_command<T: Send + 'static>(
+    f: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    tauri::async_runtime::spawn_blocking(f)
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Stop the tracked council server (best effort kill).
 #[tauri::command]
 async fn stop_council_server(app: AppHandle) -> Result<String, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         // Same lifecycle guard as restart/enable/disable: a Stop that lands
         // after restart_sidecar spawned its replacement must not kill it.
         let _lifecycle = council_lifecycle_guard();
@@ -1293,7 +1301,6 @@ async fn stop_council_server(app: AppHandle) -> Result<String, String> {
         }
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Restart the council sidecar with gateway routing toggled.
@@ -1315,7 +1322,7 @@ async fn restart_sidecar(
     librarian_base: Option<String>,
 ) -> Result<String, String> {
     // Port-release polling blocks (up to 5s) — keep it off the async runtime.
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let _lifecycle = council_lifecycle_guard();
         if via_gateway && is_packaged_install() {
             let store = KeychainSecretStore;
@@ -1389,18 +1396,16 @@ async fn restart_sidecar(
         })
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Non-secret Gateway Pack status for the installed-release UI.
 #[tauri::command]
 async fn gateway_pack_status() -> Result<GatewayPackStatus, String> {
-    tauri::async_runtime::spawn_blocking(|| {
+    blocking_command(|| {
         let store = KeychainSecretStore;
         Ok(gateway_pack::gateway_pack_status(&store))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Install/start/provision/enable the app-owned Gateway Pack. Never returns secrets.
@@ -1409,7 +1414,7 @@ async fn gateway_pack_status() -> Result<GatewayPackStatus, String> {
 #[tauri::command]
 async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let status = gateway_pack::enable_gateway_pack(&store)?;
@@ -1521,7 +1526,6 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, St
         }
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Disable governed mode and restart Council in Direct mode. Keeps pack data/Keychain.
@@ -1529,7 +1533,7 @@ async fn gateway_pack_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, St
 #[tauri::command]
 async fn gateway_pack_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let _status = gateway_pack::disable_gateway_pack(&store)?;
@@ -1583,7 +1587,6 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, S
         Ok(status_authority::recompute(&app2, Freshness::Action))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Stop the desktop Compose project only (no volume delete).
@@ -1591,7 +1594,7 @@ async fn gateway_pack_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, S
 #[tauri::command]
 async fn gateway_pack_stop(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         // Ensure Direct config before containers stop.
@@ -1650,19 +1653,17 @@ async fn gateway_pack_stop(app: AppHandle) -> Result<DesktopStatusSnapshot, Stri
         Ok(status_authority::recompute(&app2, Freshness::Action))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Install or remove the pack-native watch profile and recreate the pack so the
 /// sidecar reloads. Toggle is a bounded force-recreate (in-flight requests drop).
 #[tauri::command]
 async fn gateway_pack_set_watch_sentinels(enabled: bool) -> Result<bool, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let store = KeychainSecretStore;
         gateway_pack::set_watch_sentinels_enabled(&store, enabled)
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Whether the durable watch profile file is installed under app-support.
@@ -1688,7 +1689,7 @@ fn gateway_pack_open_watch_inbox() -> Result<String, String> {
 #[tauri::command]
 async fn gateway_pack_uninstall(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
     let app2 = app.clone();
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let _lifecycle = council_lifecycle_guard();
         let store = KeychainSecretStore;
         let _status = gateway_pack::uninstall_gateway_pack(&store)?;
@@ -1729,7 +1730,6 @@ async fn gateway_pack_uninstall(app: AppHandle) -> Result<DesktopStatusSnapshot,
         Ok(status_authority::recompute(&app2, Freshness::Action))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 // Touch ID product control: the renderer can only trigger these fixed
@@ -1748,17 +1748,16 @@ fn gateway_ready_for_arm() -> bool {
 async fn touch_id_status(app: AppHandle) -> Result<touch_id::TouchIdStatus, String> {
     // Presentation path: consume status_authority snapshot (single sticky),
     // not a parallel GATEWAY_READY sticky recomputed here.
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let snap = status_authority::recompute(&app, Freshness::Background);
         Ok(snap.touch_id)
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn touch_id_enroll(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let store = KeychainSecretStore;
         touch_id::enroll(&store, gateway_ready_for_arm())?;
 
@@ -1778,12 +1777,11 @@ async fn touch_id_enroll(app: AppHandle) -> Result<DesktopStatusSnapshot, String
         Ok(status_authority::recompute(&app, Freshness::Action))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn touch_id_arm(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let store = KeychainSecretStore;
         // Fail closed on a fresh sample — never arm from sticky/cached presentation.
         if !gateway_ready_for_arm() {
@@ -1795,12 +1793,11 @@ async fn touch_id_arm(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
         Ok(status_authority::recompute(&app, Freshness::Action))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn touch_id_renew(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let store = KeychainSecretStore;
         // Fail closed on a fresh sample — renew is the same ceremony as arm.
         if !gateway_ready_for_arm() {
@@ -1812,28 +1809,22 @@ async fn touch_id_renew(app: AppHandle) -> Result<DesktopStatusSnapshot, String>
         Ok(status_authority::recompute(&app, Freshness::Action))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
 async fn touch_id_disarm(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let store = KeychainSecretStore;
         touch_id::disarm(&store)?;
         Ok(status_authority::recompute(&app, Freshness::Action))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Host-authoritative combined status snapshot (Background freshness).
 #[tauri::command]
 async fn desktop_status_snapshot(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        Ok(status_authority::recompute(&app, Freshness::Background))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    blocking_command(move || Ok(status_authority::recompute(&app, Freshness::Background))).await
 }
 
 /// Native file picker (cabinet yamls, session json, map dirs, etc.).
@@ -1951,7 +1942,7 @@ fn council_backend_ready_probe(app: &AppHandle) -> bool {
 /// Non-secret phone access status (no bearer token, no pairing secret).
 #[tauri::command]
 async fn phone_access_status(app: AppHandle) -> Result<PhoneAccessStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let gw = gateway_pack_enabled_flag();
         let council_ready = council_backend_ready(&app);
         Ok(phone_access::phone_access_status(
@@ -1961,13 +1952,12 @@ async fn phone_access_status(app: AppHandle) -> Result<PhoneAccessStatus, String
         ))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Enable private phone publication via Tailscale Serve (never Funnel).
 #[tauri::command]
 async fn phone_access_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         // Authority path: publication changes the Tailscale route table.
         let gw = gateway_pack_enabled_flag_fresh();
         let council_ready = council_backend_ready(&app);
@@ -1981,13 +1971,12 @@ async fn phone_access_enable(app: AppHandle) -> Result<DesktopStatusSnapshot, St
         Ok(status_authority::recompute(&app, Freshness::Action))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Disable phone publication by restoring the prior Serve snapshot.
 #[tauri::command]
 async fn phone_access_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         // Authority path: restores Serve; use a fresh enabled flag.
         let gw = gateway_pack_enabled_flag_fresh();
         let council_ready = council_backend_ready(&app);
@@ -1995,7 +1984,6 @@ async fn phone_access_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, S
         Ok(status_authority::recompute(&app, Freshness::Action))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 /// Aggregate product lifecycle: Council, optional Gateway, phone access.
@@ -2004,7 +1992,7 @@ async fn phone_access_disable(app: AppHandle) -> Result<DesktopStatusSnapshot, S
 /// Council or Gateway launcher. Quit leaves app-owned Serve configured.
 #[tauri::command]
 async fn app_lifecycle_status(app: AppHandle) -> Result<AppLifecycleStatus, String> {
-    tauri::async_runtime::spawn_blocking(move || {
+    blocking_command(move || {
         let owned_child = {
             let state = app.state::<CouncilServer>();
             state.0.lock().map(|g| g.child.is_some()).unwrap_or(false)
@@ -2028,7 +2016,6 @@ async fn app_lifecycle_status(app: AppHandle) -> Result<AppLifecycleStatus, Stri
         Ok(compose_app_lifecycle(council, gateway, phone_life))
     })
     .await
-    .map_err(|e| e.to_string())?
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

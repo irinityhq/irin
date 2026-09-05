@@ -47,3 +47,13 @@ irin_sidecar_socket_volume() {
 irin_sidecar_data_volume() {
   printf '%s_sidecar_data\n' "$(irin_compose_project)"
 }
+
+curl_uds() {
+  docker run --rm -i --user 0 -v "$SIDECAR_SOCKET_VOLUME":/run/sidecar \
+    curlimages/curl:8.12.1 -s --unix-socket /run/sidecar/sidecar.sock "$@"
+}
+
+vol_sh() {
+  docker run --rm -i --user 0 -v "$SIDECAR_DATA_VOLUME":/var/lib/sidecar \
+    alpine:3.21 sh -c "$1"
+}

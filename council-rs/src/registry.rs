@@ -130,7 +130,7 @@ fn run_remote_model_probes(
 
 /// Known API key environment variables → provider mapping.
 /// Order matters: first match wins for default seat assignment.
-const KNOWN_KEYS: &[(&str, &str, &str, &str)] = &[
+pub(crate) const KNOWN_KEYS: &[(&str, &str, &str, &str)] = &[
     // (env_var, provider_slug, display_name, base_url)
     (
         "XAI_API_KEY",

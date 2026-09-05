@@ -17,7 +17,7 @@ use super::intervention::{Intervention, InterventionQueue};
 use crate::config::Config;
 use crate::engine::context::RequestContext;
 use crate::engine::deliberate::{
-    DEFAULT_CHAIR_SYSTEM, JudgeUsage, build_chair_prompt, build_round_prompt,
+    JudgeUsage, build_chair_prompt, build_round_prompt, chair_system_for as stream_chair_system,
     convergence_quality_penalty_enabled, effective_convergence_threshold,
     governed_alternative_transport_model_groups, governed_required_transport_models,
     has_usable_seat_response, judge_round, save_session, seat_preamble_for,
@@ -2341,17 +2341,6 @@ pub(crate) fn stream_should_await_operator_input(
     early_exit: bool,
 ) -> bool {
     pause_after_each_round && !is_last && !early_exit
-}
-
-fn stream_chair_system(cabinet: &Cabinet, mode: Mode) -> String {
-    let base_chair = cabinet
-        .chair
-        .system
-        .as_deref()
-        .map(str::trim)
-        .filter(|system| !system.is_empty())
-        .unwrap_or(DEFAULT_CHAIR_SYSTEM);
-    format!("{}\n\n{}", base_chair, mode.chair_instruction())
 }
 
 fn stream_frame_check_enabled(stream_config: &StreamConfig, cabinet: &Cabinet) -> bool {

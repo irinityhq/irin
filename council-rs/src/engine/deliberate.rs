@@ -1879,6 +1879,55 @@ pub(crate) fn append_validation_context(prompt: &mut String, round: &RoundResult
     }
 }
 
+pub(crate) fn build_judge_prompt(
+    valid: &[&SeatResponse],
+    total_count: usize,
+    topic: &str,
+) -> String {
+    let valid_count = valid.len();
+    let mut summaries = String::new();
+    for (i, resp) in valid.iter().enumerate() {
+        let truncated = truncate_utf8(&resp.text, 500);
+        summaries.push_str(&format!("- {}: {}\n", resp.seat_name, truncated));
+        if i >= 4 {
+            break;
+        }
+    }
+
+    let topic_snippet = truncate_utf8(topic, 300);
+    format!(
+        "You are a convergence judge for a multi-model deliberation.\n\n\
+         ORIGINAL TOPIC:\n{}\n\n\
+         EXPECTED SEATS: {}\n\
+         VALID RESPONSES: {}\n\
+         FAILED OR EMPTY RESPONSES: {}\n\n\
+         ANALYST POSITIONS ({} valid models):\n{}\n\n\
+         Assess the deliberation and respond with ONLY this JSON object:\n\
+         {{\"convergence\": <0.0-1.0>, \"intent_aligned\": <true/false>, \
+         \"drift\": <null or \"description\">, \
+         \"quality_flag\": <null or \"thin\" or \"circular\" or \"off_topic\">, \
+         \"homogeneity_score\": <null or 0.0-1.0>, \
+         \"quick_agreement\": <null or true/false>, \
+         \"recommendation\": <\"continue\" or \"converged\" or \"escalate\" or \"reframe\">, \
+         \"confidence\": <0.0-1.0>}}\n\n\
+         Rules:\n\
+         - convergence: 0.0 = total disagreement, 1.0 = perfect consensus\n\
+         - Failed or empty responses count against convergence; do not ignore them.\n\
+         - intent_aligned: did responses address the ORIGINAL topic?\n\
+         - drift: null if no drift, otherwise describe what drifted\n\
+         - quality_flag: null unless responses are thin/circular/off_topic\n\
+         - recommendation: 'converged' if convergence >= 0.8\n\
+         - confidence: your confidence in this assessment\n\n\
+         Respond with ONLY the JSON. No explanation.",
+        topic_snippet,
+        total_count,
+        valid_count,
+        total_count.saturating_sub(valid_count),
+        valid_count,
+        summaries
+    )
+}
+
 /// Structured convergence judge (v9.12.0).
 ///
 /// Returns the score, provider, assessment, and accumulated usage from every
@@ -1941,47 +1990,7 @@ pub(crate) async fn judge_round(
         };
     }
 
-    let mut summaries = String::new();
-    for (i, resp) in valid.iter().enumerate() {
-        let truncated = truncate_utf8(&resp.text, 500);
-        summaries.push_str(&format!("- {}: {}\n", resp.seat_name, truncated));
-        if i >= 4 {
-            break;
-        }
-    }
-
-    let topic_snippet = truncate_utf8(topic, 300);
-    let prompt = format!(
-        "You are a convergence judge for a multi-model deliberation.\n\n\
-         ORIGINAL TOPIC:\n{}\n\n\
-         EXPECTED SEATS: {}\n\
-         VALID RESPONSES: {}\n\
-         FAILED OR EMPTY RESPONSES: {}\n\n\
-         ANALYST POSITIONS ({} valid models):\n{}\n\n\
-         Assess the deliberation and respond with ONLY this JSON object:\n\
-         {{\"convergence\": <0.0-1.0>, \"intent_aligned\": <true/false>, \
-         \"drift\": <null or \"description\">, \
-         \"quality_flag\": <null or \"thin\" or \"circular\" or \"off_topic\">, \
-         \"homogeneity_score\": <null or 0.0-1.0>, \
-         \"quick_agreement\": <null or true/false>, \
-         \"recommendation\": <\"continue\" or \"converged\" or \"escalate\" or \"reframe\">, \
-         \"confidence\": <0.0-1.0>}}\n\n\
-         Rules:\n\
-         - convergence: 0.0 = total disagreement, 1.0 = perfect consensus\n\
-         - Failed or empty responses count against convergence; do not ignore them.\n\
-         - intent_aligned: did responses address the ORIGINAL topic?\n\
-         - drift: null if no drift, otherwise describe what drifted\n\
-         - quality_flag: null unless responses are thin/circular/off_topic\n\
-         - recommendation: 'converged' if convergence >= 0.8\n\
-         - confidence: your confidence in this assessment\n\n\
-         Respond with ONLY the JSON. No explanation.",
-        topic_snippet,
-        total_count,
-        valid_count,
-        total_count.saturating_sub(valid_count),
-        valid_count,
-        summaries
-    );
+    let prompt = build_judge_prompt(&valid, total_count, topic);
 
     let judge_configs = convergence_judge_candidates(roles, models);
 
