@@ -55,8 +55,8 @@ def mask_literals(source):
 def rust_test_lines(source):
     """Return excluded line indexes; reject unsupported test attributes."""
     code, removed = mask_literals(source), set()
-    for match in re.finditer(r'#\[cfg\((.*?)\)\]', code, re.S):
-        expression = match.group(1).strip()
+    for match in re.finditer(r'#\[(?:cfg\((.*?)\)|test)\]', code, re.S):
+        expression = (match.group(1) or 'test').strip()
         if not re.search(r'\b(test|kani)\b', expression):
             continue
         if expression in ('not(test)', 'not(kani)'):
@@ -167,6 +167,7 @@ def self_test():
     assert rust_test_lines(sample) == set(range(1, 8))
     assert rust_test_lines('#[cfg(test)]\n#[path = "some_tests.rs"]\nmod cases;\nfn live() {}\n') == {0, 1, 2}
     assert not rust_test_lines('#[cfg(not(test))]\nfn live() {}\n')
+    assert rust_test_lines('#[test]\nfn example() {}\nfn live() {}\n') == {0, 1}
     assert exclusion('gateway/bin/arm', '#!/bin/sh\nexit 0\n') is None
     assert exclusion('x/test_parser.py', '') == 'test-or-proof-file'
     assert exclusion('x/e2e/support.ts', '') == 'test-or-generated-directory'
