@@ -24,6 +24,11 @@ use crate::engine::sheldon;
 use crate::mode::Mode;
 use crate::precedent;
 use crate::provider;
+use crate::stream::deliberate::{
+    self as streaming, RoundOperatorControl, StreamRunReady, until_cancelled,
+};
+use crate::stream::events::StreamEvent;
+use crate::stream::intervention::InterventionQueue;
 use crate::types::*;
 
 const SUSPECT_QUALITY_CONVERGENCE_PENALTY: f64 = 0.15;
@@ -460,6 +465,8 @@ pub async fn run_with_cancel(
         validate_gate,
         origin,
         cancel.as_ref(),
+        None,
+        0.0,
     )
     .await?;
 
@@ -483,29 +490,37 @@ pub async fn run_with_cancel(
 }
 
 /// Phase 1 product: cabinet, session identity, transport, precedent, BATS.
-struct PreparedDeliberation {
-    cabinet: Cabinet,
-    session_id: String,
-    req_ctx: RequestContext,
-    effective_via_gateway: bool,
-    effective_sensitivity: String,
-    budget_signal: String,
-    precedent_text: String,
-    precedent_ids: Vec<String>,
-    evidence_cache: sheldon::EvidenceCache,
+pub(crate) struct PreparedDeliberation {
+    pub(crate) cabinet: Cabinet,
+    pub(crate) session_id: String,
+    pub(crate) req_ctx: RequestContext,
+    pub(crate) effective_via_gateway: bool,
+    pub(crate) effective_sensitivity: String,
+    pub(crate) budget_signal: String,
+    pub(crate) precedent_text: String,
+    pub(crate) precedent_ids: Vec<String>,
+    pub(crate) evidence_cache: sheldon::EvidenceCache,
 }
 
-/// Phase 2/3 product: completed rounds, running totals, budget pause, SpecOps.
-struct RoundExecution {
-    rounds: Vec<RoundResult>,
-    total_tokens: u32,
-    total_latency_ms: u64,
-    total_cost: f64,
-    budget_paused: bool,
-    budget_action: Option<String>,
-    specops_triggered: bool,
-    specops_cost_usd: f64,
-    specops_signal_text: Option<String>,
+/// WebSocket transport and operator controls used by the shared round loop.
+pub(crate) struct RoundStream<'a> {
+    pub(crate) ready: &'a StreamRunReady,
+    pub(crate) interventions: &'a mut InterventionQueue,
+}
+
+pub(crate) struct RoundExecution {
+    pub(crate) manual_specops_signal: String,
+    pub(crate) validator_cost_usd: f64,
+    pub(crate) judge_usage: JudgeUsage,
+    pub(crate) rounds: Vec<RoundResult>,
+    pub(crate) total_tokens: u32,
+    pub(crate) total_latency_ms: u64,
+    pub(crate) total_cost: f64,
+    pub(crate) budget_paused: bool,
+    pub(crate) budget_action: Option<String>,
+    pub(crate) specops_triggered: bool,
+    pub(crate) specops_cost_usd: f64,
+    pub(crate) specops_signal_text: Option<String>,
 }
 
 /// Phase 1 — resolve cabinet, mint session id, gateway preflight, BATS + precedent.
@@ -671,7 +686,7 @@ async fn prepare_deliberation(
 
 /// Phase 2 — fan-out rounds with judge, validation/gate, cancel, budget, convergence.
 #[allow(clippy::too_many_arguments)]
-async fn execute_deliberation_rounds(
+pub(crate) async fn execute_deliberation_rounds(
     config: &Config,
     prepared: &PreparedDeliberation,
     cabinet_name: &str,
@@ -687,8 +702,19 @@ async fn execute_deliberation_rounds(
     validate_gate: bool,
     origin: SessionOrigin,
     cancel: Option<&CancellationToken>,
+    mut stream: Option<RoundStream<'_>>,
+    cumulative_spend: f64,
 ) -> Result<RoundExecution> {
     let cabinet = &prepared.cabinet;
+    let stream_ready = stream.as_ref().map(|s| s.ready);
+    let session_id = &prepared.session_id;
+    let mut live_seats = cabinet.seats.clone();
+    let mut extra_context = String::new();
+    let mut early_exit = false;
+    let mut manual_specops_signal = String::new();
+    let mut specops_cost_usd = 0.0;
+    let mut validator_cost_usd = 0.0;
+    let mut judge_usage = JudgeUsage::default();
     let mut rounds: Vec<RoundResult> = Vec::new();
     let mut total_tokens: u32 = 0;
     let mut total_latency_ms: u64 = 0;
@@ -698,6 +724,20 @@ async fn execute_deliberation_rounds(
     let mut budget_action: Option<String> = None;
 
     for round_num in 1..=cabinet.rounds {
+        if let Some(ready) = stream_ready {
+            anyhow::ensure!(!ready.cancel.is_cancelled(), "cancelled");
+            if early_exit {
+                break;
+            }
+            let _ = ready
+                .event_tx
+                .send(StreamEvent::round_started(
+                    session_id,
+                    round_num,
+                    cabinet.rounds,
+                ))
+                .await;
+        }
         if verbose {
             eprintln!(
                 "── Round {}/{} ────────────────────────────────────────",
@@ -705,82 +745,98 @@ async fn execute_deliberation_rounds(
             );
         }
 
-        let seat_prompts = if round_num == 1 {
-            let first_seat = cabinet
-                .seats
-                .first()
-                .expect("validated cabinet must contain at least one seat");
-            let mut prompt = build_round_prompt(
-                topic,
-                context,
-                "",
-                &prepared.precedent_text,
-                &rounds,
-                &prepared.budget_signal,
-                first_seat,
-                round_num,
-            );
-            if frame_check {
-                prompt = run_frame_check(
-                    &prompt,
-                    verbose,
-                    &config.roles,
-                    &config.models,
-                    &prepared.req_ctx,
+        let mut seat_prompts: Vec<String> = live_seats
+            .iter()
+            .map(|seat| {
+                build_round_prompt(
+                    topic,
+                    context,
+                    &extra_context,
+                    &prepared.precedent_text,
+                    &rounds,
+                    &prepared.budget_signal,
+                    seat,
+                    round_num,
                 )
-                .await;
-            }
-            vec![prompt; cabinet.seats.len()]
-        } else {
-            cabinet
-                .seats
-                .iter()
-                .map(|seat| {
-                    build_round_prompt(
-                        topic,
-                        context,
-                        "",
-                        &prepared.precedent_text,
-                        &rounds,
-                        &prepared.budget_signal,
-                        seat,
-                        round_num,
-                    )
-                })
-                .collect()
-        };
-
-        // Pre-round cancel check: cheap escape before seat fan-out.
-        if let Some(c) = cancel
-            && c.is_cancelled()
+            })
+            .collect();
+        if round_num == 1
+            && frame_check
+            && let Some(first) = seat_prompts.first()
         {
-            write_cancelled_partial(
-                &prepared.session_id,
-                cabinet_name,
-                topic,
-                tier,
-                &rounds,
-                origin,
-                total_tokens,
-                total_latency_ms,
-                total_cost,
-                verbose,
-                prepared.req_ctx.parent_request_id.clone(),
+            let check = run_frame_check(
+                first,
+                verbose || stream_ready.is_some(),
+                &config.roles,
+                &config.models,
+                &prepared.req_ctx,
             );
-            anyhow::bail!("cancelled");
+            let checked = if let Some(ready) = stream_ready {
+                until_cancelled(&ready.cancel, check)
+                    .await
+                    .ok_or_else(|| anyhow::anyhow!("cancelled"))?
+            } else {
+                check.await
+            };
+            // Round-one prompts share the same topic/context; no seat transcript yet.
+            seat_prompts.fill(checked);
         }
+        let responses = if let Some(ready) = stream_ready {
+            for seat in &live_seats {
+                let _ = ready
+                    .event_tx
+                    .send(StreamEvent::seat_started(
+                        session_id,
+                        round_num,
+                        &seat.name,
+                        &seat.provider,
+                        &seat.model,
+                    ))
+                    .await;
+            }
+            streaming::run_round_fanout(
+                ready,
+                session_id,
+                mode,
+                round_num,
+                &live_seats,
+                &seat_prompts,
+            )
+            .await
+            .ok_or_else(|| anyhow::anyhow!("cancelled"))?
+        } else {
+            // Pre-round cancel check: cheap escape before seat fan-out.
+            if let Some(c) = cancel
+                && c.is_cancelled()
+            {
+                write_cancelled_partial(
+                    &prepared.session_id,
+                    cabinet_name,
+                    topic,
+                    tier,
+                    &rounds,
+                    origin,
+                    total_tokens,
+                    total_latency_ms,
+                    total_cost,
+                    verbose,
+                    prepared.req_ctx.parent_request_id.clone(),
+                );
+                anyhow::bail!("cancelled");
+            }
 
-        let responses = fan_out(
-            config,
-            cabinet,
-            &seat_prompts,
-            round_num,
-            mode,
-            verbose,
-            &prepared.req_ctx,
-            cancel,
-        )
-        .await;
+            fan_out(
+                config,
+                cabinet,
+                &seat_prompts,
+                round_num,
+                mode,
+                verbose,
+                &prepared.req_ctx,
+                cancel,
+            )
+            .await
+        };
 
         for resp in &responses {
             let cost = config.models.estimate_cost(
@@ -797,7 +853,24 @@ async fn execute_deliberation_rounds(
         // v9.12.0: Structured judge replaces naked float. Every round is
         // judged, including the last (parity with the stream core, B-07);
         // the round gate only decides whether convergence may stop early.
-        let judge = if responses.len() >= 2 {
+        let judge = if let Some(ready) = stream_ready {
+            let _ = ready
+                .event_tx
+                .send(StreamEvent::info(session_id, "Scoring convergence…"))
+                .await;
+            until_cancelled(
+                &ready.cancel,
+                judge_round(
+                    &responses,
+                    topic,
+                    &prepared.req_ctx,
+                    &config.roles,
+                    &config.models,
+                ),
+            )
+            .await
+            .ok_or_else(|| anyhow::anyhow!("cancelled"))?
+        } else if responses.len() >= 2 {
             judge_round(
                 &responses,
                 topic,
@@ -809,6 +882,7 @@ async fn execute_deliberation_rounds(
         } else {
             JudgeRoundResult::skipped()
         };
+        judge_usage += judge.usage;
         total_tokens = total_tokens.saturating_add(judge.usage.tokens);
         total_latency_ms = total_latency_ms.saturating_add(judge.usage.latency_ms);
         total_cost += judge.usage.cost_usd;
@@ -825,6 +899,28 @@ async fn execute_deliberation_rounds(
             quality_penalty_enabled,
         );
         let converged = convergence_score >= effective_threshold;
+        if let Some(ready) = stream_ready {
+            let _ = ready
+                .event_tx
+                .send(StreamEvent::convergence_scored(
+                    session_id,
+                    round_num,
+                    convergence_score,
+                    converged,
+                ))
+                .await;
+            until_cancelled(
+                &ready.cancel,
+                streaming::emit_round_divergence(
+                    &ready.event_tx,
+                    session_id,
+                    round_num,
+                    &responses,
+                ),
+            )
+            .await
+            .ok_or_else(|| anyhow::anyhow!("cancelled"))?;
+        }
 
         // v9.12.0: Flip-flop detection — hash (drift, recommendation)
         let flip_hash = judge_assess.as_ref().map(|a| {
@@ -901,7 +997,14 @@ async fn execute_deliberation_rounds(
                         gate: validate_gate,
                         verbose,
                     };
-                    let val_result = sheldon::validate_round(
+                    if let Some(ready) = stream_ready {
+                        anyhow::ensure!(!ready.cancel.is_cancelled(), "cancelled");
+                        let _ = ready
+                            .event_tx
+                            .send(StreamEvent::info(session_id, "Validating round…"))
+                            .await;
+                    }
+                    let validation = sheldon::validate_round(
                         &responses,
                         topic,
                         context,
@@ -909,12 +1012,32 @@ async fn execute_deliberation_rounds(
                         &vcfg,
                         &prepared.req_ctx,
                         Some(&prepared.evidence_cache),
-                    )
-                    .await;
+                    );
+                    let val_result = if let Some(ready) = stream_ready {
+                        until_cancelled(&ready.cancel, validation)
+                            .await
+                            .ok_or_else(|| anyhow::anyhow!("cancelled"))?
+                    } else {
+                        validation.await
+                    };
                     match val_result {
                         sheldon::ValidateRoundOutcome::Ok(report, cost) => {
                             validation_report = Some(report.clone());
                             total_cost += cost;
+                            validator_cost_usd += cost;
+                            if let Some(ready) = stream_ready {
+                                let verdicts =
+                                    serde_json::to_value(&report).unwrap_or(serde_json::json!([]));
+                                let _ = ready
+                                    .event_tx
+                                    .send(StreamEvent::round_validation(
+                                        session_id,
+                                        round_num,
+                                        validate_gate,
+                                        &verdicts,
+                                    ))
+                                    .await;
+                            }
                             total_tokens = total_tokens.saturating_add(0);
                             total_latency_ms += 0;
                             if verbose {
@@ -948,9 +1071,22 @@ async fn execute_deliberation_rounds(
         // streaming path). On the terminating round of an early stop (budget or
         // convergence) or the true last round, keep full responses so Chair
         // synthesis receives complete evidence + the validation_report.
+        let spend_at = if stream_ready.is_some() {
+            cumulative_spend
+                + rounds
+                    .iter()
+                    .flat_map(|r| &r.responses)
+                    .map(|r| r.cost_usd)
+                    .sum::<f64>()
+                + responses.iter().map(|r| r.cost_usd).sum::<f64>()
+                + validator_cost_usd
+                + judge_usage.cost_usd
+        } else {
+            total_cost
+        };
         if validate_gate && validation_report.is_some() {
             let would_budget =
-                should_pause_for_budget(budget_max_usd, total_cost, round_num, cabinet.rounds);
+                should_pause_for_budget(budget_max_usd, spend_at, round_num, cabinet.rounds);
             let is_terminating = round_num >= cabinet.rounds || converged || would_budget;
             if !is_terminating && let Some(ref rpt) = validation_report {
                 responses = sheldon::gate_responses(&responses, rpt);
@@ -974,6 +1110,20 @@ async fn execute_deliberation_rounds(
             validation_report: validation_report.map(crate::scrub::redact_validation_report),
         });
 
+        let is_last = round_num >= cabinet.rounds;
+        if let Some(ready) = stream_ready {
+            let _ = ready
+                .event_tx
+                .send(StreamEvent::round_complete(
+                    session_id,
+                    round_num,
+                    convergence_score,
+                    converged,
+                    converged && !is_last,
+                ))
+                .await;
+        }
+
         // Post-round cancel check. Persist a partial diagnostic file with
         // origin=ApiCancelled (private side-channel — never returned to the
         // API response, never indexed for precedent) and bail.
@@ -996,9 +1146,32 @@ async fn execute_deliberation_rounds(
             anyhow::bail!("cancelled");
         }
 
+        // Keep the streamed ledger's summation order after gate processing.
+        let spend_at = if stream_ready.is_some() {
+            cumulative_spend
+                + rounds
+                    .iter()
+                    .flat_map(|r| &r.responses)
+                    .map(|r| r.cost_usd)
+                    .sum::<f64>()
+                + validator_cost_usd
+                + judge_usage.cost_usd
+        } else {
+            total_cost
+        };
         // v9.12.0: Budget pause at round boundary
-        if should_pause_for_budget(budget_max_usd, total_cost, round_num, cabinet.rounds) {
+        if should_pause_for_budget(budget_max_usd, spend_at, round_num, cabinet.rounds) {
             budget_paused = true;
+            if let Some(ready) = stream_ready
+                && let Some(max) = budget_max_usd
+            {
+                let _ = ready
+                    .event_tx
+                    .send(StreamEvent::budget_paused(
+                        session_id, round_num, spend_at, max,
+                    ))
+                    .await;
+            }
             budget_action = Some("end_early".to_string());
             if verbose {
                 if let Some(max) = budget_max_usd {
@@ -1009,12 +1182,42 @@ async fn execute_deliberation_rounds(
             break;
         }
 
-        if converged && round_num < cabinet.rounds {
+        if converged
+            && !is_last
+            && !stream_ready.is_some_and(|ready| ready.stream_config.pause_after_each_round)
+        {
             break;
+        }
+        if let Some(ref mut stream) = stream {
+            match streaming::run_round_operator_pause(
+                stream.ready,
+                stream.interventions,
+                session_id,
+                topic,
+                round_num,
+                convergence_score,
+                converged,
+                is_last,
+                &mut early_exit,
+                &mut extra_context,
+                &mut live_seats,
+                &rounds,
+                &mut manual_specops_signal,
+                &mut specops_cost_usd,
+            )
+            .await
+            .ok_or_else(|| anyhow::anyhow!("cancelled"))?
+            {
+                RoundOperatorControl::BreakRounds => break,
+                RoundOperatorControl::NextRound => {}
+            }
         }
     }
 
     Ok(RoundExecution {
+        manual_specops_signal,
+        validator_cost_usd,
+        judge_usage,
         rounds,
         total_tokens,
         total_latency_ms,
@@ -1022,7 +1225,7 @@ async fn execute_deliberation_rounds(
         budget_paused,
         budget_action,
         specops_triggered: false,
-        specops_cost_usd: 0.0,
+        specops_cost_usd,
         specops_signal_text: None,
     })
 }
