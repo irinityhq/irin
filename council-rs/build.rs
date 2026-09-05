@@ -3,6 +3,10 @@
 //! Runtime health must describe the code that was compiled, never the checkout
 //! that happens to be present when the process is queried.
 
+mod build_git;
+
+use build_git::{emit_git_rerun_paths, git_is_dirty, git_output};
+
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -66,19 +70,6 @@ fn read_source_sha_file() -> Option<String> {
     None
 }
 
-fn git_is_dirty(dir: &Path) -> Option<bool> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["status", "--porcelain", "--untracked-files=normal"])
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    Some(!output.stdout.iter().all(u8::is_ascii_whitespace))
-}
-
 fn emit_tracked_file_rerun_paths(dir: &Path) {
     let Some(root) = git_output(dir, &["rev-parse", "--show-toplevel"]) else {
         return;
@@ -100,36 +91,6 @@ fn emit_tracked_file_rerun_paths(dir: &Path) {
                     .join(String::from_utf8_lossy(relative).as_ref())
                     .display()
             );
-        }
-    }
-}
-
-fn git_output(dir: &Path, args: &[&str]) -> Option<String> {
-    let output = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .output()
-        .ok()?;
-    if !output.status.success() {
-        return None;
-    }
-    let value = String::from_utf8(output.stdout).ok()?.trim().to_string();
-    (!value.is_empty()).then_some(value)
-}
-
-fn emit_git_rerun_paths(dir: &Path) {
-    for git_dir_arg in ["--git-dir", "--git-common-dir"] {
-        let Some(raw) = git_output(dir, &["rev-parse", git_dir_arg]) else {
-            continue;
-        };
-        let git_dir = if Path::new(&raw).is_absolute() {
-            PathBuf::from(raw)
-        } else {
-            dir.join(raw)
-        };
-        for path in ["HEAD", "index", "packed-refs", "refs/heads"] {
-            println!("cargo:rerun-if-changed={}", git_dir.join(path).display());
         }
     }
 }

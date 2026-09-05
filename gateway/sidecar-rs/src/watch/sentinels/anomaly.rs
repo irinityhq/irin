@@ -81,23 +81,7 @@ impl AnomalySentinel {
     }
 
     pub fn validate_path(&self) -> anyhow::Result<()> {
-        if !self.watch_db_path.exists() {
-            anyhow::bail!(
-                "watch.db missing or unreadable at {} — check bind mount / WATCH_DB_PATH",
-                self.watch_db_path.display()
-            );
-        }
-        rusqlite::Connection::open_with_flags(
-            &self.watch_db_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-        )
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "watch.db not openable read-only at {}: {e}",
-                self.watch_db_path.display()
-            )
-        })?;
-        Ok(())
+        super::validate_watch_db_path(&self.watch_db_path)
     }
 
     fn read_window_counts(

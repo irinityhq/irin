@@ -187,12 +187,6 @@ impl PolicyFirewall {
             detected_signals: signals,
         }
     }
-
-    /// Check if dry-run mode is active
-    #[allow(dead_code)]
-    pub fn is_dry_run(&self) -> bool {
-        self.config.dry_run
-    }
 }
 
 #[cfg(test)]

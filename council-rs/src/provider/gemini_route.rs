@@ -113,18 +113,7 @@ pub fn set_base_dir(base_dir: &Path) {
 }
 
 fn load_routing_from_disk(base_dir: &Path) -> GeminiRoutingFile {
-    let path = base_dir.join("gemini_routing.yaml");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return GeminiRoutingFile::default(),
-    };
-    match serde_yaml::from_str::<GeminiRoutingFile>(&content) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("⚠️  gemini_routing.yaml parse error ({e}); using built-in defaults");
-            GeminiRoutingFile::default()
-        }
-    }
+    super::load_routing_yaml(base_dir, "gemini_routing.yaml")
 }
 
 pub fn routing_snapshot() -> GeminiRoutingFile {

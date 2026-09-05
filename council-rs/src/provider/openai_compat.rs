@@ -15,33 +15,17 @@ use std::time::Instant;
 
 /// Provider configs - (env_var, env_var_fallback, base_url).
 fn provider_config(provider: &str) -> (&'static str, &'static str, &'static str) {
-    match provider {
-        // "nvidia" is the canonical slug for the NVIDIA integrate NIM backend.
-        // "nim" is a legacy alias (historical label drift for cost-control cabinets).
-        // They resolve to the exact same endpoint and key. We are normalizing to "nvidia".
-        "nvidia" | "nim" => ("NVIDIA_API_KEY", "", "https://integrate.api.nvidia.com/v1"),
-        "nous" => (
-            "NOUS_API_KEY",
-            "",
-            "https://inference-api.nousresearch.com/v1",
-        ),
-        "deepseek" => ("DEEPSEEK_API_KEY", "", "https://api.deepseek.com/v1"),
-        "groq" => ("GROQ_API_KEY", "", "https://api.groq.com/openai/v1"),
-        "together" => ("TOGETHER_API_KEY", "", "https://api.together.xyz/v1"),
-        "fireworks" => (
-            "FIREWORKS_API_KEY",
-            "",
-            "https://api.fireworks.ai/inference/v1",
-        ),
-        "openrouter" => ("OPENROUTER_API_KEY", "", "https://openrouter.ai/api/v1"),
-        "mistral" => ("MISTRAL_API_KEY", "", "https://api.mistral.ai/v1"),
-        "perplexity" => ("PERPLEXITY_API_KEY", "", "https://api.perplexity.ai"),
-        "sambanova" => ("SAMBANOVA_API_KEY", "", "https://api.sambanova.ai/v1"),
-        "cerebras" => ("CEREBRAS_API_KEY", "", "https://api.cerebras.ai/v1"),
-        "kimi" => ("MOONSHOT_API_KEY", "", "https://api.moonshot.cn/v1"),
-        "cohere" => ("COHERE_API_KEY", "", "https://api.cohere.com/v2"),
-        _ => ("", "", ""),
-    }
+    let provider = match provider {
+        "nim" => "nvidia",
+        "nvidia" | "nous" | "deepseek" | "groq" | "together" | "fireworks" | "openrouter"
+        | "mistral" | "perplexity" | "sambanova" | "cerebras" | "kimi" | "cohere" => provider,
+        _ => return ("", "", ""),
+    };
+    crate::registry::KNOWN_KEYS
+        .iter()
+        .find(|(_, slug, _, _)| *slug == provider)
+        .map(|(key, _, _, url)| (*key, "", *url))
+        .unwrap_or(("", "", ""))
 }
 
 /// Call any OpenAI-compatible provider.
@@ -661,6 +645,79 @@ pub fn parse_chat_completions(data: Value, model: &str, latency_ms: u64) -> Prov
         gateway_provenance: None,
         gateway_attempts: Vec::new(),
         provider_provenance: None,
+    }
+}
+
+#[cfg(test)]
+mod provider_config_contract {
+    use super::provider_config;
+
+    #[test]
+    fn keys_urls_alias_and_unknown_provider_are_stable() {
+        assert_eq!(
+            provider_config("nvidia"),
+            ("NVIDIA_API_KEY", "", "https://integrate.api.nvidia.com/v1")
+        );
+        assert_eq!(
+            provider_config("nous"),
+            (
+                "NOUS_API_KEY",
+                "",
+                "https://inference-api.nousresearch.com/v1"
+            )
+        );
+        assert_eq!(
+            provider_config("deepseek"),
+            ("DEEPSEEK_API_KEY", "", "https://api.deepseek.com/v1")
+        );
+        assert_eq!(
+            provider_config("groq"),
+            ("GROQ_API_KEY", "", "https://api.groq.com/openai/v1")
+        );
+        assert_eq!(
+            provider_config("together"),
+            ("TOGETHER_API_KEY", "", "https://api.together.xyz/v1")
+        );
+        assert_eq!(
+            provider_config("fireworks"),
+            (
+                "FIREWORKS_API_KEY",
+                "",
+                "https://api.fireworks.ai/inference/v1"
+            )
+        );
+        assert_eq!(
+            provider_config("openrouter"),
+            ("OPENROUTER_API_KEY", "", "https://openrouter.ai/api/v1")
+        );
+        assert_eq!(
+            provider_config("mistral"),
+            ("MISTRAL_API_KEY", "", "https://api.mistral.ai/v1")
+        );
+        assert_eq!(
+            provider_config("perplexity"),
+            ("PERPLEXITY_API_KEY", "", "https://api.perplexity.ai")
+        );
+        assert_eq!(
+            provider_config("sambanova"),
+            ("SAMBANOVA_API_KEY", "", "https://api.sambanova.ai/v1")
+        );
+        assert_eq!(
+            provider_config("cerebras"),
+            ("CEREBRAS_API_KEY", "", "https://api.cerebras.ai/v1")
+        );
+        assert_eq!(
+            provider_config("kimi"),
+            ("MOONSHOT_API_KEY", "", "https://api.moonshot.cn/v1")
+        );
+        assert_eq!(
+            provider_config("cohere"),
+            ("COHERE_API_KEY", "", "https://api.cohere.com/v2")
+        );
+        assert_eq!(provider_config("nim"), provider_config("nvidia"));
+        for unsupported in ["openai_api", "claude_api", "grok_api", "NVIDIA", ""] {
+            assert_eq!(provider_config(unsupported), ("", "", ""));
+        }
     }
 }
 

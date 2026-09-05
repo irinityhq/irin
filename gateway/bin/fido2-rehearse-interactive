@@ -9,11 +9,6 @@ TOK=$(irin_arm_principal_token) || exit 1
 SIDECAR_SOCKET_VOLUME=$(irin_sidecar_socket_volume)
 SIDECAR_DATA_VOLUME=$(irin_sidecar_data_volume)
 
-curl_uds() {
-  docker run --rm -i --user 0 -v "$SIDECAR_SOCKET_VOLUME":/run/sidecar \
-    curlimages/curl:8.12.1 -s --unix-socket /run/sidecar/sidecar.sock "$@"
-}
-
 # Check for existing stage
 PENDING=$(curl_uds -w '\n%{http_code}' http://localhost/watch/admin/producer/arm/pending \
   -H "Authorization: Bearer sovereign-op:$TOK")

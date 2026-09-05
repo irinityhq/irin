@@ -6,6 +6,14 @@ use std::sync::Arc;
 use crate::watch;
 use crate::AppState;
 
+fn bearer_from_headers(headers: &axum::http::HeaderMap) -> Option<String> {
+    headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .map(|s| s.to_string())
+}
+
 /// T31 — `GET /watch/verify-chain/:tenant`. Thin wrapper over
 /// `watch::api::verify_chain_json`; the impl lives in the library crate so
 /// integration tests can exercise the handler without spinning up AppState.
@@ -41,11 +49,7 @@ pub(super) async fn watch_set_tenant_policy(
     axum::Json(policy): axum::Json<watch::db::TenantPolicy>,
 ) -> impl IntoResponse {
     // T1: tenant-policy mutation requires the real admin token (constant-time check in lib fn).
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     watch::api::watch_set_tenant_policy(
         state.watch_db.clone(),
         state.watch_admin_token.clone(),
@@ -72,11 +76,7 @@ pub(super) async fn watch_ui_snapshot(
     axum::extract::Path(tenant): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     watch::api::ui_snapshot_json(
         state.watch_db.clone(),
         state.watch_quarantine.clone(),
@@ -97,11 +97,7 @@ pub(super) async fn watch_force_wake(
     headers: axum::http::HeaderMap,
     body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     let body_val = body.map(|axum::Json(v)| v);
     watch::api::force_wake_json(
         state.watch_db.clone(),
@@ -130,11 +126,7 @@ pub(super) async fn watch_clear_quarantine(
     headers: axum::http::HeaderMap,
     body: Option<axum::Json<serde_json::Value>>,
 ) -> impl IntoResponse {
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     let body_val = body.map(|axum::Json(v)| v);
     watch::api::clear_quarantine_json(
         state.watch_registry.clone(),
@@ -163,11 +155,7 @@ pub(super) async fn watch_list_outbox(
         .get("limit")
         .and_then(|s| s.parse::<i64>().ok())
         .unwrap_or(50);
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     watch::api::list_outbox_json(
         state.watch_db.clone(),
         tenant,
@@ -190,11 +178,7 @@ pub(super) async fn watch_get_outbox(
     axum::extract::Path((tenant, id)): axum::extract::Path<(String, String)>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     watch::api::get_outbox_json(
         state.watch_db.clone(),
         tenant,
@@ -217,11 +201,7 @@ pub(super) async fn watch_ack_outbox(
     axum::extract::Path(id): axum::extract::Path<String>,
     headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     let tenant_scope = headers
         .get("x-tenant-scope")
         .and_then(|v| v.to_str().ok())
@@ -247,11 +227,7 @@ pub(super) async fn watch_claim_outbox(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     // T1: mutations require the real admin token (constant-time check in lib fn).
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     watch::api::claim_outbox_json(
         state.watch_db.clone(),
         state.watch_admin_token.clone(),
@@ -274,11 +250,7 @@ pub(super) async fn watch_heartbeat_outbox(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     // T1: mutations require the real admin token (constant-time check in lib fn).
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     watch::api::heartbeat_outbox_json(
         state.watch_db.clone(),
         state.watch_admin_token.clone(),
@@ -302,11 +274,7 @@ pub(super) async fn watch_worker_ack_outbox(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     // T1: mutations require the real admin token (constant-time check in lib fn).
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     watch::api::worker_ack_outbox_json(
         state.watch_db.clone(),
         state.watch_admin_token.clone(),
@@ -330,11 +298,7 @@ pub(super) async fn watch_nack_outbox(
         .and_then(|v| v.to_str().ok())
         .map(|s| s.to_string());
     // T1: mutations require the real admin token (constant-time check in lib fn).
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     watch::api::nack_outbox_json(
         state.watch_db.clone(),
         state.watch_admin_token.clone(),
@@ -354,11 +318,7 @@ pub(super) async fn watch_mint_capability_token(
     headers: axum::http::HeaderMap,
     axum::Json(body): axum::Json<watch::api::MintCapabilityTokenRequest>,
 ) -> impl IntoResponse {
-    let bearer = headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|s| s.strip_prefix("Bearer "))
-        .map(|s| s.to_string());
+    let bearer = bearer_from_headers(&headers);
     watch::api::mint_capability_token_json(
         state.watch_admin_token.clone(),
         bearer,
@@ -401,4 +361,29 @@ pub(super) async fn watch_audit(
     let limit = q.get("limit").and_then(|s| s.parse::<i64>().ok());
     let before_id = q.get("before_id").and_then(|s| s.parse::<i64>().ok());
     watch::api::audit_json(state.watch_db.clone(), tenant, limit, before_id).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bearer_from_headers;
+    use axum::http::{HeaderMap, HeaderValue};
+
+    #[test]
+    fn bearer_header_preserves_case_whitespace_and_invalid_values() {
+        let mut headers = HeaderMap::new();
+        assert_eq!(bearer_from_headers(&headers), None);
+        for (raw, expected) in [
+            ("Bearer token", Some("token")),
+            ("Bearer ", Some("")),
+            ("Bearer  token ", Some(" token ")),
+            ("bearer token", None),
+            ("Bearer", None),
+            ("Basic token", None),
+        ] {
+            headers.insert("authorization", HeaderValue::from_str(raw).unwrap());
+            assert_eq!(bearer_from_headers(&headers).as_deref(), expected);
+        }
+        headers.insert("authorization", HeaderValue::from_bytes(&[0xff]).unwrap());
+        assert_eq!(bearer_from_headers(&headers), None);
+    }
 }

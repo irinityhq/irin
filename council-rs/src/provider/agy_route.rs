@@ -73,18 +73,7 @@ pub fn set_base_dir(base_dir: &Path) {
 }
 
 fn load_routing_from_disk(base_dir: &Path) -> AgyRoutingFile {
-    let path = base_dir.join("agy_routing.yaml");
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return AgyRoutingFile::default(),
-    };
-    match serde_yaml::from_str::<AgyRoutingFile>(&content) {
-        Ok(r) => r,
-        Err(e) => {
-            eprintln!("⚠️  agy_routing.yaml parse error ({e}); using built-in defaults");
-            AgyRoutingFile::default()
-        }
-    }
+    super::load_routing_yaml(base_dir, "agy_routing.yaml")
 }
 
 pub fn routing_snapshot() -> AgyRoutingFile {
@@ -125,6 +114,34 @@ pub fn resolve_agy_model_with(routing: &AgyRoutingFile, cabinet_model: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn routing_file_keeps_read_parse_defaults_and_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("agy_routing.yaml");
+        for contents in [None, Some("models: [invalid"), Some("default_model: []")] {
+            if let Some(contents) = contents {
+                std::fs::write(&path, contents).unwrap();
+            }
+            let routing = load_routing_from_disk(dir.path());
+            assert_eq!(routing.default_model, "Gemini 3.1 Pro (High)");
+            assert_eq!(routing.models.len(), 3);
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert_eq!(load_routing_from_disk(dir.path()).models.len(), 3);
+        std::fs::remove_dir(&path).unwrap();
+        for model in ["first model", "second model"] {
+            std::fs::write(
+                &path,
+                format!("default_model: {model}\nmodels: {{legacy: exact}}\n"),
+            )
+            .unwrap();
+            let routing = load_routing_from_disk(dir.path());
+            assert_eq!(routing.default_model, model);
+            assert_eq!(routing.models.get("legacy").unwrap(), "exact");
+        }
+    }
 
     #[test]
     fn legacy_pro_preview_maps_to_agy_high() {

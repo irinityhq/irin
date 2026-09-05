@@ -359,16 +359,6 @@ impl ProviderHealth {
             warn!(error = ?self.last_error, "circuit breaker OPEN — family marked unavailable");
         }
     }
-
-    /// Attempt recovery (called periodically or on explicit reset)
-    #[allow(dead_code)]
-    pub fn attempt_recovery(&mut self) {
-        if !self.available && self.consecutive_failures > 0 {
-            self.available = true;
-            self.consecutive_failures = 0;
-            info!("circuit breaker HALF-OPEN — allowing probe request");
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -777,27 +767,6 @@ impl SmartRouter {
     #[allow(dead_code)]
     pub async fn health_status(&self) -> HashMap<HealthKey, ProviderHealth> {
         self.health.read().await.clone()
-    }
-
-    /// Attempt recovery for a specific family
-    #[allow(dead_code)]
-    pub async fn recover_family(&self, provider: &str, family: &str) {
-        let key = (provider.to_string(), family.to_string());
-        let mut health = self.health.write().await;
-        if let Some(h) = health.get_mut(&key) {
-            h.attempt_recovery();
-        }
-    }
-
-    /// Attempt recovery for ALL families of a provider
-    #[allow(dead_code)]
-    pub async fn recover_provider(&self, provider: &str) {
-        let mut health = self.health.write().await;
-        for (key, h) in health.iter_mut() {
-            if key.0 == provider {
-                h.attempt_recovery();
-            }
-        }
     }
 }
 

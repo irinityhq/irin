@@ -7,6 +7,7 @@
 /scripts/ @iws17
 /council-rs/Makefile @iws17
 /council-rs/build.rs @iws17
+/council-rs/build_git.rs @iws17
 /council-rs/scripts/warroom-* @iws17
 /council-rs/warroom-tauri/src-tauri/build.rs @iws17
 /council-rs/warroom-tauri/scripts/ @iws17

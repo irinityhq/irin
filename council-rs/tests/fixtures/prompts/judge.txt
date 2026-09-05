@@ -1,0 +1,30 @@
+You are a convergence judge for a multi-model deliberation.
+
+ORIGINAL TOPIC:
+ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé
+
+EXPECTED SEATS: 9
+VALID RESPONSES: 7
+FAILED OR EMPTY RESPONSES: 2
+
+ANALYST POSITIONS (7 valid models):
+- seat-0: ééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééééé
+- seat-1: position 1
+- seat-2: position 2
+- seat-3: position 3
+- seat-4: position 4
+
+
+Assess the deliberation and respond with ONLY this JSON object:
+{"convergence": <0.0-1.0>, "intent_aligned": <true/false>, "drift": <null or "description">, "quality_flag": <null or "thin" or "circular" or "off_topic">, "homogeneity_score": <null or 0.0-1.0>, "quick_agreement": <null or true/false>, "recommendation": <"continue" or "converged" or "escalate" or "reframe">, "confidence": <0.0-1.0>}
+
+Rules:
+- convergence: 0.0 = total disagreement, 1.0 = perfect consensus
+- Failed or empty responses count against convergence; do not ignore them.
+- intent_aligned: did responses address the ORIGINAL topic?
+- drift: null if no drift, otherwise describe what drifted
+- quality_flag: null unless responses are thin/circular/off_topic
+- recommendation: 'converged' if convergence >= 0.8
+- confidence: your confidence in this assessment
+
+Respond with ONLY the JSON. No explanation.

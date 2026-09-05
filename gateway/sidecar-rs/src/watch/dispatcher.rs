@@ -2908,7 +2908,7 @@ fn parse_proposal_body(body: &str) -> Result<Value, ProposalParseError> {
     // Value so the success path parses exactly once through serde.
     let (slice, value) = match serde_json::from_str::<Value>(body) {
         Ok(v) => (body, v),
-        Err(raw_err) => match extract_first_json_fence(body) {
+        Err(raw_err) => match super::startup_probe::extract_first_json_fence(body) {
             Some(fenced) => match serde_json::from_str::<Value>(fenced) {
                 Ok(v) => (fenced, v),
                 // A fence was present but its inner is not valid JSON -> malformed, not a
@@ -2928,22 +2928,6 @@ fn parse_proposal_body(body: &str) -> Result<Value, ProposalParseError> {
     sovereign_protocol::jcs::to_jcs_bytes_strict(slice).map_err(ProposalParseError::Strict)?;
 
     Ok(value)
-}
-
-/// Extract the content of the first ```json ... ``` (or bare ``` ... ```) fence.
-fn extract_first_json_fence(text: &str) -> Option<&str> {
-    let start = text.find("```")?;
-    let after_start = &text[start + 3..];
-
-    let fence_start = if let Some(stripped) = after_start.strip_prefix("json") {
-        stripped.find('\n').map(|n| start + 3 + 4 + n + 1)?
-    } else {
-        after_start.find('\n').map(|n| start + 3 + n + 1)?
-    };
-
-    let rest = &text[fence_start..];
-    let end = rest.find("```")?;
-    Some(rest[..end].trim())
 }
 
 /// Fix B helper: insert an f64 into a signed JSON object only if it is finite.

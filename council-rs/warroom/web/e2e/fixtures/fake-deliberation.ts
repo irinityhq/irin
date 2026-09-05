@@ -7,11 +7,6 @@ export interface StreamEvent {
   data: Record<string, unknown>;
 }
 
-export interface DeliberationScriptStep {
-  delayMs?: number;
-  event: StreamEvent;
-}
-
 export interface InterventionWire {
   type: "intervention";
   payload: {
@@ -289,55 +284,4 @@ export class FakeDeliberationHarness {
     await this.delay(150);
     this.send(this.awaitingPause(1));
   }
-}
-
-/** Legacy helper — static script replay (no intervention handling). */
-export async function setupFakeDeliberation(
-  page: Page,
-  script: DeliberationScriptStep[],
-  opts: FakeDeliberationOptions = {},
-) {
-  const sessionId = opts.sessionId ?? "test_session_001";
-
-  await page.routeWebSocket("**/ws/deliberate", async (ws: WebSocketRoute) => {
-    let started = false;
-
-    ws.onMessage(async (message: string | Buffer) => {
-      let data: { type?: string };
-      try {
-        data = JSON.parse(
-          typeof message === "string" ? message : message.toString(),
-        );
-      } catch {
-        return;
-      }
-
-      if (data?.type === "start" && !started) {
-        started = true;
-        for (const step of script) {
-          if (step.delayMs && step.delayMs > 0) {
-            await new Promise((r) => setTimeout(r, step.delayMs));
-          }
-          const ev = { ...step.event, session_id: sessionId };
-          if (!ev.ts) ev.ts = new Date().toISOString();
-          ws.send(JSON.stringify(ev));
-        }
-      }
-    });
-  });
-}
-
-export function makeEvent(
-  type: string,
-  data: Record<string, unknown>,
-  sessionId = "test_session_001",
-): DeliberationScriptStep {
-  return {
-    event: {
-      type,
-      session_id: sessionId,
-      ts: new Date().toISOString(),
-      data,
-    },
-  };
 }

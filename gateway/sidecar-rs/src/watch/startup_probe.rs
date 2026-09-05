@@ -440,7 +440,7 @@ Only output the fence. No prose outside it."#,
 
 /// Extract the content of the first ```json ... ``` (or ``` ... ```) fence.
 /// Handles both "```json" and "```" variants.
-fn extract_first_json_fence(text: &str) -> Option<&str> {
+pub(crate) fn extract_first_json_fence(text: &str) -> Option<&str> {
     let start = text.find("```")?;
     let after_start = &text[start + 3..];
 

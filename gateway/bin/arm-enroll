@@ -23,11 +23,6 @@ if [ ! -x "$HELPER" ] || [ -n "$(find bin/arm-attest.swift -newer "$HELPER" 2>/d
   swiftc -O -o "$HELPER" bin/arm-attest.swift
 fi
 
-vol_sh() {
-  docker run --rm -i --user 0 -v "$SIDECAR_DATA_VOLUME":/var/lib/sidecar \
-    alpine:3.21 sh -c "$1"
-}
-
 echo "enrolling SE credential (Touch ID prompt incoming)..."
 RECORD=$("$HELPER" enroll --label "$LABEL")
 echo "new credential record:"

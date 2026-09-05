@@ -32,11 +32,6 @@ result() { # result <case> <PASS|FAIL> <detail>
   if [ "$2" = "PASS" ]; then PASS=$((PASS + 1)); else FAIL=$((FAIL + 1)); fi
 }
 
-curl_uds() {
-  docker run --rm -i --user 0 -v "$SIDECAR_SOCKET_VOLUME":/run/sidecar \
-    curlimages/curl:8.12.1 -s --unix-socket /run/sidecar/sidecar.sock "$@"
-}
-
 stage_rehearsal() {
   curl_uds -X POST http://localhost/watch/admin/producer/arm/stage \
     -H "Authorization: Bearer sovereign-op:$TOK" \

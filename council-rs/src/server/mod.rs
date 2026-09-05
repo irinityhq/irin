@@ -558,3 +558,28 @@ pub(crate) use ws_deliberate::{build_smoke_seat_events, smoke_divergence_points}
 #[cfg(test)]
 #[path = "bind_hardening_tests.rs"]
 mod bind_hardening_tests;
+
+#[cfg(test)]
+mod test_support {
+    use super::*;
+
+    pub(super) fn empty_config() -> Arc<Config> {
+        Arc::new(Config {
+            cabinets: std::collections::HashMap::new(),
+            models: crate::types::ModelRegistry {
+                models: std::collections::HashMap::new(),
+            },
+            roles: crate::types::RolesConfig::default(),
+            tera: tera::Tera::default(),
+            base_dir: std::env::temp_dir(),
+        })
+    }
+
+    pub(super) fn test_app_state(sem_permits: usize) -> AppState {
+        AppState {
+            config: empty_config(),
+            librarian: librarian::routes::LibrarianState::from_env(),
+            deliberate_semaphore: Arc::new(Semaphore::new(sem_permits)),
+        }
+    }
+}
