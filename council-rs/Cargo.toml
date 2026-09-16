@@ -55,10 +55,6 @@ tracing = "0.1.44"
 base64 = "0.22"
 ed25519-dalek = "2"
 
-# Unix process-group kill on budget-guard timeout (B-23).
-[target.'cfg(unix)'.dependencies]
-libc = "0.2"
-
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
 # WebSocket client for /ws/librarian integration tests (R20). Pinned to the
