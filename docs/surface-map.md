@@ -126,7 +126,7 @@ for quarantine defaults and incident handling.
 | Rate limits | Global, per-IP, and per-key buckets, with configured exempt CIDRs. |
 | Admin key lifecycle | Bootstrap or admin-tier provision and revoke; an admin cannot revoke itself. |
 | Budget | Defaults to $10 per 24 hours per key; optional SQLite persistence. |
-| Cache | `gateway:cache:v5:` prefix with local, Redis, or SQLite backends. |
+| Cache | `gateway:cache:v6:` prefix with local, Redis, or SQLite backends. |
 | Smart router | Scores quality, latency, cost, and risk, with per-family health. |
 | Policy and guards | Sensitivity routing, decontamination, shape, sovereignty, and tool checks. |
 | Ledger | Sign, verify, and export; verify and export require admin `X-Admin-Key`. |

@@ -34,7 +34,7 @@ Council↔Gateway wire contract, and [`watch-api.md`](watch-api.md) for Watch.
 
 ## Cache and router
 
-- Response cache prefix `gateway:cache:v5:`; hit path can short-circuit Lua.
+- Response cache prefix `gateway:cache:v6:`; hit path can short-circuit Lua.
 - Smart router scores models from `models.json` (quality/latency/cost/risk)
   with strategies `quality|balanced|economy|speed`.
 - Provider **family** health is isolated so one family's 429s do not darken
