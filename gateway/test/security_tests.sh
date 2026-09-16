@@ -42,6 +42,16 @@ fail() { echo -e "${RED}FAIL${NC}: $1"; FAIL_COUNT=$((FAIL_COUNT + 1)); }
 skip() { echo -e "${YELLOW}SKIP${NC}: $1"; SKIP_COUNT=$((SKIP_COUNT + 1)); }
 section() { echo -e "\n${BLUE}=== $1 ===${NC}"; }
 
+# Sidecar is UDS-only in Compose (no TCP :9000). Probe /health on the
+# named-volume socket from a throwaway curl container — same shape as demo.sh.
+CURL_IMG="${CURL_IMG:-curlimages/curl:8.12.1}"
+COMPOSE_PROJECT_NAME="${COMPOSE_PROJECT_NAME:-gateway}"
+SIDECAR_SOCK_VOL="${COMPOSE_PROJECT_NAME}_sidecar_sock"
+curl_uds() {
+    docker run --rm -i --user 0 -v "${SIDECAR_SOCK_VOL}:/run/sidecar" \
+        "$CURL_IMG" -sS --unix-socket /run/sidecar/sidecar.sock "$@"
+}
+
 SIDECAR_STOPPED=0
 restart_sidecar() {
     if [ "$SIDECAR_STOPPED" = "1" ]; then
@@ -52,8 +62,10 @@ restart_sidecar() {
 
         local attempt=0
         while [ "$attempt" -lt 20 ]; do
-            if docker compose exec -T sidecar wget -q -O /dev/null \
-                http://127.0.0.1:9000/health >/dev/null 2>&1; then
+            local code
+            code="$(curl_uds -o /dev/null -w '%{http_code}' --max-time 2 \
+                http://localhost/health 2>/dev/null || true)"
+            if [ "$code" = "200" ]; then
                 SIDECAR_STOPPED=0
                 return 0
             fi
