@@ -707,6 +707,7 @@ dependencies = [
  "fastembed",
  "futures-util",
  "hex",
+ "libc",
  "regex",
  "reqwest 0.13.4",
  "serde",

@@ -99,12 +99,9 @@ pub async fn fetch_budget_signal(
         Err(_elapsed) => {
             #[cfg(unix)]
             if let Some(pid) = child_pid {
-                // Negative PID: signal the whole process group (POSIX).
-                let _ = std::process::Command::new("kill")
-                    .args(["-KILL", &format!("-{pid}")])
-                    .stdout(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .status();
+                // Negative pid = process group (POSIX). Use libc: Linux
+                // `/bin/kill -KILL -$pid` is a no-op without `--` (procps).
+                let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
             }
             let _ = child.start_kill();
             let _ = child.wait().await;
