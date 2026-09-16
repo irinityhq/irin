@@ -67,7 +67,7 @@ pub async fn fetch_budget_signal(profile: Option<&str>, _task_id: Option<&str>) 
         format!("{home}/.hermes/scripts/hermes-budget-guard.sh")
     });
 
-    let mut child = match tokio::process::Command::new(&guard)
+    let child = match tokio::process::Command::new(&guard)
         .arg("--query-remaining")
         .arg(profile)
         .stdout(std::process::Stdio::piped())
