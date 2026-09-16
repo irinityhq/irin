@@ -189,6 +189,12 @@ impl SessionDirs {
     }
 }
 
+impl Drop for SessionDirs {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 fn saved_session(dirs: &SessionDirs) -> serde_json::Value {
     let path = fs::read_dir(dirs.root.join("sessions"))
         .expect("read sessions dir")
