@@ -59,7 +59,10 @@ pub(crate) fn has_usable_seat_response(rounds: &[RoundResult]) -> bool {
 /// Fetches real-time daily remaining from hermes-budget-guard.sh (respects caps, no bypass).
 /// Returns (formatted_signal, tier). On guard miss, timeout, or failure: empty
 /// signal + UNKNOWN (D-06 omit-signal path).
-pub async fn fetch_budget_signal(profile: Option<&str>, _task_id: Option<&str>) -> (String, String) {
+pub async fn fetch_budget_signal(
+    profile: Option<&str>,
+    _task_id: Option<&str>,
+) -> (String, String) {
     let profile = profile.unwrap_or("default");
     // Overridable for non-default installs; an absent or failing guard emits no signal.
     let guard = std::env::var("HERMES_BUDGET_GUARD_SCRIPT").unwrap_or_else(|_| {

@@ -214,11 +214,7 @@ async fn budget_signal_timeout_omits_and_does_not_block_runtime() {
     let previous_guard = std::env::var_os("HERMES_BUDGET_GUARD_SCRIPT");
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("slow-budget-guard.sh");
-    std::fs::write(
-        &script,
-        "#!/bin/sh\nsleep 60\necho REMAINING_USD=1\n",
-    )
-    .unwrap();
+    std::fs::write(&script, "#!/bin/sh\nsleep 60\necho REMAINING_USD=1\n").unwrap();
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
