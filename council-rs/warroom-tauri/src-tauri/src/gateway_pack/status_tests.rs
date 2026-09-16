@@ -1221,3 +1221,32 @@ fn cold_launch_preload_flight_fences_background_keychain_reads() {
     assert_eq!(store.get_count(), 1, "post-flight miss reads once");
     invalidate_arm_principal_observation();
 }
+
+#[test]
+fn cold_launch_fence_wins_over_seeded_arm_observation() {
+    // B-19: a warm ARM_PRINCIPAL_OBSERVATION must not bypass the cold-launch
+    // fence — check in-flight before the observation cache.
+    use crate::keychain::{
+        begin_cold_launch_preload, invalidate_arm_principal_observation, resolve_arm_principal,
+        seed_arm_principal_observation, ArmPrincipalProbeMode,
+    };
+    let _lock = test_env_lock();
+    let store = CountingKeychainStore::with_gw_key();
+    seed_arm_principal_observation(true);
+    let before = store.get_count();
+
+    let fence = begin_cold_launch_preload();
+    let (arm_present, arm_token) =
+        resolve_arm_principal(&store, ArmPrincipalProbeMode::BackgroundCached);
+    assert_eq!(
+        store.get_count(),
+        before,
+        "fenced arm probe must not read Keychain even with a warm observation"
+    );
+    assert!(
+        !arm_present && arm_token.is_none(),
+        "fence must win over seeded observation=true"
+    );
+    drop(fence);
+    invalidate_arm_principal_observation();
+}

@@ -57,40 +57,59 @@ pub(crate) fn has_usable_seat_response(rounds: &[RoundResult]) -> bool {
 
 /// BATS Wedge 1: Lightweight budget tracker injection.
 /// Fetches real-time daily remaining from hermes-budget-guard.sh (respects caps, no bypass).
-/// Returns (formatted_signal, tier).
-pub fn fetch_budget_signal(profile: Option<&str>, _task_id: Option<&str>) -> (String, String) {
+/// Returns (formatted_signal, tier). On guard miss, timeout, or failure: empty
+/// signal + UNKNOWN (D-06 omit-signal path).
+pub async fn fetch_budget_signal(
+    profile: Option<&str>,
+    _task_id: Option<&str>,
+) -> (String, String) {
     let profile = profile.unwrap_or("default");
     // Overridable for non-default installs; an absent or failing guard emits no signal.
     let guard = std::env::var("HERMES_BUDGET_GUARD_SCRIPT").unwrap_or_else(|_| {
         let home = std::env::var("HOME").unwrap_or_default();
         format!("{home}/.hermes/scripts/hermes-budget-guard.sh")
     });
-    let out = Command::new(&guard)
+
+    let child = match tokio::process::Command::new(&guard)
         .arg("--query-remaining")
         .arg(profile)
-        .output();
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()
+    {
+        Ok(child) => child,
+        Err(_) => return (String::new(), "UNKNOWN".to_string()),
+    };
 
-    let (remaining, spent, cap, pct) = match out {
-        Ok(o) if o.status.success() => {
-            let s = String::from_utf8_lossy(&o.stdout);
-            let mut rem = 7.0f64;
-            let mut sp = 0.0f64;
-            let mut c = 7.0f64;
-            let mut p = 0i32;
-            for line in s.lines() {
-                if let Some(v) = line.strip_prefix("REMAINING_USD=") {
-                    rem = v.trim().parse().unwrap_or(7.0);
-                } else if let Some(v) = line.strip_prefix("SPENT_USD=") {
-                    sp = v.trim().parse().unwrap_or(0.0);
-                } else if let Some(v) = line.strip_prefix("CAP_USD=") {
-                    c = v.trim().parse().unwrap_or(7.0);
-                } else if let Some(v) = line.strip_prefix("PERCENT_USED=") {
-                    p = v.trim().parse().unwrap_or(0);
-                }
-            }
-            (rem, sp, c, p)
-        }
+    // Bounded wait so a hung guard cannot stall the async worker (B-23).
+    // On timeout the Child drops with kill_on_drop(true) and is reaped.
+    const GUARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+    let out = match tokio::time::timeout(GUARD_TIMEOUT, child.wait_with_output()).await {
+        Ok(Ok(output)) => output,
         _ => return (String::new(), "UNKNOWN".to_string()),
+    };
+
+    let (remaining, spent, cap, pct) = if out.status.success() {
+        let s = String::from_utf8_lossy(&out.stdout);
+        let mut rem = 7.0f64;
+        let mut sp = 0.0f64;
+        let mut c = 7.0f64;
+        let mut p = 0i32;
+        for line in s.lines() {
+            if let Some(v) = line.strip_prefix("REMAINING_USD=") {
+                rem = v.trim().parse().unwrap_or(7.0);
+            } else if let Some(v) = line.strip_prefix("SPENT_USD=") {
+                sp = v.trim().parse().unwrap_or(0.0);
+            } else if let Some(v) = line.strip_prefix("CAP_USD=") {
+                c = v.trim().parse().unwrap_or(7.0);
+            } else if let Some(v) = line.strip_prefix("PERCENT_USED=") {
+                p = v.trim().parse().unwrap_or(0);
+            }
+        }
+        (rem, sp, c, p)
+    } else {
+        return (String::new(), "UNKNOWN".to_string());
     };
 
     let tier = if pct >= 90 || remaining < 0.5 {
@@ -612,7 +631,8 @@ async fn prepare_deliberation(
     let (budget_signal, budget_tier) = fetch_budget_signal(
         std::env::var("HERMES_PROFILE").ok().as_deref(),
         Some(&session_id),
-    );
+    )
+    .await;
     if verbose {
         eprintln!(
             "  BATS: {} | Tier: {} (injected to prompts + seats)",

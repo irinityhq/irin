@@ -181,7 +181,7 @@ async fn budget_signal_empty_on_guard_miss() {
         std::env::set_var("HERMES_BUDGET_GUARD_SCRIPT", &missing_guard);
     }
 
-    let (signal, tier) = deliberate::fetch_budget_signal(Some("default"), Some("test-task"));
+    let (signal, tier) = deliberate::fetch_budget_signal(Some("default"), Some("test-task")).await;
 
     unsafe {
         match previous_guard {
@@ -204,6 +204,72 @@ async fn budget_signal_empty_on_guard_miss() {
     assert_eq!(tier, "UNKNOWN");
     assert!(!prompt.contains("REMAINING_USD"));
     assert!(!prompt.contains("$7"));
+}
+
+#[tokio::test]
+async fn budget_signal_timeout_omits_and_does_not_block_runtime() {
+    // B-23: a slow HERMES_BUDGET_GUARD_SCRIPT must omit the signal (D-06),
+    // leave no child, and let a concurrent task keep progressing.
+    let _guard = env_lock().await;
+    let previous_guard = std::env::var_os("HERMES_BUDGET_GUARD_SCRIPT");
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("slow-budget-guard.sh");
+    std::fs::write(&script, "#!/bin/sh\nsleep 60\necho REMAINING_USD=1\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&script).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&script, perms).unwrap();
+    }
+    unsafe {
+        std::env::set_var("HERMES_BUDGET_GUARD_SCRIPT", &script);
+    }
+
+    let progressing = tokio::spawn(async {
+        let mut ticks = 0u32;
+        for _ in 0..20 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            ticks += 1;
+        }
+        ticks
+    });
+
+    let started = std::time::Instant::now();
+    let (signal, tier) =
+        deliberate::fetch_budget_signal(Some("default"), Some("test-task-timeout")).await;
+    let elapsed = started.elapsed();
+    let ticks = progressing.await.expect("concurrent task");
+
+    unsafe {
+        match previous_guard {
+            Some(value) => std::env::set_var("HERMES_BUDGET_GUARD_SCRIPT", value),
+            None => std::env::remove_var("HERMES_BUDGET_GUARD_SCRIPT"),
+        }
+    }
+
+    assert!(signal.is_empty(), "timeout must omit budget signal");
+    assert_eq!(tier, "UNKNOWN");
+    assert!(
+        elapsed < std::time::Duration::from_secs(15),
+        "guard timeout must be bounded, got {elapsed:?}"
+    );
+    assert!(
+        ticks >= 10,
+        "concurrent task must keep progressing during slow guard (ticks={ticks})"
+    );
+    // Child should be gone (kill_on_drop / timeout path).
+    let leftover = std::process::Command::new("pgrep")
+        .args(["-f", "slow-budget-guard.sh"])
+        .output()
+        .ok();
+    if let Some(out) = leftover {
+        assert!(
+            out.stdout.is_empty(),
+            "slow budget guard child must not remain: {}",
+            String::from_utf8_lossy(&out.stdout)
+        );
+    }
 }
 
 #[tokio::test]

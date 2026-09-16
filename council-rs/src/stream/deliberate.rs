@@ -1127,7 +1127,8 @@ async fn run_phase_rounds(
     let (budget_signal, _) = crate::engine::deliberate::fetch_budget_signal(
         std::env::var("HERMES_PROFILE").ok().as_deref(),
         Some(session_id),
-    );
+    )
+    .await;
     let mut cabinet = ready.cabinet.clone();
     cabinet.rounds = ready.rounds_planned;
     let prepared = PreparedDeliberation {

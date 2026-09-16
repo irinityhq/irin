@@ -424,13 +424,15 @@ end
 -- @param alias                       string  Client-supplied model alias
 -- @param raw_body                    string  Literal request body bytes
 -- @param expected_translator_version number  translator.TRANSLATOR_VERSION
+-- @param sensitivity                 string|nil  GREEN/YELLOW/RED (B-21; default GREEN)
 -- @return table|nil  { hit, response (native shape), provider, latency_ms }
 -- @return string|nil Error
-function _M.cache_check(alias, raw_body, expected_translator_version)
+function _M.cache_check(alias, raw_body, expected_translator_version, sensitivity)
     return sidecar_post("/cache/check", {
         alias                       = alias,
         raw_body                    = raw_body,
         expected_translator_version = expected_translator_version,
+        sensitivity                 = sensitivity or "GREEN",
     })
 end
 
@@ -448,7 +450,8 @@ end
 -- @param provider            string  Provider name ("anthropic", "xai", ...)
 -- @param translator_version  number  translator.TRANSLATOR_VERSION
 -- @param ttl_secs            number|nil  TTL in seconds (default: 24h)
-function _M.cache_store(alias, raw_body, native_response, provider, translator_version, ttl_secs)
+-- @param sensitivity         string|nil  GREEN/YELLOW/RED (B-21; default GREEN)
+function _M.cache_store(alias, raw_body, native_response, provider, translator_version, ttl_secs, sensitivity)
     return sidecar_post("/cache/store", {
         alias              = alias,
         raw_body           = raw_body,
@@ -456,6 +459,7 @@ function _M.cache_store(alias, raw_body, native_response, provider, translator_v
         provider           = provider,
         translator_version = translator_version,
         ttl_secs           = ttl_secs,
+        sensitivity        = sensitivity or "GREEN",
     })
 end
 

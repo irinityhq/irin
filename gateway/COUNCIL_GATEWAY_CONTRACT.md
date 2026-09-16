@@ -37,7 +37,7 @@ and decontaminator verdicts (Axis 2) into the same tamper-evident chain.
 | Field            | Value     |
 |------------------|-----------|
 | Contract version | 2         |
-| Cache key prefix | `gateway:cache:v5:` (canonical: `CACHE_KEY_PREFIX` in `sidecar-rs/src/cache.rs`) |
+| Cache key prefix | `gateway:cache:v6:` (canonical: `CACHE_KEY_PREFIX` in `sidecar-rs/src/cache.rs`) |
 | Trust root file  | `${LEDGER_SIGNING_KEY_PATH:-$HOME/.irin/ledger_key.pem}` |
 | UDS path (in container) | `/run/sidecar/sidecar.sock` |
 
@@ -213,19 +213,21 @@ Vertex streams are translated chunk-by-chunk to OpenAI SSE shape in
 ## Cache key
 
 ```
-SHA-256(alias || 0x00 || raw_body_bytes)
+SHA-256(alias || 0x00 || sensitivity || 0x00 || raw_body_bytes)
 prefix:  see CACHE_KEY_PREFIX in sidecar-rs/src/cache.rs
-         (currently "gateway:cache:v5:")
+         (currently "gateway:cache:v6:")
 ```
 
 * `alias` is the **client-supplied** model name (e.g. `"opus"`),
   not the resolved provider model id (e.g. `"claude-opus-4-7"`).
   Two different aliases that resolve to the same model are cached
   separately. This is intentional — the alias is the cache identity.
+* `sensitivity` is the caller-declared GREEN/YELLOW/RED level so a RED
+  request cannot hit a GREEN-cached cloud response (B-21).
 * `raw_body_bytes` are the literal HTTP request body, not a re-encoded
   JSON form. Hashing the original bytes prevents drift between Lua
   `cjson.safe` and Rust `serde_json` canonicalization.
-* The current prefix is `v5`; `CACHE_KEY_PREFIX` is authoritative. Entries
+* The current prefix is `v6`; `CACHE_KEY_PREFIX` is authoritative. Entries
   written under older prefixes are unreachable and age out of TTL.
 
 ---

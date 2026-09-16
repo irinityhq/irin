@@ -71,6 +71,64 @@ pub fn is_valid_cabinet_name(name: &str) -> bool {
         .all(|&b| head(b) || b == b'_' || b == b'-')
 }
 
+/// Charset-valid name that is also a single `Normal` path component.
+///
+/// Explicit `contains('/')` / `contains("..")` guards match the barriers used in
+/// `mapmaker::get_brief` and `drift::get_report` — CodeQL `rust/path-injection`
+/// models those string checks; charset-only validation is not enough.
+fn sanitized_cabinet_stem(name: &str) -> Result<&str, SaveError> {
+    if !is_valid_cabinet_name(name) {
+        return Err(SaveError::InvalidName);
+    }
+    // Same barrier shape as mapmaker/drift (CodeQL path-injection).
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(SaveError::InvalidName);
+    }
+    let mut parts = Path::new(name).components();
+    match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(os)), None) if os == std::ffi::OsStr::new(name) => {
+            Ok(name)
+        }
+        _ => Err(SaveError::InvalidName),
+    }
+}
+
+/// Join `file_name` under `dir` and refuse any escape (separators / `..`).
+fn join_under_dir(dir: &Path, file_name: &str) -> std::io::Result<PathBuf> {
+    // Barrier first — same shape as mapmaker/drift — before any Path::join.
+    if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cabinet path component rejected",
+        ));
+    }
+    let mut parts = Path::new(file_name).components();
+    match (parts.next(), parts.next()) {
+        (Some(std::path::Component::Normal(os)), None) if os == std::ffi::OsStr::new(file_name) => {
+        }
+        _ => {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cabinet path component rejected",
+            ));
+        }
+    }
+    let joined = dir.join(file_name);
+    if joined.parent() != Some(dir) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cabinet path escaped cabinets directory",
+        ));
+    }
+    match joined.file_name().and_then(|n| n.to_str()) {
+        Some(n) if n == file_name => Ok(joined),
+        _ => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cabinet path file_name mismatch",
+        )),
+    }
+}
+
 #[derive(Debug)]
 pub enum SaveError {
     InvalidName,
@@ -101,9 +159,7 @@ impl std::error::Error for SaveError {}
 /// (canonical hash stamped) so the caller can run the full execution
 /// validation (`validate_cabinet_for_execution`) before writing.
 pub fn validate_save_request(name: &str, yaml: &str) -> Result<Cabinet, SaveError> {
-    if !is_valid_cabinet_name(name) {
-        return Err(SaveError::InvalidName);
-    }
+    let name = sanitized_cabinet_stem(name)?;
     if EMBEDDED_CABINET_KEYS.contains(&name) {
         return Err(SaveError::EmbeddedKey(name.to_string()));
     }
@@ -114,15 +170,42 @@ pub fn validate_save_request(name: &str, yaml: &str) -> Result<Cabinet, SaveErro
 /// (tmp write → fsync → rename). The caller must have validated `name` and
 /// `yaml` via `validate_save_request` first.
 pub fn write_cabinet_yaml(base_dir: &Path, name: &str, yaml: &str) -> std::io::Result<PathBuf> {
-    debug_assert!(is_valid_cabinet_name(name), "caller must validate the name");
+    let name = sanitized_cabinet_stem(name).map_err(|_| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cabinet name failed path sanitization",
+        )
+    })?;
+    // Inline mapmaker/drift-shaped barrier on the same SSA value used below so
+    // rust/path-injection cannot miss an interprocedural sanitizer.
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cabinet name failed path sanitization",
+        ));
+    }
     let dir = base_dir.join("cabinets");
     std::fs::create_dir_all(&dir)?;
-    let target = dir.join(format!("{name}.yaml"));
+    let target_name = format!("{name}.yaml");
+    if target_name.contains('/') || target_name.contains('\\') || target_name.contains("..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cabinet path component rejected",
+        ));
+    }
+    let target = join_under_dir(&dir, &target_name)?;
     // Per-write unique tmp name so concurrent saves of the same cabinet don't
     // clobber each other's tmp file before the atomic rename. PID guards
     // cross-process collisions; the counter guards intra-process ones.
     let nonce = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = dir.join(format!("{name}.yaml.{}.{nonce}.tmp", std::process::id()));
+    let tmp_name = format!("{name}.yaml.{}.{nonce}.tmp", std::process::id());
+    if tmp_name.contains('/') || tmp_name.contains('\\') || tmp_name.contains("..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cabinet path component rejected",
+        ));
+    }
+    let tmp = join_under_dir(&dir, &tmp_name)?;
     {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp)?;
@@ -192,7 +275,24 @@ chair:
             over.as_str(),
         ] {
             assert!(!is_valid_cabinet_name(bad), "{bad:?} should be rejected");
+            assert!(
+                matches!(sanitized_cabinet_stem(bad), Err(SaveError::InvalidName)),
+                "{bad:?} must fail path sanitization"
+            );
         }
+    }
+
+    #[test]
+    fn write_rejects_unsanitized_name_before_filesystem() {
+        let base = temp_base();
+        let err = write_cabinet_yaml(&base, "../etc/passwd", VALID_YAML).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(
+            !base.join("cabinets").exists()
+                || base.join("cabinets").read_dir().unwrap().next().is_none(),
+            "rejected name must not create cabinet files"
+        );
+        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]

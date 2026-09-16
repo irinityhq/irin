@@ -880,8 +880,8 @@ function _M.route()
     -- STEP 2: Cache check — short-circuit on hit.
     -- Streaming requests skip cache entirely — a cached JSON response
     -- served to an SSE-expecting client would break the wire format.
-    -- Cache key is hashed from (alias, raw_body) on the Rust side. Hashing
-    -- the literal request bytes (not a re-encoded JSON form) avoids
+    -- Cache key is hashed from (alias, sensitivity, raw_body) on the Rust side.
+    -- Hashing the literal request bytes (not a re-encoded JSON form) avoids
     -- canonicalization drift between cjson and serde_json. See
     -- sidecar-rs/src/cache.rs::generate_cache_key.
     --
@@ -904,7 +904,7 @@ function _M.route()
         ngx.log(ngx.DEBUG, "router: cache skip — council model (idempotency owned by council branch)")
     else
     cache_result = sidecar.cache_check(
-        record.alias, record.raw_body, translator.TRANSLATOR_VERSION
+        record.alias, record.raw_body, translator.TRANSLATOR_VERSION, record.sensitivity
     )
     -- Demote-to-miss guard: B1's fix made the cache intentionally store
     -- *native* upstream shape, with re-translation on hit being load-bearing.
@@ -928,6 +928,20 @@ function _M.route()
         if not transport_ok then
             ngx.log(ngx.INFO, "router: exact-transport cache mismatch; treating as miss")
             cache_result = nil
+        end
+    end
+    if cache_result and cache_result.hit then
+        -- B-21: STEP 5 policy must run before serving a hit. Use the cached
+        -- provider (routing has not run yet on this path).
+        local hit_provider = cache_result.provider
+        if hit_provider and hit_provider ~= "" then
+            local hit_policy = sidecar.policy_evaluate(hit_provider, record.sensitivity)
+            -- Match STEP 5: nil policy fail-closed; dry_run denials still allow the hit.
+            if not hit_policy or (not hit_policy.allowed and not hit_policy.dry_run) then
+                ngx.log(ngx.INFO, "router: cache hit denied by sensitivity policy; treating as miss",
+                        " provider=", hit_provider, " sensitivity=", record.sensitivity)
+                cache_result = nil
+            end
         end
     end
     if cache_result and cache_result.hit then

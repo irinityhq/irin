@@ -1124,9 +1124,9 @@ function _M.account()
         end
         ledger_record(fb_provider, "client", ledger_payload, ledger_metadata, fb_caller_key)
 
-        -- Cache successful responses keyed on (alias, raw_body) — same
-        -- key cache_check used at access time. We store the NATIVE body
-        -- plus the provider and translator version so router.lua can
+        -- Cache successful responses keyed on (alias, sensitivity, raw_body) —
+        -- same key cache_check used at access time (B-21). We store the NATIVE
+        -- body plus the provider and translator version so router.lua can
         -- re-translate on hit. This makes cache hits indistinguishable
         -- from fresh requests in wire shape, and lets us invalidate stale
         -- entries after any translator change without a manual sweep.
@@ -1135,7 +1135,7 @@ function _M.account()
             if resp_decoded then
                 sidecar_cache_store(
                     fb_alias, fb_raw_body, resp_decoded,
-                    fb_provider, fb_translator_version, nil
+                    fb_provider, fb_translator_version, nil, fb_sensitivity
                 )
             end
         end
