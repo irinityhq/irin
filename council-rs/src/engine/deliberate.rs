@@ -70,24 +70,60 @@ pub async fn fetch_budget_signal(
         format!("{home}/.hermes/scripts/hermes-budget-guard.sh")
     });
 
-    let child = match tokio::process::Command::new(&guard)
-        .arg("--query-remaining")
+    let mut cmd = tokio::process::Command::new(&guard);
+    cmd.arg("--query-remaining")
         .arg(profile)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
-        .kill_on_drop(true)
-        .spawn()
+        .kill_on_drop(true);
+    // Own process group so a timeout kill reaps shell descendants (e.g. sleep).
+    // kill_on_drop alone only signals the group leader.
+    #[cfg(unix)]
     {
+        cmd.process_group(0);
+    }
+
+    let mut child = match cmd.spawn() {
         Ok(child) => child,
         Err(_) => return (String::new(), "UNKNOWN".to_string()),
     };
+    let child_pid = child.id();
+    let mut stdout = child.stdout.take();
+    let mut stderr = child.stderr.take();
 
     // Bounded wait so a hung guard cannot stall the async worker (B-23).
-    // On timeout the Child drops with kill_on_drop(true) and is reaped.
     const GUARD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
-    let out = match tokio::time::timeout(GUARD_TIMEOUT, child.wait_with_output()).await {
-        Ok(Ok(output)) => output,
-        _ => return (String::new(), "UNKNOWN".to_string()),
+    let status = match tokio::time::timeout(GUARD_TIMEOUT, child.wait()).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(_)) => return (String::new(), "UNKNOWN".to_string()),
+        Err(_elapsed) => {
+            #[cfg(unix)]
+            if let Some(pid) = child_pid {
+                // Negative PID: signal the whole process group (POSIX).
+                let _ = std::process::Command::new("kill")
+                    .args(["-KILL", &format!("-{pid}")])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return (String::new(), "UNKNOWN".to_string());
+        }
+    };
+
+    let mut stdout_buf = Vec::new();
+    let mut stderr_buf = Vec::new();
+    if let Some(ref mut pipe) = stdout {
+        let _ = tokio::io::AsyncReadExt::read_to_end(pipe, &mut stdout_buf).await;
+    }
+    if let Some(ref mut pipe) = stderr {
+        let _ = tokio::io::AsyncReadExt::read_to_end(pipe, &mut stderr_buf).await;
+    }
+    let out = std::process::Output {
+        status,
+        stdout: stdout_buf,
+        stderr: stderr_buf,
     };
 
     let (remaining, spent, cap, pct) = if out.status.success() {

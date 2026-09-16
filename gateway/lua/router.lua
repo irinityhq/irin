@@ -936,7 +936,8 @@ function _M.route()
         local hit_provider = cache_result.provider
         if hit_provider and hit_provider ~= "" then
             local hit_policy = sidecar.policy_evaluate(hit_provider, record.sensitivity)
-            if not hit_policy or not hit_policy.allowed then
+            -- Match STEP 5: nil policy fail-closed; dry_run denials still allow the hit.
+            if not hit_policy or (not hit_policy.allowed and not hit_policy.dry_run) then
                 ngx.log(ngx.INFO, "router: cache hit denied by sensitivity policy; treating as miss",
                         " provider=", hit_provider, " sensitivity=", record.sensitivity)
                 cache_result = nil
