@@ -290,6 +290,8 @@ async fn budget_signal_timeout_omits_and_does_not_block_runtime() {
     if let Some(pid) = sleep_pid {
         let alive = std::process::Command::new("kill")
             .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
             .unwrap_or(false);
