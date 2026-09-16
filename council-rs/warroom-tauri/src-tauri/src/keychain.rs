@@ -802,15 +802,17 @@ pub fn resolve_arm_principal(
     match mode {
         ArmPrincipalProbeMode::AuthorityLive(token) => (token.is_some(), token.map(str::to_string)),
         ArmPrincipalProbeMode::BackgroundCached => {
-            if let Ok(observation) = ARM_PRINCIPAL_OBSERVATION.lock() {
-                if let Some(present) = *observation {
-                    return (present, None);
-                }
-            }
+            // Fence first (B-19): a peer test or earlier seed must not bypass
+            // the cold-launch flight via a stale observation hit.
             if cold_launch_preload_in_flight() {
                 // The flight seeds this observation; do not race it with a
                 // second Keychain read.
                 return (false, None);
+            }
+            if let Ok(observation) = ARM_PRINCIPAL_OBSERVATION.lock() {
+                if let Some(present) = *observation {
+                    return (present, None);
+                }
             }
             let token = load_arm_principal_token(store).ok().flatten();
             seed_arm_principal_observation(token.is_some());

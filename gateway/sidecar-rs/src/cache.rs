@@ -29,7 +29,7 @@ const REDIS_OP_TIMEOUT: Duration = Duration::from_millis(500);
 ///            provider:vertex. Alias/raw-body keys are unchanged, but cached
 ///            proxy responses have a different native response shape and
 ///            usage parser lineage than Vertex generateContent responses.
-pub const CACHE_KEY_PREFIX: &str = "gateway:cache:v5:";
+pub const CACHE_KEY_PREFIX: &str = "gateway:cache:v6:";
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CacheEntry {
@@ -302,7 +302,8 @@ impl GatewayCache {
         self
     }
 
-    /// Generate a deterministic cache key from the client alias and the raw request body bytes.
+    /// Generate a deterministic cache key from the client alias, sensitivity,
+    /// and the raw request body bytes.
     ///
     /// Hashing the literal request bytes (not a re-encoded JSON form) is intentional:
     /// JSON canonicalization differs between cjson (Lua) and serde_json (Rust), which
@@ -314,9 +315,13 @@ impl GatewayCache {
     /// Prefix v2 introduced raw-byte hashing; v3 added provider and
     /// translator version fields so cache hits can
     /// re-run translate_response and emit the correct wire shape.
-    pub fn generate_cache_key(alias: &str, raw_body: &str) -> String {
+    /// v6 includes sensitivity so a RED request cannot receive a response
+    /// cached under GREEN for the same alias+body (B-21).
+    pub fn generate_cache_key(alias: &str, sensitivity: &str, raw_body: &str) -> String {
         let mut hasher = Sha256::new();
         hasher.update(alias.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(sensitivity.as_bytes());
         hasher.update(b"\0");
         hasher.update(raw_body.as_bytes());
         let result = hasher.finalize();
@@ -420,6 +425,21 @@ mod tests {
         .await
         .expect("RedisCache get must complete promptly");
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn cache_key_includes_sensitivity() {
+        // B-21: RED and GREEN for the same alias+body must not share a key.
+        let green = GatewayCache::generate_cache_key("opus", "GREEN", r#"{"prompt":"x"}"#);
+        let red = GatewayCache::generate_cache_key("opus", "RED", r#"{"prompt":"x"}"#);
+        assert!(green.starts_with(CACHE_KEY_PREFIX));
+        assert!(red.starts_with(CACHE_KEY_PREFIX));
+        assert_ne!(green, red);
+        assert_eq!(
+            green,
+            GatewayCache::generate_cache_key("opus", "GREEN", r#"{"prompt":"x"}"#),
+            "key must be deterministic"
+        );
     }
 
     #[tokio::test]

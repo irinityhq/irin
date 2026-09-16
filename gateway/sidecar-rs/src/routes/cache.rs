@@ -13,11 +13,19 @@ use crate::AppState;
 pub(super) struct CacheCheckRequest {
     alias: String,
     raw_body: String,
+    /// Caller sensitivity (GREEN/YELLOW/RED). Part of the cache key so a RED
+    /// request cannot hit a GREEN-cached cloud response (B-21).
+    #[serde(default = "default_sensitivity")]
+    sensitivity: String,
     /// Lua's translator_version. The check returns hit=false if the cached
     /// entry's version doesn't match — cheap insurance against silent
     /// translator drift between cache writes and reads.
     #[serde(default = "default_translator_version")]
     expected_translator_version: u32,
+}
+
+fn default_sensitivity() -> String {
+    "GREEN".to_string()
 }
 
 fn default_translator_version() -> u32 {
@@ -39,6 +47,9 @@ pub(super) struct CacheCheckResponse {
 pub(super) struct CacheStoreRequest {
     alias: String,
     raw_body: String,
+    /// Caller sensitivity — must match cache_check keying (B-21).
+    #[serde(default = "default_sensitivity")]
+    sensitivity: String,
     /// The NATIVE upstream response shape. The Lua caller MUST pass the
     /// pre-translation body (gw_response_buf_native) — passing a normalized
     /// body would defeat the cache-shape invariant.
@@ -59,7 +70,7 @@ pub(super) async fn cache_check(
     Json(req): Json<CacheCheckRequest>,
 ) -> impl IntoResponse {
     let t0 = Instant::now();
-    let key = cache::GatewayCache::generate_cache_key(&req.alias, &req.raw_body);
+    let key = cache::GatewayCache::generate_cache_key(&req.alias, &req.sensitivity, &req.raw_body);
 
     match state.cache.get(&key).await {
         Some(entry) => {
@@ -100,7 +111,7 @@ pub(super) async fn cache_store(
     Json(req): Json<CacheStoreRequest>,
 ) -> impl IntoResponse {
     let t0 = Instant::now();
-    let key = cache::GatewayCache::generate_cache_key(&req.alias, &req.raw_body);
+    let key = cache::GatewayCache::generate_cache_key(&req.alias, &req.sensitivity, &req.raw_body);
 
     // Default TTL is 24 hours if not specified
     let ttl = req.ttl_secs.unwrap_or(86400);

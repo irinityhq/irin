@@ -183,3 +183,37 @@ pub(super) struct CabinetSaveRequest {
     name: String,
     yaml: String,
 }
+
+#[cfg(test)]
+mod json_body_required_tests {
+    use super::cabinets_save_handler;
+    use crate::server::test_support::test_app_state;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn cabinets_save_handler_rejects_text_plain() {
+        let app = Router::new()
+            .route("/api/cabinets/save", post(cabinets_save_handler))
+            .with_state(test_app_state(1));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/cabinets/save")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("x"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "cabinets_save_handler must reject a simple POST (B-10)"
+        );
+    }
+}

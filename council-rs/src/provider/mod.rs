@@ -757,6 +757,11 @@ pub fn check_providers_with_gateway(gw: bool) -> Vec<(&'static str, bool)> {
         ("fireworks", gw || env_nonempty("FIREWORKS_API_KEY")),
         ("perplexity", gw || env_nonempty("PERPLEXITY_API_KEY")),
         ("cohere", gw || env_nonempty("COHERE_API_KEY")),
+        // Env-keyed OpenAI-compat seats already in registry/dispatch (B-25).
+        // Keep this list explicit — do not derive from KNOWN_KEYS.
+        ("kimi", gw || env_nonempty("MOONSHOT_API_KEY")),
+        ("sambanova", gw || env_nonempty("SAMBANOVA_API_KEY")),
+        ("cerebras", gw || env_nonempty("CEREBRAS_API_KEY")),
         // Deterministic no-spend fixture for direct (non-governed) characterization.
         // Gateway has no mock adapter — never publish mock as available under gw.
         ("mock", !gw),
@@ -836,6 +841,60 @@ mod tests {
             Some(&false),
             "governed mode hides mock"
         );
+    }
+
+    #[test]
+    fn kimi_sambanova_cerebras_availability_follows_env_keys() {
+        // B-25: cabinet seats on these providers must pass/fail preflight with
+        // the matching key — do not derive the list from KNOWN_KEYS.
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let keys = [
+            ("kimi", "MOONSHOT_API_KEY"),
+            ("sambanova", "SAMBANOVA_API_KEY"),
+            ("cerebras", "CEREBRAS_API_KEY"),
+        ];
+        let previous: Vec<_> = keys
+            .iter()
+            .map(|(_, env)| (*env, std::env::var_os(env)))
+            .collect();
+        for (_, env) in &keys {
+            unsafe {
+                std::env::remove_var(env);
+            }
+        }
+        let without: std::collections::HashMap<_, _> =
+            check_providers_with_gateway(false).into_iter().collect();
+        for (slug, _) in &keys {
+            assert_eq!(
+                without.get(slug),
+                Some(&false),
+                "{slug} must fail closed without its key"
+            );
+        }
+        for (slug, env) in &keys {
+            unsafe {
+                std::env::set_var(env, "test-key-not-for-live-calls");
+            }
+            let with: std::collections::HashMap<_, _> =
+                check_providers_with_gateway(false).into_iter().collect();
+            assert_eq!(
+                with.get(slug),
+                Some(&true),
+                "{slug} must pass preflight with {env} set"
+            );
+            unsafe {
+                std::env::remove_var(env);
+            }
+        }
+        for (env, prev) in previous {
+            unsafe {
+                match prev {
+                    Some(v) => std::env::set_var(env, v),
+                    None => std::env::remove_var(env),
+                }
+            }
+        }
     }
 
     #[test]

@@ -78,3 +78,60 @@ pub(super) async fn mapmaker_run(
     }
     axum::Json(result).into_response()
 }
+
+#[cfg(test)]
+mod json_body_required_tests {
+    use super::{map_preview, mapmaker_run};
+    use crate::server::test_support::test_app_state;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::routing::post;
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn mapmaker_run_rejects_text_plain() {
+        let app = Router::new()
+            .route("/api/mapmaker/run", post(mapmaker_run))
+            .with_state(test_app_state(1));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/mapmaker/run")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("x"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "mapmaker_run must reject a simple POST (B-10)"
+        );
+    }
+
+    #[tokio::test]
+    async fn map_preview_rejects_text_plain() {
+        let app = Router::new()
+            .route("/api/map/preview", post(map_preview))
+            .with_state(test_app_state(1));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/map/preview")
+                    .header("content-type", "text/plain")
+                    .body(Body::from("x"))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "map_preview must reject a simple POST (B-10)"
+        );
+    }
+}
