@@ -189,6 +189,12 @@ impl SessionDirs {
     }
 }
 
+impl Drop for SessionDirs {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.root);
+    }
+}
+
 fn saved_session(dirs: &SessionDirs) -> serde_json::Value {
     let path = fs::read_dir(dirs.root.join("sessions"))
         .expect("read sessions dir")
@@ -1088,35 +1094,44 @@ async fn b06_engine_and_stream_hold_round_budget_and_evidence_contract() {
         stream.validate = true;
         stream.validate_gate = true;
         stream.budget_max_usd = budget;
-        let events = run_stream(stream, InterventionQueue::new(), CancellationToken::new()).await;
+        let events = tokio::time::timeout(
+            Duration::from_secs(60),
+            run_stream(stream, InterventionQueue::new(), CancellationToken::new()),
+        )
+        .await
+        .expect("b06 stream entry point timed out");
         assert_eq!(count_type(&events, "round_complete"), expected_rounds);
         assert_eq!(count_type(&events, "done"), 1);
         let streamed = saved_session(&dirs);
         let mut config = mock_config();
         config.cabinets.insert(cabinet.name.clone(), cabinet);
-        let engine = council_rs::engine::deliberate::run_with_cancel(
-            &config,
-            "b06-round-contract",
-            "stream characterization topic",
-            "Context",
-            Mode::TearDown,
-            true,
-            false,
-            false,
-            budget,
-            "best",
-            true,
-            "mock",
-            true,
-            council_rs::types::SessionOrigin::Api,
-            council_rs::engine::context::RequestContext {
-                via_gateway: Some(false),
-                ..Default::default()
-            },
-            None,
-            None,
+        let engine = tokio::time::timeout(
+            Duration::from_secs(60),
+            council_rs::engine::deliberate::run_with_cancel(
+                &config,
+                "b06-round-contract",
+                "stream characterization topic",
+                "Context",
+                Mode::TearDown,
+                true,
+                false,
+                false,
+                budget,
+                "best",
+                true,
+                "mock",
+                true,
+                council_rs::types::SessionOrigin::Api,
+                council_rs::engine::context::RequestContext {
+                    via_gateway: Some(false),
+                    ..Default::default()
+                },
+                None,
+                None,
+            ),
         )
         .await
+        .expect("b06 engine entry point timed out")
         .expect("engine contract run");
         assert_eq!(engine.rounds.len(), expected_rounds);
         let engine = serde_json::to_value(engine).unwrap();
