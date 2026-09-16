@@ -41,3 +41,36 @@ stage_worktree_docker_context() {
     rm -f "$copy_list"
     printf '%s\n' "$dst"
 }
+
+# `make -C gateway up` entry: stage a linked worktree so sidecar build.rs
+# embeds that worktree HEAD. Invoke with CWD = gateway/.
+compose_up_with_worktree_context() {
+    local repo_root="$1"
+    local build_context="" build_context_compose=""
+    cleanup_compose_up_context() {
+        if [ -n "${build_context:-}" ] && [ -d "$build_context" ]; then
+            rm -rf "$build_context"
+        fi
+        if [ -n "${build_context_compose:-}" ] && [ -f "$build_context_compose" ]; then
+            rm -f "$build_context_compose"
+        fi
+    }
+    trap cleanup_compose_up_context EXIT INT TERM
+    if [ -f "$repo_root/.git" ] && grep -q '^gitdir:' "$repo_root/.git" 2>/dev/null; then
+        build_context="$(stage_worktree_docker_context "$repo_root")" || return 1
+        build_context_compose="$(mktemp -t irin-make-up-compose-ctx.XXXXXX.yml)" \
+            || return 1
+        cat > "$build_context_compose" <<EOF
+services:
+  sidecar:
+    build:
+      context: ${build_context}
+EOF
+        echo "linked worktree staged with a real Git directory for exact-source provenance"
+        docker compose -f docker-compose.yml -f "$build_context_compose" up -d --build
+    else
+        docker compose up -d --build
+    fi
+    cleanup_compose_up_context
+    trap - EXIT INT TERM
+}

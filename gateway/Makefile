@@ -38,7 +38,7 @@ help:
 	@echo "  test-council-644 Verify §6.4 aggregation SQL holds for replay sessions"
 	@echo "  models-validate  Validate conf/models.json structure + invariants"
 	@echo "  audit-rust       Run cargo-audit against sidecar-rs"
-	@echo "  up               docker compose up -d --build"
+	@echo "  up               docker compose up -d --build (stages linked worktree context)"
 	@echo "  down             docker compose down"
 	@echo "  logs             Tail gateway + sidecar logs"
 
@@ -370,7 +370,10 @@ ledger-fsck:
 # T23: --locked on release path + committed lock (buildability). Clean clone + this proves no missing pins for sovereign-protocol dep.
 
 up: compose-ledger-key
-	IRIN_COMPOSE_LEDGER_KEY="$(IRIN_COMPOSE_LEDGER_KEY)" docker compose up -d --build
+	IRIN_COMPOSE_LEDGER_KEY="$(IRIN_COMPOSE_LEDGER_KEY)" \
+		bash -c 'set -euo pipefail; \
+		  . "$(CURDIR)/test/lib/worktree_docker_context.sh"; \
+		  compose_up_with_worktree_context "$(abspath $(CURDIR)/..)"'
 
 down:
 	docker compose down
