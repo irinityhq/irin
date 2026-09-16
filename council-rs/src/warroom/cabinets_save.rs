@@ -73,10 +73,15 @@ pub fn is_valid_cabinet_name(name: &str) -> bool {
 
 /// Charset-valid name that is also a single `Normal` path component.
 ///
-/// The component check is the filesystem barrier CodeQL path-injection
-/// tracking recognizes; charset validation alone is not modeled as a sanitizer.
+/// Explicit `contains('/')` / `contains("..")` guards match the barriers used in
+/// `mapmaker::get_brief` and `drift::get_report` — CodeQL `rust/path-injection`
+/// models those string checks; charset-only validation is not enough.
 fn sanitized_cabinet_stem(name: &str) -> Result<&str, SaveError> {
     if !is_valid_cabinet_name(name) {
+        return Err(SaveError::InvalidName);
+    }
+    // Same barrier shape as mapmaker/drift (CodeQL path-injection).
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
         return Err(SaveError::InvalidName);
     }
     let mut parts = Path::new(name).components();
@@ -90,7 +95,13 @@ fn sanitized_cabinet_stem(name: &str) -> Result<&str, SaveError> {
 
 /// Join `file_name` under `dir` and refuse any escape (separators / `..`).
 fn join_under_dir(dir: &Path, file_name: &str) -> std::io::Result<PathBuf> {
-    // file_name must itself be a single Normal component before join.
+    // Barrier first — same shape as mapmaker/drift — before any Path::join.
+    if file_name.contains('/') || file_name.contains('\\') || file_name.contains("..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cabinet path component rejected",
+        ));
+    }
     let mut parts = Path::new(file_name).components();
     match (parts.next(), parts.next()) {
         (Some(std::path::Component::Normal(os)), None) if os == std::ffi::OsStr::new(file_name) => {
@@ -165,17 +176,36 @@ pub fn write_cabinet_yaml(base_dir: &Path, name: &str, yaml: &str) -> std::io::R
             "cabinet name failed path sanitization",
         )
     })?;
+    // Inline mapmaker/drift-shaped barrier on the same SSA value used below so
+    // rust/path-injection cannot miss an interprocedural sanitizer.
+    if name.contains('/') || name.contains('\\') || name.contains("..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cabinet name failed path sanitization",
+        ));
+    }
     let dir = base_dir.join("cabinets");
     std::fs::create_dir_all(&dir)?;
-    let target = join_under_dir(&dir, &format!("{name}.yaml"))?;
+    let target_name = format!("{name}.yaml");
+    if target_name.contains('/') || target_name.contains('\\') || target_name.contains("..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cabinet path component rejected",
+        ));
+    }
+    let target = join_under_dir(&dir, &target_name)?;
     // Per-write unique tmp name so concurrent saves of the same cabinet don't
     // clobber each other's tmp file before the atomic rename. PID guards
     // cross-process collisions; the counter guards intra-process ones.
     let nonce = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let tmp = join_under_dir(
-        &dir,
-        &format!("{name}.yaml.{}.{nonce}.tmp", std::process::id()),
-    )?;
+    let tmp_name = format!("{name}.yaml.{}.{nonce}.tmp", std::process::id());
+    if tmp_name.contains('/') || tmp_name.contains('\\') || tmp_name.contains("..") {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "cabinet path component rejected",
+        ));
+    }
+    let tmp = join_under_dir(&dir, &tmp_name)?;
     {
         use std::io::Write;
         let mut f = std::fs::File::create(&tmp)?;
