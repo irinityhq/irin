@@ -148,6 +148,9 @@ run() {
 if [[ -x scripts/test-gateway-prepare-config.sh ]]; then
   run "Gateway local-config helper self-test" scripts/test-gateway-prepare-config.sh
 fi
+if printf '%s\n' "${paths[@]}" | grep -Eq '^gateway/Makefile$|^gateway/test/lib/worktree_docker_context.sh$|^gateway/test/test_make_up_worktree_context.sh$'; then
+  run "Gateway make-up worktree context" bash gateway/test/test_make_up_worktree_context.sh
+fi
 
 any_rust=false
 rust_packages=()
