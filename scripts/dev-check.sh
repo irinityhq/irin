@@ -256,6 +256,11 @@ if [[ "$mode" == "check" ]]; then
   if printf '%s\n' "${paths[@]}" | grep -Eq '^scripts/(check-test-weakening|test-check-test-weakening)\.sh$'; then
     run "Test-weakening tripwire self-test" bash scripts/test-check-test-weakening.sh
   fi
+  # Worktree helper canonical-guard contracts when the helpers or their tests move.
+  if printf '%s\n' "${paths[@]}" | grep -Eq '^scripts/(new-worktree|link-agent-context)\.sh$|^scripts/test-(new-worktree|link-agent-context)\.sh$'; then
+    run "New-worktree guard contracts" bash scripts/test-new-worktree.sh
+    run "Agent-context link contracts" bash scripts/test-link-agent-context.sh
+  fi
   run "Test-weakening tripwire" bash scripts/check-test-weakening.sh origin/main
   run "Diff whitespace" git diff --check origin/main --
   exit 0
@@ -269,6 +274,8 @@ run "Candidate store contracts" bash packaging/test-candidate-store.sh
 # W5 hermetic method contracts (self-contained; no board/Apple/network).
 run "W5 remove-worktree evidence contracts" bash scripts/test-remove-worktree-evidence.sh
 run "W5 fake-gh publication contracts" bash scripts/test-publish-fake-gh.sh
+run "New-worktree guard contracts" bash scripts/test-new-worktree.sh
+run "Agent-context link contracts" bash scripts/test-link-agent-context.sh
 run "GitHub Actions lint" bash scripts/run-actionlint.sh
 run "Test-weakening tripwire self-test" bash scripts/test-check-test-weakening.sh
 run "Test-weakening tripwire" bash scripts/check-test-weakening.sh origin/main

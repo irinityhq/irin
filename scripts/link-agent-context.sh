@@ -137,11 +137,11 @@ require_source() {
   for name in "${DOCTRINE_NAMES[@]}"; do
     is_regular_file "$source/$name" || die "canonical doctrine missing or not a regular file: $source/$name"
   done
-  # Health check only — never link the ledger into a worktree.
+  # Health check only — never link the planning files into a worktree.
   [[ -d "$source/.projectmem" && ! -L "$source/.projectmem" ]] \
-    || die "canonical ProjectMem ledger missing at $source/.projectmem (initialize only on the canonical checkout)"
+    || die "canonical planning directory missing at $source/.projectmem (initialize only on the canonical checkout)"
   is_regular_file "$source/.projectmem/plan.md" \
-    || die "canonical planning files are not initialized (missing .projectmem/plan.md)"
+    || die "canonical planning file missing or not a regular file: $source/.projectmem/plan.md"
 }
 
 require_ignored() {

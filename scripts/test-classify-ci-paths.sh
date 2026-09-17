@@ -82,6 +82,7 @@ cases=(
   "tauri shell README stays light|$all_false|council-rs/warroom-tauri/README.md"
   "worktree scripts stay light|$all_false|scripts/remove-worktree.sh scripts/worktree-gc.sh"
   "link-agent-context stays light|$all_false|scripts/link-agent-context.sh scripts/test-link-agent-context.sh"
+  "new-worktree guard test stays light|$all_false|scripts/new-worktree.sh scripts/test-new-worktree.sh"
 )
 
 failures=0
