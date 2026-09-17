@@ -7,8 +7,8 @@
 #   CLAUDE.md
 #   RTK.md
 #
-# ProjectMem stays entirely on the canonical checkout and is reached only via
-# MCP (--root at that checkout). This script never links or creates .projectmem.
+# The .projectmem planning files stay entirely on the canonical checkout.
+# This script never links or creates .projectmem.
 #
 # Usage:
 #   scripts/link-agent-context.sh                    # link into this checkout
@@ -140,8 +140,8 @@ require_source() {
   # Health check only — never link the ledger into a worktree.
   [[ -d "$source/.projectmem" && ! -L "$source/.projectmem" ]] \
     || die "canonical ProjectMem ledger missing at $source/.projectmem (initialize only on the canonical checkout)"
-  [[ -f "$source/.projectmem/summary.md" ]] \
-    || die "canonical ProjectMem ledger is not initialized (missing summary.md)"
+  is_regular_file "$source/.projectmem/plan.md" \
+    || die "canonical planning files are not initialized (missing .projectmem/plan.md)"
 }
 
 require_ignored() {
