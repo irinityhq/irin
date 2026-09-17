@@ -37,7 +37,7 @@ run_guard() {
   (cd "$dir" && bash "$HELPER" "$@" >/dev/null 2>"$TEST_HOME/guard.err")
 }
 
-# --- guard passes with a real plan.md; the run fails later at fetch, not at the guard ---
+# --- guard passes with a real plan.md; the run fails at fetch, not at the guard ---
 CK="$TEST_HOME/pass-checkout"
 make_fake_checkout "$CK"
 printf 'plan\n' >"$CK/.projectmem/plan.md"
@@ -49,7 +49,11 @@ set -e
 if grep -q "$GUARD_MSG" "$TEST_HOME/guard.err"; then
   fail "guard refused a legitimate canonical checkout (real plan.md)"
 fi
-pass "guard accepts a real plan.md (failure came after the guard)"
+# The nonzero exit must be the fetch itself (no origin remote), not any earlier
+# unrelated failure — assert git's deterministic fetch diagnostic.
+grep -q "does not appear to be a git repository" "$TEST_HOME/guard.err" \
+  || fail "expected failure at 'git fetch origin main', got something earlier: $(tail -1 "$TEST_HOME/guard.err")"
+pass "guard accepts a real plan.md (run failed at fetch, after the guard)"
 
 # --- guard refuses a missing plan.md before any worktree exists ---
 CK="$TEST_HOME/missing-checkout"
