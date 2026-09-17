@@ -16,12 +16,12 @@ is_canonical_irin_checkout() {
     [[ -f "$root/$name" && ! -L "$root/$name" ]] || return 1
   done
   [[ -d "$root/.projectmem" && ! -L "$root/.projectmem" ]] || return 1
-  [[ -f "$root/.projectmem/plan.md" ]] || return 1
+  [[ -f "$root/.projectmem/plan.md" && ! -L "$root/.projectmem/plan.md" ]] || return 1
   return 0
 }
 if ! is_canonical_irin_checkout "$ROOT"; then
   printf 'ERROR: make worktree / new-worktree.sh must run from the canonical IRIN checkout\n' >&2
-  printf 'ERROR: need real AGENTS.md, CLAUDE.md, RTK.md, and .projectmem/ (not worktree symlinks)\n' >&2
+  printf 'ERROR: need real AGENTS.md, CLAUDE.md, RTK.md, and .projectmem/plan.md (not worktree symlinks)\n' >&2
   printf 'ERROR: current toplevel: %s\n' "$ROOT" >&2
   exit 1
 fi

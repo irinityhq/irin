@@ -140,7 +140,7 @@ require_source() {
   # Health check only — never link the ledger into a worktree.
   [[ -d "$source/.projectmem" && ! -L "$source/.projectmem" ]] \
     || die "canonical ProjectMem ledger missing at $source/.projectmem (initialize only on the canonical checkout)"
-  [[ -f "$source/.projectmem/plan.md" ]] \
+  is_regular_file "$source/.projectmem/plan.md" \
     || die "canonical planning files are not initialized (missing .projectmem/plan.md)"
 }
 
