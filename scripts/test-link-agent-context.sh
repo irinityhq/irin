@@ -49,12 +49,12 @@ RTK.md
 .projectmem/
 EOF
 
-# Canonical doctrine + initialized ledger (real files, not symlinks).
+# Canonical doctrine + initialized planning files (real files, not symlinks).
 printf 'agents doctrine\n' >"$REPO/AGENTS.md"
 printf 'claude doctrine\n' >"$REPO/CLAUDE.md"
 printf 'rtk doctrine\n' >"$REPO/RTK.md"
 mkdir -p "$REPO/.projectmem"
-printf 'summary\n' >"$REPO/.projectmem/summary.md"
+printf 'plan\n' >"$REPO/.projectmem/plan.md"
 
 cp "$HELPER" "$REPO/scripts/link-agent-context.sh"
 chmod +x "$REPO/scripts/link-agent-context.sh"
@@ -134,6 +134,18 @@ set -e
 [[ "$rc" -ne 0 ]] || fail "should refuse subdirectory"
 grep -q 'worktree root' "$TEST_HOME/sub.err" || fail "missing worktree-root message"
 pass "refuse subdirectory destination"
+
+# --- refuse when the canonical planning file is missing ---
+mv "$REPO/.projectmem/plan.md" "$TEST_HOME/plan.md.bak"
+set +e
+"$LINK" --from "$REPO" --worktree "$WT" >/dev/null 2>"$TEST_HOME/plan.err"
+rc=$?
+set -e
+[[ "$rc" -ne 0 ]] || fail "should refuse missing canonical plan.md"
+grep -q 'missing \.projectmem/plan\.md' "$TEST_HOME/plan.err" || fail "missing plan.md refuse message"
+[[ ! -e "$WT/AGENTS.md" ]] || fail "partial link after plan.md refuse"
+mv "$TEST_HOME/plan.md.bak" "$REPO/.projectmem/plan.md"
+pass "refuse missing canonical plan.md"
 
 # --- bulk continues after one failure ---
 WT2="$TEST_HOME/wt2"
