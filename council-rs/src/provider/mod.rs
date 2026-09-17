@@ -813,8 +813,17 @@ mod tests {
         assert!(should_route_via_gateway("agy_cli", true));
     }
 
+    // Tests that read or mutate process-global provider state (the grok
+    // routing store via set_base_dir, hermes seat availability, or
+    // check_providers_with_gateway) serialize here. Assertion-free locking:
+    // without it a routing fixture installed by the dispatch matrix is
+    // visible to concurrent availability checks.
+    static PROVIDER_GLOBAL_STATE_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
+        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+
     #[test]
     fn governed_mode_only_promotes_cli_transports_with_gateway_adapters() {
+        let _guard = PROVIDER_GLOBAL_STATE_LOCK.blocking_lock();
         let direct = check_providers_with_gateway(false)
             .into_iter()
             .collect::<std::collections::HashMap<_, _>>();
@@ -831,6 +840,7 @@ mod tests {
 
     #[test]
     fn mock_provider_availability_flips_with_gateway_mode() {
+        let _guard = PROVIDER_GLOBAL_STATE_LOCK.blocking_lock();
         let direct: std::collections::HashMap<_, _> =
             check_providers_with_gateway(false).into_iter().collect();
         let governed: std::collections::HashMap<_, _> =
@@ -848,6 +858,7 @@ mod tests {
         // B-25: cabinet seats on these providers must pass/fail preflight with
         // the matching key — do not derive the list from KNOWN_KEYS.
         static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _state = PROVIDER_GLOBAL_STATE_LOCK.blocking_lock();
         let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let keys = [
             ("kimi", "MOONSHOT_API_KEY"),
@@ -901,7 +912,10 @@ mod tests {
     fn liveness_provider_check_is_env_only_and_retains_documented_slugs() {
         // Must not depend on host CLI install state. `gateway` may be true when
         // the process env already has GW_API_KEY; host-only CLI seats must stay
-        // false because liveness never shells out.
+        // false because liveness never shells out. Holds the state lock so a
+        // concurrent dispatch test cannot flip GW_API_KEY between the two
+        // env reads below.
+        let _guard = PROVIDER_GLOBAL_STATE_LOCK.blocking_lock();
         let rows = check_providers_liveness(false);
         let map: std::collections::HashMap<_, _> = rows.into_iter().collect();
         for required in [
@@ -982,5 +996,337 @@ mod tests {
         assert!(resolve_via_gateway(Some(true)));
         assert!(!resolve_via_gateway(Some(false)));
         assert!(!resolve_via_gateway(None));
+    }
+
+    // Characterization fixtures ahead of consolidating scattered provider
+    // policy: these pin today's dispatch decisions so a consolidation PR must
+    // preserve the same selected route — or the same refusal — offline. They
+    // never execute a real provider CLI, network call, or the Gateway.
+    //
+    // Every test that mutates provider env (XAI_API_KEY, GW_API_KEY,
+    // COUNCIL_HERMES_SEAT*, COUNCIL_GROK_CLI_FALLBACK_API) or the routing
+    // store takes PROVIDER_GLOBAL_STATE_LOCK: two lock classes would let one
+    // test restore a key into another's unkeyed cell and arm a live call.
+    // The fallback/GW key OnceLocks also initialize from the first dispatch
+    // call, so serialized dispatch tests see deterministic cached flags.
+
+    fn dispatch_ctx(via_gateway: Option<bool>) -> RequestContext {
+        RequestContext {
+            via_gateway,
+            ..Default::default()
+        }
+    }
+
+    // Matrix test plus the availability tests above share this lock; see
+    // PROVIDER_GLOBAL_STATE_LOCK for why.
+
+    fn save_env(names: &[&'static str]) -> Vec<(&'static str, Option<std::ffi::OsString>)> {
+        names
+            .iter()
+            .map(|name| (*name, std::env::var_os(name)))
+            .collect()
+    }
+
+    fn restore_env(saved: Vec<(&'static str, Option<std::ffi::OsString>)>) {
+        for (name, prev) in saved {
+            unsafe {
+                match prev {
+                    Some(v) => std::env::set_var(name, v),
+                    None => std::env::remove_var(name),
+                }
+            }
+        }
+    }
+
+    fn arm_fallback_and_remove_api_key() {
+        // Arm the fallback escape hatch and remove the API credential, so
+        // every refusal below proves the fallback is key-gated, not absent.
+        // The OnceLock caches the flag from the first dispatch call, so every
+        // dispatch test sets the same value before its first call.
+        unsafe {
+            std::env::set_var("COUNCIL_GROK_CLI_FALLBACK_API", "1");
+            std::env::remove_var("XAI_API_KEY");
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_provider_refuses_without_substitution() {
+        let resp = ask_with_opts_and_context(
+            "no-such-transport",
+            "prompt",
+            "system",
+            "model",
+            8,
+            &dispatch_ctx(None),
+        )
+        .await;
+        assert_eq!(
+            resp.error.as_deref(),
+            Some("Unknown provider: no-such-transport")
+        );
+    }
+
+    #[tokio::test]
+    async fn canonical_grok_api_missing_key_never_switches_transport() {
+        let _guard = PROVIDER_GLOBAL_STATE_LOCK.lock().await;
+        let saved = save_env(&["XAI_API_KEY"]);
+        arm_fallback_and_remove_api_key();
+
+        // Canonical transports are pure: no key means a keyed refusal on the
+        // selected transport — never a silent hop to a CLI transport.
+        let resp = ask_with_opts_and_context(
+            "grok_api",
+            "prompt",
+            "system",
+            "grok-4.3",
+            8,
+            &dispatch_ctx(None),
+        )
+        .await;
+        assert_eq!(resp.error.as_deref(), Some("XAI_API_KEY not set"));
+
+        restore_env(saved);
+    }
+
+    #[tokio::test]
+    async fn governed_dispatch_shields_every_transport_behind_gateway() {
+        let _guard = PROVIDER_GLOBAL_STATE_LOCK.lock().await;
+        let saved = save_env(&["GW_API_KEY"]);
+        unsafe {
+            std::env::remove_var("GW_API_KEY");
+        }
+
+        // Governed mode is a transport invariant resolved before every
+        // native/API/CLI special case: native, CLI seat, alias, and even
+        // unknown transports all refuse at the Gateway client, never at a
+        // direct provider call.
+        for provider in [
+            "grok_api",
+            "grok_cli",
+            "grok",
+            "claude_code",
+            "codex_cli",
+            "no-such-transport",
+        ] {
+            let resp = ask_with_opts_and_context(
+                provider,
+                "prompt",
+                "system",
+                "model",
+                8,
+                &dispatch_ctx(Some(true)),
+            )
+            .await;
+            assert_eq!(
+                resp.error.as_deref(),
+                Some("GW_API_KEY not set"),
+                "{provider} must route through the Gateway client"
+            );
+        }
+
+        restore_env(saved);
+    }
+
+    #[cfg(unix)]
+    fn write_executable(path: &std::path::Path, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(path, body).expect("write fixture");
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod fixture");
+    }
+
+    fn write_routing_fixture(
+        dir: &std::path::Path,
+        use_hermes_for_api_only: bool,
+        seats_entry_grok_43: bool,
+    ) {
+        let mut yaml = String::new();
+        yaml.push_str("cli_models: {}\n");
+        yaml.push_str("api_only_ids:\n  - grok-4.3\n");
+        yaml.push_str("api_only_prefixes: []\n");
+        yaml.push_str("cli_default_label: grok-cli-default\n");
+        yaml.push_str("cli_pinned_label_prefix: grok-cli-\n");
+        yaml.push_str(if use_hermes_for_api_only {
+            "use_hermes_for_api_only: true\n"
+        } else {
+            "use_hermes_for_api_only: false\n"
+        });
+        yaml.push_str("hermes_label_prefix: hermes-cli-\n");
+        yaml.push_str("hermes:\n");
+        yaml.push_str("  adapter_protocol: script\n");
+        yaml.push_str("  default_adapter: scripts/hermes-seat-adapter.sh\n");
+        if seats_entry_grok_43 {
+            yaml.push_str("hermes_seats:\n  grok-4.3: {}\n");
+        } else {
+            yaml.push_str("hermes_seats: {}\n");
+        }
+        std::fs::write(dir.join("grok_routing.yaml"), yaml).expect("write routing fixture");
+    }
+
+    #[tokio::test]
+    async fn api_only_grok_seat_decision_table_fails_closed_offline() {
+        let _guard = PROVIDER_GLOBAL_STATE_LOCK.lock().await;
+        let saved = save_env(&[
+            "XAI_API_KEY",
+            "COUNCIL_GROK_CLI_FALLBACK_API",
+            "COUNCIL_HERMES_SEAT",
+            "COUNCIL_HERMES_SEAT_BIN",
+        ]);
+        let cwd = std::env::current_dir().expect("cwd");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let fixture_dir = std::env::temp_dir().join(format!(
+            "irin-dispatch-fixture-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&fixture_dir).expect("create fixture dir");
+
+        // grok-4.3 is API-only in the fixture, so dispatch never spawns the
+        // local `grok` CLI. The operator adapter override pins hermes
+        // resolution for every cell, so host CLI installs and the repo's own
+        // adapter script cannot change the outcome.
+        arm_fallback_and_remove_api_key();
+        unsafe {
+            std::env::set_var(
+                "COUNCIL_HERMES_SEAT_BIN",
+                fixture_dir.join("no-adapter-here.sh"),
+            );
+        }
+
+        // Seat disabled by the operator: refusal names the disabling flag.
+        unsafe {
+            std::env::set_var("COUNCIL_HERMES_SEAT", "0");
+        }
+        write_routing_fixture(&fixture_dir, true, true);
+        grok_route::set_base_dir(&fixture_dir);
+        let resp = ask_with_opts_and_context(
+            "grok_cli",
+            "prompt",
+            "system",
+            "grok-4.3",
+            8,
+            &dispatch_ctx(None),
+        )
+        .await;
+        let err = resp.error.expect("seat disabled must refuse");
+        assert!(err.contains("COUNCIL_HERMES_SEAT=0"), "got: {err}");
+        assert!(err.contains("API-only"), "got: {err}");
+
+        // Seat preferred but api-only seats are not routed to Hermes.
+        unsafe {
+            std::env::remove_var("COUNCIL_HERMES_SEAT");
+        }
+        write_routing_fixture(&fixture_dir, false, false);
+        grok_route::set_base_dir(&fixture_dir);
+        let resp = ask_with_opts_and_context(
+            "grok",
+            "prompt",
+            "system",
+            "grok-4.3",
+            8,
+            &dispatch_ctx(None),
+        )
+        .await;
+        let err = resp.error.expect("missing route must refuse");
+        assert!(err.contains("no Hermes route configured"), "got: {err}");
+
+        // Route configured but the adapter binary is unusable.
+        write_routing_fixture(&fixture_dir, true, true);
+        grok_route::set_base_dir(&fixture_dir);
+        let resp = ask_with_opts_and_context(
+            "grok_cli",
+            "prompt",
+            "system",
+            "grok-4.3",
+            8,
+            &dispatch_ctx(None),
+        )
+        .await;
+        let err = resp.error.expect("unusable adapter must refuse");
+        assert!(
+            err.contains("Hermes seat adapter not available"),
+            "got: {err}"
+        );
+        // The fallback escape hatch is armed but the API key is absent, so the
+        // refusal stays a seat refusal instead of becoming an xAI API call.
+        assert!(!err.contains("XAI_API_KEY not set"), "got: {err}");
+
+        // Usable stub adapter: both `grok` and `grok_cli` seats execute the
+        // operator adapter and return its stdout.
+        #[cfg(unix)]
+        {
+            let stub = fixture_dir.join("hermes-stub.sh");
+            write_executable(&stub, "#!/bin/sh\nprintf 'hermes-stub-seat-ok'\n");
+            unsafe {
+                std::env::set_var("COUNCIL_HERMES_SEAT_BIN", &stub);
+            }
+            for provider in ["grok", "grok_cli"] {
+                let resp = ask_with_opts_and_context(
+                    provider,
+                    "prompt",
+                    "system",
+                    "grok-4.3",
+                    8,
+                    &dispatch_ctx(None),
+                )
+                .await;
+                assert_eq!(resp.error, None, "{provider} stub seat must succeed");
+                assert!(
+                    resp.text.contains("hermes-stub-seat-ok"),
+                    "{provider} must return adapter stdout, got: {}",
+                    resp.text
+                );
+            }
+        }
+
+        grok_route::set_base_dir(&cwd);
+        std::fs::remove_dir_all(&fixture_dir).expect("remove fixture dir");
+        restore_env(saved);
+    }
+
+    #[test]
+    fn readonly_cli_agent_transport_table() {
+        // grok_build/grok_cli/codex_cli are read-only seats; hermes_cli is an
+        // operator adapter (can spend), and the rest are full transports.
+        for provider in ["grok_build", "grok_cli", "codex_cli"] {
+            assert!(is_readonly_cli_agent_provider(provider), "{provider}");
+        }
+        for provider in [
+            "hermes_cli",
+            "grok",
+            "grok_hermes",
+            "claude_code",
+            "gemini_cli",
+            "agy_cli",
+            "grok_api",
+            "openrouter",
+            "mock",
+        ] {
+            assert!(!is_readonly_cli_agent_provider(provider), "{provider}");
+        }
+    }
+
+    #[test]
+    fn validator_native_search_table() {
+        // Only Grok-family transports keep their own web/X search tools in
+        // direct mode; gateway routing is buffered transport and drops them.
+        let direct = dispatch_ctx(None);
+        for provider in ["grok_build", "grok", "grok_cli", "grok_api"] {
+            assert!(
+                validator_has_native_search(provider, &direct),
+                "{provider} keeps native search direct"
+            );
+        }
+        for provider in ["claude", "codex_cli", "gemini", "openrouter", "mock"] {
+            assert!(
+                !validator_has_native_search(provider, &direct),
+                "{provider} has no native search"
+            );
+        }
+        let governed = dispatch_ctx(Some(true));
+        assert!(!validator_has_native_search("grok", &governed));
+        assert!(!validator_has_native_search("grok_api", &governed));
     }
 }
