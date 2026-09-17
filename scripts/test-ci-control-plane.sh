@@ -1318,6 +1318,7 @@ ALLOW_LIST = {
     "scripts/test-gateway-pack-integration-smoke.sh": "local Makefile / desktop-ownership only",
     "scripts/test-gateway-prepare-config.sh": "local gateway config via make check",
     "scripts/test-link-agent-context.sh": "private doctrine linker hermetic",
+    "scripts/test-new-worktree.sh": "local worktree guard hermetic",
 }
 
 SHELLS = {"bash", "sh", "/bin/bash", "/bin/sh", "/usr/bin/bash", "/usr/bin/sh"}

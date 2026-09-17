@@ -142,7 +142,7 @@ set +e
 rc=$?
 set -e
 [[ "$rc" -ne 0 ]] || fail "should refuse missing canonical plan.md"
-grep -q 'missing \.projectmem/plan\.md' "$TEST_HOME/plan.err" || fail "missing plan.md refuse message"
+grep -q 'planning file missing or not a regular file: .*projectmem/plan\.md' "$TEST_HOME/plan.err" || fail "missing plan.md refuse message"
 [[ ! -e "$WT/AGENTS.md" ]] || fail "partial link after plan.md refuse"
 printf 'elsewhere\n' >"$TEST_HOME/plan.real"
 ln -s "$TEST_HOME/plan.real" "$REPO/.projectmem/plan.md"
@@ -151,7 +151,7 @@ set +e
 rc=$?
 set -e
 [[ "$rc" -ne 0 ]] || fail "should refuse symlinked canonical plan.md"
-grep -q 'missing \.projectmem/plan\.md' "$TEST_HOME/planlink.err" || fail "plan.md symlink refuse message"
+grep -q 'planning file missing or not a regular file: .*projectmem/plan\.md' "$TEST_HOME/planlink.err" || fail "plan.md symlink refuse message"
 [[ ! -e "$WT/AGENTS.md" ]] || fail "partial link after symlinked plan.md refuse"
 rm -f "$REPO/.projectmem/plan.md"
 mv "$TEST_HOME/plan.md.bak" "$REPO/.projectmem/plan.md"
