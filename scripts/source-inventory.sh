@@ -122,7 +122,9 @@ while IFS= read -r -d '' path; do
   cat="$(classify "$path")"
   base="${path##*/}"
   if is_text "$base"; then
-    lines="$(wc -l < "$path" | tr -d ' ')"
+    # awk counts the final line even when the file lacks a trailing newline;
+    # wc -l would silently undercount such files.
+    lines="$(awk 'END { print NR }' "$path")"
   else
     lines=-
   fi

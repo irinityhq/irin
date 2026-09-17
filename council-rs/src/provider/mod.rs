@@ -912,7 +912,10 @@ mod tests {
     fn liveness_provider_check_is_env_only_and_retains_documented_slugs() {
         // Must not depend on host CLI install state. `gateway` may be true when
         // the process env already has GW_API_KEY; host-only CLI seats must stay
-        // false because liveness never shells out.
+        // false because liveness never shells out. Holds the state lock so a
+        // concurrent dispatch test cannot flip GW_API_KEY between the two
+        // env reads below.
+        let _guard = PROVIDER_GLOBAL_STATE_LOCK.blocking_lock();
         let rows = check_providers_liveness(false);
         let map: std::collections::HashMap<_, _> = rows.into_iter().collect();
         for required in [
@@ -1000,11 +1003,12 @@ mod tests {
     // preserve the same selected route — or the same refusal — offline. They
     // never execute a real provider CLI, network call, or the Gateway.
     //
-    // Dispatch tests serialize on one lock because provider policy reads env
-    // live (COUNCIL_HERMES_SEAT, COUNCIL_HERMES_SEAT_BIN, XAI_API_KEY) and the
-    // fallback/GW key OnceLocks initialize from the first dispatch call.
-    static DISPATCH_ENV_LOCK: std::sync::LazyLock<tokio::sync::Mutex<()>> =
-        std::sync::LazyLock::new(|| tokio::sync::Mutex::new(()));
+    // Every test that mutates provider env (XAI_API_KEY, GW_API_KEY,
+    // COUNCIL_HERMES_SEAT*, COUNCIL_GROK_CLI_FALLBACK_API) or the routing
+    // store takes PROVIDER_GLOBAL_STATE_LOCK: two lock classes would let one
+    // test restore a key into another's unkeyed cell and arm a live call.
+    // The fallback/GW key OnceLocks also initialize from the first dispatch
+    // call, so serialized dispatch tests see deterministic cached flags.
 
     fn dispatch_ctx(via_gateway: Option<bool>) -> RequestContext {
         RequestContext {
@@ -1064,7 +1068,7 @@ mod tests {
 
     #[tokio::test]
     async fn canonical_grok_api_missing_key_never_switches_transport() {
-        let _guard = DISPATCH_ENV_LOCK.lock().await;
+        let _guard = PROVIDER_GLOBAL_STATE_LOCK.lock().await;
         let saved = save_env(&["XAI_API_KEY"]);
         arm_fallback_and_remove_api_key();
 
@@ -1086,7 +1090,7 @@ mod tests {
 
     #[tokio::test]
     async fn governed_dispatch_shields_every_transport_behind_gateway() {
-        let _guard = DISPATCH_ENV_LOCK.lock().await;
+        let _guard = PROVIDER_GLOBAL_STATE_LOCK.lock().await;
         let saved = save_env(&["GW_API_KEY"]);
         unsafe {
             std::env::remove_var("GW_API_KEY");
