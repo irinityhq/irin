@@ -162,7 +162,8 @@ lua-unit:
 	$$LUA test/watch_metric_keys_test.lua && \
 	$$LUA test/cost_account_test.lua && \
 	$$LUA test/sidecar_failclosed_test.lua && \
-	$$LUA test/sidecar_transport_test.lua
+	$$LUA test/sidecar_transport_test.lua && \
+	$$LUA test/router_route_family_test.lua
 
 smoke:
 	bash test/smoke.sh
