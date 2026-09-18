@@ -1,13 +1,14 @@
 -- ==========================================================================
 -- cost.lua — Token extraction + cost accounting.
 --
--- Two phases:
---   body_filter: capture upstream response chunks. For translated providers
---                we keep BOTH the native upstream body (for cost extraction
---                with the provider-specific parser) AND the normalized
---                OpenAI-shape body (what we emit to the client and cache).
---   log:         parse tokens from the native body, compute cost, emit
---                metrics, push feedback to the sidecar (cache, ledger, budget).
+-- Three phases. Capture never prices, and settlement never re-reads the
+-- client body when it differs from the native upstream bytes.
+--   capture_body:           buffer native upstream bytes and, when required,
+--                           emit a translated or Responses-wrapped client body.
+--   resolve_captured_usage: tokens from the native body or the streaming
+--                           usage note. Normalized client bytes are not an
+--                           accounting input.
+--   account:                cost, metrics, ledger, budget, and cache.
 --
 -- All request facts come off `ngx.ctx.gw.record` — the canonical RequestRecord
 -- frozen at access entry. The `req` table the translator mutated is NEVER
@@ -24,6 +25,7 @@ local hash             = require "lib.hash"
 local ledger           = require "lib.ledger"
 local credential_scrub = require "lib.credential_scrub"
 local responses_stream = require "lib.responses_stream"
+local sse               = require "lib.sse"
 local watch_metric_keys = require "lib.watch_metric_keys"
 
 -- Module-level function bindings for timer closures. Capturing
@@ -82,424 +84,357 @@ end
 -- OpenAI uses `usage.prompt_tokens`/`completion_tokens`). If we ran cost
 -- extraction over the already-normalized body, the native fields would be
 -- gone and accounting would silently report $0 — exactly the Anthropic bug
--- this refactor is fixing.
+-- this refactor is fixing. Native bytes stay on gw_response_buf_native.
+-- Normalized bytes (client and, for buffered responses, the ledger hash)
+-- stay on gw_response_buf_normalized. Those two buffers are not merged.
 --
--- SSE STREAMING PATH (Phase 1): For streaming responses, chunks are
--- forwarded to the client immediately AND accumulated for usage extraction
--- at EOF. The final SSE data event carries `usage` (injected by
--- stream_options.include_usage=true in router.lua). At EOF we scan the
--- accumulated body for the last usage object.
+-- The response-processing path is resolved once per invocation. Chunk and
+-- EOF share the frame walk; streaming translation and Responses wrapping
+-- stay independent flags, not a new stream type.
 -- ---------------------------------------------------------------------------
-function _M.capture_body()
-    -- Skip if we already exceeded the cap
-    if ngx.ctx.gw_response_capped then return end
 
-    local chunk = ngx.arg[1]
-    local eof   = ngx.arg[2]  -- true when this is the last chunk
-
-    local gw     = ngx.ctx.gw
-    local record = gw and gw.record or nil
-
-    -- SSE streaming: forward every chunk to client immediately.
-    -- For passthrough providers (OpenAI/xAI/NVIDIA), chunks flow unmodified.
-    -- For translated providers (Anthropic/Vertex), each chunk is parsed into
-    -- SSE frames and re-emitted as OpenAI-shaped SSE via the translator.
-    -- Native upstream bytes are accumulated for the ledger hash regardless.
-    --
-    -- The sse.lua parser replaces the ad-hoc sse_line_buf accumulation from
-    -- Phase 1, handling named events, multi-line data, CRLF, and comments.
+-- One path per body_filter call. Streaming translation and Responses
+-- wrapping are independent; buffered translation and Responses reshaping
+-- are independent too. `needs_*` stays falsy when the flag is absent.
+local function response_processing_path(record)
     if record and record.is_streaming then
-        local chunks = ngx.ctx.gw_response_chunks
-        if not chunks then
-            chunks = {}
-            ngx.ctx.gw_response_chunks = chunks
-            ngx.ctx.gw_response_len    = 0
-        end
-
         local stream_provider = record.stream_translate_as or record.provider
-        local needs_translation = translator.needs_stream_translation(stream_provider)
-
-        -- Responses API wrapping: when client sent Responses shape and upstream
-        -- emits chat.completion.chunk (not native /v1/responses), wrap output
-        -- into response.* events via lib/responses_stream.
         local upstream_path = record.upstream_path or "/v1/chat/completions"
         local responses_native = upstream_path:sub(-10) == "/responses"
-        local needs_responses_wrap = record.is_responses_api and not responses_native
-
-        if chunk and chunk ~= "" then
-            local new_len = ngx.ctx.gw_response_len + #chunk
-            if new_len > MAX_RESPONSE_CAPTURE then
-                if not ngx.ctx.gw_response_capped then
-                    ngx.ctx.gw_response_capped = true
-                    ngx.log(ngx.WARN, "cost: streaming response exceeded 1MB cap, "
-                            .. "usage extraction disabled")
-                end
-            else
-                chunks[#chunks + 1]     = chunk
-                ngx.ctx.gw_response_len = new_len
-            end
-
-            if not ngx.ctx.gw_response_capped then
-                -- Initialize SSE parser on first chunk
-                if not ngx.ctx.sse_parser then
-                    local sse = require("lib.sse")
-                    ngx.ctx.sse_parser = sse.new({ strict = true })
-                end
-
-                -- Initialize Responses wrapper on first chunk (if needed)
-                if needs_responses_wrap and not ngx.ctx.responses_wrap_ctx then
-                    ngx.ctx.responses_wrap_ctx = responses_stream.new({
-                        model       = record.resolved_model,
-                        response_id = "resp_" .. (record.request_id or tostring(ngx.now())),
-                    })
-                end
-
-                if needs_translation then
-                    -- Provider-aware path: parse SSE frames, translate to OpenAI shape
-                    if not ngx.ctx.stream_translate_ctx then
-                        ngx.ctx.stream_translate_ctx = {
-                            model = record.resolved_model,
-                        }
-                    end
-
-                    local frames = ngx.ctx.sse_parser:feed(chunk)
-                    local out_lines = {}
-
-                    for _, frame in ipairs(frames) do
-                        local sse_line, usage = translator.translate_stream_chunk(
-                            stream_provider, frame, ngx.ctx.stream_translate_ctx
-                        )
-                        if usage then
-                            ngx.ctx.gw_streaming_usage = {
-                                prompt_tokens     = usage.input_tokens or 0,
-                                completion_tokens = usage.output_tokens or 0,
-                                total_tokens      = (usage.input_tokens or 0) + (usage.output_tokens or 0),
-                            }
-                        end
-                        if sse_line then
-                            if needs_responses_wrap then
-                                -- Wrap: parse the chat.completion.chunk and feed to wrapper
-                                local wrapped = self_wrap_sse_line(ngx.ctx.responses_wrap_ctx, sse_line)
-                                if wrapped and wrapped ~= "" then
-                                    out_lines[#out_lines + 1] = wrapped
-                                end
-                            else
-                                out_lines[#out_lines + 1] = sse_line
-                            end
-                        end
-                    end
-
-                    if #out_lines > 0 then
-                        ngx.arg[1] = table.concat(out_lines)
-                    else
-                        ngx.arg[1] = nil
-                    end
-                else
-                    -- Passthrough path: OpenAI/xAI/NVIDIA
-                    local frames = ngx.ctx.sse_parser:feed(chunk)
-
-                    if needs_responses_wrap then
-                        -- Parse each frame and wrap into Responses events
-                        local out_lines = {}
-                        for _, frame in ipairs(frames) do
-                            if frame.done then
-                                -- [DONE] sentinel — skip, we emit response.completed at EOF
-                            elseif frame.data then
-                                local data = cjson.decode(frame.data)
-                                if data then
-                                    local u = nil
-                                    if type(data.usage) == "table" then
-                                        u = data.usage
-                                    elseif data.response and type(data.response.usage) == "table" then
-                                        u = data.response.usage
-                                    end
-                                    if u and ((u.prompt_tokens or u.input_tokens or 0) > 0
-                                           or (u.completion_tokens or u.output_tokens or 0) > 0
-                                           or (u.total_tokens or 0) > 0) then
-                                        ngx.ctx.gw_streaming_usage = u
-                                    end
-                                    -- Feed to wrapper (skip usage-only chunks with no choices)
-                                    local wrapped = ngx.ctx.responses_wrap_ctx:feed(data)
-                                    if wrapped and wrapped ~= "" then
-                                        out_lines[#out_lines + 1] = wrapped
-                                    end
-                                end
-                            end
-                        end
-                        if #out_lines > 0 then
-                            ngx.arg[1] = table.concat(out_lines)
-                        else
-                            ngx.arg[1] = nil
-                        end
-                    else
-                        -- Original passthrough: parse for usage only, chunk unchanged
-                        for _, frame in ipairs(frames) do
-                            if not frame.done and frame.data then
-                                local data = cjson.decode(frame.data)
-                                if data then
-                                    local u = nil
-                                    if type(data.usage) == "table" then
-                                        u = data.usage
-                                    elseif data.response and type(data.response.usage) == "table" then
-                                        u = data.response.usage
-                                    end
-                                    if u and ((u.prompt_tokens or u.input_tokens or 0) > 0
-                                           or (u.completion_tokens or u.output_tokens or 0) > 0
-                                           or (u.total_tokens or 0) > 0) then
-                                        ngx.ctx.gw_streaming_usage = u
-                                    end
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-        end
-
-        if eof then
-            -- Flush any remaining buffered data in the parser
-            if ngx.ctx.sse_parser and not ngx.ctx.gw_response_capped then
-                local frames = ngx.ctx.sse_parser:flush()
-                if needs_translation and ngx.ctx.stream_translate_ctx then
-                    local out_lines = {}
-                    for _, frame in ipairs(frames) do
-                        local sse_line, usage = translator.translate_stream_chunk(
-                            stream_provider, frame, ngx.ctx.stream_translate_ctx
-                        )
-                        if usage then
-                            ngx.ctx.gw_streaming_usage = {
-                                prompt_tokens     = usage.input_tokens or 0,
-                                completion_tokens = usage.output_tokens or 0,
-                                total_tokens      = (usage.input_tokens or 0) + (usage.output_tokens or 0),
-                            }
-                        end
-                        if sse_line then
-                            if needs_responses_wrap then
-                                local wrapped = self_wrap_sse_line(ngx.ctx.responses_wrap_ctx, sse_line)
-                                if wrapped and wrapped ~= "" then
-                                    out_lines[#out_lines + 1] = wrapped
-                                end
-                            else
-                                out_lines[#out_lines + 1] = sse_line
-                            end
-                        end
-                    end
-                    if #out_lines > 0 then
-                        local existing = ngx.arg[1] or ""
-                        ngx.arg[1] = existing .. table.concat(out_lines)
-                    end
-                elseif needs_responses_wrap then
-                    local out_lines = {}
-                    for _, frame in ipairs(frames) do
-                        if not frame.done and frame.data then
-                            local data = cjson.decode(frame.data)
-                            if data then
-                                local u = data.usage or (data.response and data.response.usage)
-                                if u and ((u.prompt_tokens or u.input_tokens or 0) > 0
-                                       or (u.completion_tokens or u.output_tokens or 0) > 0) then
-                                    ngx.ctx.gw_streaming_usage = u
-                                end
-                                local wrapped = ngx.ctx.responses_wrap_ctx:feed(data)
-                                if wrapped and wrapped ~= "" then
-                                    out_lines[#out_lines + 1] = wrapped
-                                end
-                            end
-                        end
-                    end
-                    if #out_lines > 0 then
-                        local existing = ngx.arg[1] or ""
-                        ngx.arg[1] = existing .. table.concat(out_lines)
-                    end
-                else
-                    for _, frame in ipairs(frames) do
-                        if not frame.done and frame.data then
-                            local data = cjson.decode(frame.data)
-                            if data then
-                                local u = data.usage or (data.response and data.response.usage)
-                                if u and ((u.prompt_tokens or u.input_tokens or 0) > 0
-                                       or (u.completion_tokens or u.output_tokens or 0) > 0) then
-                                    ngx.ctx.gw_streaming_usage = u
-                                end
-                            end
-                        end
-                    end
-                end
-            end
-
-            -- Emit response.completed for Responses-wrapped streams
-            if needs_responses_wrap and ngx.ctx.responses_wrap_ctx then
-                local final_lines = ngx.ctx.responses_wrap_ctx:finish(ngx.ctx.gw_streaming_usage)
-                if final_lines and final_lines ~= "" then
-                    local existing = ngx.arg[1] or ""
-                    ngx.arg[1] = existing .. final_lines
-                end
-                ngx.ctx.responses_wrap_ctx = nil
-            end
-
-            local full_sse = table.concat(chunks)
-            -- Streaming credential scrub: we cannot unsend chunks that already went
-            -- to the client, but we MUST scrub the ledger hash buffer and flag the
-            -- request so we don't cache leaked credentials or store them in audit logs.
-            local scrub_res = credential_scrub.scrub(full_sse)
-            if scrub_res.redactions > 0 then
-                ngx.ctx.gw_credentials_redacted = true
-                ngx.ctx.gw_credentials_matched = scrub_res.matched
-                ngx.log(ngx.WARN, "cost: streaming response leaked credentials, redacting from ledger/cache (",
-                        scrub_res.redactions, " matches)")
-                full_sse = scrub_res.scrubbed_text
-            end
-
-            ngx.ctx.gw_response_buf_native     = full_sse
-            ngx.ctx.gw_response_buf_normalized = full_sse
-            ngx.ctx.gw_response_chunks         = nil
-            ngx.ctx.sse_parser                 = nil
-            ngx.ctx.stream_translate_ctx       = nil
-        end
-        return
+        return {
+            kind = "stream",
+            stream_provider = stream_provider,
+            needs_translation = translator.needs_stream_translation(stream_provider),
+            needs_responses_wrap = record.is_responses_api and not responses_native,
+        }
     end
+    local ok_status = ngx.status >= 200 and ngx.status < 400
+    return {
+        kind = "buffered",
+        needs_translation = record and record.needs_response_translation and ok_status,
+        needs_responses_reshape = record and record.is_responses_api and ok_status,
+    }
+end
 
-    -- Non-streaming path: accumulate chunks in an array for O(N) concat at EOF.
+local function ensure_chunk_buf()
     local chunks = ngx.ctx.gw_response_chunks
     if not chunks then
         chunks = {}
         ngx.ctx.gw_response_chunks = chunks
-        ngx.ctx.gw_response_len    = 0
+        ngx.ctx.gw_response_len = 0
     end
+    return chunks
+end
 
-    if chunk and chunk ~= "" then
-        local new_len = ngx.ctx.gw_response_len + #chunk
-        if new_len > MAX_RESPONSE_CAPTURE then
+-- "empty", "capped", or "stored".
+-- Streaming marks the cap and continues so this call can still run EOF
+-- bookkeeping. Buffered returns from capture_body immediately.
+local function accept_chunk(chunks, chunk, streaming)
+    if not chunk or chunk == "" then
+        return "empty"
+    end
+    local new_len = ngx.ctx.gw_response_len + #chunk
+    if new_len > MAX_RESPONSE_CAPTURE then
+        if streaming then
+            if not ngx.ctx.gw_response_capped then
+                ngx.ctx.gw_response_capped = true
+                ngx.log(ngx.WARN, "cost: streaming response exceeded 1MB cap, "
+                        .. "usage extraction disabled")
+            end
+        else
             ngx.ctx.gw_response_capped = true
             ngx.log(ngx.WARN, "cost: response body exceeded 1MB cap, token tracking disabled")
-            return
         end
-        chunks[#chunks + 1]        = chunk
-        ngx.ctx.gw_response_len    = new_len
+        return "capped"
+    end
+    chunks[#chunks + 1] = chunk
+    ngx.ctx.gw_response_len = new_len
+    return "stored"
+end
+
+-- warn_msg is the log prefix up to and including "(". Nil skips the log
+-- (buffered Responses decode-failure scrubs without that warning).
+local function scrub_for_client(text, warn_msg)
+    local scrub_res = credential_scrub.scrub(text)
+    if scrub_res.redactions > 0 then
+        ngx.ctx.gw_credentials_redacted = true
+        ngx.ctx.gw_credentials_matched = scrub_res.matched
+        if warn_msg then
+            ngx.log(ngx.WARN, warn_msg, scrub_res.redactions, " matches)")
+        end
+    end
+    return scrub_res.scrubbed_text, scrub_res.redactions
+end
+
+local function note_translated_stream_usage(usage)
+    if not usage then return end
+    ngx.ctx.gw_streaming_usage = {
+        prompt_tokens     = usage.input_tokens or 0,
+        completion_tokens = usage.output_tokens or 0,
+        total_tokens      = (usage.input_tokens or 0) + (usage.output_tokens or 0),
+    }
+end
+
+-- Chunk and EOF scans are not the same predicate. Chunk requires a usage
+-- table and treats total_tokens as enough. EOF takes the first truthy
+-- usage field and ignores total_tokens. Do not collapse them.
+local function note_passthrough_stream_usage(data, phase)
+    local u
+    if phase == "chunk" then
+        if type(data.usage) == "table" then
+            u = data.usage
+        elseif data.response and type(data.response.usage) == "table" then
+            u = data.response.usage
+        end
+        if u and ((u.prompt_tokens or u.input_tokens or 0) > 0
+               or (u.completion_tokens or u.output_tokens or 0) > 0
+               or (u.total_tokens or 0) > 0) then
+            ngx.ctx.gw_streaming_usage = u
+        end
+        return
+    end
+    u = data.usage or (data.response and data.response.usage)
+    if u and ((u.prompt_tokens or u.input_tokens or 0) > 0
+           or (u.completion_tokens or u.output_tokens or 0) > 0) then
+        ngx.ctx.gw_streaming_usage = u
+    end
+end
+
+-- mode "replace" overwrites ngx.arg[1] (and clears it when nothing was
+-- produced). mode "append" only extends a non-empty flush.
+local function emit_out_lines(out_lines, mode)
+    if #out_lines == 0 then
+        if mode == "replace" then
+            ngx.arg[1] = nil
+        end
+        return
+    end
+    local joined = table.concat(out_lines)
+    if mode == "replace" then
+        ngx.arg[1] = joined
+    else
+        ngx.arg[1] = (ngx.arg[1] or "") .. joined
+    end
+end
+
+local function ensure_stream_parsers(record, path)
+    if not ngx.ctx.sse_parser then
+        ngx.ctx.sse_parser = sse.new({ strict = true })
+    end
+    if path.needs_responses_wrap and not ngx.ctx.responses_wrap_ctx then
+        ngx.ctx.responses_wrap_ctx = responses_stream.new({
+            model       = record.resolved_model,
+            response_id = "resp_" .. (record.request_id or tostring(ngx.now())),
+        })
+    end
+    if path.needs_translation and not ngx.ctx.stream_translate_ctx then
+        ngx.ctx.stream_translate_ctx = {
+            model = record.resolved_model,
+        }
+    end
+end
+
+local function emit_translated_frames(frames, path, mode)
+    local ctx = ngx.ctx.stream_translate_ctx
+    if not ctx then return end
+    local out_lines = {}
+    for _, frame in ipairs(frames) do
+        local sse_line, usage = translator.translate_stream_chunk(
+            path.stream_provider, frame, ctx
+        )
+        note_translated_stream_usage(usage)
+        if sse_line then
+            if path.needs_responses_wrap then
+                local wrapped = self_wrap_sse_line(ngx.ctx.responses_wrap_ctx, sse_line)
+                if wrapped and wrapped ~= "" then
+                    out_lines[#out_lines + 1] = wrapped
+                end
+            else
+                out_lines[#out_lines + 1] = sse_line
+            end
+        end
+    end
+    emit_out_lines(out_lines, mode)
+end
+
+local function scan_passthrough_frames(frames, path, phase, mode)
+    local out_lines = {}
+    for _, frame in ipairs(frames) do
+        if not frame.done and frame.data then
+            local data = cjson.decode(frame.data)
+            if data then
+                note_passthrough_stream_usage(data, phase)
+                if path.needs_responses_wrap then
+                    local wrapped = ngx.ctx.responses_wrap_ctx:feed(data)
+                    if wrapped and wrapped ~= "" then
+                        out_lines[#out_lines + 1] = wrapped
+                    end
+                end
+            end
+        end
+    end
+    if mode then
+        emit_out_lines(out_lines, mode)
+    end
+end
+
+local function finish_responses_wrap(path)
+    if path.needs_responses_wrap and ngx.ctx.responses_wrap_ctx then
+        local final_lines = ngx.ctx.responses_wrap_ctx:finish(ngx.ctx.gw_streaming_usage)
+        if final_lines and final_lines ~= "" then
+            ngx.arg[1] = (ngx.arg[1] or "") .. final_lines
+        end
+        ngx.ctx.responses_wrap_ctx = nil
+    end
+end
+
+local function seal_stream_buffers(chunks)
+    local full_sse = table.concat(chunks)
+    local scrubbed, redactions = scrub_for_client(full_sse,
+        "cost: streaming response leaked credentials, redacting from ledger/cache (")
+    if redactions > 0 then
+        full_sse = scrubbed
+    end
+    ngx.ctx.gw_response_buf_native     = full_sse
+    ngx.ctx.gw_response_buf_normalized = full_sse
+    ngx.ctx.gw_response_chunks         = nil
+    ngx.ctx.sse_parser                 = nil
+    ngx.ctx.stream_translate_ctx       = nil
+end
+
+local function seal_native(chunks)
+    local full_native = table.concat(chunks)
+    ngx.ctx.gw_response_buf_native = full_native
+    return full_native
+end
+
+local function publish_shaped(normalized, warn_msg)
+    local scrubbed = scrub_for_client(normalized, warn_msg)
+    ngx.arg[1] = scrubbed
+    ngx.ctx.gw_response_buf_normalized = scrubbed
+end
+
+local function capture_stream(record, path, chunk, eof)
+    local chunks = ensure_chunk_buf()
+    local accepted = accept_chunk(chunks, chunk, true)
+
+    if accepted == "stored" then
+        ensure_stream_parsers(record, path)
+        local frames = ngx.ctx.sse_parser:feed(chunk)
+        if path.needs_translation then
+            emit_translated_frames(frames, path, "replace")
+        elseif path.needs_responses_wrap then
+            scan_passthrough_frames(frames, path, "chunk", "replace")
+        else
+            scan_passthrough_frames(frames, path, "chunk", nil)
+        end
     end
 
+    if eof then
+        if ngx.ctx.sse_parser and not ngx.ctx.gw_response_capped then
+            local frames = ngx.ctx.sse_parser:flush()
+            if path.needs_translation and ngx.ctx.stream_translate_ctx then
+                emit_translated_frames(frames, path, "append")
+            elseif path.needs_responses_wrap then
+                scan_passthrough_frames(frames, path, "eof", "append")
+            else
+                scan_passthrough_frames(frames, path, "eof", nil)
+            end
+        end
+        finish_responses_wrap(path)
+        seal_stream_buffers(chunks)
+    end
+end
+
+local function capture_buffered(record, path, chunk, eof)
+    local chunks = ensure_chunk_buf()
+    if accept_chunk(chunks, chunk, false) == "capped" then
+        return
+    end
     if not record then return end
 
-    -- Phase 5: Responses API clients expect output[] shape on the way back.
-    -- For passthrough providers whose native shape is already output[]
-    -- (xAI/OpenAI on /v1/responses path), the denormalize call is a no-op.
-    -- For providers that translate to chat.completion shape (Anthropic/Vertex)
-    -- and for chat.completion-native providers (NVIDIA/claude-cli), we re-emit
-    -- the response as output[] so the client sees a uniform Responses API shape.
-    local needs_responses_reshape = record.is_responses_api
-        and ngx.status >= 200 and ngx.status < 400
-
-    if record.needs_response_translation and ngx.status >= 200 and ngx.status < 400 then
+    if path.needs_translation then
         if not eof then
             ngx.arg[1] = nil
-        else
-            local full_native = table.concat(chunks)
-            ngx.ctx.gw_response_buf_native = full_native
-            if full_native ~= "" then
-                local resp = cjson.decode(full_native)
-                if resp then
-                    local translated = translator.translate_response(record.provider, resp)
-                    if needs_responses_reshape then
-                        translated = translator.denormalize_messages_to_responses(translated)
-                    end
-                    local normalized = cjson.encode(translated)
-
-                    local scrub_res = credential_scrub.scrub(normalized)
-                    if scrub_res.redactions > 0 then
-                        ngx.ctx.gw_credentials_redacted = true
-                        ngx.ctx.gw_credentials_matched = scrub_res.matched
-                        ngx.log(ngx.WARN, "cost: translated response leaked credentials, redacting (",
-                                scrub_res.redactions, " matches)")
-                        normalized = scrub_res.scrubbed_text
-                    end
-
-                    ngx.arg[1] = normalized
-                    ngx.ctx.gw_response_buf_normalized = normalized
-                    ngx.log(ngx.INFO, "cost: response translated from ",
-                            record.provider, " format",
-                            needs_responses_reshape and " [responses-api]" or "")
-                else
-                    ngx.log(ngx.WARN, "cost: failed to decode native response for translation")
-                    ngx.arg[1] = full_native
-                    ngx.ctx.gw_response_buf_normalized = full_native
+            return
+        end
+        local full_native = seal_native(chunks)
+        if full_native ~= "" then
+            local resp = cjson.decode(full_native)
+            if resp then
+                local translated = translator.translate_response(record.provider, resp)
+                if path.needs_responses_reshape then
+                    translated = translator.denormalize_messages_to_responses(translated)
                 end
+                publish_shaped(cjson.encode(translated),
+                    "cost: translated response leaked credentials, redacting (")
+                ngx.log(ngx.INFO, "cost: response translated from ",
+                        record.provider, " format",
+                        path.needs_responses_reshape and " [responses-api]" or "")
+            else
+                ngx.log(ngx.WARN, "cost: failed to decode native response for translation")
+                ngx.arg[1] = full_native
+                ngx.ctx.gw_response_buf_normalized = full_native
             end
         end
-    elseif needs_responses_reshape then
-        -- Passthrough provider (no translate_response needed) but client
-        -- requested Responses shape. Decode native, re-emit as output[].
-        -- Idempotent for upstreams that already returned output[] (xAI/OpenAI
-        -- on /v1/responses path) — denormalize_messages_to_responses returns
-        -- the input unchanged when resp.output already exists.
+        return
+    end
+
+    if path.needs_responses_reshape then
         if not eof then
             ngx.arg[1] = nil
-        else
-            local full_native = table.concat(chunks)
-            ngx.ctx.gw_response_buf_native = full_native
-            if full_native ~= "" then
-                local resp = cjson.decode(full_native)
-                if resp then
-                    local reshaped = translator.denormalize_messages_to_responses(resp)
-                    local normalized = cjson.encode(reshaped)
-
-                    local scrub_res = credential_scrub.scrub(normalized)
-                    if scrub_res.redactions > 0 then
-                        ngx.ctx.gw_credentials_redacted = true
-                        ngx.ctx.gw_credentials_matched = scrub_res.matched
-                        ngx.log(ngx.WARN, "cost: responses-shape response leaked credentials, redacting (",
-                                scrub_res.redactions, " matches)")
-                        normalized = scrub_res.scrubbed_text
-                    end
-
-                    ngx.arg[1] = normalized
-                    ngx.ctx.gw_response_buf_normalized = normalized
-                else
-                    -- Decode failed — pass through native bytes; the client
-                    -- gets the upstream body unchanged. Log so the failure
-                    -- is observable rather than silent.
-                    ngx.log(ngx.WARN, "cost: responses-api passthrough decode failed; returning native body")
-                    local scrub_res = credential_scrub.scrub(full_native)
-                    local normalized = scrub_res.scrubbed_text
-                    if scrub_res.redactions > 0 then
-                        ngx.ctx.gw_credentials_redacted = true
-                        ngx.ctx.gw_credentials_matched = scrub_res.matched
-                    end
-                    ngx.arg[1] = normalized
-                    ngx.ctx.gw_response_buf_normalized = normalized
-                end
+            return
+        end
+        local full_native = seal_native(chunks)
+        if full_native ~= "" then
+            local resp = cjson.decode(full_native)
+            if resp then
+                publish_shaped(
+                    cjson.encode(translator.denormalize_messages_to_responses(resp)),
+                    "cost: responses-shape response leaked credentials, redacting (")
+            else
+                ngx.log(ngx.WARN, "cost: responses-api passthrough decode failed; returning native body")
+                local scrubbed = scrub_for_client(full_native, nil)
+                ngx.arg[1] = scrubbed
+                ngx.ctx.gw_response_buf_normalized = scrubbed
             end
         end
-    else
-        if eof then
-            local full_native = table.concat(chunks)
-            ngx.ctx.gw_response_buf_native     = full_native
+        return
+    end
 
-            local scrub_res = credential_scrub.scrub(full_native)
-            local normalized = scrub_res.scrubbed_text
-            if scrub_res.redactions > 0 then
-                ngx.ctx.gw_credentials_redacted = true
-                ngx.ctx.gw_credentials_matched = scrub_res.matched
-                ngx.log(ngx.WARN, "cost: response leaked credentials, redacting (",
-                        scrub_res.redactions, " matches)")
-                ngx.arg[1] = normalized
-            end
+    if eof then
+        local full_native = seal_native(chunks)
+        local scrubbed, redactions = scrub_for_client(full_native,
+            "cost: response leaked credentials, redacting (")
+        if redactions > 0 then
+            ngx.arg[1] = scrubbed
+        end
+        ngx.ctx.gw_response_buf_normalized = scrubbed
 
-            ngx.ctx.gw_response_buf_normalized = normalized
-
-            -- Council body snapshot (spec §6.2 / P0 #8). Freeze the
-            -- normalized bytes onto the record so log-phase cleanup has a
-            -- known-good source for the idempotency-cache entry. Council
-            -- is a passthrough provider — native == normalized in this
-            -- branch — but capturing here defends against future per-provider
-            -- post-processing on this code path.
-            if record and record.provider == "council" then
-                record.council_response_body = normalized
-                if not normalized or #normalized < 2 then
-                    ngx.log(ngx.ERR, "council body capture: empty body for ",
-                            record.request_id or "?")
-                end
+        if record.provider == "council" then
+            record.council_response_body = scrubbed
+            if not scrubbed or #scrubbed < 2 then
+                ngx.log(ngx.ERR, "council body capture: empty body for ",
+                        record.request_id or "?")
             end
         end
     end
+end
+
+function _M.capture_body()
+    if ngx.ctx.gw_response_capped then return end
+
+    local chunk  = ngx.arg[1]
+    local eof    = ngx.arg[2]
+    local gw     = ngx.ctx.gw
+    local record = gw and gw.record or nil
+    local path   = response_processing_path(record)
+
+    if path.kind == "stream" then
+        capture_stream(record, path, chunk, eof)
+        return
+    end
+    capture_buffered(record, path, chunk, eof)
 end
 
 -- ---------------------------------------------------------------------------
@@ -645,8 +580,97 @@ function _M.account_replay(record)
     return ngx.exit(ngx.status)
 end
 
+-- Usage extraction. Reads the native buffer and the streaming usage note
+-- written by capture_body. The normalized client body is returned for the
+-- ledger hash and is not parsed for tokens.
+local function resolve_captured_usage(record)
+    -- Response-capped path: the body exceeded 1MB and we stopped buffering,
+    -- so we cannot parse provider-native usage. Pre-fix this branch
+    -- early-returned, leaving the ledger and budget WITHOUT a record of
+    -- exactly the largest requests an auditor would most want to inspect.
+    --
+    -- Degrade gracefully. Estimate input tokens from the request body byte
+    -- length (rough: ~4 chars/token for English), under-estimate output as
+    -- 0 (we genuinely don't know — over-estimating would over-bill the
+    -- caller), and mark the audit/ledger entry as capped=true. Cache_store
+    -- is the only thing we still skip on this path — we have no parsed
+    -- response to cache.
+    local capped = ngx.ctx.gw_response_capped == true
+    local native_body     = ngx.ctx.gw_response_buf_native
+    local normalized_body = ngx.ctx.gw_response_buf_normalized or native_body
+
+    local usage
+    local unparsed = false
+    local is_streaming = record.is_streaming
+    if is_streaming and ngx.ctx.gw_streaming_usage then
+        local su = ngx.ctx.gw_streaming_usage
+        usage = {
+            tokens_in  = su.prompt_tokens     or su.input_tokens  or 0,
+            tokens_out = su.completion_tokens  or su.output_tokens or 0,
+            cached_in  = (su.prompt_tokens_details
+                         and su.prompt_tokens_details.cached_tokens)
+                         or (su.input_tokens_details
+                         and su.input_tokens_details.cached_tokens)
+                         or su.cached_input_tokens
+                         or 0,
+        }
+    elseif is_streaming then
+        local raw_len = (record.raw_body and #record.raw_body) or 0
+        local resp_len = (native_body and #native_body) or 0
+        -- Byte-length counts are not provider-reported usage. Cache is
+        -- already skipped for streams; this only marks the audit/ledger.
+        unparsed = true
+        usage = {
+            tokens_in  = math.floor(raw_len / 4),
+            tokens_out = math.floor(resp_len / 16),
+            cached_in  = 0,
+        }
+        ngx.log(ngx.WARN, "cost: streaming response without usage data — ",
+                "estimate tokens_in≈", usage.tokens_in,
+                " tokens_out≈", usage.tokens_out,
+                " model=", record.resolved_model or "unknown")
+    elseif capped then
+        local raw_len = (record.raw_body and #record.raw_body) or 0
+        usage = {
+            tokens_in  = math.floor(raw_len / 4),
+            tokens_out = 0,
+            cached_in  = 0,
+        }
+        ngx.log(ngx.WARN, "cost: capped 1MB response — input-only estimate ",
+                "tokens_in≈", usage.tokens_in, " model=",
+                record.resolved_model or "unknown")
+    else
+        -- Empty or unparseable native body: pre-fix this early-returned and
+        -- the request left NO ledger row (B-09 / #0165). Degrade like the
+        -- capped path instead: input-only estimate, tokens_estimated=true,
+        -- no cache_store (there is no parsed payload to cache).
+        local native_resp, parse_err
+        if native_body and native_body ~= "" then
+            native_resp, parse_err = cjson.decode(native_body)
+        else
+            parse_err = "empty body"
+        end
+        if native_resp then
+            usage = providers.extract_usage(record.provider, native_resp)
+        else
+            unparsed = true
+            local raw_len = (record.raw_body and #record.raw_body) or 0
+            usage = {
+                tokens_in  = math.floor(raw_len / 4),
+                tokens_out = 0,
+                cached_in  = 0,
+            }
+            ngx.log(ngx.WARN, "cost: unparseable native response (", tostring(parse_err),
+                    ") — input-only estimate tokens_in≈", usage.tokens_in,
+                    " model=", record.resolved_model or "unknown")
+        end
+    end
+
+    return usage, unparsed, capped, is_streaming, native_body, normalized_body
+end
+
 -- ---------------------------------------------------------------------------
--- LOG PHASE — parse tokens, calculate cost, write metrics, sidecar feedback
+-- LOG PHASE — price the extracted usage, then settle metrics, ledger, budget, cache
 -- ---------------------------------------------------------------------------
 function _M.account()
     local gw     = ngx.ctx.gw
@@ -829,84 +853,8 @@ function _M.account()
         return
     end
 
-    -- Response-capped path: the body exceeded 1MB and we stopped buffering,
-    -- so we cannot parse provider-native usage. Pre-fix this branch
-    -- early-returned, leaving the ledger and budget WITHOUT a record of
-    -- exactly the largest requests an auditor would most want to inspect.
-    --
-    -- New behavior: degrade gracefully. Estimate input tokens from the
-    -- request body byte length (rough: ~4 chars/token for English),
-    -- under-estimate output as 0 (we genuinely don't know — over-estimating
-    -- would over-bill the caller), and mark the audit/ledger entry as
-    -- capped=true. Cache_store is the only thing we still skip on this
-    -- path — we have no parsed response to cache.
-    local capped = ngx.ctx.gw_response_capped == true
-    local native_body     = ngx.ctx.gw_response_buf_native
-    local normalized_body = ngx.ctx.gw_response_buf_normalized or native_body
-
-    local usage
-    local unparsed = false
-    local is_streaming = record.is_streaming
-    if is_streaming and ngx.ctx.gw_streaming_usage then
-        local su = ngx.ctx.gw_streaming_usage
-        usage = {
-            tokens_in  = su.prompt_tokens     or su.input_tokens  or 0,
-            tokens_out = su.completion_tokens  or su.output_tokens or 0,
-            cached_in  = (su.prompt_tokens_details
-                         and su.prompt_tokens_details.cached_tokens)
-                         or (su.input_tokens_details
-                         and su.input_tokens_details.cached_tokens)
-                         or su.cached_input_tokens
-                         or 0,
-        }
-    elseif is_streaming then
-        local raw_len = (record.raw_body and #record.raw_body) or 0
-        local resp_len = (native_body and #native_body) or 0
-        usage = {
-            tokens_in  = math.floor(raw_len / 4),
-            tokens_out = math.floor(resp_len / 16),
-            cached_in  = 0,
-        }
-        ngx.log(ngx.WARN, "cost: streaming response without usage data — ",
-                "estimate tokens_in≈", usage.tokens_in,
-                " tokens_out≈", usage.tokens_out,
-                " model=", record.resolved_model or "unknown")
-    elseif capped then
-        local raw_len = (record.raw_body and #record.raw_body) or 0
-        usage = {
-            tokens_in  = math.floor(raw_len / 4),
-            tokens_out = 0,
-            cached_in  = 0,
-        }
-        ngx.log(ngx.WARN, "cost: capped 1MB response — input-only estimate ",
-                "tokens_in≈", usage.tokens_in, " model=",
-                record.resolved_model or "unknown")
-    else
-        -- Empty or unparseable native body: pre-fix this early-returned and
-        -- the request left NO ledger row (B-09 / #0165). Degrade like the
-        -- capped path instead: input-only estimate, tokens_estimated=true,
-        -- no cache_store (there is no parsed payload to cache).
-        local native_resp, parse_err
-        if native_body and native_body ~= "" then
-            native_resp, parse_err = cjson.decode(native_body)
-        else
-            parse_err = "empty body"
-        end
-        if native_resp then
-            usage = providers.extract_usage(record.provider, native_resp)
-        else
-            unparsed = true
-            local raw_len = (record.raw_body and #record.raw_body) or 0
-            usage = {
-                tokens_in  = math.floor(raw_len / 4),
-                tokens_out = 0,
-                cached_in  = 0,
-            }
-            ngx.log(ngx.WARN, "cost: unparseable native response (", tostring(parse_err),
-                    ") — input-only estimate tokens_in≈", usage.tokens_in,
-                    " model=", record.resolved_model or "unknown")
-        end
-    end
+    local usage, unparsed, capped, is_streaming, native_body, normalized_body =
+        resolve_captured_usage(record)
 
     -- Calculate cost
     local pricing = record.pricing or {}
