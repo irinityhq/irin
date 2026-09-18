@@ -18,6 +18,7 @@ pub mod scrub;
 pub mod server;
 pub mod static_web;
 pub mod stream;
+pub mod text;
 pub mod types;
 pub mod warroom;
 

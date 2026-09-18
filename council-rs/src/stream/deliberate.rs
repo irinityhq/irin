@@ -17,7 +17,7 @@ use crate::engine::context::RequestContext;
 use crate::engine::deliberate::{
     DEFAULT_CHAIR_SYSTEM, JudgeUsage, build_chair_prompt,
     governed_alternative_transport_model_groups, governed_required_transport_models,
-    has_usable_seat_response, save_session, seat_preamble_for,
+    has_usable_seat_response, prepare_seat_call, save_session, seat_response_from_provider,
 };
 use crate::mode::Mode;
 use crate::precedent;
@@ -750,28 +750,16 @@ pub(crate) async fn run_round_fanout(
             set.abort_all();
             return None;
         }
-        let seat_name = seat.name.clone();
-        let prov = seat.provider.clone();
-        let model = seat.model.clone();
-        let base_system = match config.render_system_prompt(&seat.system) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "ERROR: render_system_prompt failed for seat {}: {}",
-                    seat.name, e
-                );
-                seat.system.clone()
-            }
-        };
-        let system = format!("{}\n\n{}", base_system, seat_preamble_for(cabinet, mode));
-        let prompt = prompt.clone();
-        let ctx = req_ctx.clone();
+        // Shared seat-call preparation (P1-1): the same rendered system
+        // prompt + seat preamble the REST fan-out uses, so the two paths
+        // cannot drift.
+        let call = prepare_seat_call(config, cabinet, mode, seat, prompt, req_ctx);
         // N01: token streaming. For streaming-capable providers
         // (openai_compat SSE family, gateway routing excluded), forward
         // each visible delta as a `seat_chunk` between seat_started and
         // seat_complete. seat_complete.text stays authoritative. Other
         // providers fall back to the buffered call (zero chunks — legal).
-        let stream_chunks = provider::is_streaming_capable(&prov, effective_via_gateway);
+        let stream_chunks = provider::is_streaming_capable(&call.provider, effective_via_gateway);
         let chunk_tx = event_tx.clone();
         // Re-own for the seat task (parent holds &str; original monobody had String).
         let chunk_sid = session_id.to_string();
@@ -790,30 +778,39 @@ pub(crate) async fn run_round_fanout(
                 // SECURITY.md#t24-data-flow-redaction.
                 let on_delta = |delta: &str| {
                     let evt =
-                        StreamEvent::seat_chunk(&chunk_sid, round_num, &seat_name, delta, seq);
+                        StreamEvent::seat_chunk(&chunk_sid, round_num, &call.seat_name, delta, seq);
                     seq = seq.saturating_add(1);
                     let _ = chunk_tx.try_send(evt);
                 };
                 provider::ask_streaming_with_context(
-                    &prov, &prompt, &system, &model, &ctx, on_delta,
+                    &call.provider,
+                    &call.prompt,
+                    &call.system,
+                    &call.model,
+                    &call.ctx,
+                    on_delta,
                 )
                 .await
             } else {
-                provider::ask_with_context(&prov, &prompt, &system, &model, &ctx).await
+                provider::ask_with_context(
+                    &call.provider,
+                    &call.prompt,
+                    &call.system,
+                    &call.model,
+                    &call.ctx,
+                )
+                .await
             };
             tracing::info!(
-                provider = %prov,
-                model = %model,
-                seat = %seat_name,
+                provider = %call.provider,
+                model = %call.model,
+                seat = %call.seat_name,
                 tokens_in = resp.tokens_in,
                 tokens_out = resp.tokens_out,
                 latency_ms = resp.latency_ms,
                 "Provider call completed"
             );
-            SeatResponse::from_provider(&seat_name, &prov, round_num, resp, |s| {
-                let text = crate::scrub::redact(s);
-                crate::librarian::redaction::redact_secrets(&text).0
-            })
+            seat_response_from_provider(&call, round_num, resp)
         });
     }
 
@@ -1122,7 +1119,7 @@ async fn run_phase_rounds(
     cumulative_spend: f64,
 ) -> Option<PhaseRoundOutcome> {
     use crate::engine::deliberate::{
-        PreparedDeliberation, RoundStream, execute_deliberation_rounds,
+        DeliberationOptions, PreparedDeliberation, RoundStream, execute_deliberation_rounds,
     };
     let (budget_signal, _) = crate::engine::deliberate::fetch_budget_signal(
         std::env::var("HERMES_PROFILE").ok().as_deref(),
@@ -1142,21 +1139,25 @@ async fn run_phase_rounds(
         precedent_ids: Vec::new(),
         evidence_cache: crate::engine::sheldon::EvidenceCache::default(),
     };
-    let out = execute_deliberation_rounds(
-        &ready.config,
-        &prepared,
-        &ready.stream_config.cabinet_name,
+    let opts = DeliberationOptions {
+        cabinet_name: &ready.stream_config.cabinet_name,
         topic,
         context,
         mode,
-        ready.frame_check_enabled,
-        false,
-        ready.stream_config.budget_max_usd,
-        &ready.stream_config.tier,
-        ready.stream_config.validate,
-        &ready.stream_config.validate_provider,
-        ready.stream_config.validate_gate,
-        SessionOrigin::Cli,
+        blind: ready.stream_config.blind,
+        frame_check: ready.frame_check_enabled,
+        verbose: false,
+        budget_max_usd: ready.stream_config.budget_max_usd,
+        tier: &ready.stream_config.tier,
+        validate: ready.stream_config.validate,
+        validate_provider: &ready.stream_config.validate_provider,
+        validate_gate: ready.stream_config.validate_gate,
+        origin: SessionOrigin::Cli,
+    };
+    let out = execute_deliberation_rounds(
+        &ready.config,
+        &prepared,
+        &opts,
         None,
         Some(RoundStream {
             ready,

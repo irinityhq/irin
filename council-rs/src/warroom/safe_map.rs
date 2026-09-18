@@ -285,7 +285,7 @@ pub fn gather_map_preview(dir_path: &str) -> Value {
         "file_count": files.len(),
         "files": files.iter().take(200).collect::<Vec<_>>(),
         "total_bytes": content.len(),
-        "preview": crate::engine::deliberate::truncate_utf8(&content, 5000),
+        "preview": crate::text::truncate_utf8(&content, 5000),
     })
 }
 
