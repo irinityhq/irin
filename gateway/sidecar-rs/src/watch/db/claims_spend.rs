@@ -888,7 +888,7 @@ impl WatchDb {
 
     /// Perform recovery for one `council_response_staged` row.
     /// The actual parsing + signing + outbox helper + composite-key update
-    /// lives in `dispatcher::recover_council_response_staged`.
+    /// lives in `recovery::recover_council_response_staged`.
     ///
     /// Returns the outcome plus the list of bridged high-level Phase 3
     /// watch audit events (escalation_recovered_resume_outbox, directive_staged, ...).
@@ -959,7 +959,7 @@ impl WatchDb {
         self.conn
             .call(move |conn| -> Result<_, rusqlite::Error> {
                 let mut sink = Vec::new();
-                let (outcome, events) = crate::watch::dispatcher::recover_council_response_staged(
+                let (outcome, events) = crate::watch::recovery::recover_council_response_staged(
                     conn, &id, &t, &j, &mut sink, owned_key,
                 )
                 .map_err(|_e| rusqlite::Error::ExecuteReturnedResults)?;

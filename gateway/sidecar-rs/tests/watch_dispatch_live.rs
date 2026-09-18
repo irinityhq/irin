@@ -806,6 +806,7 @@ fn live_continuation_uses_shared_recovery_no_duplicate_parser_path() {
     // It must not contain a second implementation of the proposal parsing, PersistedDirectivePayloadV1
     // construction, or Ed25519 signing.
     let src = include_str!("../src/watch/dispatcher.rs");
+    let recovery = include_str!("../src/watch/recovery.rs");
 
     // The live functions must call the shared recovery
     assert!(
@@ -814,19 +815,23 @@ fn live_continuation_uses_shared_recovery_no_duplicate_parser_path() {
         "live continuation must call the shared recover_one_council_response_staged"
     );
 
-    // Count occurrences of key parsing error strings that would indicate duplication.
-    // These strings appear only inside the original recover_council_response_staged.
+    // Parsing error strings live once, in the shared recovery module. The
+    // dispatcher must not grow a second copy.
     let parse_error_markers = [
         "malformed durable envelope",
         "missing body in durable envelope",
         "missing headers in durable envelope",
     ];
     for marker in &parse_error_markers {
-        let count = src.matches(marker).count();
-        assert!(
-            count <= 1,
-            "parsing error string '{}' appears more than once — duplicate parser path detected",
-            marker
+        assert_eq!(
+            src.matches(marker).count(),
+            0,
+            "dispatcher grew a second parser for '{marker}'"
+        );
+        assert_eq!(
+            recovery.matches(marker).count(),
+            1,
+            "shared recovery must keep exactly one '{marker}' parser"
         );
     }
 
@@ -1107,12 +1112,18 @@ fn dispatcher_tick_source_assertion_no_council_idem_no_duplicate_parser() {
     assert!(src.contains("run_dispatcher_tick"));
     assert!(src.contains("ClaimStageResult"));
 
-    // The parsing error strings from the shared recovery should appear only once (in the original recover fn)
+    // The parsing error string lives once, in shared recovery, not in the tick.
     let marker = "malformed durable envelope";
+    let recovery = include_str!("../src/watch/recovery.rs");
     assert_eq!(
         src.matches(marker).count(),
-        1,
+        0,
         "duplicate parser detected for 3b.3"
+    );
+    assert_eq!(
+        recovery.matches(marker).count(),
+        1,
+        "shared recovery lost its single parser for 3b.3"
     );
 }
 
@@ -1321,9 +1332,15 @@ fn spawn_live_dispatcher_source_assertion() {
     assert!(src.contains("spawn_live_dispatcher_loop"));
     assert!(src.contains("run_dispatcher_tick"));
 
-    // Parsing markers still appear only in the original recovery function
+    // Parsing markers still appear only in shared recovery, not in the spawn loop.
     let marker = "malformed durable envelope";
-    assert_eq!(src.matches(marker).count(), 1, "duplicate parser in 3b.4");
+    let recovery = include_str!("../src/watch/recovery.rs");
+    assert_eq!(src.matches(marker).count(), 0, "duplicate parser in 3b.4");
+    assert_eq!(
+        recovery.matches(marker).count(),
+        1,
+        "shared recovery lost its single parser in 3b.4"
+    );
 }
 
 // ==========================================================================
@@ -1731,11 +1748,19 @@ fn prove_no_in_memory_fast_path_source_assertion() {
         "run_dispatcher_tick must go through recover_one_staged_row"
     );
 
-    // The low-level outbox_insert_with_skew_normalize( call must appear only once in the whole file
-    // (inside the shared recover_council_response_staged, not duplicated in the live path).
-    let direct_call_sites = src.matches("outbox_insert_with_skew_normalize(").count();
+    // The low-level outbox helper call stays on the shared recovery path.
+    // The live dispatcher must not grow a second call site.
+    let recovery = include_str!("../src/watch/recovery.rs");
     assert_eq!(
-        direct_call_sites, 1,
+        src.matches("outbox_insert_with_skew_normalize(").count(),
+        0,
+        "live dispatcher must not call the outbox helper"
+    );
+    assert_eq!(
+        recovery
+            .matches("outbox_insert_with_skew_normalize(")
+            .count(),
+        1,
         "only the shared recovery path should directly invoke the outbox helper"
     );
 }

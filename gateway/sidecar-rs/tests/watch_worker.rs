@@ -1123,8 +1123,8 @@ fn test_clamp_max_allowed_skew_ms() {
         MAX_ALLOWED_SKEW_MS_MAX, 10_000,
         "ceiling 10s — margin under 30s min TTL horizon"
     );
-    // The cap-ceiling < TTL-floor invariant is enforced at compile time in dispatcher.rs
-    // (a `const _: () = assert!(...)` static assertion beside the consts).
+    // The cap-ceiling < TTL-floor invariant is enforced at compile time in
+    // stage_ttl.rs (a `const _: () = assert!(...)` beside the TTL consts).
     assert_eq!(
         clamp_max_allowed_skew_ms(Some(7_500)),
         7_500,
