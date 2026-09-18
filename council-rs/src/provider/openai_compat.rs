@@ -14,18 +14,55 @@ use serde_json::{Value, json};
 use std::time::Instant;
 
 /// Provider configs - (env_var, env_var_fallback, base_url).
+/// Lookup is owned by the registry; the empty fallback slot is kept so the
+/// existing contract test still pins the triple.
 fn provider_config(provider: &str) -> (&'static str, &'static str, &'static str) {
-    let provider = match provider {
-        "nim" => "nvidia",
-        "nvidia" | "nous" | "deepseek" | "groq" | "together" | "fireworks" | "openrouter"
-        | "mistral" | "perplexity" | "sambanova" | "cerebras" | "kimi" | "cohere" => provider,
-        _ => return ("", "", ""),
+    match crate::registry::openai_compat_chat_config(provider) {
+        Some((env_key, base_url)) => (env_key, "", base_url),
+        None => ("", "", ""),
+    }
+}
+
+struct PreparedChat {
+    key: String,
+    url: String,
+    payload: Value,
+}
+
+fn prepare_chat(
+    provider: &str,
+    prompt: &str,
+    system: &str,
+    model: &str,
+    max_tokens: u32,
+    stream: bool,
+) -> Result<PreparedChat, ProviderResponse> {
+    let (env_key, _, base_url) = provider_config(provider);
+    if base_url.is_empty() {
+        return Err(ProviderResponse {
+            error: Some(format!("Unknown openai-compat provider: {}", provider)),
+            ..Default::default()
+        });
+    }
+    let key = match std::env::var(env_key) {
+        Ok(k) => k,
+        Err(_) => {
+            return Err(ProviderResponse {
+                error: Some(format!("{} not set (provider: {})", env_key, provider)),
+                ..Default::default()
+            });
+        }
     };
-    crate::registry::KNOWN_KEYS
-        .iter()
-        .find(|(_, slug, _, _)| *slug == provider)
-        .map(|(key, _, _, url)| (*key, "", *url))
-        .unwrap_or(("", "", ""))
+    let mut messages = Vec::new();
+    if !system.is_empty() {
+        messages.push(json!({"role": "system", "content": system}));
+    }
+    messages.push(json!({"role": "user", "content": prompt}));
+    Ok(PreparedChat {
+        key,
+        url: format!("{}/chat/completions", base_url),
+        payload: build_chat_payload(provider, model, messages, max_tokens, stream),
+    })
 }
 
 /// Call any OpenAI-compatible provider.
@@ -38,42 +75,11 @@ pub async fn ask(
     model: &str,
     max_tokens: u32,
 ) -> ProviderResponse {
-    let (env_key, env_fallback, base_url) = provider_config(provider);
-
-    if base_url.is_empty() {
-        return ProviderResponse {
-            error: Some(format!("Unknown openai-compat provider: {}", provider)),
-            ..Default::default()
-        };
-    }
-
-    let key = std::env::var(env_key).or_else(|_| {
-        if env_fallback.is_empty() {
-            Err(std::env::VarError::NotPresent)
-        } else {
-            std::env::var(env_fallback)
-        }
-    });
-
-    let key = match key {
-        Ok(k) => k,
-        Err(_) => {
-            return ProviderResponse {
-                error: Some(format!("{} not set (provider: {})", env_key, provider)),
-                ..Default::default()
-            };
-        }
+    let prepared = match prepare_chat(provider, prompt, system, model, max_tokens, false) {
+        Ok(p) => p,
+        Err(resp) => return resp,
     };
-
-    let mut messages = Vec::new();
-    if !system.is_empty() {
-        messages.push(json!({"role": "system", "content": system}));
-    }
-    messages.push(json!({"role": "user", "content": prompt}));
-
-    let payload = build_chat_payload(provider, model, messages, max_tokens, false);
-
-    let url = format!("{}/chat/completions", base_url);
+    let PreparedChat { key, url, payload } = prepared;
     let t0 = Instant::now();
     let client = Client::new();
     let resp = client
@@ -441,41 +447,11 @@ pub async fn ask_streaming(
     max_tokens: u32,
     mut on_delta: impl FnMut(&str),
 ) -> ProviderResponse {
-    let (env_key, env_fallback, base_url) = provider_config(provider);
-
-    if base_url.is_empty() {
-        return ProviderResponse {
-            error: Some(format!("Unknown openai-compat provider: {}", provider)),
-            ..Default::default()
-        };
-    }
-
-    let key = std::env::var(env_key).or_else(|_| {
-        if env_fallback.is_empty() {
-            Err(std::env::VarError::NotPresent)
-        } else {
-            std::env::var(env_fallback)
-        }
-    });
-    let key = match key {
-        Ok(k) => k,
-        Err(_) => {
-            return ProviderResponse {
-                error: Some(format!("{} not set (provider: {})", env_key, provider)),
-                ..Default::default()
-            };
-        }
+    let prepared = match prepare_chat(provider, prompt, system, model, max_tokens, true) {
+        Ok(p) => p,
+        Err(resp) => return resp,
     };
-
-    let mut messages = Vec::new();
-    if !system.is_empty() {
-        messages.push(json!({"role": "system", "content": system}));
-    }
-    messages.push(json!({"role": "user", "content": prompt}));
-
-    let payload = build_chat_payload(provider, model, messages, max_tokens, true);
-
-    let url = format!("{}/chat/completions", base_url);
+    let PreparedChat { key, url, payload } = prepared;
     let t0 = Instant::now();
     let client = Client::new();
     let resp = client
@@ -718,6 +694,17 @@ mod provider_config_contract {
         for unsupported in ["openai_api", "claude_api", "grok_api", "NVIDIA", ""] {
             assert_eq!(provider_config(unsupported), ("", "", ""));
         }
+    }
+
+    #[tokio::test]
+    async fn buffered_and_streaming_share_unknown_provider_refusal() {
+        let buffered = super::ask("no-such", "p", "s", "m", 8).await;
+        let streamed = super::ask_streaming("no-such", "p", "s", "m", 8, |_| {}).await;
+        assert_eq!(buffered.error, streamed.error);
+        assert_eq!(
+            buffered.error.as_deref(),
+            Some("Unknown openai-compat provider: no-such")
+        );
     }
 }
 
