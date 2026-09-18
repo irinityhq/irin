@@ -440,7 +440,7 @@ pub(crate) async fn api_ask(prompt: &str, system: &str, model: &str) -> Provider
                     let preview = if body_text.len() > 200 {
                         format!(
                             "{}…",
-                            crate::engine::deliberate::truncate_utf8(&body_text, 200)
+                            crate::text::truncate_utf8(&body_text, 200)
                         )
                     } else {
                         body_text.clone()

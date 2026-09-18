@@ -29,24 +29,12 @@ use crate::stream::deliberate::{
 };
 use crate::stream::events::StreamEvent;
 use crate::stream::intervention::InterventionQueue;
+use crate::text::truncate_utf8;
 use crate::types::*;
 
 const SUSPECT_QUALITY_CONVERGENCE_PENALTY: f64 = 0.15;
 const MIN_VALID_SEAT_RESPONSES: usize = 2;
 const MIN_VALID_PARTICIPATION_RATIO: f64 = 0.80;
-
-/// Byte-bounded prefix that never splits a UTF-8 character. Every
-/// user- or provider-derived truncation goes through here (B-08).
-pub fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
 
 pub(crate) fn has_usable_seat_response(rounds: &[RoundResult]) -> bool {
     rounds
@@ -2813,21 +2801,6 @@ pub(crate) fn save_session(session: &CouncilSession) -> Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// B-08: a cut that lands inside a multi-byte character must back off to
-    /// the previous boundary instead of panicking (`&prompt[..3000]` did).
-    #[test]
-    fn truncate_utf8_backs_off_from_mid_character_cut() {
-        // 2999 ASCII bytes, then a 3-byte character straddling byte 3000.
-        let prompt = format!("{}€tail", "a".repeat(2999));
-        assert_eq!(prompt.len(), 2999 + 3 + 4);
-        assert!(!prompt.is_char_boundary(3000));
-        let cut = truncate_utf8(&prompt, 3000);
-        assert_eq!(cut.len(), 2999);
-        assert!(cut.is_char_boundary(cut.len()));
-        assert_eq!(truncate_utf8("短い", 100), "短い");
-        assert_eq!(truncate_utf8("日本語", 4), "日");
-    }
 
     /// Serialize tests that mutate process env (cascade pin vars are global;
     /// a parallel set/remove pair can otherwise cross the assertion window).

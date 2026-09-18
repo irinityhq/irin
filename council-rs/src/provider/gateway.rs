@@ -444,7 +444,7 @@ async fn handle_gateway_response(
         let snippet = if body.len() > 200 {
             format!(
                 "{}...",
-                crate::engine::deliberate::truncate_utf8(&body, 200)
+                crate::text::truncate_utf8(&body, 200)
             )
         } else {
             body

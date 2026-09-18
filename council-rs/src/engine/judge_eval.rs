@@ -13,8 +13,9 @@ use crate::config::Config;
 use crate::engine::context::RequestContext;
 use crate::engine::deliberate::{
     CascadeCandidate, convergence_judge_candidates, frame_check_candidates, parse_judge_json,
-    provider_auth_ready, truncate_utf8,
+    provider_auth_ready,
 };
+use crate::text::truncate_utf8;
 use crate::provider;
 use crate::types::JudgeAssessment;
 

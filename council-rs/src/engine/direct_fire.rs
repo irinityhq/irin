@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::Config;
 use crate::engine::context::RequestContext;
-use crate::engine::deliberate::truncate_utf8;
+use crate::text::truncate_utf8;
 use crate::provider;
 use crate::types::{RoundResult, SessionMode};
 
