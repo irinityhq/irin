@@ -55,6 +55,7 @@ local env_map = {
 package.preload["cjson.safe"] = function()
     return {
         decode = function(s)
+            S.decode_input = s
             if S.decoded == nil then return nil, "invalid json" end
             return S.decoded
         end,
@@ -286,10 +287,12 @@ _G.ngx = {
         get_method = function() return S.method or "POST" end,
         set_header = function(name, v)
             S.headers[name] = v
+            S.headers[name:lower()] = v
             header_ops[#header_ops + 1] = { "set", name, v }
         end,
         clear_header = function(name)
             S.headers[name] = nil
+            S.headers[name:lower()] = nil
             header_ops[#header_ops + 1] = { "clear", name }
         end,
     },
@@ -410,6 +413,7 @@ local function test_body_file_fallback()
     S.body_file_content = '{"model":"gpt-test"}'
     S.decoded = { model = "gpt-test", messages = { { role = "user", content = "hi" } } }
     eq(run_route(), nil, "body-file fallback reaches proxy path")
+    eq(S.decode_input, S.body_file_content, "decoder receives body-file content")
     local record = default_record()
     eq(record.raw_body, '{"model":"gpt-test"}', "body file content becomes raw_body")
 end
@@ -546,6 +550,7 @@ local function test_proxy_success_order()
     eq(S.var.target_host, "api.openai.local", "target_host")
     eq(S.var.auth_value, "Bearer sk-openai", "openai auth_value")
     check(hdr_ops("clear", "Authorization") ~= nil, "client Authorization stripped")
+    eq(S.headers.authorization, nil, "client Authorization removed")
     check(hdr_ops("clear", "X-API-Key") ~= nil, "client X-API-Key stripped")
     eq(S.headers["x-openai-extra"], "1", "provider extra_headers applied")
     eq(_G.ngx.header["X-Routed-Model"], "gpt-test", "X-Routed-Model header")
