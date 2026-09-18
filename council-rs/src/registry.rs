@@ -231,6 +231,26 @@ pub(crate) const KNOWN_KEYS: &[(&str, &str, &str, &str)] = &[
     // Vertex handled separately (ADC, no API key)
 ];
 
+/// Native API slugs in `KNOWN_KEYS` that keep dedicated clients instead of `openai_compat`.
+const NATIVE_API_SLUGS: &[&str] = &["grok_api", "claude_api", "openai_api"];
+
+/// OpenAI-compatible chat endpoint for a provider slug (`nim` aliases `nvidia`).
+/// Native API slugs in `KNOWN_KEYS` return `None` — they keep dedicated clients.
+pub(crate) fn openai_compat_chat_config(provider: &str) -> Option<(&'static str, &'static str)> {
+    let slug = if provider == "nim" {
+        "nvidia"
+    } else {
+        provider
+    };
+    if NATIVE_API_SLUGS.contains(&slug) {
+        return None;
+    }
+    KNOWN_KEYS
+        .iter()
+        .find(|(_, s, _, _)| *s == slug)
+        .map(|(env, _, _, url)| (*env, *url))
+}
+
 /// Localhost endpoints to probe for local models.
 const LOCAL_PROBES: &[(&str, &str, u16)] = &[
     ("ollama", "Ollama", 11434),
@@ -1029,73 +1049,6 @@ impl ProviderRegistry {
             "log": self.sanitized_discovery_log(),
         })
     }
-
-    /// Auto-assemble a cabinet from discovered providers.
-    /// Rules: highest-tier reasoning model per provider, capped at 4 seats.
-    pub fn auto_cabinet(&self) -> Option<crate::types::Cabinet> {
-        if self.providers.len() < 2 {
-            return None;
-        }
-
-        // Rank providers by cost tier (premium > high > medium > low > free)
-        let tier_rank = |tier: &str| -> u8 {
-            match tier {
-                "premium" => 5,
-                "high" => 4,
-                "medium" => 3,
-                "low" => 2,
-                "free" => 1,
-                _ => 0,
-            }
-        };
-
-        let mut ranked: Vec<_> = self.providers.values().collect();
-        ranked.sort_by(|a, b| {
-            tier_rank(&b.capabilities.cost_tier).cmp(&tier_rank(&a.capabilities.cost_tier))
-        });
-
-        // Take top 4 for seats, top 1 for chair
-        let seat_count = ranked.len().min(4);
-        let seats: Vec<crate::types::Seat> = ranked[..seat_count]
-            .iter()
-            .enumerate()
-            .map(|(i, p)| {
-                let role = match i {
-                    0 => "strategist",
-                    1 => "mirror",
-                    2 => "operator",
-                    _ => "analyst",
-                };
-                crate::types::Seat {
-                    name: format!("Seat-{} ({})", i + 1, p.display_name),
-                    provider: p.slug.clone(),
-                    model: p.default_model.clone(),
-                    system: role.to_string(),
-                }
-            })
-            .collect();
-
-        // Chair: highest-tier provider
-        let chair_provider = &ranked[0];
-        let chair = crate::types::Chair {
-            name: "Chair".into(),
-            provider: chair_provider.slug.clone(),
-            model: chair_provider.default_model.clone(),
-            system: None,
-            thinking_effort: Some("high".into()),
-        };
-
-        Some(crate::types::Cabinet {
-            hash: String::new(),
-            name: "Auto-Assembled".into(),
-            description: format!("Auto-assembled from {} detected providers", seat_count),
-            rounds: if seat_count >= 4 { 2 } else { 1 },
-            seats,
-            chair,
-            local_code_only: false,
-            synthesis_mode: crate::types::SynthesisMode::Generic,
-        })
-    }
 }
 
 /// Stable wire string for a provider source — matches the serde
@@ -1542,6 +1495,25 @@ cost_tier = "high"
     #[test]
     fn parse_user_providers_empty_is_ok() {
         assert!(parse_user_providers("").expect("empty parses").is_empty());
+    }
+
+    #[test]
+    fn openai_compat_chat_config_uses_known_keys_and_excludes_native_api() {
+        let (env, url) = openai_compat_chat_config("nvidia").expect("nvidia is chat-compat");
+        assert_eq!(env, "NVIDIA_API_KEY");
+        assert_eq!(url, "https://integrate.api.nvidia.com/v1");
+        assert_eq!(
+            openai_compat_chat_config("nim"),
+            openai_compat_chat_config("nvidia")
+        );
+        assert_eq!(
+            openai_compat_chat_config("kimi"),
+            Some(("MOONSHOT_API_KEY", "https://api.moonshot.cn/v1"))
+        );
+        for native in ["grok_api", "claude_api", "openai_api"] {
+            assert_eq!(openai_compat_chat_config(native), None, "{native}");
+        }
+        assert_eq!(openai_compat_chat_config("no-such-provider"), None);
     }
 
     #[test]

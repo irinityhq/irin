@@ -363,7 +363,29 @@ pub fn is_codex_cli_available() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
+#[cfg(test)]
+static TEST_AGY_AVAILABLE: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+static TEST_AGY_ASK: std::sync::Mutex<Option<ProviderResponse>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_test_agy_cli_available(value: Option<bool>) {
+    *TEST_AGY_AVAILABLE.lock().unwrap_or_else(|e| e.into_inner()) = value;
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_agy_ask(value: Option<ProviderResponse>) {
+    *TEST_AGY_ASK.lock().unwrap_or_else(|e| e.into_inner()) = value;
+}
+
 pub fn is_agy_cli_available() -> bool {
+    #[cfg(test)]
+    {
+        if let Some(v) = *TEST_AGY_AVAILABLE.lock().unwrap_or_else(|e| e.into_inner()) {
+            return v;
+        }
+    }
     static AGY_AVAILABLE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *AGY_AVAILABLE.get_or_init(|| {
         std::process::Command::new("agy")
@@ -494,6 +516,14 @@ pub async fn ask_codex(prompt: &str, system: &str, model: &str) -> ProviderRespo
 }
 
 pub async fn ask_agy(prompt: &str, system: &str, model: &str) -> ProviderResponse {
+    #[cfg(test)]
+    if let Some(resp) = TEST_AGY_ASK
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+    {
+        return resp;
+    }
     let full_prompt = full_prompt(prompt, system);
     if full_prompt.len() > AGY_MAX_PROMPT_BYTES {
         return cli_error(
