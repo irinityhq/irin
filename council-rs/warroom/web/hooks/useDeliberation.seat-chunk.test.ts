@@ -105,21 +105,27 @@ describe("applyEvent seat_chunk", () => {
     let s = startedRound();
     s = applyEvent(s, chunk({ seat_name: "Strategist", round_num: 1, text_delta: "one", seq: 0 }));
     s = applyEvent(s, chunk({ seat_name: "Strategist", round_num: 1, text_delta: "two", seq: 1 }));
+    const round = s.rounds[0];
     // Replay of seq 0 and 1 must be ignored.
     s = applyEvent(s, chunk({ seat_name: "Strategist", round_num: 1, text_delta: "dup", seq: 1 }));
     s = applyEvent(s, chunk({ seat_name: "Strategist", round_num: 1, text_delta: "older", seq: 0 }));
     expect(s.rounds[0].seats["Strategist"].text).toBe("onetwo");
     expect(s.rounds[0].seats["Strategist"].last_seq).toBe(1);
+    expect(s.rounds[0]).toBe(round);
   });
 
   it("still records seat_complete totals when the seat is missing", () => {
     let s = startedRound();
+    s = applyEvent(s, complete(baseComplete));
+    const seeded = s.totals;
+    const round = s.rounds[0];
     s = applyEvent(s, complete({ ...baseComplete, seat_name: "Ghost" }));
     expect(s.rounds[0].seats["Ghost"]).toBeUndefined();
+    expect(s.rounds[0]).toBe(round);
     expect(s.totals).toEqual({
-      tokens: baseComplete.tokens_in + baseComplete.tokens_out,
-      cost_usd: baseComplete.cost_usd,
-      latency_ms: baseComplete.latency_ms,
+      tokens: seeded.tokens + baseComplete.tokens_in + baseComplete.tokens_out,
+      cost_usd: seeded.cost_usd + baseComplete.cost_usd,
+      latency_ms: seeded.latency_ms + baseComplete.latency_ms,
     });
   });
 
