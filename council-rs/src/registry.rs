@@ -231,7 +231,7 @@ pub(crate) const KNOWN_KEYS: &[(&str, &str, &str, &str)] = &[
     // Vertex handled separately (ADC, no API key)
 ];
 
-/// Native API transports in `KNOWN_KEYS` that do not speak `/v1/chat/completions`.
+/// Native API slugs in `KNOWN_KEYS` that keep dedicated clients instead of `openai_compat`.
 const NATIVE_API_SLUGS: &[&str] = &["grok_api", "claude_api", "openai_api"];
 
 /// OpenAI-compatible chat endpoint for a provider slug (`nim` aliases `nvidia`).

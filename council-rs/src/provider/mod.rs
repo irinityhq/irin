@@ -1292,15 +1292,29 @@ mod tests {
         restore_env(saved);
     }
 
-    fn serve_one_http_stub() -> String {
+    fn serve_http_stub(max_connections: usize) -> String {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
+        listener
+            .set_nonblocking(true)
+            .expect("stub listener nonblocking");
         let addr = listener.local_addr().expect("stub addr");
         std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                use std::io::Write;
-                let _ = stream.write_all(
-                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
-                );
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let mut served = 0usize;
+            while served < max_connections && std::time::Instant::now() < deadline {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        use std::io::Write;
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+                        );
+                        served += 1;
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    Err(_) => break,
+                }
             }
         });
         format!("http://{addr}")
@@ -1340,7 +1354,7 @@ mod tests {
         }
         let _routing = RoutingClear(cwd.clone());
 
-        grok::set_test_xai_base_url(Some(serve_one_http_stub()));
+        grok::set_test_xai_base_url(Some(serve_http_stub(2)));
         unsafe {
             std::env::set_var("COUNCIL_GROK_CLI_FALLBACK_API", "1");
             std::env::set_var("XAI_API_KEY", "test-xai-key-not-live");
@@ -1394,6 +1408,7 @@ mod tests {
         impl Drop for AgyClear {
             fn drop(&mut self) {
                 crate::provider::agent_cli::set_test_agy_cli_available(None);
+                crate::provider::agent_cli::set_test_agy_ask(None);
             }
         }
         let _agy = AgyClear;
@@ -1442,6 +1457,10 @@ mod tests {
         );
 
         crate::provider::agent_cli::set_test_agy_cli_available(Some(true));
+        crate::provider::agent_cli::set_test_agy_ask(Some(ProviderResponse {
+            error: Some("agy-test-stub".into()),
+            ..Default::default()
+        }));
         let resp = ask_with_opts_and_context(
             "gemini",
             "prompt",
@@ -1452,6 +1471,10 @@ mod tests {
         )
         .await;
         let err = resp.error.expect("agy-on path must attempt the CLI");
+        assert!(
+            err.contains("agy-test-stub"),
+            "agy-on path must use the test stub, got: {err}"
+        );
         assert!(
             !err.contains("agy CLI not found (primary for gemini)"),
             "got: {err}"
