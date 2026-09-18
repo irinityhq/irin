@@ -617,6 +617,9 @@ local function resolve_captured_usage(record)
     elseif is_streaming then
         local raw_len = (record.raw_body and #record.raw_body) or 0
         local resp_len = (native_body and #native_body) or 0
+        -- Byte-length counts are not provider-reported usage. Cache is
+        -- already skipped for streams; this only marks the audit/ledger.
+        unparsed = true
         usage = {
             tokens_in  = math.floor(raw_len / 4),
             tokens_out = math.floor(resp_len / 16),

@@ -651,8 +651,8 @@ do
     cost.capture_body()
     cost.account()
     local row = recorded[1]
-    check(row and row.metadata.tokens_estimated ~= true and row.payload.tokens_out == math.floor(#('data: {"usage":{"total_tokens":9}}') / 16),
-        "eof-flush total_tokens-only usage is ignored and the stream is estimated")
+    check(row and row.metadata.tokens_estimated == true and row.payload.tokens_out == math.floor(#('data: {"usage":{"total_tokens":9}}') / 16),
+        "eof-flush total_tokens-only usage is ignored and the stream is marked estimated")
 end
 
 print("[9] malformed data")
