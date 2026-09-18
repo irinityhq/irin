@@ -43,9 +43,11 @@ pub use utility_roles::{frame_check_prompt, print_role_cascades};
 
 pub(crate) use judge::{JudgeUsage, build_judge_prompt, parse_judge_json};
 pub(crate) use rounds::{RoundExecution, RoundStream, execute_deliberation_rounds};
-pub(crate) use seats::seat_preamble_for;
+pub(crate) use seats::{prepare_seat_call, seat_response_from_provider};
 pub(crate) use synthesis::{DEFAULT_CHAIR_SYSTEM, has_usable_seat_response, save_session};
-pub(crate) use utility_roles::{CascadeCandidate, convergence_judge_candidates, frame_check_candidates};
+pub(crate) use utility_roles::{
+    CascadeCandidate, convergence_judge_candidates, frame_check_candidates,
+};
 
 #[cfg(test)]
 pub(crate) use judge::{convergence_quality_penalty_enabled, effective_convergence_threshold};
@@ -54,58 +56,26 @@ pub(crate) use synthesis::{DIRECTIVE_TRIAGE_CHAIR_SYSTEM, chair_system_for};
 
 use synthesis::synthesize_and_persist;
 
-#[cfg(test)]
-mod specops_enable_tests {
-    use super::specops_auto_escalate_enabled;
-    use crate::types::SessionOrigin;
-
-    #[test]
-    fn api_origin_suppresses_even_when_grok_available() {
-        // Capability forced true — this is the contract Copilot correctly
-        // noted was untested by an integration run without Grok present.
-        assert!(!specops_auto_escalate_enabled(
-            true,
-            false,
-            SessionOrigin::Api
-        ));
-    }
-
-    #[test]
-    fn api_origin_allows_when_auto_escalate_opted_in() {
-        assert!(specops_auto_escalate_enabled(
-            true,
-            true,
-            SessionOrigin::Api
-        ));
-    }
-
-    #[test]
-    fn non_api_origin_allows_when_grok_available() {
-        assert!(specops_auto_escalate_enabled(
-            true,
-            false,
-            SessionOrigin::Cli
-        ));
-        assert!(specops_auto_escalate_enabled(
-            true,
-            false,
-            SessionOrigin::Warroom
-        ));
-    }
-
-    #[test]
-    fn no_grok_never_enables() {
-        assert!(!specops_auto_escalate_enabled(
-            false,
-            true,
-            SessionOrigin::Cli
-        ));
-        assert!(!specops_auto_escalate_enabled(
-            false,
-            true,
-            SessionOrigin::Api
-        ));
-    }
+/// Normalized internal run settings shared by prepare, the round loop,
+/// escalation, and synthesis. Each boundary (CLI/REST `run_with_cancel`,
+/// WebSocket `run_phase_rounds`) constructs this once; external signatures
+/// at those boundaries are unchanged. Borrowed: nothing is cloned beyond
+/// what the spawned seat tasks already owned.
+#[derive(Debug, Clone)]
+pub(crate) struct DeliberationOptions<'a> {
+    pub(crate) cabinet_name: &'a str,
+    pub(crate) topic: &'a str,
+    pub(crate) context: &'a str,
+    pub(crate) mode: Mode,
+    pub(crate) blind: bool,
+    pub(crate) frame_check: bool,
+    pub(crate) verbose: bool,
+    pub(crate) budget_max_usd: Option<f64>,
+    pub(crate) tier: &'a str,
+    pub(crate) validate: bool,
+    pub(crate) validate_provider: &'a str,
+    pub(crate) validate_gate: bool,
+    pub(crate) origin: SessionOrigin,
 }
 
 /// Run a full deliberation.
@@ -198,27 +168,12 @@ pub async fn run_with_cancel(
     worker_provenance: Option<sovereign_protocol::types::WorkerProvenanceGuard>,
     cancel: Option<CancellationToken>,
 ) -> Result<CouncilSession> {
-    let prepared = prepare_deliberation(
-        config,
-        cabinet_name,
-        topic,
-        mode,
-        blind,
-        frame_check,
-        verbose,
-        budget_max_usd,
-        validate,
-        req_ctx,
-    )
-    .await?;
-
-    let rounds = execute_deliberation_rounds(
-        config,
-        &prepared,
+    let opts = DeliberationOptions {
         cabinet_name,
         topic,
         context,
         mode,
+        blind,
         frame_check,
         verbose,
         budget_max_usd,
@@ -227,29 +182,16 @@ pub async fn run_with_cancel(
         validate_provider,
         validate_gate,
         origin,
-        cancel.as_ref(),
-        None,
-        0.0,
-    )
-    .await?;
+    };
 
-    let rounds = maybe_escalate_specops(config, &prepared, rounds, topic, verbose, origin).await;
+    let prepared = prepare_deliberation(config, &opts, req_ctx).await?;
 
-    synthesize_and_persist(
-        config,
-        prepared,
-        rounds,
-        cabinet_name,
-        topic,
-        context,
-        mode,
-        verbose,
-        budget_max_usd,
-        tier,
-        origin,
-        worker_provenance,
-    )
-    .await
+    let rounds =
+        execute_deliberation_rounds(config, &prepared, &opts, cancel.as_ref(), None, 0.0).await?;
+
+    let rounds = maybe_escalate_specops(config, &prepared, rounds, &opts).await;
+
+    synthesize_and_persist(config, prepared, rounds, &opts, worker_provenance).await
 }
 
 /// Phase 1 product: cabinet, session identity, transport, precedent, BATS.
@@ -266,19 +208,22 @@ pub(crate) struct PreparedDeliberation {
 }
 
 /// Phase 1 — resolve cabinet, mint session id, gateway preflight, BATS + precedent.
-#[allow(clippy::too_many_arguments)]
 async fn prepare_deliberation(
     config: &Config,
-    cabinet_name: &str,
-    topic: &str,
-    mode: Mode,
-    blind: bool,
-    frame_check: bool,
-    verbose: bool,
-    budget_max_usd: Option<f64>,
-    validate: bool,
+    opts: &DeliberationOptions<'_>,
     mut req_ctx: RequestContext,
 ) -> Result<PreparedDeliberation> {
+    let DeliberationOptions {
+        cabinet_name,
+        topic,
+        mode,
+        blind,
+        frame_check,
+        verbose,
+        budget_max_usd,
+        validate,
+        ..
+    } = opts.clone();
     // resolve_cabinet_owned (feature contract): registry hit clones; a miss falls back to
     // <base_dir>/cabinets/<name>.yaml so cabinets saved after startup are
     // launchable by name. Bound by reference below to keep downstream usage
@@ -444,10 +389,14 @@ async fn maybe_escalate_specops(
     config: &Config,
     prepared: &PreparedDeliberation,
     mut rounds: RoundExecution,
-    topic: &str,
-    verbose: bool,
-    origin: SessionOrigin,
+    opts: &DeliberationOptions<'_>,
 ) -> RoundExecution {
+    let DeliberationOptions {
+        topic,
+        verbose,
+        origin,
+        ..
+    } = opts.clone();
     // Grok counts as available via OAuth CLI or XAI_API_KEY; an empty
     // XAI_API_KEY= placeholder does not count as configured.
     let grok_available =
@@ -612,5 +561,59 @@ pub(crate) fn provider_auth_ready(provider: &str) -> bool {
             .output()
             .is_ok_and(|o| o.status.success()),
         _ => true,
+    }
+}
+
+#[cfg(test)]
+mod specops_enable_tests {
+    use super::specops_auto_escalate_enabled;
+    use crate::types::SessionOrigin;
+
+    #[test]
+    fn api_origin_suppresses_even_when_grok_available() {
+        // Capability forced true — this is the contract Copilot correctly
+        // noted was untested by an integration run without Grok present.
+        assert!(!specops_auto_escalate_enabled(
+            true,
+            false,
+            SessionOrigin::Api
+        ));
+    }
+
+    #[test]
+    fn api_origin_allows_when_auto_escalate_opted_in() {
+        assert!(specops_auto_escalate_enabled(
+            true,
+            true,
+            SessionOrigin::Api
+        ));
+    }
+
+    #[test]
+    fn non_api_origin_allows_when_grok_available() {
+        assert!(specops_auto_escalate_enabled(
+            true,
+            false,
+            SessionOrigin::Cli
+        ));
+        assert!(specops_auto_escalate_enabled(
+            true,
+            false,
+            SessionOrigin::Warroom
+        ));
+    }
+
+    #[test]
+    fn no_grok_never_enables() {
+        assert!(!specops_auto_escalate_enabled(
+            false,
+            true,
+            SessionOrigin::Cli
+        ));
+        assert!(!specops_auto_escalate_enabled(
+            false,
+            true,
+            SessionOrigin::Api
+        ));
     }
 }

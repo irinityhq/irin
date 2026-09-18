@@ -11,6 +11,7 @@ use crate::mode::Mode;
 use crate::provider;
 use crate::types::*;
 
+use super::DeliberationOptions;
 use super::PreparedDeliberation;
 use super::rounds::RoundExecution;
 use super::seats::append_validation_context;
@@ -294,21 +295,24 @@ async fn synthesize(
 }
 
 /// Phase 4 — chair synthesis, session record, save.
-#[allow(clippy::too_many_arguments)]
 pub(super) async fn synthesize_and_persist(
     config: &Config,
     prepared: PreparedDeliberation,
     mut rounds: RoundExecution,
-    cabinet_name: &str,
-    topic: &str,
-    context: &str,
-    mode: Mode,
-    verbose: bool,
-    budget_max_usd: Option<f64>,
-    tier: &str,
-    origin: SessionOrigin,
+    opts: &DeliberationOptions<'_>,
     worker_provenance: Option<sovereign_protocol::types::WorkerProvenanceGuard>,
 ) -> Result<CouncilSession> {
+    let DeliberationOptions {
+        cabinet_name,
+        topic,
+        context,
+        mode,
+        verbose,
+        budget_max_usd,
+        tier,
+        origin,
+        ..
+    } = opts.clone();
     if !has_usable_seat_response(&rounds.rounds) {
         write_cancelled_partial(
             &prepared.session_id,

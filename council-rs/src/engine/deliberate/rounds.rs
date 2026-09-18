@@ -9,7 +9,6 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::Config;
 use crate::engine::sheldon;
-use crate::mode::Mode;
 use crate::stream::deliberate::{
     self as streaming, RoundOperatorControl, StreamRunReady, until_cancelled,
 };
@@ -17,6 +16,7 @@ use crate::stream::events::StreamEvent;
 use crate::stream::intervention::InterventionQueue;
 use crate::types::*;
 
+use super::DeliberationOptions;
 use super::PreparedDeliberation;
 use super::budget::should_pause_for_budget;
 use super::judge::{
@@ -49,26 +49,29 @@ pub(crate) struct RoundExecution {
 }
 
 /// Phase 2 — fan-out rounds with judge, validation/gate, cancel, budget, convergence.
-#[allow(clippy::too_many_arguments)]
 pub(crate) async fn execute_deliberation_rounds(
     config: &Config,
     prepared: &PreparedDeliberation,
-    cabinet_name: &str,
-    topic: &str,
-    context: &str,
-    mode: Mode,
-    frame_check: bool,
-    verbose: bool,
-    budget_max_usd: Option<f64>,
-    tier: &str,
-    validate: bool,
-    validate_provider: &str,
-    validate_gate: bool,
-    origin: SessionOrigin,
+    opts: &DeliberationOptions<'_>,
     cancel: Option<&CancellationToken>,
     mut stream: Option<RoundStream<'_>>,
     cumulative_spend: f64,
 ) -> Result<RoundExecution> {
+    let DeliberationOptions {
+        cabinet_name,
+        topic,
+        context,
+        mode,
+        blind: _,
+        frame_check,
+        verbose,
+        budget_max_usd,
+        tier,
+        validate,
+        validate_provider,
+        validate_gate,
+        origin,
+    } = opts.clone();
     let cabinet = &prepared.cabinet;
     let stream_ready = stream.as_ref().map(|s| s.ready);
     let session_id = &prepared.session_id;

@@ -49,6 +49,66 @@ pub(crate) fn seat_preamble_for(cabinet: &Cabinet, mode: Mode) -> &'static str {
     }
 }
 
+/// Owned per-seat call preparation shared by the REST fan-out and the WS
+/// streaming fan-out: rendered system prompt, seat preamble injection, and
+/// the owned clones the spawned seat task needs. Both fan-outs route through
+/// here so the system/preamble contract cannot drift between paths (P1-1):
+/// `seat_preamble_for` sends triage (`directive_proposal_v1`) cabinets to the
+/// neutral TRIAGE_SEAT_PREAMBLE and everything else to the operator-facing
+/// Mode preamble. On a render error the raw `seat.system` is used (logged) so
+/// one broken template cannot silence a seat.
+pub(crate) struct PreparedSeatCall {
+    pub(crate) seat_name: String,
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) system: String,
+    pub(crate) prompt: String,
+    pub(crate) ctx: RequestContext,
+}
+
+pub(crate) fn prepare_seat_call(
+    config: &Config,
+    cabinet: &Cabinet,
+    mode: Mode,
+    seat: &Seat,
+    prompt: &str,
+    req_ctx: &RequestContext,
+) -> PreparedSeatCall {
+    let base_system = match config.render_system_prompt(&seat.system) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!(
+                "ERROR: render_system_prompt failed for seat {}: {}",
+                seat.name, e
+            );
+            // Fallback to raw to avoid total brain death, but error is logged
+            seat.system.clone()
+        }
+    };
+    let system = format!("{}\n\n{}", base_system, seat_preamble_for(cabinet, mode));
+    PreparedSeatCall {
+        seat_name: seat.name.clone(),
+        provider: seat.provider.clone(),
+        model: seat.model.clone(),
+        system,
+        prompt: prompt.to_string(),
+        ctx: req_ctx.clone(),
+    }
+}
+
+/// Build the persisted `SeatResponse` with the shared redaction closure (the
+/// T24 persisted form): `scrub::redact` then librarian secret redaction.
+pub(crate) fn seat_response_from_provider(
+    call: &PreparedSeatCall,
+    round_num: u32,
+    resp: crate::types::ProviderResponse,
+) -> SeatResponse {
+    SeatResponse::from_provider(&call.seat_name, &call.provider, round_num, resp, |s| {
+        let text = crate::scrub::redact(s);
+        crate::librarian::redaction::redact_secrets(&text).0
+    })
+}
+
 /// Fan-out to all seats in parallel.
 ///
 /// Phase 0.5 §4.5: per-seat `tokio::select!` against `cancel`. v0.1 scope-cut
@@ -69,27 +129,7 @@ pub(super) async fn fan_out(
     let mut set = JoinSet::new();
 
     for (seat, prompt) in cabinet.seats.iter().zip(prompts) {
-        let seat_name = seat.name.clone();
-        let prov = seat.provider.clone();
-        let model = seat.model.clone();
-        let base_system = match config.render_system_prompt(&seat.system) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!(
-                    "ERROR: render_system_prompt failed for seat {}: {}",
-                    seat.name, e
-                );
-                // Fallback to raw to avoid total brain death, but error is logged
-                seat.system.clone()
-            }
-        };
-        // Inject the seat preamble after the base system prompt. seat_preamble_for
-        // routes triage (directive_proposal_v1) to the neutral TRIAGE_SEAT_PREAMBLE
-        // and everything else to the operator-facing Mode preamble — the single
-        // selector both the REST and WS fan-outs share so the contract can't drift.
-        let system = format!("{}\n\n{}", base_system, seat_preamble_for(cabinet, mode));
-        let prompt = prompt.to_string();
-        let ctx = req_ctx.clone();
+        let call = prepare_seat_call(config, cabinet, mode, seat, prompt, req_ctx);
         let token = cancel.cloned();
 
         set.spawn(async move {
@@ -98,18 +138,28 @@ pub(super) async fn fan_out(
                     biased;
                     _ = c.cancelled() => crate::types::ProviderResponse {
                         error: Some("cancelled".into()),
-                        model: model.clone(),
+                        model: call.model.clone(),
                         ..Default::default()
                     },
-                    r = provider::ask_with_context(&prov, &prompt, &system, &model, &ctx) => r,
+                    r = provider::ask_with_context(
+                        &call.provider,
+                        &call.prompt,
+                        &call.system,
+                        &call.model,
+                        &call.ctx,
+                    ) => r,
                 }
             } else {
-                provider::ask_with_context(&prov, &prompt, &system, &model, &ctx).await
+                provider::ask_with_context(
+                    &call.provider,
+                    &call.prompt,
+                    &call.system,
+                    &call.model,
+                    &call.ctx,
+                )
+                .await
             };
-            SeatResponse::from_provider(&seat_name, &prov, round_num, resp, |s| {
-                let text = crate::scrub::redact(s);
-                crate::librarian::redaction::redact_secrets(&text).0
-            })
+            seat_response_from_provider(&call, round_num, resp)
         });
     }
 
@@ -285,6 +335,101 @@ mod tests {
         assert_ne!(
             seat_preamble_for(&generic, Mode::TearDown),
             TRIAGE_SEAT_PREAMBLE
+        );
+    }
+
+    // P1-1 parity: the shared seat-call preparation that both the REST and WS
+    // fan-outs use must render the seat's system prompt and append the same
+    // preamble the selector picks, so the two paths cannot drift.
+    #[test]
+    fn seat_call_preparation_renders_system_with_mode_preamble() {
+        let config = crate::config::Config::load(std::path::Path::new(".")).unwrap();
+        let cabinet = cabinet_with_mode("");
+        let seat = Seat {
+            name: "Checker".into(),
+            provider: "mock".into(),
+            model: "mock-model".into(),
+            system: "You are the checker seat.".into(),
+        };
+        let call = prepare_seat_call(
+            &config,
+            &cabinet,
+            Mode::Harden,
+            &seat,
+            "prompt text",
+            &crate::engine::context::RequestContext::default(),
+        );
+
+        assert_eq!(call.seat_name, "Checker");
+        assert_eq!(call.provider, "mock");
+        assert_eq!(call.model, "mock-model");
+        assert_eq!(call.prompt, "prompt text");
+        // Inline system prompts get the restate/frame-check gates appended by
+        // render_system_prompt; the shared helper then appends the preamble.
+        assert!(call.system.starts_with("You are the checker seat."));
+        assert!(
+            call.system
+                .ends_with(seat_preamble_for(&cabinet, Mode::Harden)),
+            "system prompt must end with the operator Mode preamble"
+        );
+    }
+
+    #[test]
+    fn seat_call_preparation_routes_triage_cabinets_to_triage_preamble() {
+        let config = crate::config::Config::load(std::path::Path::new(".")).unwrap();
+        let cabinet = cabinet_with_mode(r#","synthesis_mode":"directive_proposal_v1""#);
+        let seat = Seat {
+            name: "S".into(),
+            provider: "p".into(),
+            model: "m".into(),
+            system: "sys".into(),
+        };
+        let call = prepare_seat_call(
+            &config,
+            &cabinet,
+            Mode::TearDown,
+            &seat,
+            "",
+            &crate::engine::context::RequestContext::default(),
+        );
+        assert!(
+            call.system.ends_with(TRIAGE_SEAT_PREAMBLE),
+            "triage cabinets must get the neutral triage preamble, not the Mode one"
+        );
+    }
+
+    // T24 persisted form: the shared response closure must scrub high-entropy
+    // secrets from the persisted text while keeping the surrounding answer.
+    #[test]
+    fn seat_response_redaction_scrubs_high_entropy_secrets() {
+        let call = PreparedSeatCall {
+            seat_name: "Checker".into(),
+            provider: "mock".into(),
+            model: "mock-model".into(),
+            system: String::new(),
+            prompt: String::new(),
+            ctx: crate::engine::context::RequestContext::default(),
+        };
+        let resp = crate::types::ProviderResponse {
+            text: "answer with secret Zx9Qp2Lm8Vb4Nc7Rt3Yk6Wj plus analysis".into(),
+            model: "mock-model".into(),
+            tokens_in: 1,
+            tokens_out: 2,
+            latency_ms: 3,
+            ..Default::default()
+        };
+        let seat_response = seat_response_from_provider(&call, 2, resp);
+
+        assert_eq!(seat_response.seat_name, "Checker");
+        assert_eq!(seat_response.provider, "mock");
+        assert_eq!(seat_response.round_num, 2);
+        assert!(
+            !seat_response.text.contains("Zx9Qp2Lm8Vb4Nc7Rt3Yk6Wj"),
+            "high-entropy token must be scrubbed from the persisted form"
+        );
+        assert!(
+            seat_response.text.contains("answer with secret"),
+            "surrounding answer text must survive redaction"
         );
     }
 
