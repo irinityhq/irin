@@ -22,6 +22,20 @@ local function sidecar_calls()
     return out
 end
 
+local function saw_sidecar(name)
+    for _, e in ipairs(events) do
+        if e.kind == "sidecar" and e.name == name then return true end
+    end
+    return false
+end
+
+local function saw_metric(name)
+    for _, e in ipairs(events) do
+        if e.kind == "metric" and e.name == name then return true end
+    end
+    return false
+end
+
 local function ledger_actions()
     local out = {}
     for _, r in ipairs(ledger_rows) do out[#out + 1] = r.meta.action end
@@ -460,6 +474,42 @@ local function test_guard_block()
     eq(default_record().chain_terminated, true, "guard marks chain_terminated")
 end
 
+-- MCP loopback and trusted-council parent-id skip decon. A swapped
+-- bypass condition would still pass test_guard_block.
+local function test_guard_bypasses()
+    reset()
+    S.headers["x-tool-format"] = "mcp"
+    S.var.remote_addr = "127.0.0.1"
+    S.guard_blocked = true
+    eq(run_route(), nil, "loopback MCP proxies through a blocked guard")
+    check(not saw_sidecar("guard_input"), "loopback MCP never calls guard_input")
+    check(saw_metric("mcp_passthrough_total"), "loopback MCP bumps passthrough metric")
+
+    reset()
+    S.headers["x-tool-format"] = "mcp"
+    S.var.remote_addr = "8.8.8.8"
+    S.guard_blocked = true
+    eq(run_route(), 403, "non-loopback MCP still runs the guard")
+    check(saw_sidecar("guard_input"), "non-loopback MCP calls guard_input")
+    check(not saw_metric("mcp_passthrough_total"),
+          "non-loopback MCP does not bump the passthrough metric")
+
+    reset()
+    S.auth_result = { allowed = true, budget_key = "bk1", key_id = "key-1",
+                      service_role = "council",
+                      rate_limit_limit = 10, rate_limit_remaining = 9,
+                      rate_limit_reset = 5 }
+    S.headers["x-parent-request-id"] = "parent-9"
+    S.guard_blocked = true
+    eq(run_route(), nil, "trusted council parent-id proxies through a blocked guard")
+    check(not saw_sidecar("guard_input"),
+          "trusted council parent-id never calls guard_input")
+    check(saw_metric("council_internal_decon_bypass_total"),
+          "trusted council parent-id bumps the internal-decon metric")
+    eq(default_record().parent_council_request_id, "parent-9",
+       "parent request id restored for the bypass")
+end
+
 local function test_cache_hit()
     reset()
     S.cache_result = { hit = true, provider = "openai",
@@ -742,6 +792,9 @@ local function test_council_gate()
     check(S.abort_fn ~= nil, "client-abort unlock registered")
     eq(S.headers["X-Council-Request-ID"], "req-1", "parent header stamped")
     eq(S.headers["X-Council-Depth"], "0", "depth header stamped")
+    eq(S.headers["X-Gateway-Auth"], "static-key",
+       "council provider token applied on the custom auth header")
+    eq(S.var.auth_value, "", "council clears bearer auth_value")
     eq(sidecar_calls(),
        { "shape_gate", "auth_check", "ip_check", "guard_input", "route_decide",
          "budget_check", "policy_evaluate", "peek", "lock", "claim" },
@@ -782,6 +835,8 @@ local function test_batch_family()
     eq(run_route(), nil, "batch create proxies through")
     eq(sidecar_calls(), { "auth_check", "ip_check", "budget_check" },
        "batch check order (no guard/cache/route)")
+    eq(S.read_body_calls, 1, "batch POST reads a body")
+    eq(default_record().raw_body, S.body, "batch POST raw_body is the request bytes")
     eq(scheduled, { "batch_received" }, "batch open-end ledger row")
     local row = last_ledger("batch_create")
     check(row ~= nil, "batch create action recorded")
@@ -789,6 +844,18 @@ local function test_batch_family()
     eq(S.var.target_url, "https://api.openai.local/v1/batches", "batch target_url")
     eq(S.headers["x-openai-extra"], "1", "batch provider extra headers applied")
     eq(_G.ngx.header["X-Batch-Op"], "create", "batch op header")
+
+    reset()
+    S.var.uri = "/v1/batches"
+    S.headers["x-provider"] = "openai"
+    S.body = nil
+    S.body_file = "/tmp/body.json"
+    S.body_file_content = '{"custom":"batch"}'
+    eq(run_route(), nil, "batch POST body-file fallback proxies through")
+    eq(S.read_body_calls, 1, "batch POST body-file still calls read_body")
+    eq(S.decode_input, nil, "batch does not JSON-decode the body")
+    eq(default_record().raw_body, '{"custom":"batch"}',
+       "batch POST raw_body is the body-file contents")
 
     reset()
     S.var.uri = "/v1/batches/job-9"
@@ -820,6 +887,7 @@ local tests = {
     { name = "auth_rejections",         fn = test_auth_rejections },
     { name = "content_depth",           fn = test_content_depth },
     { name = "guard_block",             fn = test_guard_block },
+    { name = "guard_bypasses",          fn = test_guard_bypasses },
     { name = "cache_hit",               fn = test_cache_hit },
     { name = "cache_empty_demoted",     fn = test_cache_empty_provider_demoted },
     { name = "cache_policy_demoted",    fn = test_cache_policy_denied_demoted },
