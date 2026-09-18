@@ -143,14 +143,22 @@ local function set_request(opts)
     ngx_var.request_id = opts.request_id or "req-test"
 end
 
--- Force env values for sidecar.init(); false pins a variable to nil.
+-- Force env values for sidecar.init(); false pins a variable to nil. The
+-- four module keys below never pass the host environment through — each
+-- init call is hermetic unless a scenario sets the key explicitly.
 local real_getenv = os.getenv
+local MANAGED_ENV_KEYS = {
+    "SIDECAR_ADDR", "SIDECAR_TIMEOUT_MS", "LEDGER_ADMIN_KEY", "ADMIN_KEY",
+}
 local function with_env(env, fn)
     os.getenv = function(k)
         local v = env[k]
         if v ~= nil then
             if v == false then return nil end
             return v
+        end
+        for _, managed in ipairs(MANAGED_ENV_KEYS) do
+            if k == managed then return nil end
         end
         return real_getenv(k)
     end
@@ -182,6 +190,11 @@ local function init_clean()
         LEDGER_ADMIN_KEY = false, ADMIN_KEY = false,
     }, function() sidecar.init() end)
 end
+
+-- Pin the module to defaults before any scenario so a host shell exporting
+-- SIDECAR_ADDR / ADMIN_KEY cannot leak into the assertions below; later
+-- scenarios re-init explicitly for the behavior under test.
+init_clean()
 
 local HOT_ADDR = "unix:/tmp/gateway-sidecar.sock:"
 local function pool(name)
