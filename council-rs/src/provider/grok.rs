@@ -8,6 +8,30 @@ use reqwest::Client;
 use serde_json::{Value, json};
 use std::time::Instant;
 
+fn xai_responses_url() -> String {
+    #[cfg(test)]
+    if let Some(base) = test_xai_base() {
+        return format!("{}/responses", base.trim_end_matches('/'));
+    }
+    "https://api.x.ai/v1/responses".to_string()
+}
+
+#[cfg(test)]
+fn test_xai_base() -> Option<String> {
+    TEST_XAI_BASE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+}
+
+#[cfg(test)]
+static TEST_XAI_BASE: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+#[cfg(test)]
+pub(crate) fn set_test_xai_base_url(url: Option<String>) {
+    *TEST_XAI_BASE.lock().unwrap_or_else(|e| e.into_inner()) = url;
+}
+
 /// Call Grok via xAI's v1/responses endpoint.
 pub async fn ask(prompt: &str, system: &str, model: &str) -> ProviderResponse {
     let key = match std::env::var("XAI_API_KEY") {
@@ -40,7 +64,7 @@ pub async fn ask(prompt: &str, system: &str, model: &str) -> ProviderResponse {
     let t0 = Instant::now();
     let client = Client::new();
     let resp = client
-        .post("https://api.x.ai/v1/responses")
+        .post(xai_responses_url())
         .header("Authorization", format!("Bearer {}", key))
         .header("Content-Type", "application/json")
         .timeout(super::request_timeout())
@@ -100,7 +124,7 @@ pub async fn ask_with_web_search(prompt: &str, system: &str, model: &str) -> Pro
     let t0 = Instant::now();
     let client = Client::new();
     let resp = client
-        .post("https://api.x.ai/v1/responses")
+        .post(xai_responses_url())
         .header("Authorization", format!("Bearer {}", key))
         .header("Content-Type", "application/json")
         .timeout(super::request_timeout())

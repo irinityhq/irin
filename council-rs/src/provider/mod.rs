@@ -998,10 +998,9 @@ mod tests {
         assert!(!resolve_via_gateway(None));
     }
 
-    // Characterization fixtures ahead of consolidating scattered provider
-    // policy: these pin today's dispatch decisions so a consolidation PR must
-    // preserve the same selected route — or the same refusal — offline. They
-    // never execute a real provider CLI, network call, or the Gateway.
+    // Characterization fixtures for provider dispatch. They pin the selected
+    // route — or the same refusal — offline: no real provider CLI, no public
+    // network, no running Gateway. Local loopback stubs are allowed.
     //
     // Every test that mutates provider env (XAI_API_KEY, GW_API_KEY,
     // COUNCIL_HERMES_SEAT*, COUNCIL_GROK_CLI_FALLBACK_API) or the routing
@@ -1035,6 +1034,13 @@ mod tests {
                     None => std::env::remove_var(name),
                 }
             }
+        }
+    }
+
+    struct EnvRestore(Vec<(&'static str, Option<std::ffi::OsString>)>);
+    impl Drop for EnvRestore {
+        fn drop(&mut self) {
+            restore_env(std::mem::take(&mut self.0));
         }
     }
 
@@ -1284,6 +1290,173 @@ mod tests {
         grok_route::set_base_dir(&cwd);
         std::fs::remove_dir_all(&fixture_dir).expect("remove fixture dir");
         restore_env(saved);
+    }
+
+    fn serve_one_http_stub() -> String {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind stub");
+        let addr = listener.local_addr().expect("stub addr");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                use std::io::Write;
+                let _ = stream.write_all(
+                    b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 2\r\nConnection: close\r\n\r\nno",
+                );
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    #[tokio::test]
+    async fn api_only_grok_fallback_with_key_hits_injectable_xai_url() {
+        let _guard = PROVIDER_GLOBAL_STATE_LOCK.lock().await;
+        let _env = EnvRestore(save_env(&[
+            "XAI_API_KEY",
+            "COUNCIL_GROK_CLI_FALLBACK_API",
+            "COUNCIL_HERMES_SEAT",
+            "COUNCIL_HERMES_SEAT_BIN",
+        ]));
+        struct XaiClear;
+        impl Drop for XaiClear {
+            fn drop(&mut self) {
+                grok::set_test_xai_base_url(None);
+            }
+        }
+        let _xai = XaiClear;
+        let cwd = std::env::current_dir().expect("cwd");
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos();
+        let fixture_dir = std::env::temp_dir().join(format!(
+            "irin-dispatch-fallback-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&fixture_dir).expect("create fixture dir");
+        struct RoutingClear(std::path::PathBuf);
+        impl Drop for RoutingClear {
+            fn drop(&mut self) {
+                grok_route::set_base_dir(&self.0);
+            }
+        }
+        let _routing = RoutingClear(cwd.clone());
+
+        grok::set_test_xai_base_url(Some(serve_one_http_stub()));
+        unsafe {
+            std::env::set_var("COUNCIL_GROK_CLI_FALLBACK_API", "1");
+            std::env::set_var("XAI_API_KEY", "test-xai-key-not-live");
+            std::env::set_var(
+                "COUNCIL_HERMES_SEAT_BIN",
+                fixture_dir.join("no-adapter-here.sh"),
+            );
+        }
+        write_routing_fixture(&fixture_dir, true, true);
+        grok_route::set_base_dir(&fixture_dir);
+
+        for provider in ["grok", "grok_cli"] {
+            let resp = ask_with_opts_and_context(
+                provider,
+                "prompt",
+                "system",
+                "grok-4.3",
+                8,
+                &dispatch_ctx(None),
+            )
+            .await;
+            let err = resp
+                .error
+                .expect("{provider} fallback with key must call xAI");
+            assert!(
+                !err.contains("Hermes seat adapter not available"),
+                "{provider} took the seat refusal, got: {err}"
+            );
+            assert!(
+                !err.contains("XAI_API_KEY not set"),
+                "{provider} still unkeyed, got: {err}"
+            );
+            assert!(
+                err.contains("JSON parse") || err.contains("HTTP") || err.contains("401"),
+                "{provider} must hit the injectable URL, got: {err}"
+            );
+        }
+        grok_route::set_base_dir(&cwd);
+        std::fs::remove_dir_all(&fixture_dir).expect("remove fixture dir");
+    }
+
+    #[tokio::test]
+    async fn gemini_alias_three_way_is_offline_pinnable() {
+        let _guard = PROVIDER_GLOBAL_STATE_LOCK.lock().await;
+        let _env = EnvRestore(save_env(&[
+            "COUNCIL_GEMINI_VERTEX_FALLBACK",
+            "VERTEX_PROJECT",
+            "GOOGLE_CLOUD_PROJECT",
+        ]));
+        struct AgyClear;
+        impl Drop for AgyClear {
+            fn drop(&mut self) {
+                crate::provider::agent_cli::set_test_agy_cli_available(None);
+            }
+        }
+        let _agy = AgyClear;
+
+        crate::provider::agent_cli::set_test_agy_cli_available(Some(false));
+        unsafe {
+            std::env::remove_var("COUNCIL_GEMINI_VERTEX_FALLBACK");
+        }
+        let resp = ask_with_opts_and_context(
+            "gemini",
+            "prompt",
+            "system",
+            "model",
+            8,
+            &dispatch_ctx(None),
+        )
+        .await;
+        let err = resp
+            .error
+            .expect("agy-off without vertex fallback must refuse");
+        assert!(
+            err.contains("agy CLI not found (primary for gemini)"),
+            "got: {err}"
+        );
+
+        unsafe {
+            std::env::set_var("COUNCIL_GEMINI_VERTEX_FALLBACK", "1");
+            std::env::remove_var("VERTEX_PROJECT");
+            std::env::remove_var("GOOGLE_CLOUD_PROJECT");
+        }
+        let resp = ask_with_opts_and_context(
+            "gemini",
+            "prompt",
+            "system",
+            "model",
+            8,
+            &dispatch_ctx(None),
+        )
+        .await;
+        let err = resp
+            .error
+            .expect("vertex fallback path must not use the agy refusal");
+        assert!(
+            !err.contains("agy CLI not found (primary for gemini)"),
+            "got: {err}"
+        );
+
+        crate::provider::agent_cli::set_test_agy_cli_available(Some(true));
+        let resp = ask_with_opts_and_context(
+            "gemini",
+            "prompt",
+            "system",
+            "model",
+            8,
+            &dispatch_ctx(None),
+        )
+        .await;
+        let err = resp.error.expect("agy-on path must attempt the CLI");
+        assert!(
+            !err.contains("agy CLI not found (primary for gemini)"),
+            "got: {err}"
+        );
+        assert!(!err.contains("VERTEX_PROJECT"), "got: {err}");
     }
 
     #[test]
