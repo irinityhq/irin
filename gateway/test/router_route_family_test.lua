@@ -155,6 +155,9 @@ package.preload["sidecar"] = function()
         end,
         policy_evaluate = function(provider, sens)
             rec("sidecar", "policy_evaluate")
+            if S.policy_nil then
+                return nil
+            end
             if S.policy_blocked then
                 return { allowed = false, dry_run = false, reason = "no",
                          level = "RED", detected_signals = {} }
@@ -533,6 +536,27 @@ local function test_budget_and_policy_blocks()
     eq(row.payload.level, "RED", "policy ledger payload level")
 end
 
+-- Live STEP 5 allows a nil policy result. Cache hits fail-closed on nil
+-- (demote) and then re-run STEP 5, which still allows.
+local function test_nil_policy_live_allows_cache_demotes()
+    reset()
+    S.policy_nil = true
+    eq(run_route(), nil, "nil live STEP 5 policy allows the request")
+    check(last_ledger("policy_evaluate") == nil,
+          "nil live policy does not write a blocked policy row")
+    eq(_G.ngx.header["X-Cache"], nil, "nil live policy is not a cache hit")
+
+    reset()
+    S.cache_result = { hit = true, provider = "openai", response = { id = "x" } }
+    S.policy_nil = true
+    eq(run_route(), nil, "nil cache policy demotes the hit then live STEP 5 allows")
+    eq(_G.ngx.header["X-Cache"], nil, "nil cache policy does not serve the hit")
+    eq(sidecar_calls(),
+       { "shape_gate", "auth_check", "ip_check", "guard_input", "cache_check",
+         "policy_evaluate", "route_decide", "budget_check", "policy_evaluate" },
+       "demoted nil-policy hit re-runs routing then live STEP 5")
+end
+
 local function test_proxy_success_order()
     reset()
     eq(run_route(), nil, "success proxies through without exit")
@@ -801,6 +825,7 @@ local tests = {
     { name = "cache_policy_demoted",    fn = test_cache_policy_denied_demoted },
     { name = "route_model_failures",    fn = test_route_and_model_failures },
     { name = "budget_policy_blocks",    fn = test_budget_and_policy_blocks },
+    { name = "nil_policy_live_vs_cache", fn = test_nil_policy_live_allows_cache_demotes },
     { name = "proxy_success_order",     fn = test_proxy_success_order },
     { name = "anthropic_upstream_auth", fn = test_anthropic_upstream_auth },
     { name = "cli_proxy_token",         fn = test_cli_provider_proxy_token },

@@ -504,11 +504,8 @@ local function route_batch(headers)
 end
 
 -- =========================================================================
--- Main /v1/ path — phase helpers. Each phase either returns control to
--- route_chat or terminates the request; terminating phases return true
--- AFTER the terminating call so execution stops exactly where the old
--- inline `return json_error(...)` stopped (ngx.exit finalizes the request,
--- but Lua only stops where the code returns).
+-- Main /v1/ path — phase helpers. Terminating helpers return true after
+-- json_error so callers that mock ngx.exit as a normal return still stop.
 -- =========================================================================
 
 --- Extract the last user message's text content for guard/policy scanning.
@@ -922,8 +919,8 @@ local function check_budget(record, model_cfg)
     return false
 end
 
---- STEP 5: Policy — sensitivity firewall. Nil policy fails closed; dry_run
---- denials allow the request. Returns true when blocked and terminated.
+--- STEP 5: Policy — sensitivity firewall. An explicit deny (allowed=false,
+--- dry_run=false) blocks; nil or dry_run allows. Returns true when blocked.
 local function check_policy(record, model_cfg)
     local policy_result = sidecar.policy_evaluate(model_cfg.provider, record.sensitivity)
     if policy_result and not policy_result.allowed and not policy_result.dry_run then
