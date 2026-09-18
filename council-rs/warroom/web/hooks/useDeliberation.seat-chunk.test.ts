@@ -109,6 +109,18 @@ describe("applyEvent seat_chunk", () => {
     s = applyEvent(s, chunk({ seat_name: "Strategist", round_num: 1, text_delta: "dup", seq: 1 }));
     s = applyEvent(s, chunk({ seat_name: "Strategist", round_num: 1, text_delta: "older", seq: 0 }));
     expect(s.rounds[0].seats["Strategist"].text).toBe("onetwo");
+    expect(s.rounds[0].seats["Strategist"].last_seq).toBe(1);
+  });
+
+  it("still records seat_complete totals when the seat is missing", () => {
+    let s = startedRound();
+    s = applyEvent(s, complete({ ...baseComplete, seat_name: "Ghost" }));
+    expect(s.rounds[0].seats["Ghost"]).toBeUndefined();
+    expect(s.totals).toEqual({
+      tokens: baseComplete.tokens_in + baseComplete.tokens_out,
+      cost_usd: baseComplete.cost_usd,
+      latency_ms: baseComplete.latency_ms,
+    });
   });
 
   it("ignores chunks for an unknown seat without throwing", () => {

@@ -10,6 +10,7 @@ import {
   InterventionPayload,
   PrecedentMatch,
   RoundRuntimeState,
+  SeatRuntimeState,
   BudgetPausedData,
   PhaseStartedData,
   RoundValidationData,
@@ -179,71 +180,55 @@ export function applyEvent(s: DeliberationState, ev: StreamEvent): DeliberationS
     }
     case "seat_started": {
       const d = ev.data as { round_num: number; seat_name: string };
-      return mapRound(s, d.round_num, (r) => {
-        const seat = r.seats[d.seat_name];
-        if (!seat) return r;
-        return {
-          ...r,
-          seats: { ...r.seats, [d.seat_name]: { ...seat, status: "thinking" } },
-        };
-      });
+      return mapSeat(s, d.round_num, d.seat_name, (seat) => ({
+        ...seat,
+        status: "thinking",
+      }));
     }
     case "seat_chunk": {
       const d = ev.data as SeatChunkData;
-      return mapRound(s, d.round_num, (r) => {
-        const seat = r.seats[d.seat_name];
-        if (!seat) return r;
+      return mapSeat(s, d.round_num, d.seat_name, (seat) => {
         // mpsc preserves order, but guard duplicates/replays defensively: a
         // chunk whose seq we've already applied (<= last_seq) is dropped.
         const lastSeq = seat.last_seq ?? -1;
-        if (typeof d.seq === "number" && d.seq <= lastSeq) return r;
+        if (typeof d.seq === "number" && d.seq <= lastSeq) return seat;
         return {
-          ...r,
-          seats: {
-            ...r.seats,
-            [d.seat_name]: {
-              ...seat,
-              status: seat.status === "complete" ? seat.status : "thinking",
-              streaming: true,
-              text: seat.text + (d.text_delta ?? ""),
-              last_seq: typeof d.seq === "number" ? d.seq : lastSeq,
-            },
-          },
+          ...seat,
+          status: seat.status === "complete" ? seat.status : "thinking",
+          streaming: true,
+          text: seat.text + (d.text_delta ?? ""),
+          last_seq: typeof d.seq === "number" ? d.seq : lastSeq,
         };
       });
     }
     case "seat_complete": {
       const d = ev.data as SeatCompleteData;
-      return mapRound(s, d.round_num, (r) => {
-        const seat = r.seats[d.seat_name];
-        if (!seat) return r;
-        return {
-          ...r,
-          seats: {
-            ...r.seats,
-            [d.seat_name]: {
-              ...seat,
-              status: d.error ? "error" : "complete",
-              streaming: false,
-              text: d.text,
-              latency_ms: d.latency_ms,
-              tokens_in: d.tokens_in,
-              tokens_out: d.tokens_out,
-              cached_in: d.cached_in,
-              cost_usd: d.cost_usd,
-              error: d.error ?? null,
-              provider_provenance: d.provider_provenance ?? null,
-              gateway_provenance: d.gateway ?? d.gateway_provenance ?? null,
-            },
+      return mapSeat(
+        s,
+        d.round_num,
+        d.seat_name,
+        (seat) => ({
+          ...seat,
+          status: d.error ? "error" : "complete",
+          streaming: false,
+          text: d.text,
+          latency_ms: d.latency_ms,
+          tokens_in: d.tokens_in,
+          tokens_out: d.tokens_out,
+          cached_in: d.cached_in,
+          cost_usd: d.cost_usd,
+          error: d.error ?? null,
+          provider_provenance: d.provider_provenance ?? null,
+          gateway_provenance: d.gateway ?? d.gateway_provenance ?? null,
+        }),
+        {
+          totals: {
+            tokens: s.totals.tokens + d.tokens_in + d.tokens_out,
+            cost_usd: s.totals.cost_usd + d.cost_usd,
+            latency_ms: s.totals.latency_ms + d.latency_ms,
           },
-        };
-      }, {
-        totals: {
-          tokens: s.totals.tokens + d.tokens_in + d.tokens_out,
-          cost_usd: s.totals.cost_usd + d.cost_usd,
-          latency_ms: s.totals.latency_ms + d.latency_ms,
         },
-      });
+      );
     }
     case "convergence_scored": {
       const d = ev.data as ConvergenceScoredData;
@@ -389,6 +374,31 @@ function mapRound(
     ...rest,
     rounds: s.rounds.map((r) => (r.round_num === num ? fn(r) : r)),
   };
+}
+
+/** Locate one seat inside its round and replace selected fields. Returning the same seat leaves the round unchanged. */
+function mapSeat(
+  s: DeliberationState,
+  roundNum: number,
+  seatName: string,
+  update: (seat: SeatRuntimeState) => SeatRuntimeState,
+  rest: Partial<DeliberationState> = {},
+): DeliberationState {
+  return mapRound(
+    s,
+    roundNum,
+    (r) => {
+      const seat = r.seats[seatName];
+      if (!seat) return r;
+      const next = update(seat);
+      if (next === seat) return r;
+      return {
+        ...r,
+        seats: { ...r.seats, [seatName]: next },
+      };
+    },
+    rest,
+  );
 }
 
 /**
