@@ -36,21 +36,15 @@ fn prepare_chat(
     model: &str,
     max_tokens: u32,
     stream: bool,
-) -> Result<PreparedChat, ProviderResponse> {
+) -> Result<PreparedChat, String> {
     let (env_key, _, base_url) = provider_config(provider);
     if base_url.is_empty() {
-        return Err(ProviderResponse {
-            error: Some(format!("Unknown openai-compat provider: {}", provider)),
-            ..Default::default()
-        });
+        return Err(format!("Unknown openai-compat provider: {}", provider));
     }
     let key = match std::env::var(env_key) {
         Ok(k) => k,
         Err(_) => {
-            return Err(ProviderResponse {
-                error: Some(format!("{} not set (provider: {})", env_key, provider)),
-                ..Default::default()
-            });
+            return Err(format!("{} not set (provider: {})", env_key, provider));
         }
     };
     let mut messages = Vec::new();
@@ -77,7 +71,12 @@ pub async fn ask(
 ) -> ProviderResponse {
     let prepared = match prepare_chat(provider, prompt, system, model, max_tokens, false) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(error) => {
+            return ProviderResponse {
+                error: Some(error),
+                ..Default::default()
+            };
+        }
     };
     let PreparedChat { key, url, payload } = prepared;
     let t0 = Instant::now();
@@ -449,7 +448,12 @@ pub async fn ask_streaming(
 ) -> ProviderResponse {
     let prepared = match prepare_chat(provider, prompt, system, model, max_tokens, true) {
         Ok(p) => p,
-        Err(resp) => return resp,
+        Err(error) => {
+            return ProviderResponse {
+                error: Some(error),
+                ..Default::default()
+            };
+        }
     };
     let PreparedChat { key, url, payload } = prepared;
     let t0 = Instant::now();
