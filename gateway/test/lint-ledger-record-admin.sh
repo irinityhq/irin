@@ -81,11 +81,11 @@ vertex_token_body="$(
 printf '%s\n' "$vertex_token_body" | grep -Fq '["X-Admin-Key"] = LEDGER_ADMIN_KEY' \
     || fail "vertex_token must assign [\"X-Admin-Key\"] = LEDGER_ADMIN_KEY"
 guard_line="$(printf '%s\n' "$vertex_token_body" | grep -n 'LEDGER_ADMIN_KEY == ""' | head -n1 | cut -d: -f1)"
-httpc_line="$(printf '%s\n' "$vertex_token_body" | grep -n 'local httpc = http.new()' | head -n1 | cut -d: -f1)"
+transport_line="$(printf '%s\n' "$vertex_token_body" | grep -n 'sidecar_exchange{' | head -n1 | cut -d: -f1)"
 [[ -n "$guard_line" ]] || fail "vertex_token must fail closed when LEDGER_ADMIN_KEY is empty"
-[[ -n "$httpc_line" ]] || fail "vertex_token must create an HTTP client after the empty-key guard"
-[[ "$guard_line" -lt "$httpc_line" ]] \
-    || fail "vertex_token empty-key guard must run before local httpc = http.new()"
+[[ -n "$transport_line" ]] || fail "vertex_token must start a sidecar exchange after the empty-key guard"
+[[ "$guard_line" -lt "$transport_line" ]] \
+  || fail "vertex_token empty-key guard must run before the sidecar exchange"
 
 if [[ "$EXIT" -ne 0 ]]; then
     echo

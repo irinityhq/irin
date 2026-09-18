@@ -43,7 +43,7 @@ function _M.init()
 end
 
 -- ---------------------------------------------------------------------------
--- Internal HTTP helper (cosocket + connection pool)
+-- Internal HTTP transport (cosocket + connection pool)
 -- ---------------------------------------------------------------------------
 
 -- Returns (host_field, connect_target) where:
@@ -65,16 +65,46 @@ local function parse_sidecar_addr(addr)
     return addr, addr
 end
 
-local function sidecar_post(path, body_table, extra_headers)
+-- Execute one complete HTTP exchange with the sidecar: connect over the
+-- configured UDS/TCP address, send the request, read the full response
+-- body, then dispose of the connection. Everything endpoint-specific —
+-- timeout, keep-alive pool, method, path, headers, body, and whether the
+-- connection is pooled or closed — is supplied explicitly by `req`:
+--
+--   req.timeout_ms  number              socket timeout in ms
+--   req.pool        string              keep-alive pool suffix; "" shares
+--                                       the hot-path pool
+--   req.method      string              HTTP method
+--   req.path        string              request path (query string included)
+--   req.headers     table               endpoint-permitted headers; the
+--                                       Host header is added here
+--   req.body        string|nil          request body
+--   req.keepalive   {idle_ms, size}|nil return the connection to its pool;
+--                                       nil closes the connection instead
+--
+-- Returns (status, body, res, err, phase):
+--   status  number|nil  HTTP status once the sidecar answered — kept even
+--                       when the body read then fails, so proxies forward
+--                       the upstream status instead of inventing a 502
+--   body    string|nil  full response body when read
+--   res     table|nil   resty.http response object (res.headers)
+--   err     string|nil  raw failure detail for `phase`
+--   phase   string|nil  nil on success, else "connect" | "request" | "body"
+--                       — where the exchange failed
+local function sidecar_exchange(req)
     local httpc = http.new()
-    httpc:set_timeout(SIDECAR_TIMEOUT_MS)
+    httpc:set_timeout(req.timeout_ms)
 
-    local body_json = cjson.encode(body_table)
     local host_field, connect_target = parse_sidecar_addr(SIDECAR_ADDR)
 
     -- Pool name keys keep-alive sockets per-target. Including the address
     -- string keeps UDS and TCP pools separated cleanly.
-    local pool_name = "sidecar:" .. SIDECAR_ADDR
+    local pool_name
+    if req.pool == "" then
+        pool_name = "sidecar:" .. SIDECAR_ADDR
+    else
+        pool_name = "sidecar:" .. req.pool .. ":" .. SIDECAR_ADDR
+    end
 
     local ok, conn_err
     if type(connect_target) == "table" then
@@ -92,11 +122,81 @@ local function sidecar_post(path, body_table, extra_headers)
         }
     end
     if not ok then
-        return nil, "sidecar unreachable: " .. (conn_err or "connect failed")
+        return nil, nil, nil, conn_err or "connect failed", "connect"
     end
 
+    local headers = req.headers or {}
+    headers["Host"] = host_field
+
+    local res, req_err = httpc:request{
+        method  = req.method,
+        path    = req.path,
+        body    = req.body,
+        headers = headers,
+    }
+    if not res then
+        httpc:close()
+        return nil, nil, nil, req_err or "unknown", "request"
+    end
+
+    local body, body_err = res:read_body()
+    if not body then
+        httpc:close()
+        return res.status, nil, res, body_err or "unknown", "body"
+    end
+
+    if req.keepalive then
+        -- Return the connection to the keep-alive pool with the
+        -- caller-chosen idle time and pool size.
+        httpc:set_keepalive(req.keepalive[1], req.keepalive[2])
+    else
+        -- Low-frequency pollers close instead of pooling: a long gap
+        -- between calls is enough for the server side to have dropped a
+        -- pooled socket, which would surface as a read-timeout on the
+        -- next use.
+        httpc:close()
+    end
+
+    return res.status, body, res, nil, nil
+end
+
+-- API-style failure text for a failed exchange: connect, request, and body
+-- failures share one (nil, err) shape across every JSON endpoint.
+local function exchange_err_text(phase, err)
+    if phase == "connect" then
+        return "sidecar unreachable: " .. err
+    elseif phase == "request" then
+        return "sidecar request failed: " .. err
+    end
+    return "sidecar body read failed: " .. err
+end
+
+-- Decode a sidecar response body, mapping a decode failure to the shared
+-- error string.
+local function decode_json_body(body)
+    local decoded, decode_err = cjson.decode(body)
+    if not decoded then
+        return nil, "sidecar response parse error: " .. (decode_err or "empty body")
+    end
+    return decoded, nil
+end
+
+-- Proxy-style failure shape: the nginx-level 502 JSON the operator surface
+-- produces. Only connect and request failures 502 — once the sidecar has
+-- answered, a failed body read forwards the upstream status with an empty
+-- body instead.
+local function proxy_transport_error(err, phase)
+    ngx.status = 502
+    ngx.header["Content-Type"] = "application/json"
+    local error_kind = (phase == "connect") and "sidecar unreachable"
+        or "sidecar request failed"
+    ngx.say(cjson.encode({error = error_kind, detail = err}))
+end
+
+local function sidecar_post(path, body_table, extra_headers)
+    local body_json = cjson.encode(body_table)
+
     local headers = {
-        ["Host"]           = host_field,
         ["Content-Type"]   = "application/json",
         ["Content-Length"] = tostring(#body_json),
     }
@@ -106,32 +206,25 @@ local function sidecar_post(path, body_table, extra_headers)
         end
     end
 
-    local res, req_err = httpc:request{
-        method  = "POST",
-        path    = path,
-        body    = body_json,
-        headers = headers,
+    local status, body, _, err, phase = sidecar_exchange{
+        timeout_ms = SIDECAR_TIMEOUT_MS,
+        pool       = "",
+        method     = "POST",
+        path       = path,
+        body       = body_json,
+        headers    = headers,
+        keepalive  = {60000, 10},  -- 60s idle, 10 per worker
     }
-    if not res then
-        httpc:close()
-        return nil, "sidecar request failed: " .. (req_err or "unknown")
+    if phase then
+        return nil, exchange_err_text(phase, err)
     end
 
-    local body, body_err = res:read_body()
-    if not body then
-        httpc:close()
-        return nil, "sidecar body read failed: " .. (body_err or "unknown")
-    end
-
-    -- Return the connection to the keep-alive pool (60s, 10 per worker).
-    httpc:set_keepalive(60000, 10)
-
-    local decoded, decode_err = cjson.decode(body)
+    local decoded, decode_err = decode_json_body(body)
     if not decoded then
-        return nil, "sidecar response parse error: " .. (decode_err or "empty body")
+        return nil, decode_err
     end
 
-    return decoded, nil, res.status
+    return decoded, nil, status
 end
 
 -- ---------------------------------------------------------------------------
@@ -487,8 +580,8 @@ function _M.council_idempotency_peek(caller_key, idempotency_key, body_sha256)
 end
 
 --- Insert an owner-aware Pending reservation AFTER the concurrency lock has
--- been acquired. Returns `conflict=true` when a foreign owner won the race
--- between peek and claim; the caller MUST then release its lock and 409.
+--- been acquired. Returns `conflict=true` when a foreign owner won the race
+--- between peek and claim; the caller MUST then release its lock and 409.
 function _M.council_idempotency_claim(caller_key, idempotency_key, body_sha256, owner_request_id)
     return sidecar_post("/council/idempotency/claim", {
         caller_key       = caller_key,
@@ -568,57 +661,27 @@ function _M.vertex_token()
     if LEDGER_ADMIN_KEY == "" then
         return nil, "ledger admin key not configured (set LEDGER_ADMIN_KEY or ADMIN_KEY)"
     end
-    local httpc = http.new()
-    httpc:set_timeout(SIDECAR_TIMEOUT_MS)
 
-    local host_field, connect_target = parse_sidecar_addr(SIDECAR_ADDR)
-    local pool_name = "sidecar:" .. SIDECAR_ADDR
-
-    local ok, conn_err
-    if type(connect_target) == "table" then
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target.host,
-            port   = connect_target.port,
-            pool   = pool_name,
-        }
-    else
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target,
-            pool   = pool_name,
-        }
-    end
-    if not ok then return nil, "sidecar unreachable: " .. (conn_err or "connect failed") end
-
-    local res, req_err = httpc:request{
-        method  = "GET",
-        path    = "/vertex/token",
-        headers = {
-            ["Host"] = host_field,
+    local status, body, _, err, phase = sidecar_exchange{
+        timeout_ms = SIDECAR_TIMEOUT_MS,
+        pool       = "",
+        method     = "GET",
+        path       = "/vertex/token",
+        headers    = {
             ["X-Admin-Key"] = LEDGER_ADMIN_KEY,
         },
+        keepalive  = {60000, 10},
     }
-    if not res then
-        httpc:close()
-        return nil, "sidecar request failed: " .. (req_err or "unknown")
+    if phase then
+        return nil, exchange_err_text(phase, err)
+    end
+    if status ~= 200 then
+        return nil, "sidecar returned " .. status .. ": " .. body
     end
 
-    local body, body_err = res:read_body()
-    if not body then
-        httpc:close()
-        return nil, "sidecar body read failed: " .. (body_err or "unknown")
-    end
-
-    httpc:set_keepalive(60000, 10)
-
-    if res.status ~= 200 then
-        return nil, "sidecar returned " .. res.status .. ": " .. body
-    end
-
-    local decoded, decode_err = cjson.decode(body)
+    local decoded, decode_err = decode_json_body(body)
     if not decoded then
-        return nil, "sidecar response parse error: " .. (decode_err or "empty body")
+        return nil, decode_err
     end
 
     return decoded, nil
@@ -637,68 +700,30 @@ end
 --                     active_locks, active_caller_keys, stored_bytes }
 -- @return string|nil error
 function _M.council_stats()
-    local httpc = http.new()
     -- Stats polling is not on the request hot path — fires every 30s from a
     -- single worker timer. The default SIDECAR_TIMEOUT_MS (200ms in compose)
     -- is calibrated for hot-path calls and is tight for the cold connection
     -- + lock acquisition pattern this endpoint hits. 1000ms is generous.
-    httpc:set_timeout(1000)
-
-    local host_field, connect_target = parse_sidecar_addr(SIDECAR_ADDR)
-    -- Use a dedicated pool name to keep the polling connection isolated
-    -- from the hot-path pool. Combined with the close() below, this means
-    -- each poll opens + closes its own socket and we can't inherit a
-    -- stale-keepalive socket the server already closed.
-    local pool_name = "sidecar:stats:" .. SIDECAR_ADDR
-
-    local ok, conn_err
-    if type(connect_target) == "table" then
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target.host,
-            port   = connect_target.port,
-            pool   = pool_name,
-        }
-    else
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target,
-            pool   = pool_name,
-        }
-    end
-    if not ok then return nil, "sidecar unreachable: " .. (conn_err or "connect failed") end
-
-    local res, req_err = httpc:request{
-        method  = "GET",
-        path    = "/council/stats",
-        headers = { ["Host"] = host_field, ["Connection"] = "close" },
+    -- Dedicated pool + Connection: close + close-after-read: each poll
+    -- opens + closes its own socket and we can't inherit a stale-keepalive
+    -- socket the server already closed.
+    local status, body, _, err, phase = sidecar_exchange{
+        timeout_ms = 1000,
+        pool       = "stats",
+        method     = "GET",
+        path       = "/council/stats",
+        headers    = {
+            ["Connection"] = "close",
+        },
     }
-    if not res then
-        httpc:close()
-        return nil, "sidecar request failed: " .. (req_err or "unknown")
+    if phase then
+        return nil, exchange_err_text(phase, err)
+    end
+    if status ~= 200 then
+        return nil, "sidecar returned " .. status .. ": " .. body
     end
 
-    local body, body_err = res:read_body()
-    if not body then
-        httpc:close()
-        return nil, "sidecar body read failed: " .. (body_err or "unknown")
-    end
-
-    -- Close rather than keepalive: this is a low-frequency poller, and a
-    -- 30s gap between calls is long enough that a pooled socket can be
-    -- closed by the server side, surfacing as a read-timeout on next use.
-    httpc:close()
-
-    if res.status ~= 200 then
-        return nil, "sidecar returned " .. res.status .. ": " .. body
-    end
-
-    local decoded, decode_err = cjson.decode(body)
-    if not decoded then
-        return nil, "sidecar response parse error: " .. (decode_err or "empty body")
-    end
-
-    return decoded, nil
+    return decode_json_body(body)
 end
 
 -- ---------------------------------------------------------------------------
@@ -711,58 +736,24 @@ end
 -- @return table|nil  { audit_infra_errors_total, persist_failures_total }
 -- @return string|nil error
 function _M.watch_stats()
-    local httpc = http.new()
     -- Same rationale as council_stats: poller cadence (30s), not hot-path.
-    httpc:set_timeout(1000)
-
-    local host_field, connect_target = parse_sidecar_addr(SIDECAR_ADDR)
-    local pool_name = "sidecar:watch_stats:" .. SIDECAR_ADDR
-
-    local ok, conn_err
-    if type(connect_target) == "table" then
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target.host,
-            port   = connect_target.port,
-            pool   = pool_name,
-        }
-    else
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target,
-            pool   = pool_name,
-        }
-    end
-    if not ok then return nil, "sidecar unreachable: " .. (conn_err or "connect failed") end
-
-    local res, req_err = httpc:request{
-        method  = "GET",
-        path    = "/watch/stats",
-        headers = { ["Host"] = host_field, ["Connection"] = "close" },
+    local status, body, _, err, phase = sidecar_exchange{
+        timeout_ms = 1000,
+        pool       = "watch_stats",
+        method     = "GET",
+        path       = "/watch/stats",
+        headers    = {
+            ["Connection"] = "close",
+        },
     }
-    if not res then
-        httpc:close()
-        return nil, "sidecar request failed: " .. (req_err or "unknown")
+    if phase then
+        return nil, exchange_err_text(phase, err)
+    end
+    if status ~= 200 then
+        return nil, "sidecar returned " .. status .. ": " .. body
     end
 
-    local body, body_err = res:read_body()
-    if not body then
-        httpc:close()
-        return nil, "sidecar body read failed: " .. (body_err or "unknown")
-    end
-
-    httpc:close()
-
-    if res.status ~= 200 then
-        return nil, "sidecar returned " .. res.status .. ": " .. body
-    end
-
-    local decoded, decode_err = cjson.decode(body)
-    if not decoded then
-        return nil, "sidecar response parse error: " .. (decode_err or "empty body")
-    end
-
-    return decoded, nil
+    return decode_json_body(body)
 end
 
 -- ---------------------------------------------------------------------------
@@ -772,34 +763,6 @@ end
 -- ---------------------------------------------------------------------------
 
 function _M.admin_proxy()
-    local httpc = http.new()
-    httpc:set_timeout(5000)
-
-    local host_field, connect_target = parse_sidecar_addr(SIDECAR_ADDR)
-    local pool_name = "sidecar:admin:" .. SIDECAR_ADDR
-
-    local ok, conn_err
-    if type(connect_target) == "table" then
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target.host,
-            port   = connect_target.port,
-            pool   = pool_name,
-        }
-    else
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target,
-            pool   = pool_name,
-        }
-    end
-    if not ok then
-        ngx.status = 502
-        ngx.header["Content-Type"] = "application/json"
-        ngx.say(cjson.encode({error = "sidecar unreachable", detail = conn_err or "connect failed"}))
-        return
-    end
-
     ngx.req.read_body()
     local body = ngx.req.get_body_data()
 
@@ -811,7 +774,6 @@ function _M.admin_proxy()
     -- Authorization stays stripped — this surface never carried it.
     local req_headers = ngx.req.get_headers()
     local fwd_headers = {
-        ["Host"]         = host_field,
         ["Content-Type"] = "application/json",
         ["X-Request-ID"] = ngx.var.request_id,
     }
@@ -828,24 +790,21 @@ function _M.admin_proxy()
         path = path .. "?" .. ngx.var.args
     end
 
-    local res, req_err = httpc:request{
-        method  = ngx.req.get_method(),
-        path    = path,
-        body    = body,
-        headers = fwd_headers,
+    local status, resp_body, res, err, phase = sidecar_exchange{
+        timeout_ms = 5000,
+        pool       = "admin",
+        method     = ngx.req.get_method(),
+        path       = path,
+        body       = body,
+        headers    = fwd_headers,
+        keepalive  = {10000, 4},
     }
-    if not res then
-        httpc:close()
-        ngx.status = 502
-        ngx.header["Content-Type"] = "application/json"
-        ngx.say(cjson.encode({error = "sidecar request failed", detail = req_err or "unknown"}))
+    if phase == "connect" or phase == "request" then
+        proxy_transport_error(err, phase)
         return
     end
 
-    local resp_body = res:read_body()
-    httpc:set_keepalive(10000, 4)
-
-    ngx.status = res.status
+    ngx.status = status
     ngx.header["Content-Type"] = res.headers["Content-Type"] or "application/json"
     ngx.say(resp_body or "")
 end
@@ -887,39 +846,10 @@ function _M.watch_outbox_proxy()
         end
     end
 
-    local httpc = http.new()
-    httpc:set_timeout(5000)
-
-    local host_field, connect_target = parse_sidecar_addr(SIDECAR_ADDR)
-    local pool_name = "sidecar:watch_outbox:" .. SIDECAR_ADDR
-
-    local ok, conn_err
-    if type(connect_target) == "table" then
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target.host,
-            port   = connect_target.port,
-            pool   = pool_name,
-        }
-    else
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target,
-            pool   = pool_name,
-        }
-    end
-    if not ok then
-        ngx.status = 502
-        ngx.header["Content-Type"] = "application/json"
-        ngx.say(cjson.encode({error = "sidecar unreachable", detail = conn_err or "connect failed"}))
-        return
-    end
-
     ngx.req.read_body()
     local body = ngx.req.get_body_data()
     local req_headers = ngx.req.get_headers()
     local headers = {
-        ["Host"]         = host_field,
         ["X-Request-ID"] = ngx.var.request_id,
     }
 
@@ -941,24 +871,21 @@ function _M.watch_outbox_proxy()
         path = path .. "?" .. ngx.var.args
     end
 
-    local res, req_err = httpc:request{
-        method  = ngx.req.get_method(),
-        path    = path,
-        body    = body,
-        headers = headers,
+    local status, resp_body, res, err, phase = sidecar_exchange{
+        timeout_ms = 5000,
+        pool       = "watch_outbox",
+        method     = ngx.req.get_method(),
+        path       = path,
+        body       = body,
+        headers    = headers,
+        keepalive  = {10000, 4},
     }
-    if not res then
-        httpc:close()
-        ngx.status = 502
-        ngx.header["Content-Type"] = "application/json"
-        ngx.say(cjson.encode({error = "sidecar request failed", detail = req_err or "unknown"}))
+    if phase == "connect" or phase == "request" then
+        proxy_transport_error(err, phase)
         return
     end
 
-    local resp_body = res:read_body()
-    httpc:set_keepalive(10000, 4)
-
-    ngx.status = res.status
+    ngx.status = status
     ngx.header["Content-Type"] = res.headers["Content-Type"] or "application/json"
     if resp_body and #resp_body > 0 then
         ngx.print(resp_body)
@@ -979,58 +906,28 @@ function _M.watch_ui_snapshot_proxy()
         return
     end
 
-    local httpc = http.new()
-    httpc:set_timeout(5000)
-
-    local host_field, connect_target = parse_sidecar_addr(SIDECAR_ADDR)
-    local pool_name = "sidecar:watch_ui_snapshot:" .. SIDECAR_ADDR
-    local ok, conn_err
-    if type(connect_target) == "table" then
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host = connect_target.host,
-            port = connect_target.port,
-            pool = pool_name,
-        }
-    else
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host = connect_target,
-            pool = pool_name,
-        }
-    end
-    if not ok then
-        ngx.status = 502
-        ngx.header["Content-Type"] = "application/json"
-        ngx.say(cjson.encode({error = "sidecar unreachable", detail = conn_err or "connect failed"}))
-        return
-    end
-
     local req_headers = ngx.req.get_headers()
     local headers = {
-        ["Host"] = host_field,
         ["X-Request-ID"] = ngx.var.request_id,
     }
     if req_headers["Authorization"] then
         headers["Authorization"] = req_headers["Authorization"]
     end
 
-    local res, req_err = httpc:request{
-        method = "GET",
-        path = ngx.var.uri,
-        headers = headers,
+    local status, resp_body, res, err, phase = sidecar_exchange{
+        timeout_ms = 5000,
+        pool       = "watch_ui_snapshot",
+        method     = "GET",
+        path       = ngx.var.uri,
+        headers    = headers,
+        keepalive  = {10000, 4},
     }
-    if not res then
-        httpc:close()
-        ngx.status = 502
-        ngx.header["Content-Type"] = "application/json"
-        ngx.say(cjson.encode({error = "sidecar request failed", detail = req_err or "unknown"}))
+    if phase == "connect" or phase == "request" then
+        proxy_transport_error(err, phase)
         return
     end
 
-    local resp_body = res:read_body()
-    httpc:set_keepalive(10000, 4)
-    ngx.status = res.status
+    ngx.status = status
     ngx.header["Content-Type"] = res.headers["Content-Type"] or "application/json"
     if resp_body and #resp_body > 0 then
         ngx.print(resp_body)
@@ -1152,36 +1049,8 @@ function _M.watch_arm_proxy()
         -- in-memory nor file-buffered request bytes.
     end
 
-    local httpc = http.new()
-    httpc:set_timeout(10000)
-
-    local host_field, connect_target = parse_sidecar_addr(SIDECAR_ADDR)
-    local pool_name = "sidecar:watch_arm:" .. SIDECAR_ADDR
-    local ok, conn_err
-    if type(connect_target) == "table" then
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host = connect_target.host,
-            port = connect_target.port,
-            pool = pool_name,
-        }
-    else
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host = connect_target,
-            pool = pool_name,
-        }
-    end
-    if not ok then
-        ngx.status = 502
-        ngx.header["Content-Type"] = "application/json"
-        ngx.say(cjson.encode({error = "sidecar unreachable", detail = conn_err or "connect failed"}))
-        return
-    end
-
     local req_headers = ngx.req.get_headers()
     local headers = {
-        ["Host"] = host_field,
         ["X-Request-ID"] = ngx.var.request_id,
     }
     if req_headers["Authorization"] then
@@ -1191,23 +1060,21 @@ function _M.watch_arm_proxy()
         headers["Content-Type"] = "application/json"
     end
 
-    local res, req_err = httpc:request{
-        method = method,
-        path = ngx.var.uri,
-        headers = headers,
-        body = body,
+    local status, resp_body, res, err, phase = sidecar_exchange{
+        timeout_ms = 10000,
+        pool       = "watch_arm",
+        method     = method,
+        path       = ngx.var.uri,
+        body       = body,
+        headers    = headers,
+        keepalive  = {10000, 4},
     }
-    if not res then
-        httpc:close()
-        ngx.status = 502
-        ngx.header["Content-Type"] = "application/json"
-        ngx.say(cjson.encode({error = "sidecar request failed", detail = req_err or "unknown"}))
+    if phase == "connect" or phase == "request" then
+        proxy_transport_error(err, phase)
         return
     end
 
-    local resp_body = res:read_body()
-    httpc:set_keepalive(10000, 4)
-    ngx.status = res.status
+    ngx.status = status
     ngx.header["Content-Type"] = res.headers["Content-Type"] or "application/json"
     if resp_body and #resp_body > 0 then
         ngx.print(resp_body)
@@ -1223,52 +1090,22 @@ end
 -- @return table|nil  Context result (identity, memory)
 -- @return string|nil Error
 function _M.librarian_context(tenant_id)
-    local httpc = http.new()
-    httpc:set_timeout(SIDECAR_TIMEOUT_MS)
-
-    local host_field, connect_target = parse_sidecar_addr(SIDECAR_ADDR)
-    local pool_name = "sidecar:librarian:" .. SIDECAR_ADDR
-
-    local ok, conn_err
-    if type(connect_target) == "table" then
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target.host,
-            port   = connect_target.port,
-            pool   = pool_name,
-        }
-    else
-        ok, conn_err = httpc:connect{
-            scheme = "http",
-            host   = connect_target,
-            pool   = pool_name,
-        }
-    end
-    if not ok then return nil, "sidecar unreachable: " .. (conn_err or "connect failed") end
-
-    local res, req_err = httpc:request{
-        method  = "GET",
-        path    = "/librarian/context/" .. tenant_id,
-        headers = { ["Host"] = host_field },
+    local status, body, _, err, phase = sidecar_exchange{
+        timeout_ms = SIDECAR_TIMEOUT_MS,
+        pool       = "librarian",
+        method     = "GET",
+        path       = "/librarian/context/" .. tenant_id,
+        headers    = {},
+        keepalive  = {60000, 10},
     }
-    if not res then
-        httpc:close()
-        return nil, "sidecar request failed: " .. (req_err or "unknown")
+    if phase then
+        return nil, exchange_err_text(phase, err)
+    end
+    if status ~= 200 then
+        return nil, "sidecar returned " .. status .. ": " .. body
     end
 
-    local body = res:read_body()
-    httpc:set_keepalive(60000, 10)
-
-    if res.status ~= 200 then
-        return nil, "sidecar returned " .. res.status .. ": " .. body
-    end
-
-    local decoded, decode_err = cjson.decode(body)
-    if not decoded then
-        return nil, "sidecar response parse error: " .. (decode_err or "empty body")
-    end
-
-    return decoded, nil
+    return decode_json_body(body)
 end
 
 --- Submit a commit proposal to Librarian.
