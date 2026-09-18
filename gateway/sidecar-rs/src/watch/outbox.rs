@@ -214,9 +214,9 @@ pub fn outbox_insert_with_skew_normalize<A: OutboxAuditSink>(
     // absolute authorization window forward by that delta. Refuse instead: fail-safe (blocks
     // dispatch, never spends), counted so the operator sees the breaker trip. The check is on
     // the row-derived delta, so the helper still reads no clock of its own (#45 invariant).
-    let max_skew_ms = crate::watch::dispatcher::max_allowed_skew_ms();
+    let max_skew_ms = crate::watch::clock_skew::max_allowed_skew_ms();
     if skew_delta_ms > max_skew_ms {
-        crate::watch::dispatcher::bump_directive_clock_skew_rejected(1);
+        crate::watch::clock_skew::bump_directive_clock_skew_rejected(1);
         return Err(OutboxError::ClockSkewExceeded {
             directive_id: row.id,
             tenant: row.tenant,

@@ -8,15 +8,20 @@
 
 pub mod api;
 pub mod attest; // dual-custody-local-attest (spec §5) — arm-confirm challenge + boot self-test
+pub mod capability; // prepare/execute capability-token checks
+pub mod clock_skew; // stage-time skew cap, below outbox and recovery
 pub mod db;
-pub mod dispatcher; // C11 / Fork 1 — council-triage header construction
+pub mod dispatcher; // claim, council call, durable stage, continuation
+pub mod header_segment; // tenant and escalation Idempotency-Key segments
 pub mod outbox;
 pub mod quarantine;
 pub mod recon; // watch telemetry — out-of-band spend reconciliation (telemetry invariant)
+pub mod recovery; // council_response_staged -> signed outbox; phases stay separate
 pub mod registry;
 pub mod runner;
 pub mod runtime;
 pub mod sentinels;
+pub mod stage_ttl; // staged-directive authorization window
 pub mod startup_probe; // Phase 3a cabinet schema probe (AC-19h / startup gate)
 pub mod worker;
 
