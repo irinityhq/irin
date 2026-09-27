@@ -1314,6 +1314,7 @@ fn known_cli_models(slug: &str) -> Vec<String> {
             "claude-sonnet-5".into(),
         ],
         "claude_code" => vec![
+            "claude-opus-5-5".into(),
             "claude-fable-5".into(),
             "claude-opus-4-8".into(),
             "claude-opus-4-6".into(),
@@ -1334,6 +1335,8 @@ fn known_cli_models(slug: &str) -> Vec<String> {
             "grok-4-1-fast-non-reasoning".into(),
         ],
         "grok_build" => vec![
+            "grok-4.7".into(),
+            "grok-4.6".into(),
             "grok-4.5".into(),
             "grok-build".into(),
             "grok-composer-2.5-fast".into(),
@@ -1356,7 +1359,16 @@ fn known_cli_models(slug: &str) -> Vec<String> {
             "gemini-3.5-flash".into(),
             "gemini-3.1-flash-lite".into(),
         ],
-        "gpt" | "openai_api" | "codex_cli" => vec![
+        "gpt" | "codex_cli" => vec![
+            "gpt-6-sol".into(),
+            "gpt-6-astra".into(),
+            "gpt-5.6-sol".into(),
+            "gpt-5.5-2026-04-23".into(),
+            "o1".into(),
+            "gpt-4o".into(),
+            "gpt-4o-mini".into(),
+        ],
+        "openai_api" => vec![
             "gpt-5.6-sol".into(),
             "gpt-5.5-2026-04-23".into(),
             "o1".into(),
@@ -1871,5 +1883,27 @@ base_url = "https://example.invalid/v1"
                 .iter()
                 .any(|model| model == "claude-fable-5")
         );
+    }
+
+    #[test]
+    fn known_cli_models_includes_subscription_ids() {
+        assert!(known_cli_models("grok_build").contains(&"grok-4.7".to_string()));
+        assert!(known_cli_models("grok_build").contains(&"grok-4.6".to_string()));
+        assert!(
+            known_cli_models("claude_code")
+                .iter()
+                .any(|model| model == "claude-opus-5-5")
+        );
+        assert!(
+            !known_cli_models("claude_api")
+                .iter()
+                .any(|model| model == "claude-opus-5-5")
+        );
+        assert!(known_cli_models("codex_cli").contains(&"gpt-6-sol".to_string()));
+        assert!(known_cli_models("codex_cli").contains(&"gpt-6-astra".to_string()));
+        assert!(!known_cli_models("openai_api").contains(&"gpt-6-sol".to_string()));
+        assert!(!known_cli_models("openai_api").contains(&"gpt-6-astra".to_string()));
+        assert!(known_cli_models("openai_api").contains(&"gpt-5.6-sol".to_string()));
+        assert!(known_cli_models("codex_cli").contains(&"gpt-5.6-sol".to_string()));
     }
 }

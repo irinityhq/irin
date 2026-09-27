@@ -44,12 +44,13 @@ CANDIDATES = [
 
 
 def council_bin() -> Path:
-    release = ROOT / "target" / "release" / "council"
-    debug = ROOT / "target" / "debug" / "council"
-    if release.exists():
-        return release
-    if debug.exists():
-        return debug
+    # Cargo workspace builds land in irin/target, not council-rs/target.
+    # Prefer any release build over any debug build.
+    for profile in ("release", "debug"):
+        for target in (ROOT / "target", ROOT.parent / "target"):
+            path = target / profile / "council"
+            if path.exists():
+                return path
     raise SystemExit(
         "council binary not found — run: cargo build --release"
     )

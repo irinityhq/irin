@@ -26,15 +26,23 @@ fn claude_model_allowlist_is_exact_only() {
         resolve_claude_model("claude-opus-4-8"),
         Some("claude-opus-4-8")
     );
+    assert_eq!(
+        resolve_claude_model("claude-opus-5-5"),
+        Some("claude-opus-5-5")
+    );
     assert_eq!(resolve_claude_model("opus"), Some("opus"));
     assert_eq!(resolve_claude_model("sonnet"), Some("sonnet"));
     // Fuzzy/evil IDs must not map silently.
     assert_eq!(resolve_claude_model("claude-opus-99-evil"), None);
     assert_eq!(resolve_claude_model("claude-sonnet"), None);
+    assert_eq!(resolve_claude_model("claude-opus-5-5[1m]"), None);
 }
 
 #[test]
 fn codex_model_allowlist_is_exact_only() {
+    assert_eq!(resolve_codex_model("gpt-6-sol"), Some("gpt-6-sol"));
+    assert_eq!(resolve_codex_model("gpt-6-astra"), Some("gpt-6-astra"));
+    assert_eq!(resolve_codex_model("gpt-5.6-sol"), Some("gpt-5.6-sol"));
     assert_eq!(resolve_codex_model("gpt-5.5"), Some("gpt-5.5"));
     assert_eq!(resolve_codex_model("gpt"), Some("gpt-5.5"));
     assert_eq!(resolve_codex_model("gpt-9-evil"), None);
