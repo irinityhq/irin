@@ -1359,9 +1359,16 @@ fn known_cli_models(slug: &str) -> Vec<String> {
             "gemini-3.5-flash".into(),
             "gemini-3.1-flash-lite".into(),
         ],
-        "gpt" | "openai_api" | "codex_cli" => vec![
+        "gpt" | "codex_cli" => vec![
             "gpt-6-sol".into(),
             "gpt-6-astra".into(),
+            "gpt-5.6-sol".into(),
+            "gpt-5.5-2026-04-23".into(),
+            "o1".into(),
+            "gpt-4o".into(),
+            "gpt-4o-mini".into(),
+        ],
+        "openai_api" => vec![
             "gpt-5.6-sol".into(),
             "gpt-5.5-2026-04-23".into(),
             "o1".into(),
@@ -1894,6 +1901,9 @@ base_url = "https://example.invalid/v1"
         );
         assert!(known_cli_models("codex_cli").contains(&"gpt-6-sol".to_string()));
         assert!(known_cli_models("codex_cli").contains(&"gpt-6-astra".to_string()));
+        assert!(!known_cli_models("openai_api").contains(&"gpt-6-sol".to_string()));
+        assert!(!known_cli_models("openai_api").contains(&"gpt-6-astra".to_string()));
+        assert!(known_cli_models("openai_api").contains(&"gpt-5.6-sol".to_string()));
         assert!(known_cli_models("codex_cli").contains(&"gpt-5.6-sol".to_string()));
     }
 }
