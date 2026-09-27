@@ -320,6 +320,7 @@ fn wall_now_secs() -> f64 {
 pub fn resolve_claude_model(model: &str) -> Option<&'static str> {
     match model {
         "claude-opus-4-8" => Some("claude-opus-4-8"),
+        "claude-opus-5-5" => Some("claude-opus-5-5"),
         "claude-opus-4-7" | "claude-opus-4-6" | "claude-opus-4-5" | "opus" => Some("opus"),
         "claude-sonnet-4-6" | "claude-sonnet-4-5" | "sonnet" => Some("sonnet"),
         "claude-haiku-4-5" | "haiku" => Some("haiku"),
@@ -331,6 +332,8 @@ pub fn resolve_claude_model(model: &str) -> Option<&'static str> {
 /// Pure: model allow-list for Codex CLI `-m` args (exact match only).
 pub fn resolve_codex_model(model: &str) -> Option<&'static str> {
     match model {
+        "gpt-6-sol" => Some("gpt-6-sol"),
+        "gpt-6-astra" => Some("gpt-6-astra"),
         "gpt-5.6-sol" => Some("gpt-5.6-sol"),
         "gpt-5.5" | "gpt" => Some("gpt-5.5"),
         "gpt-5.5-pro" => Some("gpt-5.5-pro"),
@@ -345,6 +348,7 @@ pub fn resolve_codex_model(model: &str) -> Option<&'static str> {
 
 pub fn claude_model_ids() -> &'static [&'static str] {
     &[
+        "claude-opus-5-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
         "claude-opus-4-6",
@@ -362,6 +366,8 @@ pub fn claude_model_ids() -> &'static [&'static str] {
 
 pub fn codex_model_ids() -> &'static [&'static str] {
     &[
+        "gpt-6-sol",
+        "gpt-6-astra",
         "gpt-5.6-sol",
         "gpt-5.5",
         "gpt-5.5-pro",

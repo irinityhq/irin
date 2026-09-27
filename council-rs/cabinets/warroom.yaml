@@ -10,9 +10,11 @@ seats:
     model: "grok-4.6"
     system: ceo
 
+  # Mirror → claude-opus-5-5 (2026-09-27 flywheel tryout). Full-room read
+  # pending: Operator + Chair are also Claude.
   - name: Mirror
-    provider: gemini_agy
-    model: "gemini-3.1-pro-preview"
+    provider: claude_code
+    model: "claude-opus-5-5"
     system: mirror_warroom
 
   - name: Red Team
