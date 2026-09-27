@@ -45,8 +45,9 @@ CANDIDATES = [
 
 def council_bin() -> Path:
     # Cargo workspace builds land in irin/target, not council-rs/target.
-    for target in (ROOT / "target", ROOT.parent / "target"):
-        for profile in ("release", "debug"):
+    # Prefer any release build over any debug build.
+    for profile in ("release", "debug"):
+        for target in (ROOT / "target", ROOT.parent / "target"):
             path = target / profile / "council"
             if path.exists():
                 return path

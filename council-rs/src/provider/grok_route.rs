@@ -391,4 +391,15 @@ mod tests {
         assert_eq!(r.hermes.adapter_protocol, HermesAdapterProtocol::Script);
         assert_eq!(r.hermes.default_adapter, "scripts/hermes-seat-adapter.sh");
     }
+
+    #[test]
+    fn shipped_routing_file_pins_current_cli_models() {
+        let r = load_routing_from_disk(Path::new(env!("CARGO_MANIFEST_DIR")));
+        for id in ["grok-4.7", "grok-4.6", "grok-4.5"] {
+            let res = resolve_cli_model_with(&r, id);
+            assert_eq!(res.cli_model_arg.as_deref(), Some(id), "{id} must pin -m");
+            assert_eq!(res.response_label, format!("grok-cli-{id}"));
+            assert!(!res.api_id_substituted);
+        }
+    }
 }
